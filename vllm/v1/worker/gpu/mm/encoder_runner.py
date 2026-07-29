@@ -120,11 +120,28 @@ class EncoderRunner:
         num_computed_tokens: np.ndarray,
         draft_lookahead: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        if draft_lookahead:
-            num_computed_tokens = num_computed_tokens + draft_lookahead
+        """Gather cached MM embeddings for the drafter's or target's token window.
 
+        ``draft_lookahead`` is how many positions past the target's chunk end the
+        caller reads: 0 for the target itself, 1 for a single-module drafter, and
+        one more for each later multi-module MTP module. A drafter's slot j holds
+        target token j + 1, so its query window is the target's shifted one
+        position ahead, which consumes the first lookahead position. Any remaining
+        positions have no query slot and land in a dense
+        [num_reqs, max(draft_lookahead - 1, 0)] grid appended to the mask, stopping
+        at the end of each request's known prefill. The matching embeddings are
+        appended after the query window's.
+        """
+
+        window_shift = 1 if draft_lookahead else 0
+        num_extra_lookahead = max(draft_lookahead - 1, 0)
+        num_computed_tokens = num_computed_tokens + window_shift
+
+        num_reqs = len(req_ids)
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens + num_reqs * num_extra_lookahead,
+            dtype=torch.bool,
+            device="cpu",
         )
 
         # Whether to gather media embeddings this step.
@@ -141,6 +158,7 @@ class EncoderRunner:
         query_end = (num_computed_tokens + num_scheduled_tokens).tolist()
 
         mm_embeds: list[torch.Tensor] = []
+        extra_lookahead_mm_embeds: list[torch.Tensor] = []
         for i, req_id in enumerate(req_ids):
             if exclude_embeddings is not None and exclude_embeddings[i]:
                 continue
@@ -148,53 +166,103 @@ class EncoderRunner:
             cur_query_start = query_start[i]
             cur_query_end = query_end[i]
 
-            mm_features = self.encoder_cache.mm_features[req_id]
-            lo, hi = get_mm_features_in_window(
-                mm_features, start=cur_query_start, end=cur_query_end
+            # The query window sits window_shift positions ahead of the
+            # target's, so undo the shift to recover the target's chunk end.
+            target_chunk_end = cur_query_end - window_shift
+            self._gather_mm_features_in_window(
+                req_id,
+                window_start=cur_query_start,
+                window_end=cur_query_end,
+                is_mm_embed=is_mm_embed,
+                mask_offset=int(query_start_loc[i]) - cur_query_start,
+                mm_embeds=mm_embeds,
+                target_chunk_end=target_chunk_end,
             )
-            for idx in range(lo, hi):
-                mm_feature = mm_features[idx]
-                pos_info = mm_feature.mm_position
-                start_pos = pos_info.offset
-                num_encoder_tokens = pos_info.length
 
-                start_idx = max(cur_query_start - start_pos, 0)
-                end_idx = min(cur_query_end - start_pos, num_encoder_tokens)
-                assert start_idx < end_idx
-                curr_embeds_start, curr_embeds_end = (
-                    pos_info.get_embeds_indices_in_range(start_idx, end_idx)
-                )
-                # If there are no embeddings in the current range, we skip
-                # gathering the embeddings.
-                if curr_embeds_start == curr_embeds_end:
+            # The lookahead positions with no query slot pick up where the
+            # query window ends, and stop at the end of the known prefill.
+            extra_start = cur_query_end
+            extra_end = min(extra_start + num_extra_lookahead, int(prefill_lens[i]))
+            if extra_start >= extra_end:
+                continue
+            self._gather_mm_features_in_window(
+                req_id,
+                window_start=extra_start,
+                window_end=extra_end,
+                is_mm_embed=is_mm_embed,
+                mask_offset=(
+                    total_num_scheduled_tokens + i * num_extra_lookahead - extra_start
+                ),
+                mm_embeds=extra_lookahead_mm_embeds,
+                target_chunk_end=target_chunk_end,
+            )
+
+        # The extra-lookahead embeddings come after all query window ones,
+        # matching their mask positions at the end of the extended mask.
+        return mm_embeds + extra_lookahead_mm_embeds, is_mm_embed
+
+    def _gather_mm_features_in_window(
+        self,
+        req_id: str,
+        window_start: int,
+        window_end: int,
+        is_mm_embed: torch.Tensor,
+        mask_offset: int,
+        mm_embeds: list[torch.Tensor],
+        target_chunk_end: int,
+    ) -> None:
+        """Gather the cached MM embeddings covering [window_start, window_end).
+
+        The mask bit for position p is written at is_mm_embed[mask_offset + p].
+        A feature starting before target_chunk_end was consumed by the target,
+        so a missing encoder output there is a bug; one starting at or after it
+        is only reachable by looking ahead and is skipped on a miss.
+        """
+        mm_features = self.encoder_cache.mm_features[req_id]
+        lo, hi = get_mm_features_in_window(
+            mm_features, start=window_start, end=window_end
+        )
+        for idx in range(lo, hi):
+            mm_feature = mm_features[idx]
+            pos_info = mm_feature.mm_position
+            start_pos = pos_info.offset
+            num_encoder_tokens = pos_info.length
+
+            start_idx = max(window_start - start_pos, 0)
+            end_idx = min(window_end - start_pos, num_encoder_tokens)
+            assert start_idx < end_idx
+            curr_embeds_start, curr_embeds_end = pos_info.get_embeds_indices_in_range(
+                start_idx, end_idx
+            )
+            # If there are no embeddings in the current range, we skip
+            # gathering the embeddings.
+            if curr_embeds_start == curr_embeds_end:
+                continue
+
+            mm_hash = mm_feature.identifier
+            encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash, None)
+            if encoder_output is None:
+                # A feature starting at/after the processed boundary is only
+                # reached via the drafter's look-ahead and might not be encoded
+                # yet; fall back to the token embedding for drafting.
+                if start_pos >= target_chunk_end:
                     continue
+                raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
 
-                mm_hash = mm_feature.identifier
-                encoder_output = self.encoder_cache.encoder_outputs.get(mm_hash, None)
-                if encoder_output is None:
-                    # A feature starting at/after the processed boundary is only
-                    # reached via the drafter's +1 look-ahead and might not be
-                    # encoded yet; fall back to the token embedding for drafting.
-                    if start_pos + draft_lookahead >= cur_query_end:
-                        continue
-                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
+            if (is_embed := pos_info.is_embed) is not None:
+                is_embed = is_embed[start_idx:end_idx]
+                mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
+            else:
+                mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
-                    mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
-                else:
-                    mm_embeds_item = encoder_output[start_idx:end_idx]
+            # Attach modality for Omni interleaved merge (collected on demand).
+            set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
 
-                # Attach modality for Omni interleaved merge (collected on demand).
-                set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)
-
-                req_start_pos = query_start_loc[i] + start_pos - cur_query_start
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
-                    True if is_embed is None else is_embed
-                )
-                mm_embeds.append(mm_embeds_item)
-
-        return mm_embeds, is_mm_embed
+            mask_start_pos = mask_offset + start_pos
+            is_mm_embed[mask_start_pos + start_idx : mask_start_pos + end_idx] |= (
+                True if is_embed is None else is_embed
+            )
+            mm_embeds.append(mm_embeds_item)
 
     @torch.inference_mode()
     def get_inputs_embeds(

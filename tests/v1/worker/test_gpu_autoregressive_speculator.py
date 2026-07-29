@@ -228,7 +228,10 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
 
     assert speculator.supports_mm_inputs
     assert speculator.inputs_embeds is not None
-    assert speculator.inputs_embeds.shape == (4, 3)
+    # max_num_tokens, plus the future prefill token each of the max_num_reqs
+    # requests may append for each of the num_speculative_steps - 1 later
+    # MTP modules: 4 + 2 * 2.
+    assert speculator.inputs_embeds.shape == (8, 3)
     assert speculator.cached_draft_input_embeds is not None
     assert speculator.cached_draft_input_embeds.shape == (2, 2, 3)
 

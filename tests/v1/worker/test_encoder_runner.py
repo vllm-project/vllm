@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
-Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
-feature past the processed boundary is used when its encoder output is present
-and tolerated (token-embedding fallback) when it is not, while a miss within
-the processed range still fails loudly.
+Covers the speculative-drafter encoder-cache handling: the drafter reads
+``draft_lookahead`` positions past the target's processed boundary. The +1
+look-ahead feature past that boundary is used when its encoder output is
+present and tolerated (token-embedding fallback) when it is not, while a miss
+within the processed range still fails loudly. Multi-module MTP looks further
+still, and those positions land in a per-request grid appended to the mask.
 """
 
 import numpy as np
@@ -158,6 +159,69 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["image", "image"]
     assert int(is_mm_embed.sum()) == (14 if draft_lookahead else 16)
+
+
+def test_extra_lookahead_extends_mask_with_per_request_grid():
+    """Multi-module MTP reads ``draft_lookahead`` positions past the target's
+    chunk end. Only the first has a query slot (the +1 skew); the rest land in
+    a dense [num_reqs, draft_lookahead - 1] grid appended to the mask, and
+    their embeddings are appended after every query-window one."""
+    # req0 is mid-prefill and f1 straddles its chunk end, so f1 contributes to
+    # both the query window and the grid. req1 contributes to the grid only,
+    # pinning the per-request row stride. req2 is decoding, so its row stays
+    # empty and must not shift the others.
+    f0 = _feature("f0", offset=0, length=8)
+    f1 = _feature("f1", offset=8, length=4)
+    g0 = _feature("g0", offset=10, length=1)
+    cache = EncoderCache()
+    cache.mm_features["req0"] = [f0, f1]
+    cache.mm_features["req1"] = [g0]
+    cache.mm_features["req2"] = []
+    for f in (f0, f1, g0):
+        length = f.mm_position.length
+        cache.encoder_outputs[f.identifier] = torch.arange(
+            length * HIDDEN, dtype=torch.float32
+        ).reshape(length, HIDDEN)
+    runner = EncoderRunner(
+        model=None,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req0", "req1", "req2"],
+        total_num_scheduled_tokens=24,
+        num_scheduled_tokens=np.array([8, 8, 8]),
+        query_start_loc=np.array([0, 8, 16]),
+        prefill_lens=np.array([1000, 1000, 50]),
+        num_computed_tokens=np.array([0, 0, 100]),
+        draft_lookahead=3,
+    )
+
+    # 24 query slots, then one 2-wide grid row per request.
+    assert is_mm_embed.shape == (30,)
+    # req0's query window is positions 1..8 (its chunk 0..7, skewed by one):
+    # f0 marks 1..7 and f1 marks 8. req1 has no feature in its window, and
+    # req2 is decoding.
+    assert bool(is_mm_embed[:8].all())
+    assert not bool(is_mm_embed[8:24].any())
+    # Grid rows: req0 covers positions 9..10 (both f1), req1 covers 9..10 of
+    # which only 10 is g0, req2 contributes nothing.
+    assert is_mm_embed[24:].tolist() == [True, True, False, True, False, False]
+
+    # Query-window embeddings first, then the grid's:
+    # f0[1:8], f1[0:1] | f1[1:3], g0[0:1].
+    assert [tuple(e.shape) for e in mm_embeds] == [
+        (7, HIDDEN),
+        (1, HIDDEN),
+        (2, HIDDEN),
+        (1, HIDDEN),
+    ]
+    # The third entry is f1's grid slice (rows 1..2), not its query slice.
+    assert float(mm_embeds[2][0, 0]) == 4.0
 
 
 def test_gather_preserves_mixed_modalities():

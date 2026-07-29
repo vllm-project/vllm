@@ -658,10 +658,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.sampler is not None
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
+                assert self.speculative_config is not None
+                # Mirror gather_mm_embeddings' layout: the query window, then a
+                # dense grid holding the lookahead positions.
+                mm_draft_lookahead = (
+                    self.num_speculative_steps
+                    if self.speculative_config.use_multi_module_mtp()
+                    else 1
+                )
                 mm_inputs = (
                     [],
                     torch.zeros(
-                        input_batch.num_tokens,
+                        input_batch.num_tokens
+                        + input_batch.num_reqs * (mm_draft_lookahead - 1),
                         dtype=torch.bool,
                         device="cpu",
                     ),
@@ -1587,11 +1596,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
-            # The EAGLE/MTP drafter reads one position ahead of the target.
-            # TODO(TheEpicDolphin): Gather MM embeddings for all speculative
-            # steps during multi-module MTP.
+            # EAGLE/single-module MTP reads one position ahead of the target.
+            # Multi-module MTP reads one further for each later module.
+            assert self.speculative_config is not None
+            mm_draft_lookahead = (
+                self.num_speculative_steps
+                if self.speculative_config.use_multi_module_mtp()
+                else 1
+            )
             mm_inputs = self.model_state.gather_mm_embeddings(
-                input_batch, draft_lookahead=1
+                input_batch,
+                draft_lookahead=mm_draft_lookahead,
             )
 
         # Postprocess results and update request states.

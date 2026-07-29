@@ -30,6 +30,18 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
+        self.input_buffers = InputBuffers(
+            max_num_reqs=self.max_num_reqs,
+            # Extend max_num_tokens by the future prefill token each request may
+            # append for each of the last num_speculative_steps - 1 MTP modules.
+            max_num_tokens=(
+                self.max_num_tokens
+                + self.max_num_reqs * (self.num_speculative_steps - 1)
+            ),
+            device=device,
+        )
+        self.inputs_embeds: torch.Tensor | None = None
+
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
@@ -38,16 +50,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
-        self.inputs_embeds: torch.Tensor | None = None
-
-        # Input id overrides for the last num_speculative_steps - 1 draft steps.
-        # Used by chunked-prefilling requests to swap in the future prefill token
-        # for the sampled draft token. Non-chunked-prefilling requests fill the -1
-        # value, indicating that the sampled draft token should be used.
-        self.draft_input_id_overrides = torch.full(
-            (self.max_num_reqs, self.num_speculative_steps - 1),
-            -1,
-            dtype=torch.int64,
+        # Whether each of the last num_speculative_steps - 1 draft steps appends
+        # a known future prefill token rather than the token sampled from that
+        # step's draft. True only for chunked-prefilling requests, and only for
+        # steps that land inside the request's remaining prefill.
+        self.is_next_prefill_token = torch.zeros(
+            self.max_num_reqs,
+            self.num_speculative_steps - 1,
+            dtype=torch.bool,
             device=device,
         )
 
@@ -84,7 +94,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             return
 
         self.inputs_embeds = torch.zeros(
-            self.max_num_tokens,
+            # Extend max_num_tokens by the future prefill token each request may
+            # append for each of the last num_speculative_steps - 1 MTP modules.
+            self.max_num_tokens + self.max_num_reqs * (self.num_speculative_steps - 1),
             self.hidden_size,
             dtype=self.dtype,
             device=self.device,
@@ -322,13 +334,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         prepare_input_buffers(
             num_reqs,
+            num_tokens,
             input_batch,
             self.cached_draft_input_ids,
             num_sampled,
             num_rejected,
             last_sampled,
             next_prefill_tokens,
-            self.draft_input_id_overrides,
+            self.is_next_prefill_token,
             self.input_buffers,
             self.last_token_indices,
             self.max_num_reqs,
@@ -337,20 +350,27 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         # Compute the input embeddings with the MM embeddings merged in.
         # TODO(TheEpicDolphin): When the batch has no MM content (is_mm_embed
-        # all False), skip this embed/copy and run the model with
-        # inputs_embeds=None. Requirements:
+        # all False, which now spans the future prefill tokens too), skip this
+        # embed and run the model with inputs_embeds=None. Requirements:
         # 1. Eager steps can switch freely, but FULL cudagraphs bake the
-        # embeds/no-embeds path at capture, so extending to decode steps
-        # needs a uses_input_embeds property in the graph descriptors,
-        # resulting in 2x captures.
+        # embeds/no-embeds path at capture. FULL needs a uniform token count,
+        # i.e. an all-decode batch, which carries no MM content -- so capturing
+        # only the no-embeds path and forcing need_eager when embeds are
+        # required avoids 2x captures. need_eager is a per-rank host decision
+        # though, so it needs an allreduce before dispatch or DP ranks desync.
         # 2. The skip condition must also verify the request's cached
         # re-prefill window (cached_draft_input_embeds) holds no MM
         # embeddings, or the rejection re-prefill gap would be re-embedded
         # from token ids incorrectly.
         if self.inputs_embeds is not None:
             mm_embeds, is_mm_embed = mm_inputs or (None, None)
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_buffers.input_ids[:num_tokens],
+            # Embed the query tokens and the future prefill tokens staged after
+            # them in one pass. EncoderRunner.gather_mm_embeddings lays is_mm_embed
+            # out to match this exact slice: packed query tokens, then the dense
+            # [num_reqs, num_speculative_steps - 1] grid.
+            num_embed_tokens = num_tokens + num_reqs * (self.num_speculative_steps - 1)
+            self.inputs_embeds[:num_embed_tokens] = self.model.embed_input_ids(
+                self.input_buffers.input_ids[:num_embed_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
             )
@@ -428,25 +448,23 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.draft_tokens[:num_reqs, step] = draft_tokens
             if step < self.num_speculative_steps - 1:
                 self.hidden_states[:num_tokens] = hidden_states
-                # Mid-prefill requests append the known future prefill token
-                # instead of the sampled draft.
-                overrides = self.draft_input_id_overrides[:num_reqs, step]
-                next_input_tokens = torch.where(overrides >= 0, overrides, draft_tokens)
-                # Shift the draft inputs left by one and append the next
-                # input token id/embeddings.
-                draft_embeds = (
-                    self.model.embed_input_ids(next_input_tokens)
-                    if self.inputs_embeds is not None
-                    else None
-                )
+                # Shift the draft inputs left by one and append this step's
+                # drafted token id/embedding. Mid-prefill requests append their
+                # known future prefill token/embedding.
+                draft_embeds = None
+                if self.inputs_embeds is not None:
+                    draft_embeds = self.model.embed_input_ids(draft_tokens)
                 update_draft_inputs(
-                    next_input_tokens,
+                    draft_tokens,
                     draft_embeds,
+                    self.is_next_prefill_token,
+                    step,
                     self.input_buffers,
                     self.inputs_embeds,
                     last_token_indices,
                     idx_mapping,
                     num_reqs,
+                    self.num_speculative_steps,
                 )
                 sample_positions += 1
 
@@ -461,16 +479,17 @@ def _prepare_input_buffers_kernel(
     target_positions_ptr,
     cached_draft_input_ids_ptr,
     cached_draft_input_ids_stride0,
-    draft_input_id_overrides_ptr,
-    draft_input_id_overrides_stride0,
     idx_mapping_ptr,
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     next_prefill_tokens_stride0,
+    is_next_prefill_token_ptr,
+    is_next_prefill_token_stride,
     num_sampled_ptr,
     num_rejected_ptr,
     target_seq_lens_ptr,
     query_start_loc_ptr,
+    total_num_tokens,
     max_num_reqs,
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
@@ -502,30 +521,6 @@ def _prepare_input_buffers_kernel(
     # Write the updated sequence length.
     tl.store(draft_seq_lens_ptr + req_idx, seq_len)
 
-    # Get the next draft input token.
-    num_sampled = tl.load(num_sampled_ptr + req_idx)
-    if num_sampled > 0:
-        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-    else:
-        # Chunked prefill. Seed with the next prefill token.
-        next_token = tl.load(next_prefill_tokens_ptr + req_state_idx)
-
-    # For chunked-prefilling requests, copy the future prefill tokens that
-    # will later override the input token ids for the last
-    # num_speculative_steps - 1 draft steps.
-    for i in range(1, num_speculative_steps):
-        future_token = tl.load(
-            next_prefill_tokens_ptr + i * next_prefill_tokens_stride0 + req_state_idx
-        )
-        override = tl.where(num_sampled > 0, -1, future_token).to(tl.int64)
-        tl.store(
-            draft_input_id_overrides_ptr
-            + req_idx * draft_input_id_overrides_stride0
-            + i
-            - 1,
-            override,
-        )
-
     # Copy the target's input ids (read at the target offset) shifted left by 1,
     # and right by the number of re-prefills, into the draft buffer.
     for i in range(1, num_input_tokens, BLOCK_SIZE):
@@ -539,7 +534,38 @@ def _prepare_input_buffers_kernel(
         )
     last_token_index = query_start + num_reprefill_tokens + num_input_tokens - 1
     tl.store(last_token_indices_ptr + req_idx, last_token_index)
+
+    # Get the next draft input token.
+    num_sampled = tl.load(num_sampled_ptr + req_idx)
+    if num_sampled > 0:
+        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+    else:
+        # Chunked prefill. Seed with the next prefill token.
+        next_token = tl.load(next_prefill_tokens_ptr + req_state_idx)
     tl.store(draft_input_ids_ptr + last_token_index, next_token)
+
+    # Stage the future prefill token each of the last num_speculative_steps - 1
+    # draft steps will append, and flag which of those steps actually has one.
+    # next_prefill_tokens already holds 0 past the end of the request's prefill.
+    for i in range(num_speculative_steps - 1):
+        next_prefill_token = tl.load(
+            next_prefill_tokens_ptr
+            + (i + 1) * next_prefill_tokens_stride0
+            + req_state_idx
+        )
+        is_next_prefill = (num_sampled == 0) & (next_prefill_token > 0)
+        tl.store(
+            is_next_prefill_token_ptr + req_idx * is_next_prefill_token_stride + i,
+            is_next_prefill,
+        )
+        # Store the next prefill tokens at the end of the draft input ids.
+        tl.store(
+            draft_input_ids_ptr
+            + total_num_tokens
+            + req_idx * (num_speculative_steps - 1)
+            + i,
+            tl.where(is_next_prefill, next_prefill_token, 0),
+        )
 
     # Copy the target's positions, shifted over by the number of tokens to be
     # re-prefilled.
@@ -590,6 +616,7 @@ def _prepare_input_buffers_kernel(
 
 def prepare_input_buffers(
     num_reqs: int,
+    num_tokens: int,
     input_batch: InputBatch,
     # [max_num_reqs, num_speculative_steps - 1]
     cached_draft_input_ids: torch.Tensor,
@@ -602,7 +629,7 @@ def prepare_input_buffers(
     # [num_prefill_lookahead, max_num_reqs]
     next_prefill_tokens: torch.Tensor,
     # [max_num_reqs, num_speculative_steps - 1]
-    draft_input_id_overrides: torch.Tensor,
+    is_next_prefill_token: torch.Tensor,
     input_buffers: InputBuffers,
     # [max_num_reqs]
     last_token_indices: torch.Tensor,
@@ -618,16 +645,17 @@ def prepare_input_buffers(
         input_batch.positions,
         cached_draft_input_ids,
         cached_draft_input_ids.stride(0) if cached_draft_input_ids is not None else 0,
-        draft_input_id_overrides,
-        draft_input_id_overrides.stride(0),
         input_batch.idx_mapping,
         last_sampled,
         next_prefill_tokens,
         next_prefill_tokens.stride(0),
+        is_next_prefill_token,
+        is_next_prefill_token.stride(0),
         num_sampled,
         num_rejected,
         input_batch.seq_lens,
         input_buffers.query_start_loc,
+        num_tokens,
         max_num_reqs,
         num_speculative_steps,
         BLOCK_SIZE=1024,
@@ -973,15 +1001,31 @@ def cache_inputs(
 
 
 @triton.jit
+def _next_prefill_token_row(
+    query_start_loc_ptr, num_reqs, req_idx, step, num_speculative_steps
+):
+    return (
+        tl.load(query_start_loc_ptr + num_reqs)
+        + req_idx * (num_speculative_steps - 1)
+        + step
+    )
+
+
+@triton.jit
 def _shift_input_ids_kernel(
     input_ids_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
     last_token_indices_ptr,
     draft_tokens_ptr,
+    is_next_prefill_token_ptr,
+    is_next_prefill_token_stride,
+    step,
+    num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
+    num_reqs = tl.num_programs(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     if req_state_idx < 0:
         # Skip cudagraph padded requests.
@@ -994,14 +1038,25 @@ def _shift_input_ids_kernel(
     query_len = last_token_index - query_start + 1
 
     # Shift input token ids to the left by one position and
-    # insert the last sampled draft token.
+    # insert this step's input token.
     for i in range(1, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
         input_ids = tl.load(input_ids_ptr + query_start + block, mask=mask)
         tl.store(input_ids_ptr + query_start + block - 1, input_ids, mask=mask)
-    draft_token = tl.load(draft_tokens_ptr + req_idx)
-    tl.store(input_ids_ptr + last_token_index, draft_token)
+
+    # Mid-prefill requests append their known future prefill token.
+    # The rest append this step's sampled draft token id.
+    if tl.load(
+        is_next_prefill_token_ptr + req_idx * is_next_prefill_token_stride + step
+    ):
+        row = _next_prefill_token_row(
+            query_start_loc_ptr, num_reqs, req_idx, step, num_speculative_steps
+        )
+        next_token = tl.load(input_ids_ptr + row)
+    else:
+        next_token = tl.load(draft_tokens_ptr + req_idx).to(tl.int32)
+    tl.store(input_ids_ptr + last_token_index, next_token)
 
 
 @triton.jit
@@ -1010,14 +1065,19 @@ def _shift_input_embeds_kernel(
     input_embeds_stride0,
     draft_embeds_ptr,
     draft_embeds_stride0,
+    is_next_prefill_token_ptr,
+    is_next_prefill_token_stride,
     idx_mapping_ptr,
     query_start_loc_ptr,
     last_token_indices_ptr,
+    step,
+    num_speculative_steps,
     hidden_size,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
+    num_reqs = tl.num_programs(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     if req_state_idx < 0:
         # Skip cudagraph padded requests.
@@ -1032,7 +1092,7 @@ def _shift_input_embeds_kernel(
     query_len = last_token_index - query_start + 1
 
     # Shift input token embeddings to the left by one position and
-    # insert the last sampled draft token's embeddings.
+    # insert this step's input token embedding.
     for i in range(1, query_len, BLOCK_SIZE_Q):
         query_block = i + tl.arange(0, BLOCK_SIZE_Q)
         query_mask = query_block < query_len
@@ -1050,25 +1110,45 @@ def _shift_input_embeds_kernel(
             input_embed,
             mask=mask,
         )
-    draft_embed = tl.load(
-        draft_embeds_ptr + req_idx * draft_embeds_stride0 + dim_block,
-        mask=dim_mask,
-    )
+
+    # Mid-prefill requests append their known future prefill token embeddings.
+    # The rest append the embedding of this step's sampled draft token.
+    if tl.load(
+        is_next_prefill_token_ptr + req_idx * is_next_prefill_token_stride + step
+    ):
+        row = _next_prefill_token_row(
+            query_start_loc_ptr, num_reqs, req_idx, step, num_speculative_steps
+        )
+        next_embed = tl.load(
+            input_embeds_ptr + row * input_embeds_stride0 + dim_block,
+            mask=dim_mask,
+        )
+    else:
+        next_embed = tl.load(
+            draft_embeds_ptr + req_idx * draft_embeds_stride0 + dim_block,
+            mask=dim_mask,
+        )
     tl.store(
         input_embeds_ptr + last_token_index * input_embeds_stride0 + dim_block,
-        draft_embed,
+        next_embed,
         mask=dim_mask,
     )
 
 
 def update_draft_inputs(
+    # [num_reqs]
     draft_tokens: torch.Tensor,
+    # [num_reqs, hidden_size]
     draft_embeds: torch.Tensor | None,
+    # [max_num_reqs, num_speculative_steps - 1]
+    is_next_prefill_token: torch.Tensor,
+    step: int,
     input_buffers: InputBuffers,
     input_embeds: torch.Tensor | None,
     last_token_indices: torch.Tensor,
     idx_mapping: torch.Tensor,
     num_reqs: int,
+    num_speculative_steps: int,
 ) -> None:
     _shift_input_ids_kernel[(num_reqs,)](
         input_buffers.input_ids,
@@ -1076,6 +1156,10 @@ def update_draft_inputs(
         input_buffers.query_start_loc,
         last_token_indices,
         draft_tokens,
+        is_next_prefill_token,
+        is_next_prefill_token.stride(0),
+        step,
+        num_speculative_steps,
         BLOCK_SIZE=1024,
     )
     if input_embeds is not None:
@@ -1089,9 +1173,13 @@ def update_draft_inputs(
             input_embeds.stride(0),
             draft_embeds,
             draft_embeds.stride(0),
+            is_next_prefill_token,
+            is_next_prefill_token.stride(0),
             idx_mapping,
             input_buffers.query_start_loc,
             last_token_indices,
+            step,
+            num_speculative_steps,
             hidden_size,
             BLOCK_SIZE_Q=16,
             BLOCK_SIZE_H=hidden_block_size,
