@@ -111,8 +111,8 @@ class DualQueueThreadPool:
         n_threads: int,
     ) -> Iterator[list[Task]]:
         """
-        Batch tasks so that the request's tasks are split evenly
-        across the n_threads. This is important for load-balancing and TTFT.
+        Batch tasks so that the request's tasks are split evenly across the
+        n_threads.
         """
         tasks = iter(tasks)
         q, r = divmod(n_tasks, n_threads)
