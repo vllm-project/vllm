@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictBool,
     model_serializer,
     model_validator,
 )
@@ -139,9 +138,7 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     # schema is the field in openai but that causes conflicts with pydantic so
     # instead use json_schema with an alias
     json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
-    # StrictBool: reject non-boolean JSON values (e.g. "yes") with a 400
-    # instead of coercing them, matching the reference API behavior.
-    strict: StrictBool | None = None
+    strict: bool | None = None
 
 
 class LegacyStructuralTag(OpenAIBaseModel):
