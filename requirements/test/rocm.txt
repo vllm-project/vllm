@@ -166,7 +166,7 @@ dataproperty==1.1.0
     # via
     #   pytablewriter
     #   tabledata
-datasets==3.6.0
+datasets==5.0.0
     # via
     #   -r requirements/test/rocm.in
     #   evaluate
@@ -180,7 +180,7 @@ depyf @ git+https://github.com/rasmith/depyf.git@c67f28ddbdb5c4922fb14530743d77c
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-dill==0.3.8
+dill==0.4.1
     # via
     #   datasets
     #   depyf
@@ -532,7 +532,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-multiprocess==0.70.16
+multiprocess==0.70.19
     # via
     #   -r requirements/test/rocm.in
     #   datasets
@@ -556,7 +556,7 @@ numba==0.65.0
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-numpy==2.3.5
+numpy==2.4.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
