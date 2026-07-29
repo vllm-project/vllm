@@ -63,3 +63,17 @@ steps:
   commands:
     - pip install "vllm-gguf-plugin >= 0.0.2"
     - pytest -v -s plugins_tests/gguf
+
+- label: BitsAndBytes Plugin (2 GPUs)
+  key: bitsandbytes-plugin
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  soft_fail: true
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/
+  - tests/plugins_tests/bitsandbytes
+  commands:
+    - uv pip install --system "vllm-bnb-plugin >= 0.1.0"
+    - pytest -v -s plugins_tests/bitsandbytes
