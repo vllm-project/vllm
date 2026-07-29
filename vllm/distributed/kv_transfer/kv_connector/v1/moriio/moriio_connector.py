@@ -37,11 +37,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ReqMeta,
     TransferId,
     WriteTask,
+    fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
     parse_moriio_zmq_address,
+    pod_index,
     resolve_host_ip,
     set_role,
     zmq_ctx,
@@ -374,15 +376,18 @@ class MoRIIOConnectorScheduler:
             "notify_port"
         ]
         self.tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # Local DP rank (0..dp_local-1) for port arithmetic.
-        self.dp_rank = (
-            self.vllm_config.parallel_config.data_parallel_rank
-            % self.vllm_config.parallel_config.data_parallel_size_local
+        # Local DP rank (0..dp_local-1) for port arithmetic; fold_local_rank
+        # handles the external-DP sentinel (dp_local==0) so the arithmetic
+        # can't ZeroDivisionError at init.
+        _pc = self.vllm_config.parallel_config
+        self.dp_rank = fold_local_rank(
+            _pc.data_parallel_rank, _pc.data_parallel_size_local
         )
-        # Only first-pod ranks originate notify to avoid duplicates.
+        # Only first-pod ranks originate notify to avoid duplicates. Guarding
+        # via pod_index keeps _is_kv_master True for the external-DP sentinel
+        # (single pod) instead of being silently stuck False.
         self._is_kv_master = (
-            self.vllm_config.parallel_config.data_parallel_rank
-            < self.vllm_config.parallel_config.data_parallel_size_local
+            pod_index(_pc.data_parallel_rank, _pc.data_parallel_size_local) == 0
         )
         # Global DP rank for pinned request ownership check.
         self._global_dp_rank = self.vllm_config.parallel_config.data_parallel_rank
@@ -752,9 +757,9 @@ class MoRIIOConnectorScheduler:
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
                     # is bit-identical (modulus is a no-op).
-                    _remote_dp_rank_for_port = remote_dp_rank
-                    if _dp_local > 0:
-                        _remote_dp_rank_for_port = remote_dp_rank % _dp_local
+                    _remote_dp_rank_for_port = fold_local_rank(
+                        remote_dp_rank, _dp_local
+                    )
                     # The target rank may live on a child pod at a different IP,
                     # so resolve the per-pod host (pod_idx = global // dp_local).
                     # Otherwise a notify for child ranks lands on the master
@@ -763,7 +768,7 @@ class MoRIIOConnectorScheduler:
                     _kvp = request.kv_transfer_params or {}
                     _remote_hosts = _kvp.get("remote_hosts") or []
                     if _dp_local > 0 and _remote_hosts:
-                        _pod_idx = remote_dp_rank // _dp_local
+                        _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
                     for tp_index in range(self.tp_size):
@@ -1616,21 +1621,14 @@ class MoRIIOConnectorWorker:
 
         for cur_dp_rank in range(remote_dp_size):
             dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
-            _pod_idx = (
-                cur_dp_rank // remote_dp_size_local if remote_dp_size_local > 0 else 0
-            )
+            _pod_idx = pod_index(cur_dp_rank, remote_dp_size_local)
             if _pod_idx >= len(pod_hosts):
                 _pod_idx = 0
             _per_rank_host = pod_hosts[_pod_idx]
-            # The handshake port offset must use the per-pod local rank
-            # (% remote_dp_size_local), since each pod binds sockets only for
-            # its local ranks; dp_engine_id keeps the global rank for
-            # uniqueness. Single-pod is bit-identical (modulus is a no-op).
-            _per_rank_local_dp = (
-                cur_dp_rank % remote_dp_size_local
-                if remote_dp_size_local > 0
-                else cur_dp_rank
-            )
+            # The handshake port offset must use the per-pod local rank, since
+            # each pod binds sockets only for its local ranks; dp_engine_id
+            # keeps the global rank for uniqueness. Single-pod is bit-identical.
+            _per_rank_local_dp = fold_local_rank(cur_dp_rank, remote_dp_size_local)
             future = self._handshake_initiation_executor.submit(
                 self._moriio_handshake,
                 _per_rank_host,

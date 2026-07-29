@@ -191,6 +191,25 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
 
 
+def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
+    """Fold a global DP rank into its pod-local rank [0, dp_size_local).
+
+    ``dp_size_local == 0`` is the external-DP sentinel (local size unknown):
+    return the rank unchanged, since a global DP rank is always < the global
+    DP size so no folding is needed and the modulo is skipped (never divides
+    by zero).
+    """
+    return global_dp_rank % dp_size_local if dp_size_local else global_dp_rank
+
+
+def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
+    """Pod index (0-based) a global DP rank lives on for Wide-EP multi-pod.
+
+    ``dp_size_local == 0`` (external-DP sentinel) collapses to a single pod.
+    """
+    return global_dp_rank // dp_size_local if dp_size_local else 0
+
+
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 
@@ -281,14 +300,9 @@ class MoRIIOConfig:
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
         # Fold the global data_parallel_rank back to [0, dp_size_local) for
-        # per-node port allocation. data_parallel_size_local == 0 is the
-        # documented external-DP sentinel (local size unknown here); fall back
-        # to the global data_parallel_size (Field(ge=1), so never zero-divides).
-        # Do NOT assert -- it is stripped under `python -O` and would crash
-        # valid external-DP deployments.
+        # per-node port allocation (handles the external-DP sentinel).
         pc = vllm_config.parallel_config
-        dp_size_local = pc.data_parallel_size_local or pc.data_parallel_size
-        dp_rank = pc.data_parallel_rank % dp_size_local
+        dp_rank = fold_local_rank(pc.data_parallel_rank, pc.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
