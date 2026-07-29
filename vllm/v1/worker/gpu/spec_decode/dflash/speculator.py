@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,8 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -469,164 +472,358 @@ class DFlashSpeculator(DraftModelSpeculator):
         return self.draft_tokens[:num_reqs]
 
 
-@triton.jit
-def _prepare_dflash_inputs_kernel(
-    # Outputs
-    out_input_ids_ptr,
-    out_query_positions_ptr,
-    out_query_start_loc_ptr,
-    out_seq_lens_ptr,
-    out_query_slot_mapping_ptr,
-    out_context_positions_ptr,
-    out_context_slot_mapping_ptr,
-    out_sample_indices_ptr,
-    out_sample_pos_ptr,
-    out_sample_idx_mapping_ptr,
-    out_temperature_ptr,
-    out_seeds_ptr,
-    # Inputs from target batch
-    target_positions_ptr,
-    target_query_start_loc_ptr,
-    idx_mapping_ptr,
-    last_sampled_ptr,
-    next_prefill_tokens_ptr,
-    num_sampled_ptr,
-    num_rejected_ptr,
-    # Sampling params
-    temperature_ptr,
-    seeds_ptr,
-    # Block table for slot mapping lookup.
-    block_table_ptr,
-    block_table_stride,
-    # Scalars
-    parallel_drafting_token_id,
-    block_size,
-    num_query_per_req,
-    num_speculative_steps,
-    max_num_reqs,
-    max_num_tokens,
-    max_model_len,
-    SAMPLE_FROM_ANCHOR: tl.constexpr,
-    PAD_SLOT_ID: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    num_reqs = tl.num_programs(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+class PrepareDflashInputsKernel(VllmJitKernel["PrepareDflashInputsKernel.CompileKey"]):
+    """VllmJitKernel wrapper for ``_prepare_dflash_inputs_kernel``.
 
-    ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
-    ctx_end = tl.load(target_query_start_loc_ptr + req_idx + 1)
-    num_ctx = ctx_end - ctx_start
+    Warmup reads deployment-fixed scalars from the live speculator so
+    Triton's divisibility tags match runtime exactly.
+    """
 
-    num_rejected = tl.load(num_rejected_ptr + req_idx)
-    valid_ctx_end = ctx_end - num_rejected
+    _BLOCK_SIZES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+    _GRID_NUM_REQS: tuple[int, ...] = (1, 50)
+    _GRID_NUM_BLOCKS: tuple[int, ...] = (1, 8)
 
-    num_sampled = tl.load(num_sampled_ptr + req_idx)
-    if num_sampled > 0:
-        bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
-    else:
-        # Chunked prefilling: splice in the next prefill token.
-        bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
+    @dataclass(frozen=True)
+    class CompileKey:
+        SAMPLE_FROM_ANCHOR: bool
+        PAD_SLOT_ID: int
+        BLOCK_SIZE: int
+        block_table_stride: int
+        parallel_drafting_token_id: int
+        block_size: int
+        num_query_per_req: int
+        num_speculative_steps: int
+        max_num_reqs: int
+        max_num_tokens: int
+        max_model_len: int
+        grid_num_reqs: int
+        grid_num_blocks: int
 
-    last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
-    query_base = req_idx * num_query_per_req
+    @staticmethod
+    @triton.jit
+    def kernel(
+        out_input_ids_ptr,
+        out_query_positions_ptr,
+        out_query_start_loc_ptr,
+        out_seq_lens_ptr,
+        out_query_slot_mapping_ptr,
+        out_context_positions_ptr,
+        out_context_slot_mapping_ptr,
+        out_sample_indices_ptr,
+        out_sample_pos_ptr,
+        out_sample_idx_mapping_ptr,
+        out_temperature_ptr,
+        out_seeds_ptr,
+        # Inputs from target batch
+        target_positions_ptr,
+        target_query_start_loc_ptr,
+        idx_mapping_ptr,
+        last_sampled_ptr,
+        next_prefill_tokens_ptr,
+        num_sampled_ptr,
+        num_rejected_ptr,
+        # Sampling params
+        temperature_ptr,
+        seeds_ptr,
+        # Block table for slot mapping lookup.
+        block_table_ptr,
+        block_table_stride,
+        # Scalars
+        parallel_drafting_token_id,
+        block_size,
+        num_query_per_req,
+        num_speculative_steps,
+        max_num_reqs,
+        max_num_tokens,
+        max_model_len,
+        SAMPLE_FROM_ANCHOR: tl.constexpr,
+        PAD_SLOT_ID: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        req_idx = tl.program_id(0)
+        block_idx = tl.program_id(1)
+        num_reqs = tl.num_programs(0)
+        req_state_idx = tl.load(idx_mapping_ptr + req_idx)
 
-    j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    is_ctx = j < num_ctx
-    is_query = (j >= num_ctx) & (j < num_ctx + num_query_per_req)
-    query_off = j - num_ctx
+        ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
+        ctx_end = tl.load(target_query_start_loc_ptr + req_idx + 1)
+        num_ctx = ctx_end - ctx_start
 
-    # --- Context positions / slots ---
-    ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
-    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
-    ctx_block_num = ctx_pos // block_size
-    ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-    ctx_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=is_ctx,
-        other=0,
-    ).to(tl.int64)
-    ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
-    tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
-    tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
+        num_rejected = tl.load(num_rejected_ptr + req_idx)
+        valid_ctx_end = ctx_end - num_rejected
 
-    # --- Query positions / input_ids / slots ---
-    query_pos = last_valid_pos + 1 + query_off
-    query_idx = query_base + query_off
-    is_bonus = is_query & (query_off == 0)
-    input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
+        num_sampled = tl.load(num_sampled_ptr + req_idx)
+        if num_sampled > 0:
+            bonus_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+        else:
+            bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
 
-    q_block_num = query_pos // block_size
-    q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
-    q_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + q_block_num,
-        mask=is_query,
-        other=0,
-    ).to(tl.int64)
-    q_slot = q_block_id * block_size + (query_pos % block_size)
+        last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        query_base = req_idx * num_query_per_req
 
-    tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
-    clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
-    tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
-    tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
+        j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        is_ctx = j < num_ctx
+        is_query = (j >= num_ctx) & (j < num_ctx + num_query_per_req)
+        query_off = j - num_ctx
 
-    # --- Sample indices / positions / idx_mapping ---
-    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
-    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
-    # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
-    # at offsets > 0 are sampled from, each AT its own position.
-    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
-    is_sample = is_query & (query_off >= sample_off)
-    sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
-    sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
-    tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
-    tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
-    tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
+        ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
+        ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
+        ctx_block_num = ctx_pos // block_size
+        ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
+        ctx_block_id = tl.load(
+            block_table_ptr + req_idx * block_table_stride + ctx_block_num,
+            mask=is_ctx,
+            other=0,
+        ).to(tl.int64)
+        ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+        tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
+        tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
 
-    if block_idx == 0:
-        tl.store(out_query_start_loc_ptr + req_idx, query_base)
-        # seq_lens is the absolute sequence length the draft attention
-        # reads up to (context + query), not just the count of accepted
-        # tokens this step.
-        tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
-        # Copy sampling state.
-        tl.store(
-            out_temperature_ptr + req_state_idx,
-            tl.load(temperature_ptr + req_state_idx),
+        query_pos = last_valid_pos + 1 + query_off
+        query_idx = query_base + query_off
+        is_bonus = is_query & (query_off == 0)
+        input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
+
+        q_block_num = query_pos // block_size
+        q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
+        q_block_id = tl.load(
+            block_table_ptr + req_idx * block_table_stride + q_block_num,
+            mask=is_query,
+            other=0,
+        ).to(tl.int64)
+        q_slot = q_block_id * block_size + (query_pos % block_size)
+
+        tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
+        clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
+        tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
+        tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
+
+        sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+        is_sample = is_query & (query_off >= sample_off)
+        sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
+        sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
+        tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
+        tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
+        tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
+
+        if block_idx == 0:
+            tl.store(out_query_start_loc_ptr + req_idx, query_base)
+            # seq_lens is the absolute sequence length the draft attention
+            # reads up to (context + query), not just the count of accepted
+            # tokens this step.
+            tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+            # Copy sampling state.
+            tl.store(
+                out_temperature_ptr + req_state_idx,
+                tl.load(temperature_ptr + req_state_idx),
+            )
+            tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
+            if req_idx == num_reqs - 1:
+                last_query_end = num_reqs * num_query_per_req
+                for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = block < max_num_reqs + 1
+                    tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
+                for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = block < max_num_reqs
+                    tl.store(out_seq_lens_ptr + block, 0, mask=mask)
+                pad_start = num_reqs * num_speculative_steps
+                pad_end = max_num_reqs * num_speculative_steps
+                for i in range(pad_start, pad_end, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = block < pad_end
+                    tl.store(out_sample_indices_ptr + block, 0, mask=mask)
+                    tl.store(out_sample_pos_ptr + block, 0, mask=mask)
+                    tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
+                q_pad_start = num_reqs * num_query_per_req
+                for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = block < max_num_tokens
+                    tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        SAMPLE_FROM_ANCHOR: bool,
+        PAD_SLOT_ID: int,
+        BLOCK_SIZE: int,
+        block_table_stride: int,
+        parallel_drafting_token_id: int,
+        block_size: int,
+        num_query_per_req: int,
+        num_speculative_steps: int,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        max_model_len: int,
+        grid_num_reqs: int,
+        grid_num_blocks: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            SAMPLE_FROM_ANCHOR=SAMPLE_FROM_ANCHOR,
+            PAD_SLOT_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=BLOCK_SIZE,
+            block_table_stride=block_table_stride,
+            parallel_drafting_token_id=parallel_drafting_token_id,
+            block_size=block_size,
+            num_query_per_req=num_query_per_req,
+            num_speculative_steps=num_speculative_steps,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            max_model_len=max_model_len,
+            grid_num_reqs=grid_num_reqs,
+            grid_num_blocks=grid_num_blocks,
         )
-        tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
-        if req_idx == num_reqs - 1:
-            # Pad per-request buffers to max_num_reqs for CUDA graph safety.
-            last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs + 1
-                tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
-            for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs
-                tl.store(out_seq_lens_ptr + block, 0, mask=mask)
-            # Padded sample slots point at query index 0 (a valid row in
-            # last_hidden_states) so CG replay never reads OOB. Padded
-            # sample idx mappings point to -1, which is ignored during
-            # sampling to prevent writing stale values to draft logits.
-            pad_start = num_reqs * num_speculative_steps
-            pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < pad_end
-                tl.store(out_sample_indices_ptr + block, 0, mask=mask)
-                tl.store(out_sample_pos_ptr + block, 0, mask=mask)
-                tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
-            # Pad query slot mappings past num_query_tokens with PAD so the
-            # captured CG sees PAD slots (no K/V write) for replay sizes
-            # larger than the current request count.
-            q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_tokens
-                tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
+
+    def get_warmup_keys(
+        self,
+        vllm_config: VllmConfig,
+        *,
+        speculator: DFlashSpeculator,
+    ) -> list[CompileKey]:
+        kernel_block_sizes = getattr(
+            speculator.block_tables, "kernel_block_sizes", None
+        )
+        if not kernel_block_sizes:
+            return []
+        input_block_tables = getattr(
+            speculator.block_tables, "input_block_tables", None
+        )
+        if not input_block_tables:
+            return []
+        block_table_stride = int(input_block_tables[0].stride(0))
+
+        return self._trace_dispatch(self.dispatch)(
+            SAMPLE_FROM_ANCHOR=speculator.sample_from_anchor,
+            PAD_SLOT_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=list(self._BLOCK_SIZES),
+            block_table_stride=block_table_stride,
+            parallel_drafting_token_id=speculator.parallel_drafting_token_id,
+            block_size=kernel_block_sizes[0],
+            num_query_per_req=speculator.num_query_per_req,
+            num_speculative_steps=speculator.num_speculative_steps,
+            max_num_reqs=speculator.max_num_reqs,
+            max_num_tokens=speculator.max_num_tokens,
+            max_model_len=speculator.max_model_len,
+            grid_num_reqs=list(self._GRID_NUM_REQS),
+            grid_num_blocks=list(self._GRID_NUM_BLOCKS),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        int64_ptr = TritonWarmupTensor(torch.int64)
+        float32_ptr = TritonWarmupTensor(torch.float32)
+        warmup(
+            int32_ptr,  # out_input_ids_ptr
+            int64_ptr,  # out_query_positions_ptr
+            int32_ptr,  # out_query_start_loc_ptr
+            int32_ptr,  # out_seq_lens_ptr
+            int64_ptr,  # out_query_slot_mapping_ptr
+            int64_ptr,  # out_context_positions_ptr
+            int64_ptr,  # out_context_slot_mapping_ptr
+            int64_ptr,  # out_sample_indices_ptr
+            int64_ptr,  # out_sample_pos_ptr
+            int32_ptr,  # out_sample_idx_mapping_ptr
+            float32_ptr,  # out_temperature_ptr
+            int64_ptr,  # out_seeds_ptr
+            int64_ptr,  # target_positions_ptr
+            int32_ptr,  # target_query_start_loc_ptr
+            int32_ptr,  # idx_mapping_ptr
+            int64_ptr,  # last_sampled_ptr
+            int32_ptr,  # next_prefill_tokens_ptr
+            int32_ptr,  # num_sampled_ptr
+            int32_ptr,  # num_rejected_ptr
+            float32_ptr,  # temperature_ptr
+            int64_ptr,  # seeds_ptr
+            int32_ptr,  # block_table_ptr
+            compile_key.block_table_stride,
+            compile_key.parallel_drafting_token_id,
+            compile_key.block_size,
+            compile_key.num_query_per_req,
+            compile_key.num_speculative_steps,
+            compile_key.max_num_reqs,
+            compile_key.max_num_tokens,
+            compile_key.max_model_len,
+            SAMPLE_FROM_ANCHOR=compile_key.SAMPLE_FROM_ANCHOR,
+            PAD_SLOT_ID=compile_key.PAD_SLOT_ID,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            grid=(compile_key.grid_num_reqs, compile_key.grid_num_blocks),
+        )
+
+    def __call__(
+        self,
+        input_buffers: InputBuffers,
+        query_slot_mapping: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor,
+        sample_indices: torch.Tensor,
+        sample_pos: torch.Tensor,
+        sample_idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        input_temperature: torch.Tensor,
+        input_seeds: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        parallel_drafting_token_id: int,
+        num_query_per_req: int,
+        num_speculative_steps: int,
+        max_num_reqs: int,
+        max_num_tokens: int,
+        max_model_len: int,
+        sample_from_anchor: bool = False,
+    ) -> None:
+        num_reqs = input_batch.num_reqs
+        assert num_reqs > 0
+        max_target_query_len = int(input_batch.num_scheduled_tokens.max())
+        max_tokens_per_req = max_target_query_len + num_query_per_req
+        BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
+        num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
+        self.kernel[(num_reqs, num_blocks)](
+            input_buffers.input_ids,
+            input_buffers.positions,
+            input_buffers.query_start_loc,
+            input_buffers.seq_lens,
+            query_slot_mapping,
+            context_positions,
+            context_slot_mapping,
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            temperature,
+            seeds,
+            input_batch.positions,
+            input_batch.query_start_loc,
+            input_batch.idx_mapping,
+            last_sampled,
+            next_prefill_tokens,
+            num_sampled,
+            num_rejected,
+            input_temperature,
+            input_seeds,
+            block_table,
+            block_table.stride(0),
+            parallel_drafting_token_id,
+            block_size,
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            max_model_len,
+            SAMPLE_FROM_ANCHOR=sample_from_anchor,
+            PAD_SLOT_ID=PAD_SLOT_ID,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+
+
+_PREPARE_DFLASH_INPUTS_KERNEL = PrepareDflashInputsKernel()
 
 
 def prepare_dflash_inputs(
@@ -663,19 +860,8 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
 ) -> None:
-    num_reqs = input_batch.num_reqs
-    assert num_reqs > 0
-    # Cover the longest possible per-request span (ctx + query). Use the max
-    # per-request query length, not the total token count across the batch.
-    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
-    max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
-    num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
-    _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
-        input_buffers.input_ids,
-        input_buffers.positions,
-        input_buffers.query_start_loc,
-        input_buffers.seq_lens,
+    _PREPARE_DFLASH_INPUTS_KERNEL(
+        input_buffers,
         query_slot_mapping,
         context_positions,
         context_slot_mapping,
@@ -684,25 +870,20 @@ def prepare_dflash_inputs(
         sample_idx_mapping,
         temperature,
         seeds,
-        input_batch.positions,
-        input_batch.query_start_loc,
-        input_batch.idx_mapping,
-        last_sampled,
-        next_prefill_tokens,
+        input_batch,
         num_sampled,
         num_rejected,
+        last_sampled,
+        next_prefill_tokens,
         input_temperature,
         input_seeds,
         block_table,
-        block_table.stride(0),
-        parallel_drafting_token_id,
         block_size,
+        parallel_drafting_token_id,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
-        PAD_SLOT_ID=PAD_SLOT_ID,
-        BLOCK_SIZE=BLOCK_SIZE,
+        sample_from_anchor,
     )
