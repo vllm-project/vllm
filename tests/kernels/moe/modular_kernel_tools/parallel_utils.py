@@ -106,7 +106,7 @@ def _worker_parallel_launch(
     if vllm_config is not None:
         cpu_group = _set_vllm_config(vllm_config, world_size, rank, local_rank)
 
-    try:
+    def _run_worker():
         worker(
             ProcessGroupInfo(
                 world_size=world_size,
@@ -121,6 +121,13 @@ def _worker_parallel_launch(
             *args,
             **worker_kwargs,
         )
+
+    try:
+        if vllm_config is not None:
+            with set_current_vllm_config(vllm_config):
+                _run_worker()
+        else:
+            _run_worker()
     except Exception as ex:
         print(ex)
         traceback.print_exc()
