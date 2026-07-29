@@ -187,9 +187,15 @@ def test_hash_collision_media_io_config():
     keep = ImageMediaIO(image_mode=None).load_bytes(data)
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=black)
-    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=keep)
-    assert hasher.hash_kwargs(image=white) == hasher.hash_kwargs(image=white2)
+    assert hasher.hash_kwargs("blake3", image=white) != hasher.hash_kwargs(
+        "blake3", image=black
+    )
+    assert hasher.hash_kwargs("blake3", image=white) != hasher.hash_kwargs(
+        "blake3", image=keep
+    )
+    assert hasher.hash_kwargs("blake3", image=white) == hasher.hash_kwargs(
+        "blake3", image=white2
+    )
 
 
 def test_hash_media_io_noop_config_preserves_hash():
@@ -203,4 +209,6 @@ def test_hash_media_io_noop_config_preserves_hash():
 
     plain = MediaWithBytes(loaded.media, data)
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(image=loaded) == hasher.hash_kwargs(image=plain)
+    assert hasher.hash_kwargs("blake3", image=loaded) == hasher.hash_kwargs(
+        "blake3", image=plain
+    )
