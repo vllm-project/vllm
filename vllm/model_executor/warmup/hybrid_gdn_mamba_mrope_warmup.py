@@ -105,6 +105,7 @@ def _mrope_configs(model: torch.nn.Module, model_dtype: torch.dtype):
                 rotary_dim=int(rotary_emb.rotary_dim),
                 mrope_section=(int(section[0]), int(section[1]), int(section[2])),
                 is_interleaved=bool(rotary_emb.mrope_interleaved),
+                is_neox_style=bool(rotary_emb.is_neox_style),
             )
         )
     return configs

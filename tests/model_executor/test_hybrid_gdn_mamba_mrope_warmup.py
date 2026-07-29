@@ -9,6 +9,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import (
     MropeKernel,
     MropeWarmupConfig,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
     PackedGdnDecodeKernel,
     PackedGdnDecodeWarmupConfig,
@@ -24,9 +25,10 @@ def test_mrope_warmup_keys_cover_integer_specializations() -> None:
         n_qh=28,
         n_kh=4,
         head_size=128,
-        rotary_dim=128,
-        mrope_section=(16, 24, 24),
+        rotary_dim=64,
+        mrope_section=(8, 12, 12),
         is_interleaved=False,
+        is_neox_style=False,
     )
 
     keys = MropeKernel().get_warmup_keys([config, config])
@@ -35,7 +37,50 @@ def test_mrope_warmup_keys_cover_integer_specializations() -> None:
     assert {key.num_tokens_divisible_by_16 for key in keys} == {False, True}
     assert all(key.pad_n_qh == 32 for key in keys)
     assert all(key.pad_n_kh == 4 for key in keys)
-    assert all(key.pad_hd == 128 for key in keys)
+    assert all(key.pad_rd == 64 for key in keys)
+    assert all(not key.is_neox_style for key in keys)
+    expected_num_warps = 1 if current_platform.is_rocm() else 4
+    assert all(key.num_warps == expected_num_warps for key in keys)
+
+
+def test_mrope_warmup_config_tracks_runtime_layout(monkeypatch) -> None:
+    from vllm.model_executor.layers.rotary_embedding import mrope
+    from vllm.model_executor.warmup import hybrid_gdn_mamba_mrope_warmup as warmup
+
+    class FakeMRotaryEmbedding:
+        mrope_section = [8, 12, 12]
+        cos_sin_cache = torch.empty(1, dtype=torch.float32)
+        rotary_dim = 64
+        mrope_interleaved = True
+        is_neox_style = False
+
+    class Attention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rotary_emb = FakeMRotaryEmbedding()
+            self.num_heads = 28
+            self.num_kv_heads = 4
+            self.head_dim = 128
+
+    monkeypatch.setattr(mrope, "MRotaryEmbedding", FakeMRotaryEmbedding)
+
+    configs = warmup._mrope_configs(Attention(), torch.bfloat16)
+
+    assert configs == [
+        MropeWarmupConfig(
+            q_dtype=torch.bfloat16,
+            k_dtype=torch.bfloat16,
+            cos_dtype=torch.float32,
+            sin_dtype=torch.float32,
+            n_qh=28,
+            n_kh=4,
+            head_size=128,
+            rotary_dim=64,
+            mrope_section=(8, 12, 12),
+            is_interleaved=True,
+            is_neox_style=False,
+        )
+    ]
 
 
 def test_packed_gdn_warmup_key_matches_kernel_meta_parameters() -> None:
