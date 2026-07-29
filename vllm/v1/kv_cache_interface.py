@@ -130,8 +130,8 @@ class KVCacheSpec:
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         """
-        The number of block table entries needed per request, i.e. the row
-        length of the worker-side block table for this cache group.
+        The maximum number of KV-manager blocks needed per request, before
+        kernel block splitting and block-table alignment.
 
         Args:
             vllm_config: The vllm config.
@@ -834,6 +834,12 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return max(
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
+        )
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:

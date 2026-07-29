@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
+BLOCK_TABLE_TOKEN_ALIGNMENT = 128
+
 
 class AttentionType(str, Enum):
     """
@@ -631,6 +633,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    # Whether the builder constructor requires a resolved block-table layout.
+    requires_block_table_layout: ClassVar[bool] = False
 
     @abstractmethod
     def __init__(

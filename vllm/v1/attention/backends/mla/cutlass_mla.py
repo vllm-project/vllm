@@ -19,6 +19,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
+    BLOCK_TABLE_TOKEN_ALIGNMENT,
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
@@ -208,7 +209,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B_block_table, block_num = page_table.shape
         assert B_block_table == B_q
         assert block_num > 0, f"block num must be greater than 0, got {block_num}"
-        assert block_num % (128 / PAGE_SIZE) == 0
+        assert (block_num * PAGE_SIZE) % BLOCK_TABLE_TOKEN_ALIGNMENT == 0
 
         assert q_nope.dtype in (torch.float16, torch.bfloat16, torch.float8_e4m3fn), (
             f"q_nope.dtype needs to be fp16 or bf16 or e4m3 but got {q_nope.dtype}."

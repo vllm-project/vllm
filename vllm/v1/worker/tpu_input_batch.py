@@ -29,7 +29,7 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
-        max_num_blocks_per_req: list[int],
+        block_table_widths: list[int],
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -70,7 +70,7 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
-            max_num_blocks=max_num_blocks_per_req,
+            block_table_widths=block_table_widths,
         )
 
         # Sampling-related.

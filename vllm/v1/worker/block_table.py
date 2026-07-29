@@ -9,7 +9,6 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -26,7 +25,7 @@ class BlockTable:
         self,
         block_size: int,
         max_num_reqs: int,
-        max_num_blocks_per_req: int,
+        block_table_width: int,
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
@@ -38,7 +37,7 @@ class BlockTable:
         Args:
             block_size: Block size used for KV cache memory allocation
             max_num_reqs: Maximum number of concurrent requests supported.
-            max_num_blocks_per_req: Maximum number of blocks per request.
+            block_table_width: Number of entries in each block-table row.
             max_num_batched_tokens: Maximum number of tokens in a batch.
             pin_memory: Whether to pin memory for faster GPU transfers.
             device: Target device for the block table.
@@ -76,7 +75,7 @@ class BlockTable:
             self.blocks_per_kv_block = block_size // kernel_block_size
             self.use_hybrid_blocks = True
 
-        self.max_num_blocks_per_req = max_num_blocks_per_req * self.blocks_per_kv_block
+        self.max_num_blocks_per_req = block_table_width
 
         self.block_table = self._make_buffer(
             self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
@@ -249,7 +248,7 @@ class MultiGroupBlockTable:
         device: torch.device,
         block_sizes: list[int],
         kernel_block_sizes: list[int],
-        max_num_blocks: list[int],
+        block_table_widths: list[int],
         cp_kv_cache_interleave_size: int = 1,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
     ) -> None:
@@ -266,24 +265,17 @@ class MultiGroupBlockTable:
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
-        if len(max_num_blocks) != len(block_sizes):
+        if len(block_table_widths) != len(block_sizes):
             raise ValueError(
-                f"max_num_blocks length ({len(max_num_blocks)}) "
+                f"block_table_widths length ({len(block_table_widths)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
-
-        # Align to a multiple of (128 / block_size) as required
-        # by some attention backends such as TRTLLM (#39324)
-        max_num_blocks = [
-            cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
-            for n, bs in zip(max_num_blocks, block_sizes)
-        ]
 
         self.block_tables = [
             BlockTable(
                 block_size,
                 max_num_reqs,
-                max_num_blocks_per_req,
+                block_table_width,
                 max_num_batched_tokens,
                 pin_memory,
                 device,
@@ -294,10 +286,13 @@ class MultiGroupBlockTable:
             for (
                 block_size,
                 kernel_block_size,
-                max_num_blocks_per_req,
+                block_table_width,
                 slot_mapping_mode,
             ) in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks, slot_mapping_modes
+                block_sizes,
+                kernel_block_sizes,
+                block_table_widths,
+                slot_mapping_modes,
             )
         ]
 

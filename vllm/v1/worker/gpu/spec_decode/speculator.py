@@ -191,7 +191,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
+        self.attn_groups, self.attn_cg_support, _, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
