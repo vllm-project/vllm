@@ -70,7 +70,7 @@ def predictable_llama_config_path(tmp_path_factory):
 # Need for Python 3.14 compatibility, vLLM with force spawn due to CUDA
 # reinitialization, and register will not persist.
 PREDICTABLE_LLAMA_MODEL_CLS = (
-    "vllm.tests.v1.kv_connector.extract_hidden_states_integration"
+    "tests.v1.kv_connector.extract_hidden_states_integration"
     ".predictable_llama:PredictableLlamaForCausalLM"
 )
 

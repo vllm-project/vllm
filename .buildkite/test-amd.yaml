@@ -2682,7 +2682,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+  - PYTHONPATH=/vllm-workspace pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
 - label: V1 attention (H100-MI300) %N # TBD
   timeout_in_minutes: 180
