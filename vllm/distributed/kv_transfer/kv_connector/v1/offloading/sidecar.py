@@ -12,16 +12,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
 )
-from vllm.v1.kv_offload.base import GPULoadStoreSpec
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingSpec,
+)
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def build_sidecar_config(
-    spec: object,
+    spec: OffloadingSpec,
 ) -> KVConnectorSidecarConfig | None:
     """Return the sidecar layout for supported offloading storage."""
-    if not isinstance(spec, CPUOffloadingSpec):
+    # Subclasses such as TieringOffloadingSpec move KV beyond the primary CPU
+    # tier without moving sidecars, so only the native CPU spec is safe.
+    if type(spec) is not CPUOffloadingSpec:
         return None
     return KVConnectorSidecarConfig(
         num_connector_blocks=spec.num_blocks,
@@ -34,8 +40,8 @@ def _divide_round_up(dividend: int, divisor: int) -> int:
 
 
 def _normalize_transfer(
-    gpu_spec: object,
-    connector_spec: object,
+    gpu_spec: LoadStoreSpec,
+    connector_spec: LoadStoreSpec,
     *,
     kv_group_id: int,
     expected_num_groups: int,
@@ -50,6 +56,20 @@ def _normalize_transfer(
 
     group_sizes = gpu_spec.group_sizes
     block_indices = gpu_spec.block_indices
+    if (
+        blocks_per_connector_block < 1
+        or len(group_sizes) != expected_num_groups
+        or len(block_indices) != len(group_sizes)
+        or not 0 <= kv_group_id < len(group_sizes)
+    ):
+        raise RuntimeError(
+            "KV block sidecar transfer violates the group-major flat-order "
+            f"contract: group_sizes={list(group_sizes)}, "
+            f"block_indices={list(block_indices)}, kv_group_id={kv_group_id}, "
+            f"blocks_per_connector_block={blocks_per_connector_block}, "
+            f"expected_num_groups={expected_num_groups}"
+        )
+
     connector_blocks_per_group = [
         _divide_round_up(
             int(group_size) + int(block_indices[group_id]) % blocks_per_connector_block,
@@ -57,11 +77,9 @@ def _normalize_transfer(
         )
         for group_id, group_size in enumerate(group_sizes)
     ]
-    if (
-        len(group_sizes) != expected_num_groups
-        or sum(group_sizes) != len(gpu_spec.block_ids)
-        or sum(connector_blocks_per_group) != len(connector_spec.block_ids)
-    ):
+    if sum(group_sizes) != len(gpu_spec.block_ids) or sum(
+        connector_blocks_per_group
+    ) != len(connector_spec.block_ids):
         raise RuntimeError(
             "KV block sidecar transfer violates the group-major flat-order "
             f"contract: group_sizes={list(group_sizes)}, "
@@ -132,7 +150,7 @@ def normalize_sidecar_transfers(
     """Convert native offloading jobs into the public sidecar contract."""
 
     def normalize(
-        gpu_spec: object, connector_spec: object
+        gpu_spec: LoadStoreSpec, connector_spec: LoadStoreSpec
     ) -> KVConnectorSidecarTransfer:
         return _normalize_transfer(
             gpu_spec,

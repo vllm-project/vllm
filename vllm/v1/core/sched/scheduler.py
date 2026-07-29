@@ -388,6 +388,11 @@ class Scheduler(SchedulerInterface):
                 "--enable-return-routed-experts with KV offload requires "
                 "a non-empty connector block pool"
             )
+        if config.blocks_per_connector_block <= 0:
+            raise ValueError(
+                "--enable-return-routed-experts with KV offload requires "
+                "a positive blocks-per-connector-block value"
+            )
         return (
             config.num_connector_blocks,
             config.blocks_per_connector_block,

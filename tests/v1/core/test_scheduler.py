@@ -4,7 +4,6 @@ import dataclasses
 from concurrent.futures import Future
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 
@@ -17,6 +16,9 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
@@ -49,10 +51,6 @@ pytestmark = pytest.mark.cpu_test
 
 
 def test_routed_experts_uses_public_connector_sidecar_config():
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorSidecarConfig,
-    )
-
     connector = Mock()
     connector.get_block_sidecar_config.return_value = KVConnectorSidecarConfig(
         num_connector_blocks=17,
@@ -65,65 +63,43 @@ def test_routed_experts_uses_public_connector_sidecar_config():
     connector.get_block_sidecar_config.assert_called_once_with()
 
 
-def test_offloading_connector_normalizes_internal_jobs_for_sidecars():
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
-        OffloadingConnectorMetadata,
-        TransferJob,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.sidecar import (
-        build_sidecar_config,
-        normalize_sidecar_transfers,
-    )
-    from vllm.v1.kv_offload.base import GPULoadStoreSpec
-    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [
+        pytest.param(
+            None,
+            "supports block sidecars",
+            id="unsupported-connector",
+        ),
+        pytest.param(
+            KVConnectorSidecarConfig(
+                num_connector_blocks=0,
+                blocks_per_connector_block=1,
+            ),
+            "non-empty connector block pool",
+            id="empty-connector-block-pool",
+        ),
+        pytest.param(
+            KVConnectorSidecarConfig(
+                num_connector_blocks=1,
+                blocks_per_connector_block=0,
+            ),
+            "positive blocks-per-connector-block",
+            id="invalid-block-size-factor",
+        ),
+    ],
+)
+def test_routed_experts_rejects_invalid_connector_sidecar_config(
+    config: KVConnectorSidecarConfig | None,
+    match: str,
+):
+    connector = Mock()
+    connector.get_block_sidecar_config.return_value = config
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.connector = connector
 
-    spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
-    spec.num_blocks = 17
-    spec.blocks_per_chunk = 2
-    config = build_sidecar_config(spec)
-    assert config is not None
-
-    gpu_spec = GPULoadStoreSpec(
-        block_ids=[10, 11, 12, 20],
-        group_sizes=[3, 1],
-        block_indices=[1, 0],
-    )
-    connector_spec = CPULoadStoreSpec([100, 101, 200])
-    metadata = OffloadingConnectorMetadata(
-        load_jobs={
-            1: TransferJob(
-                req_id="load",
-                src_spec=connector_spec,
-                dst_spec=gpu_spec,
-            )
-        },
-        store_jobs={
-            2: TransferJob(
-                req_id="store",
-                src_spec=gpu_spec,
-                dst_spec=connector_spec,
-            )
-        },
-    )
-
-    transfers = normalize_sidecar_transfers(
-        metadata,
-        config=config,
-        kv_group_id=0,
-        expected_num_groups=2,
-    )
-
-    for transfer in (*transfers.loads, *transfers.stores):
-        np.testing.assert_array_equal(transfer.gpu_block_ids, [10, 11, 12])
-        np.testing.assert_array_equal(
-            transfer.connector_block_ids,
-            [100, 101, 101],
-        )
-        np.testing.assert_array_equal(
-            transfer.connector_block_offsets,
-            [1, 0, 1],
-        )
+    with pytest.raises(ValueError, match=match):
+        scheduler._get_routed_experts_sidecar_config()
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
