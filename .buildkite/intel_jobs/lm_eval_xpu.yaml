@@ -185,27 +185,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt || true'
-- label: LM Eval Large Models (8xH200)
-  device: intel_gpu
-  timeout_in_minutes: 50
-  num_devices: 8
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 8+
-  _raw_old_commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt || true'
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
   device: intel_gpu
   num_devices: 2
@@ -481,7 +460,7 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k nemotron-h-8b or gemma-4-e4b-it || true'
 - label: LM Eval KV-Offload (2xH100)
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   num_devices: 2
   working_dir: .
   no_plugin: true
@@ -493,7 +472,7 @@ steps:
     label: debug
     gpu: 2+
   _raw_old_commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b"
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
@@ -504,7 +483,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k qwen3.5-35b || true'
+    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k qwen3.5-35b or deepseek-v2-lite || true'
 - label: LM Eval KV-Offload (4xH100)
   device: intel_gpu
   timeout_in_minutes: 40

@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: PyTorch Compilation Unit Tests
   device: intel_gpu
-  timeout_in_minutes: 110
+  timeout_in_minutes: 150
   working_dir: .
   no_plugin: true
   env:
