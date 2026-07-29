@@ -31,7 +31,7 @@ from vllm.entrypoints.serve.utils.error_response import (
     create_error_response,
     sanitize_message,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -323,6 +323,16 @@ async def log_response(request: Request, call_next):
     else:
         _log_non_streaming_response(response_body)
     return response
+
+
+async def vllm_error_handler(req: Request, exc: VLLMError):
+    """Dispatch a vLLM-specific error to the appropriate handler."""
+    if isinstance(exc, (EngineGenerateError, EngineDeadError)):
+        return await engine_error_handler(req, exc)
+    elif isinstance(exc, GenerationError):
+        return await generation_error_handler(req, exc)
+    else:
+        return await exception_handler(req, exc)
 
 
 async def engine_error_handler(

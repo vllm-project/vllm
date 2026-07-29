@@ -84,7 +84,15 @@ RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
-    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling", "cohere"
+    "auto",
+    "hf",
+    "slow",
+    "mistral",
+    "deepseek_v32",
+    "deepseek_v4",
+    "inkling",
+    "kimi_k3",
+    "cohere",
 ]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
@@ -141,6 +149,8 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
+      with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -637,6 +647,8 @@ class ModelConfig:
                 self.tokenizer_mode = "terratorch"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
+            elif arch == "KimiK3ForConditionalGeneration":
+                self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
