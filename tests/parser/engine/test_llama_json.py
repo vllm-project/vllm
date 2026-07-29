@@ -36,7 +36,6 @@ from vllm.parser.llama_json import (
     _ValueScan,
 )
 from vllm.parser.parser_manager import ParserManager
-from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
 PYTHON_TAG = "<|python_tag|>"
 
@@ -1161,3 +1160,186 @@ class TestIncrementalArgScanning:
             _splice_types(raw, 0, len(raw), schema)
             == '{"a": "1", "b": "2", "c": "keep", "d": "3"}'
         )
+
+
+class TestRequiredAndNamedToolChoice:
+    """Required/named tool choice must be parsed here, not by the shared helpers.
+
+    ``extract_required_tool_call_streaming`` and its named counterpart
+    rebuild their state from the cumulative document, but engine-based
+    parsers are fed one delta at a time -- ``previous_text`` is always
+    empty, so those helpers never see a complete call.  A llama parser that
+    advertised ``supports_required_and_named`` therefore streamed nothing at
+    all for required choice, and streamed the whole ``{"name": ...,
+    "parameters": ...}`` envelope as the arguments for named choice.
+
+    Declaring the flag False sends both choices to this parser instead, as
+    the other engine-based parsers do.  Guided decoding is unaffected: the
+    tool schema is applied from the request's ``tool_choice``, independent
+    of the flag.
+    """
+
+    ARRAY = '[{"name": "get_weather", "parameters": {"city": "SF"}}]'
+    NATIVE = '{"name": "get_weather", "parameters": {"city": "SF"}}'
+    NAMED = {"type": "function", "function": {"name": "get_weather"}}
+
+    def test_flag_holds_without_strict_enforcement(self, monkeypatch):
+        """The regression guard for this whole class.
+
+        ``ToolParser.__init_subclass__`` forces the flag False only while
+        ``VLLM_ENFORCE_STRICT_TOOL_CALLING`` is set, and that is read once,
+        at class-creation time.  With strict enforcement off the class must
+        still declare it in its own body -- otherwise it inherits True and
+        required/named tool choice routes to the generic helpers, which is
+        the broken configuration.  Re-import the module to see what a
+        strict-disabled server actually gets.
+        """
+        import importlib
+
+        import vllm.tool_parsers.llama_tool_parser as module
+
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        try:
+            reloaded = importlib.reload(module)
+            assert reloaded.Llama3JsonToolParser.supports_required_and_named is False
+        finally:
+            monkeypatch.undo()
+            importlib.reload(module)
+
+    @staticmethod
+    def _request(tool_choice):
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "weather in SF?"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            tool_choice=tool_choice,
+        )
+
+    @staticmethod
+    def _stream(parser, request, text, chunk_size):
+        names: list[str] = []
+        args: dict[int, str] = {}
+        for start in range(0, len(text), chunk_size):
+            delta_text = text[start : start + chunk_size]
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(text),
+            )
+            for tool_call in (delta.tool_calls if delta else None) or []:
+                if tool_call.function and tool_call.function.name:
+                    names.append(tool_call.function.name)
+                if tool_call.function and tool_call.function.arguments:
+                    args[tool_call.index] = (
+                        args.get(tool_call.index, "") + tool_call.function.arguments
+                    )
+        return names, args
+
+    @pytest.fixture
+    def parser(self, mock_tokenizer):
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert parser_cls is not None
+        return parser_cls(mock_tokenizer)
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 10_000])
+    @pytest.mark.parametrize("body", ["ARRAY", "NATIVE"])
+    def test_required_streams_the_call(self, parser, chunk_size, body):
+        """Required choice streams a call for both wire shapes.
+
+        Without a llama structural tag the model is guided to the
+        ``[{...}]`` array schema; with one it emits the bare envelope.
+        """
+        text = getattr(self, body)
+        names, args = self._stream(parser, self._request("required"), text, chunk_size)
+
+        assert names == ["get_weather"]
+        assert [json.loads(a) for a in args.values()] == [{"city": "SF"}]
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 10_000])
+    def test_named_streams_only_the_arguments(self, parser, chunk_size):
+        """Named choice must stream the parameters, not the whole envelope."""
+        names, args = self._stream(
+            parser, self._request(self.NAMED), self.NATIVE, chunk_size
+        )
+
+        assert names == ["get_weather"]
+        assert [json.loads(a) for a in args.values()] == [{"city": "SF"}]
+
+    @pytest.mark.parametrize("tool_choice", ["required", "named"])
+    @pytest.mark.parametrize("body", ["ARRAY", "NATIVE"])
+    def test_non_streaming_matches_streaming(self, parser, tool_choice, body):
+        choice = self.NAMED if tool_choice == "named" else tool_choice
+        info = parser.extract_tool_calls(getattr(self, body), self._request(choice))
+
+        assert info.tools_called
+        assert [tc.function.name for tc in info.tool_calls] == ["get_weather"]
+        assert [json.loads(tc.function.arguments) for tc in info.tool_calls] == [
+            {"city": "SF"}
+        ]
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 10_000])
+    @pytest.mark.parametrize("tool_choice", ["required", "named"])
+    def test_forced_choice_emits_no_content(self, parser, chunk_size, tool_choice):
+        """The array schema's brackets must not leak as content.
+
+        Required/named apply a ``[{...}, {...}]`` JSON schema, whose opening
+        bracket reaches the parser before any call completes -- so the
+        "drop content once a call completed" rule does not cover it, and it
+        surfaced as ``content="["``.  Gemma4 hit the same class of leak
+        (vllm-project/vllm#45795), where the whole forced JSON leaked.
+        """
+        choice = self.NAMED if tool_choice == "named" else tool_choice
+        content_parts: list[str] = []
+        request = self._request(choice)
+        for start in range(0, len(self.ARRAY), chunk_size):
+            delta_text = self.ARRAY[start : start + chunk_size]
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(self.ARRAY),
+            )
+            if delta and delta.content:
+                content_parts.append(delta.content)
+
+        assert "".join(content_parts) == ""
+
+    @pytest.mark.parametrize("tool_choice", ["required", "named"])
+    def test_forced_choice_emits_no_content_non_streaming(self, parser, tool_choice):
+        choice = self.NAMED if tool_choice == "named" else tool_choice
+        _, content = parser._extract_tool_calls(
+            self.ARRAY, self._request(choice), enable_auto_tools=True
+        )
+
+        assert not content
+
+    def test_auto_choice_still_keeps_leading_prose(self, parser):
+        """Dropping content is scoped to forced choice, not to every request."""
+        text = (
+            'Sure, here you go. {"name": "get_weather", "parameters": {"city": "SF"}}'
+        )
+        calls, content = parser._extract_tool_calls(
+            text, self._request("auto"), enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["get_weather"]
+        assert content and "Sure, here you go." in content
