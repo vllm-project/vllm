@@ -13,9 +13,6 @@ use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::{OpaqueValue, lora};
 use crate::{Error, Result};
 
-/// Match Python's default threshold for moving tensor data out of msgpack.
-pub const DEFAULT_AUX_FRAME_THRESHOLD: usize = 256;
-
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
 ///
@@ -165,6 +162,8 @@ mod tests {
     use crate::protocol::tensor::{WireArrayData, WireTensor};
     use crate::protocol::{decode_value, encode_msgpack};
 
+    const AUX_FRAME_THRESHOLD: usize = 256;
+
     #[test]
     fn engine_core_request_serializes_as_full_array() {
         let request = EngineCoreRequest {
@@ -196,9 +195,9 @@ mod tests {
 
     #[test]
     fn engine_core_request_extracts_large_nested_tensors_in_wire_order() {
-        let inline = vec![1_u8; DEFAULT_AUX_FRAME_THRESHOLD - 1];
-        let first_aux = vec![2_u8; DEFAULT_AUX_FRAME_THRESHOLD];
-        let second_aux = vec![3_u8; DEFAULT_AUX_FRAME_THRESHOLD + 1];
+        let inline = vec![1_u8; AUX_FRAME_THRESHOLD - 1];
+        let first_aux = vec![2_u8; AUX_FRAME_THRESHOLD];
+        let second_aux = vec![3_u8; AUX_FRAME_THRESHOLD + 1];
         let first_aux_ptr = first_aux.as_ptr();
         let second_aux_ptr = second_aux.as_ptr();
         let mut request = EngineCoreRequest {
@@ -246,7 +245,7 @@ mod tests {
             ..EngineCoreRequest::default()
         };
 
-        let aux_frames = request.extract_aux_frames(DEFAULT_AUX_FRAME_THRESHOLD);
+        let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
 
         assert_eq!(aux_frames.len(), 2);
         assert_eq!(aux_frames[0].as_ptr(), first_aux_ptr);
@@ -271,6 +270,6 @@ mod tests {
             feature.mm_position.is_embed.as_ref().unwrap().data,
             WireArrayData::AuxIndex(2)
         );
-        assert!(request.extract_aux_frames(DEFAULT_AUX_FRAME_THRESHOLD).is_empty());
+        assert!(request.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
     }
 }

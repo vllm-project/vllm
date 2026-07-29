@@ -22,19 +22,30 @@ use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_outpu
 use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
-use crate::protocol::request::{
-    DEFAULT_AUX_FRAME_THRESHOLD, EngineCoreRequest, EngineCoreRequestType,
-};
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
+
+const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
+const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
+
+fn msgpack_zero_copy_threshold() -> usize {
+    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
+}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    /// Per-tensor byte threshold loaded from env variable
+    /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
+    msgpack_zero_copy_threshold: usize,
     scheduler_stats_recorder: SchedulerStatsRecorder,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -57,6 +68,7 @@ impl ClientInner {
             input_send,
             handle,
             model_name,
+            msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             scheduler_stats_recorder,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
@@ -242,7 +254,7 @@ impl ClientInner {
         engine_id: &EngineId,
         mut payload: EngineCoreRequest,
     ) -> Result<()> {
-        let aux_frames = payload.extract_aux_frames(DEFAULT_AUX_FRAME_THRESHOLD);
+        let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
         let payload = Bytes::from(encode_msgpack(&payload)?);
         self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
             .await
