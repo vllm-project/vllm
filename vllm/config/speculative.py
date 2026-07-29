@@ -80,7 +80,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
@@ -520,7 +520,8 @@ class SpeculativeConfig:
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
-    block instead of one at a time."""
+    block instead of one at a time. 'fly' applies FLy's lossy, entropy-gated
+    deferred window to the native per-token acceptance decisions."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -596,6 +597,12 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    fly_window_size: int = Field(default=6, ge=1)
+    """Number of subsequent native acceptance decisions checked by FLy."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0)
+    """Target top-3 entropy lower bound for FLy loose acceptance."""
 
     def compute_hash(self) -> str:
         """
@@ -1773,6 +1780,23 @@ class SpeculativeConfig:
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
             )
+
+        if self.rejection_sample_method == "fly":
+            if not (self.uses_draft_model() or self.use_eagle()):
+                raise ValueError(
+                    "FLy requires a trained drafter proposing a linear token "
+                    "sequence: method='draft_model' or one of "
+                    "'eagle', 'eagle3', 'mtp', 'dflash', 'dspark'."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy requires fly_window_size to be smaller than "
+                    "num_speculative_tokens."
+                )
+            if self.use_heterogeneous_vocab:
+                raise ValueError(
+                    "FLy currently requires a shared target/draft vocabulary."
+                )
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()

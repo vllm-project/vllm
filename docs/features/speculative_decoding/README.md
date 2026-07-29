@@ -87,9 +87,12 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
-| `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, or `block`. |
+| `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
+| `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
+| `fly_window_size` | `integer >= 1` | `6` | Number of subsequent native acceptance decisions checked by FLy. Must be smaller than `num_speculative_tokens`. |
+| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-3 entropy required for FLy to retain a native rejection. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
 
 !!! note
@@ -188,6 +191,10 @@ vllm serve <target-model> \
 - `use_heterogeneous_vocab` currently supports greedy draft sampling only. Probabilistic acceptance (temperature > 0 draft sampling) is not yet supported and will be added in a future release.
 
 ## Lossless guarantees of Speculative Decoding
+
+!!! warning
+    These guarantees apply to the standard rejection sampler. FLy deliberately
+    relaxes verification and is not distribution preserving.
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
 speculative decoding, breaking down the guarantees into three key areas:
