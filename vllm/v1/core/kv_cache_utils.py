@@ -1212,8 +1212,8 @@ def _get_kv_cache_groups_uniform_page_size(
     # Attempt to further merge same-type layers based on whether their KV
     # cache specs can be merged, to minimize the group count. This benefits
     # situations where specs share a block layout and differ only in a
-    # property it can reconcile (e.g. MLA layers differing only in
-    # non_causal_multi_token_decode).
+    # property it can reconcile (e.g. full attention layers differing only in
+    # sliding window / attention chunk size).
     layer_buckets: list[list[str]] = []
     spec_buckets: list[list[KVCacheSpec]] = []
     for layer_spec, layer_names in same_type_layers.items():
