@@ -332,6 +332,8 @@ def test_gptq_marlin_padded_round_trip(shape, group_size):
         size_k=padded_k,
         size_n=padded_n,
         num_bits=quant_type.size_bits,
+        is_a_8bit=False,
+        is_w4a8_int8=False,
     )
     s = marlin_pad_scales(s, size_n, size_k, padded_n, padded_k, group_size)
     marlin_s = marlin_permute_scales(
@@ -484,6 +486,8 @@ def test_awq_zp_marlin_padded_round_trip(shape):
         size_k=padded_k,
         size_n=padded_n,
         num_bits=quant_type.size_bits,
+        is_a_8bit=False,
+        is_w4a8_int8=False,
     )
     s = marlin_pad_scales(s, size_n, size_k, padded_n, padded_k, group_size)
     marlin_s = marlin_permute_scales(

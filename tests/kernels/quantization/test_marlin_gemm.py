@@ -245,24 +245,84 @@ def test_gptq_marlin_repack(
     if act_order:
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
+    is_w4a8_int8 = is_a_8bit and quant_type == scalar_types.uint4b8
+    use_ldmatrix_s4 = is_w4a8_int8 and ops.marlin_uses_ldmatrix_s4(q_w_gptq)
+
     # Pack to Marlin format
-    weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
+    weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit, use_ldmatrix_s4)
     marlin_q_w_1 = marlin_weights(
-        q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit
+        q_w,
+        size_k,
+        size_n,
+        quant_type.size_bits,
+        weight_perm,
+        is_a_8bit,
+        use_ldmatrix_s4,
     )
 
     opcheck(
         torch.ops._C.gptq_marlin_repack,
-        (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit),
+        (
+            q_w_gptq,
+            sort_indices,
+            size_k,
+            size_n,
+            quant_type.size_bits,
+            is_a_8bit,
+            is_w4a8_int8,
+        ),
     )
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
-        q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit
+        q_w_gptq,
+        sort_indices,
+        size_k,
+        size_n,
+        quant_type.size_bits,
+        is_a_8bit,
+        is_w4a8_int8,
     )
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
+    size_k, size_n = 128, 64
+    q_w = torch.arange(size_k * size_n, dtype=torch.int32, device="cuda").reshape(
+        size_k, size_n
+    )
+    q_w %= 16
+    q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+    perm = torch.empty(0, dtype=torch.int32, device="cuda")
+
+    use_ldmatrix_s4 = ops.marlin_uses_ldmatrix_s4(q_w_gptq)
+    weight_perm = get_weight_perm(4, True, use_ldmatrix_s4)
+    expected = marlin_weights(
+        q_w,
+        size_k,
+        size_n,
+        4,
+        weight_perm,
+        is_a_8bit=True,
+        use_ldmatrix_s4=use_ldmatrix_s4,
+    )
+    actual = ops.gptq_marlin_repack(
+        q_w_gptq,
+        perm,
+        size_k,
+        size_n,
+        4,
+        is_a_8bit=True,
+        is_w4a8_int8=True,
+    )
+
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(

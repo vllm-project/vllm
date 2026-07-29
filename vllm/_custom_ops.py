@@ -1086,11 +1086,22 @@ def gptq_marlin_repack(
     size_k: int,
     size_n: int,
     num_bits: int,
-    is_a_8bit: bool = False,
+    is_a_8bit: bool,
+    is_w4a8_int8: bool,
 ) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_repack(
-        b_q_weight, perm, size_k, size_n, num_bits, is_a_8bit
+        b_q_weight,
+        perm,
+        size_k,
+        size_n,
+        num_bits,
+        is_a_8bit,
+        is_w4a8_int8,
     )
+
+
+def marlin_uses_ldmatrix_s4(tensor: torch.Tensor) -> bool:
+    return torch.ops._C.marlin_uses_ldmatrix_s4(tensor)
 
 
 if hasattr(torch.ops._C, "gptq_marlin_repack"):
@@ -1102,7 +1113,8 @@ if hasattr(torch.ops._C, "gptq_marlin_repack"):
         size_k: torch.SymInt,
         size_n: torch.SymInt,
         num_bits: int,
-        is_a_8bit: bool = False,
+        is_a_8bit: bool,
+        is_w4a8_int8: bool,
     ) -> torch.Tensor:
         pack_factor = 32 // num_bits
         marlin_tile_size = 16
@@ -1162,7 +1174,7 @@ def gptq_marlin_moe_repack(
     )
     for e in range(num_experts):
         output[e] = torch.ops._C.gptq_marlin_repack(
-            b_q_weight[e], perm[e], size_k, size_n, num_bits, is_a_8bit
+            b_q_weight[e], perm[e], size_k, size_n, num_bits, is_a_8bit, False
         )
     return output
 
