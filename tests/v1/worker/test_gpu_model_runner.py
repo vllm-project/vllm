@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -1377,6 +1378,22 @@ def test_hybrid_block_table_initialization():
     assert np.array_equal(
         block_table.block_table.np[req_index, : len(expected_kernel_blocks)],
         expected_kernel_blocks,
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_num_blocks", "block_size", "kernel_block_size", "expected_width"),
+    [(1875, 64, 64, 1876), (235, 256, 64, 940)],
+)
+def test_get_block_table_width(
+    max_num_blocks: int,
+    block_size: int,
+    kernel_block_size: int,
+    expected_width: int,
+):
+    assert (
+        get_block_table_width(max_num_blocks, block_size, kernel_block_size)
+        == expected_width
     )
 
 
