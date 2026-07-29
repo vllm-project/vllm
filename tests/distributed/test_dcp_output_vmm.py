@@ -143,6 +143,16 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         cpu_group,
         device,
     )
+    ring_workspaces = [
+        create_dcp_output_vmm_workspace_for_group(
+            max_rows,
+            total_heads,
+            head_dim,
+            cpu_group,
+            device,
+        )
+        for _ in range(2)
+    ]
     assert workspace.payload_bytes_per_rank == 10_526_720
     assert workspace.peer_partial_outputs.shape == (
         world_size,
@@ -261,8 +271,66 @@ def _worker(rank: int, world_size: int, port: int) -> None:
                 expected_output,
                 expected_lse,
             )
+
+        # Consecutive normal layers alternate two slots. The publication
+        # barrier for the intervening slot proves every rank finished reading
+        # the previous slot, so this mode needs no explicit reuse wait or ack.
+        ring_inputs = [
+            _make_inputs(
+                rank,
+                rows,
+                total_heads,
+                head_dim,
+                200 + slot,
+                device,
+            )
+            for slot in range(2)
+        ]
+        dist.barrier()
+        ring_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(ring_graph):
+            ring_results = [
+                ring_workspaces[slot].merge(
+                    output,
+                    lse,
+                    is_lse_base_on_e=False,
+                    return_lse=True,
+                    barrier_protected_reuse=True,
+                )
+                for slot, (output, lse) in enumerate(ring_inputs)
+            ]
+
+        for replay in range(3):
+            if replay:
+                for output, lse in ring_inputs:
+                    output.add_(0.125 * replay)
+                    lse.sub_(0.25 * replay)
+            ring_expected = [
+                _reference_merge(
+                    output,
+                    lse,
+                    rank,
+                    world_size,
+                    is_lse_base_on_e=False,
+                )
+                for output, lse in ring_inputs
+            ]
+            dist.barrier()
+            ring_graph.replay()
+            torch.accelerator.synchronize()
+            for (actual_output, actual_lse), (expected_output, expected_lse) in zip(
+                ring_results, ring_expected
+            ):
+                _assert_matches(
+                    actual_output,
+                    actual_lse,
+                    expected_output,
+                    expected_lse,
+                )
     finally:
         workspace.close()
+        for ring_workspace in ring_workspaces:
+            ring_workspace.close()
         dist.destroy_process_group(cpu_group)
         dist.destroy_process_group()
 

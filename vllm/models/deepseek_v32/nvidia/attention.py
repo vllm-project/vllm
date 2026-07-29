@@ -231,6 +231,13 @@ class DeepseekV32Attention(MLAAttention):
         # MTP/nextn layers always build a full indexer (they toggle at runtime).
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
+        dcp_output_vmm_workspace_slot = layer_id % 2
+        dcp_output_vmm_barrier_protected_reuse = (
+            num_hidden_layers is not None
+            and num_hidden_layers >= 2
+            and num_hidden_layers % 2 == 0
+            and not is_mtp_layer
+        )
 
         # Build kv_b_proj + indexer first; they are passed to MLAAttention.__init__
         # (which runs nn.Module.__init__ and registers them).
@@ -277,6 +284,10 @@ class DeepseekV32Attention(MLAAttention):
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self._dcp_output_vmm_workspace_slot = dcp_output_vmm_workspace_slot
+        self._dcp_output_vmm_barrier_protected_reuse = (
+            dcp_output_vmm_barrier_protected_reuse
+        )
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -380,15 +391,16 @@ class DeepseekV32Attention(MLAAttention):
                     get_dcp_output_vmm_workspace,
                 )
 
-                # Initialize collectively during model construction, before
-                # memory profiling or CUDA-graph warmup. All layers reuse this
-                # fail-closed singleton.
+                # Consecutive normal layers alternate two fail-closed slots.
+                # The publish barrier on the intervening layer proves all
+                # ranks finished reading a slot before it is reused.
                 get_dcp_output_vmm_workspace(
                     DEFAULT_MAX_ROWS,
                     num_local_heads * dcp_group.world_size,
                     kv_lora_rank,
                     dcp_group.cpu_group,
                     dcp_group.device,
+                    self._dcp_output_vmm_workspace_slot,
                 )
                 self._dcp_output_vmm_max_rows = DEFAULT_MAX_ROWS
 
@@ -715,6 +727,10 @@ class DeepseekV32Attention(MLAAttention):
                             lse,
                             dcp_group,
                             is_lse_base_on_e=self.impl.lse_base_on_e,
+                            workspace_slot=self._dcp_output_vmm_workspace_slot,
+                            barrier_protected_reuse=(
+                                self._dcp_output_vmm_barrier_protected_reuse
+                            ),
                         )
                 else:
                     route = (

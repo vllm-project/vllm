@@ -275,6 +275,7 @@ class DcpOutputVmmWorkspace:
         *,
         is_lse_base_on_e: bool,
         return_lse: bool = False,
+        barrier_protected_reuse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.allocation.closed:
             raise RuntimeError("DCP output VMM workspace is closed.")
@@ -325,15 +326,16 @@ class DcpOutputVmmWorkspace:
                 rows,
             )
 
-        with record_function("dcp.output_lse.vmm.wait_reuse"):
-            _wait_writable_kernel[(1,)](
-                self.peer_flags,
-                self.peer_flags.stride(0),
-                my_rank=self.my_rank,
-                world_size=self.world_size,
-                block_size=triton.next_power_of_2(self.world_size),
-                max_spins=_MAX_FENCE_SPINS,
-            )
+        if not barrier_protected_reuse:
+            with record_function("dcp.output_lse.vmm.wait_reuse"):
+                _wait_writable_kernel[(1,)](
+                    self.peer_flags,
+                    self.peer_flags.stride(0),
+                    my_rank=self.my_rank,
+                    world_size=self.world_size,
+                    block_size=triton.next_power_of_2(self.world_size),
+                    max_spins=_MAX_FENCE_SPINS,
+                )
         with record_function("dcp.output_lse.vmm.publish_owner_and_acquire_peers"):
             self.local_partial_output[:rows].copy_(partial_output)
             self.local_partial_lse[:rows].copy_(partial_lse)
@@ -378,12 +380,13 @@ class DcpOutputVmmWorkspace:
                 is_base_e=is_lse_base_on_e,
                 block_dim=block_dim,
             )
-        with record_function("dcp.output_lse.vmm.ack"):
-            _ack_kernel[(1,)](
-                self.peer_flags,
-                self.peer_flags.stride(0),
-                my_rank=self.my_rank,
-            )
+        if not barrier_protected_reuse:
+            with record_function("dcp.output_lse.vmm.ack"):
+                _ack_kernel[(1,)](
+                    self.peer_flags,
+                    self.peer_flags.stride(0),
+                    my_rank=self.my_rank,
+                )
         if return_lse:
             return output, lse
         return output
@@ -509,7 +512,7 @@ def create_dcp_output_vmm_workspace_for_group(
     )
 
 
-_workspace: DcpOutputVmmWorkspace | None = None
+_workspaces: dict[int, DcpOutputVmmWorkspace] = {}
 _workspace_failed = False
 
 
@@ -519,18 +522,22 @@ def get_dcp_output_vmm_workspace(
     head_dim: int,
     group: ProcessGroup,
     device: torch.device,
+    workspace_slot: int = 0,
 ) -> DcpOutputVmmWorkspace:
-    """Create or fetch the singleton workspace, refusing all fallback."""
-    global _workspace, _workspace_failed
+    """Create or fetch one workspace slot, refusing all fallback."""
+    global _workspace_failed
     world_size = group.size()
+    if workspace_slot < 0:
+        raise ValueError("DCP output VMM workspace slot must be nonnegative.")
     if _workspace_failed:
         raise RuntimeError("DCP output VMM workspace is unavailable.")
-    if _workspace is not None:
+    workspace = _workspaces.get(workspace_slot)
+    if workspace is not None:
         actual = (
-            _workspace.max_rows,
-            _workspace.total_heads,
-            _workspace.head_dim,
-            _workspace.world_size,
+            workspace.max_rows,
+            workspace.total_heads,
+            workspace.head_dim,
+            workspace.world_size,
         )
         requested = (max_rows, total_heads, head_dim, world_size)
         requested_device = torch.device(device)
@@ -540,28 +547,30 @@ def get_dcp_output_vmm_workspace(
             )
         if (
             actual != requested
-            or _workspace.group is not group
-            or _workspace.my_rank != group.rank()
-            or _workspace.device != requested_device
+            or workspace.group is not group
+            or workspace.my_rank != group.rank()
+            or workspace.device != requested_device
         ):
             raise RuntimeError(
                 "DCP output VMM workspace identity changed after initialization: "
+                f"workspace_slot={workspace_slot}, "
                 f"workspace_geometry={actual}, request_geometry={requested}, "
-                f"workspace_rank={_workspace.my_rank}, request_rank={group.rank()}, "
-                f"workspace_device={_workspace.device}, "
+                f"workspace_rank={workspace.my_rank}, request_rank={group.rank()}, "
+                f"workspace_device={workspace.device}, "
                 f"request_device={requested_device}, "
-                f"same_group={_workspace.group is group}."
+                f"same_group={workspace.group is group}."
             )
-        return _workspace
+        return workspace
 
     try:
-        _workspace = create_dcp_output_vmm_workspace_for_group(
+        workspace = create_dcp_output_vmm_workspace_for_group(
             max_rows,
             total_heads,
             head_dim,
             group,
             device,
         )
+        _workspaces[workspace_slot] = workspace
     except Exception as exc:
         _workspace_failed = True
         raise RuntimeError(
@@ -570,20 +579,21 @@ def get_dcp_output_vmm_workspace(
         ) from exc
     logger.info_once(
         "Using owner-local CUDA VMM DCP output/LSE compute-gather "
-        "(max_rows=%d, total_heads=%d, head_dim=%d, "
+        "(workspace_slot=%d, max_rows=%d, total_heads=%d, head_dim=%d, "
         "physical_bytes_per_rank=%d).",
-        _workspace.max_rows,
-        _workspace.total_heads,
-        _workspace.head_dim,
-        _workspace.physical_bytes_per_rank,
+        workspace_slot,
+        workspace.max_rows,
+        workspace.total_heads,
+        workspace.head_dim,
+        workspace.physical_bytes_per_rank,
     )
-    return _workspace
+    return workspace
 
 
 def close_dcp_output_vmm_workspace() -> None:
-    """Collectively close and reset the singleton workspace."""
-    global _workspace, _workspace_failed
-    if _workspace is not None:
-        _workspace.close()
-    _workspace = None
+    """Collectively close and reset all workspace slots."""
+    global _workspace_failed
+    for workspace in _workspaces.values():
+        workspace.close()
+    _workspaces.clear()
     _workspace_failed = False
