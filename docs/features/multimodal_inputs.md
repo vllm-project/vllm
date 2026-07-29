@@ -846,11 +846,13 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 vLLM decodes video bytes into frames using a selectable decoding backend. Five
 backends are supported:
 
-- `opencv` (default): OpenCV-based decoder.
-- `pyav`: PyAV decoder.
-- `torchcodec`: TorchCodec (PyTorch-native) decoder.
-- `pynvvideocodec`: NVIDIA PyNvVideoCodec GPU decoder.
-- `deepstream`: NVIDIA DeepStream GPU decoder.
+| Backend | Device | Description |
+| --- | --- | --- |
+| `opencv` (default) | CPU | OpenCV-based decoder |
+| `pyav` | CPU | PyAV decoder |
+| `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
+| `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
+| `deepstream` | GPU | NVIDIA DeepStream decoder |
 
 The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
 choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
