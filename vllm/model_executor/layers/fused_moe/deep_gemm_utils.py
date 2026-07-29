@@ -505,7 +505,13 @@ def deepgemm_moe_permute(
             dtype=torch.int32,
         )
     else:
-        aq_scale_out = torch.empty((M_sum, sf_k), device=device, dtype=torch.float32)
+        # ep_scatter only writes rows that receive a token, so the per-expert
+        # alignment padding keeps whatever the allocation started with.
+        # DeepGEMM converts FP32 scale factors to UE8M0 by keeping only the
+        # exponent bits and asserts that the sign and mantissa are zero, and
+        # it runs that conversion over the whole padded MN range. Zero is a
+        # valid UE8M0 code, so zero-fill rather than leave padding undefined.
+        aq_scale_out = torch.zeros((M_sum, sf_k), device=device, dtype=torch.float32)
 
     # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
     # completely invalid / padded blocks that should be skipped. We always

@@ -234,7 +234,9 @@ def _deepgemm_fp8_gemm_nt_warmup(
 
     device = w.device
     a1q = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
-    a1q_scales = torch.empty(
+    # Dummy scales must be exact powers of two: DeepGEMM's UE8M0 conversion
+    # keeps only the exponent bits and asserts the sign and mantissa are zero.
+    a1q_scales = torch.ones(
         (max_tokens, k // block_m), device=device, dtype=torch.float32
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
@@ -336,7 +338,10 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
         _, n, k = w.size()
         a1q = torch.empty((MAX_M, k), device=device, dtype=torch.float8_e4m3fn)
-        a1q_scales = torch.empty(
+        # Dummy scales must be exact powers of two: DeepGEMM's UE8M0
+        # conversion keeps only the exponent bits and asserts the sign and
+        # mantissa are zero.
+        a1q_scales = torch.ones(
             (MAX_M, k // block_m), device=device, dtype=torch.float32
         )
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
