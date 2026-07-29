@@ -13,3 +13,9 @@ class Llama3JsonToolParser(LlamaJsonParserToolAdapter):  # type: ignore[valid-ty
     """
 
     structural_tag_model = "llama"
+    # Engine-based streaming feeds one delta at a time, while the generic
+    # required/named helpers need the cumulative document -- so route those
+    # tool choices through this parser instead, as the other engine-based
+    # parsers do.  Guided decoding is unaffected: the tool schema is applied
+    # from the request's tool_choice, independent of this flag.
+    supports_required_and_named = False
