@@ -163,7 +163,13 @@ class BlockTables:
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
-        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+        #
+        # Zero the rows so dummy runs write mamba state to the reserved null
+        # block rather than through the previous real step's (stale) block
+        # ids, which may point at blocks since freed and reallocated.
+        return tuple(
+            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
+        )
 
     def compute_slot_mappings(
         self,
