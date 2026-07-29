@@ -5,12 +5,6 @@
 import os
 
 import torch
-from zllm.vllm.models.glm5next.nvidia.ops.kpool_compress import (
-    append_tail_to_topk,
-    expand_pools_to_tokens,
-    kpool_compress_and_write_cache,
-    kpool_decode_update_and_maybe_write_cache,
-)
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -19,6 +13,12 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+    append_tail_to_topk,
+    expand_pools_to_tokens,
+    kpool_compress_and_write_cache,
+    kpool_decode_update_and_maybe_write_cache,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
