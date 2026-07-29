@@ -304,9 +304,13 @@ class MambaHybridModelState(DefaultModelState):
                 )
         else:
             # Fill with single value.
-            self.num_accepted_tokens_gpu.index_fill_(
-                0, idx_mapping, max(num_sampled, 1)
-            )
+            n = idx_mapping.shape[0]
+            if n:
+                _fill_num_accepted_kernel[(n,)](
+                    idx_mapping,
+                    self.num_accepted_tokens_gpu,
+                    max(num_sampled, 1),
+                )
 
         # Align: save the running state to the block-aligned position when
         # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
@@ -340,3 +344,16 @@ def _scatter_num_accepted_kernel(
         return
     num_sampled = tl.load(num_sampled_ptr + row)
     tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))
+
+
+@triton.jit
+def _fill_num_accepted_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_accepted_ptr,  # [max_num_reqs]
+    num_sampled,
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    tl.store(num_accepted_ptr + req_state_idx, num_sampled)
