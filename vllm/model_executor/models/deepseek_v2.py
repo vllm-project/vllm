@@ -1178,6 +1178,9 @@ class DeepseekV2MLAAttention(nn.Module):
             # the V1 proposer. A frozen True would leave the draft reading a
             # never-written topk buffer.
             skip_topk=_skip_topk and not is_mtp_layer,
+            # Do not skip scoring for MTP layers: their top-k buffer may be
+            # reused by later draft iterations through index sharing.
+            allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
 
     def forward(
@@ -1478,8 +1481,6 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
-                # fused_add_rms_norm requires a contiguous residual
-                residual = residual.contiguous()
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
@@ -1504,8 +1505,6 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
-            # fused_add_rms_norm requires a contiguous residual
-            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)
