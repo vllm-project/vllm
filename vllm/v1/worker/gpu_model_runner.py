@@ -3683,7 +3683,7 @@ class GPUModelRunner(
     ]:
         num_nans: torch.Tensor | None = None
         num_nans_in_logits: dict[str, int] = {}
-        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+        if self.observability_config.enable_detect_nans_in_logits:
             if self.use_async_scheduling:
                 # Keep the counts on device; they ride the async output copy
                 # stream rather than blocking here.

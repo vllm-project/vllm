@@ -2012,6 +2012,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        nan_abort_req_ids: set[str] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2191,6 +2192,18 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+                if (
+                    self.observability_config.enable_nan_fault_tolerance
+                    and request.num_nans_in_logits > 0
+                    and request.status == RequestStatus.RUNNING
+                ):
+                    logger.warning(
+                        "Request %s aborted: %d NaN values in logits",
+                        req_id,
+                        request.num_nans_in_logits,
+                    )
+                    nan_abort_req_ids.add(req_id)
+                    continue
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
@@ -2242,6 +2255,7 @@ class Scheduler(SchedulerInterface):
             # An encoder input the connector can no longer obtain. Failing is
             # retryable: re-issuing the request re-runs the encode.
             error_req_ids.update(self.ec_connector.take_unavailable_requests())
+        error_req_ids.update(nan_abort_req_ids)
 
         if error_req_ids:
             error_reqs = self.finish_requests(
