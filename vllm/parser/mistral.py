@@ -912,9 +912,9 @@ class MistralParser(ParserEngine):
         return super().extract_reasoning(model_output, request)
 
     def _accept_tool_name(self, name: str) -> bool:
-        # Once TOOL_ARGS is reached the slot name is final, empty included.
-        # Emitting the call with "" surfaces the malformed generation instead
-        # of dropping it.
+        # Once `[ARGS]` or the opening `{` has moved the slot past its name,
+        # that name is final, empty included. Emitting the call with ""
+        # surfaces the malformed generation instead of dropping it.
         return self._is_valid_tool_name(name)
 
     def _try_extract_name(self, idx: int) -> str | None:

@@ -181,7 +181,10 @@ def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     }
     ids: list[int] = []
     for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\])", text):
-        if part in marker_ids and marker_ids[part] is not None:
+        if part in marker_ids:
+            # Fall back to text encoding here and the id-based engine path
+            # silently stops being exercised while the tests still pass.
+            assert marker_ids[part] is not None, f"{part} missing from vocab"
             ids.append(marker_ids[part])
         elif part:
             ids.extend(tokenizer.encode(part, add_special_tokens=False))
@@ -762,9 +765,9 @@ def test_extract_tool_calls_empty_name_unparsable_args_no_crash(
 def test_extract_tool_calls_streaming_malformed_name_before_marker(
     mistral_tool_parser,
 ):
-    # Streaming counterpart: by the time TOOL_ARGS starts, the state machine
-    # can never return to TOOL_NAME, so the (empty) name is already final and
-    # streams immediately alongside the args.
+    # Streaming counterpart: once the args start the slot can never go back to
+    # naming, so the (empty) name is already final and streams immediately
+    # alongside the args.
     model_output = 'bash[TOOL_CALLS]{"command": "cat file.py"}'
     mid_delta = mistral_tool_parser.extract_tool_calls_streaming(
         previous_text="",
@@ -2491,7 +2494,7 @@ def _stream_via_parse_delta(
 
 _MALFORMED_MATRIX_CASES = [
     pytest.param(
-        # well-formed single call: name intact via the `[ARGS]` separator.
+        # 2x2 corner: name present, `[ARGS]` token present.
         '[TOOL_CALLS]bash[ARGS]{"command": "ls -la"}',
         ["bash"],
         [json.dumps({"command": "ls -la"})],
@@ -2499,13 +2502,30 @@ _MALFORMED_MATRIX_CASES = [
         id="wellformed_single",
     ),
     pytest.param(
-        # malformed single call: "bash" lands in content before the marker,
-        # then generation jumps straight to args (no NAME slot, no [ARGS]).
+        # 2x2 corner: name present, no `[ARGS]` token.
+        '[TOOL_CALLS]bash{"command": "ls -la"}',
+        ["bash"],
+        [json.dumps({"command": "ls -la"})],
+        None,
+        id="wellformed_single_no_args_token",
+    ),
+    pytest.param(
+        # 2x2 corner: name skipped, no `[ARGS]` token. "bash" lands in
+        # content before the marker, then generation jumps straight to
+        # args (no NAME slot, no [ARGS]).
         'bash[TOOL_CALLS]{"command": "cat file.py"}',
         [""],
         [json.dumps({"command": "cat file.py"})],
         "bash",
         id="malformed_single",
+    ),
+    pytest.param(
+        # 2x2 corner: name skipped, `[ARGS]` token present.
+        'bash[TOOL_CALLS][ARGS]{"command": "cat file.py"}',
+        [""],
+        [json.dumps({"command": "cat file.py"})],
+        "bash",
+        id="malformed_single_args_token",
     ),
     pytest.param(
         # parallel well-formed x2; the second call's nested braces in its
@@ -2528,6 +2548,16 @@ _MALFORMED_MATRIX_CASES = [
         id="parallel_malformed",
     ),
     pytest.param(
+        # parallel malformed x2, `[ARGS]` token variant: both calls skip
+        # the NAME slot but enter TOOL_ARGS via `[ARGS]` instead of `{`.
+        'bash[TOOL_CALLS][ARGS]{"command": "ls"}'
+        '[TOOL_CALLS][ARGS]{"answer": {"nested": 1}}',
+        ["", ""],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        "bash",
+        id="parallel_malformed_args_token",
+    ),
+    pytest.param(
         # mixed: malformed first call, well-formed second call. The
         # important case: proves calls are split on the `[TOOL_CALLS]`
         # marker, not on braces — the first call's simple args and the
@@ -2538,6 +2568,16 @@ _MALFORMED_MATRIX_CASES = [
         [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
         "bash",
         id="mixed_malformed_then_wellformed",
+    ),
+    pytest.param(
+        # mixed, `[ARGS]` token variant: malformed first call enters
+        # TOOL_ARGS via `[ARGS]` instead of `{`, second call well-formed.
+        'bash[TOOL_CALLS][ARGS]{"command": "ls"}'
+        '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}',
+        ["", "submit"],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        "bash",
+        id="mixed_malformed_args_token_then_wellformed",
     ),
     pytest.param(
         # mixed: well-formed first call, malformed second call (NAME slot
