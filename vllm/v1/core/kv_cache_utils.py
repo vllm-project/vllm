@@ -1107,6 +1107,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    speculator_layers: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1823,11 +1824,18 @@ def get_kv_cache_groups(
         if not isinstance(v, HiddenStateCacheSpec)
     }
 
+    # Identify speculator layers for KV cache grouping.
+    # Classical draft models are detected by the 'draft_model' name prefix;
+    # EAGLE-style drafters are detected by layer index >= target layer count.
+    speculator_layers = _identify_speculator_layers(
+        vllm_config, list(filtered_spec.keys()))
+
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
     filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(
+        filtered_spec, speculator_layers=speculator_layers)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
