@@ -552,6 +552,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         vendored_processor = MiniCPMVProcessor(
             image_processor=hf_processor.image_processor,
             tokenizer=hf_processor.tokenizer,
+            version=self.get_model_version(),
         )
         hf_processor = vendored_processor
 

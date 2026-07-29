@@ -8,19 +8,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fla.ops.fused_gdn_prefill_post_conv import (
-    fused_post_conv_prep,
-)
-from vllm.model_executor.layers.fla.ops.fused_sigmoid_gating import (
-    fused_sigmoid_gating_delta_rule_update,
-)
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-)
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
-from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.utils import _zero_kv_blocks_kernel
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -37,21 +24,8 @@ _QWEN_MODEL_TYPES = frozenset(
     }
 )
 
-_ZERO_KV_N_BLOCKS = (1, 2)
-
-_SLOT_MAPPING_KV_BLOCK_SIZE = 16
-_SLOT_MAPPING_CP_KV_CACHE_INTERLEAVE_SIZE = 1
-_SLOT_MAPPING_BLOCK_TABLE_STRIDES = (1, 3)
-
 # Covers L=1 constexpr, non-divisible runtime L, and divisible runtime L.
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
-
-
-@dataclass(frozen=True)
-class _ZeroKvWarmupConfig:
-    page_size_el: int
-    block_size: int
-    n_segs: int
 
 
 @dataclass(frozen=True)
@@ -128,6 +102,10 @@ def _qwen_gdn_warmup_config(
             continue
 
         conv_cache, ssm_state = cache_tensors
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            is_conv_state_dim_first,
+        )
+
         conv_state = (
             conv_cache if is_conv_state_dim_first() else conv_cache.transpose(-1, -2)
         )
@@ -156,94 +134,14 @@ def _qwen_gdn_warmup_config(
     return None
 
 
-def _get_kv_block_zeroer(runner: object) -> object | None:
-    zeroer = getattr(runner, "kv_block_zeroer", None)
-    if zeroer is None:
-        zeroer = getattr(runner, "_kv_block_zeroer", None)
-    return zeroer
-
-
-def _zero_kv_warmup_config(runner: object) -> _ZeroKvWarmupConfig | None:
-    zeroer = _get_kv_block_zeroer(runner)
-    meta = getattr(zeroer, "_meta", None)
-    if meta is None:
-        return None
-
-    _, page_size_el, block_size, n_segs = meta
-    return _ZeroKvWarmupConfig(
-        page_size_el=int(page_size_el),
-        block_size=int(block_size),
-        n_segs=int(n_segs),
-    )
-
-
-def _warm_zero_kv_blocks_with_runner_zeroer(runner: object) -> bool:
-    zeroer = _get_kv_block_zeroer(runner)
-    zero_block_ids = getattr(zeroer, "zero_block_ids", None)
-    if not callable(zero_block_ids):
-        return False
-
-    for n_blocks in _ZERO_KV_N_BLOCKS:
-        zero_block_ids(list(range(n_blocks)))
-    return True
-
-
-def _warm_zero_kv_blocks_kernel(
-    device: torch.device, config: _ZeroKvWarmupConfig
-) -> None:
-    max_n_blocks = max(_ZERO_KV_N_BLOCKS)
-    scratch = torch.empty(
-        max_n_blocks * config.page_size_el,
-        dtype=torch.int32,
-        device=device,
-    )
-    seg_addrs = torch.tensor(
-        [scratch.data_ptr()] * config.n_segs,
-        dtype=torch.uint64,
-        device=device,
-    )
-
-    for n_blocks in _ZERO_KV_N_BLOCKS:
-        block_ids = torch.arange(n_blocks, dtype=torch.int64, device=device)
-        grid = (n_blocks * config.n_segs * (config.page_size_el // config.block_size),)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            block_ids,
-            n_blocks,
-            N_SEGS=config.n_segs,
-            PAGE_SIZE_EL=config.page_size_el,
-            BLOCK_SIZE=config.block_size,
-            num_warps=4,
-            num_stages=3,
-        )
-
-
-def _warm_compute_slot_mapping_kernel(device: torch.device) -> None:
-    # num_tokens/max_num_tokens are do_not_specialize; keep the launch tiny.
-    num_tokens = 1
-    query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
-    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
-
-    for block_table_stride in _SLOT_MAPPING_BLOCK_TABLE_STRIDES:
-        # Use BlockTable so the JIT key matches the production slot-mapping call.
-        block_table = BlockTable(
-            block_size=_SLOT_MAPPING_KV_BLOCK_SIZE,
-            max_num_reqs=1,
-            max_num_blocks_per_req=block_table_stride,
-            max_num_batched_tokens=num_tokens,
-            pin_memory=False,
-            device=device,
-            kernel_block_size=_SLOT_MAPPING_KV_BLOCK_SIZE,
-            cp_kv_cache_interleave_size=_SLOT_MAPPING_CP_KV_CACHE_INTERLEAVE_SIZE,
-        )
-        block_table.add_row(list(range(block_table_stride)), 0)
-        block_table.commit_block_table(num_reqs=1)
-        block_table.compute_slot_mapping(1, query_start_loc, positions)
-
-
 def _warm_causal_conv1d_fwd_kernel(
     device: torch.device, config: _QwenGDNWarmupConfig
 ) -> None:
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+        causal_conv1d_fn,
+    )
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+
     x_storage = torch.empty(
         (1, config.conv_dim), dtype=config.conv_dtype, device=device
     )
@@ -276,6 +174,10 @@ def _warm_causal_conv1d_fwd_kernel(
 def _warm_fused_post_conv_kernel(
     device: torch.device, config: _QwenGDNWarmupConfig
 ) -> None:
+    from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (  # noqa: E501
+        fused_post_conv_prep,
+    )
+
     qkv_dim = 2 * config.h * config.k + config.hv * config.v
     for length in _FLA_POST_CONV_WARMUP_LENGTHS:
         conv_output = torch.empty(
@@ -302,6 +204,10 @@ def _warm_fused_sigmoid_gating_delta_rule_update_kernel(
     device: torch.device,
     config: _QwenGDNWarmupConfig,
 ) -> None:
+    from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+        fused_sigmoid_gating_delta_rule_update,
+    )
+
     q = torch.empty((1, 1, config.h, config.k), dtype=config.conv_dtype, device=device)
     k = torch.empty_like(q)
     v = torch.empty((1, 1, config.hv, config.v), dtype=config.conv_dtype, device=device)
@@ -362,17 +268,6 @@ def qwen_triton_warmup(
 
     device = getattr(runner, "device", torch.device("cuda"))
     logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
-
-    zero_config = _zero_kv_warmup_config(runner)
-    if _warm_zero_kv_blocks_with_runner_zeroer(runner):
-        pass
-    elif zero_config is not None:
-        _warm_zero_kv_blocks_kernel(device, zero_config)
-    else:
-        logger.info("Skipping Qwen zero-kv warmup: no KVBlockZeroer metadata.")
-
-    _warm_compute_slot_mapping_kernel(device)
-    _synchronize_device(device)
 
     compilation_config = getattr(runner, "compilation_config", None)
     static_forward_context = getattr(compilation_config, "static_forward_context", None)

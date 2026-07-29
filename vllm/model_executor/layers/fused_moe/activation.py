@@ -22,6 +22,7 @@ class MoEActivation(Enum):
     # expects the *packed* layout ([all gates; all ups]), as produced by a
     # MergedColumnParallelLinear gate_up_proj (e.g. MiniMax-M3).
     SWIGLUOAI = "swigluoai"
+    SITU = "situ"
     SWIGLUOAI_UNINTERLEAVE = "swigluoai_uninterleave"
     SWIGLUSTEP = "swiglustep"
 
@@ -77,6 +78,7 @@ _CUSTOM_OP_NAMES: dict[MoEActivation, str] = {
     MoEActivation.SILU: "silu_and_mul",
     MoEActivation.GELU: "gelu_and_mul",
     MoEActivation.GELU_TANH: "gelu_tanh_and_mul",
+    MoEActivation.SITU: "situ_and_mul",
     MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
     MoEActivation.SWIGLUOAI_UNINTERLEAVE: "silu_and_mul_with_clamp",
     MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
@@ -107,6 +109,22 @@ def activation_without_mul(activation: str) -> str:
     return MoEActivation.from_str(activation).without_mul().value
 
 
+def silu_and_mul_with_clamp(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    clamp_limit: float,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    if topk_ids is not None and expert_map is not None:
+        from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+
+        swiglu_limit_func(output, input, clamp_limit, topk_ids, expert_map)
+    else:
+        # Fused silu(clamp(gate)) * clamp(up); equivalent to swiglu_limit_func.
+        torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
+
+
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
@@ -115,6 +133,10 @@ def apply_moe_activation(
     clamp_limit: float | None = None,
     alpha: float = 1.0,
     beta: float = 0.0,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function.
 
@@ -138,14 +160,32 @@ def apply_moe_activation(
     # Activations with gated multiplication (gate × activation(up))
     if activation == MoEActivation.SILU:
         if clamp_limit is not None:
-            # Fused silu(clamp(gate)) * clamp(up); equivalent to swiglu_limit_func.
-            torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
+            silu_and_mul_with_clamp(output, input, clamp_limit, topk_ids, expert_map)
         else:
             torch.ops._C.silu_and_mul(output, input)
     elif activation == MoEActivation.GELU:
         torch.ops._C.gelu_and_mul(output, input)
     elif activation == MoEActivation.GELU_TANH:
         torch.ops._C.gelu_tanh_and_mul(output, input)
+    elif activation == MoEActivation.SITU:
+        # Fused CUDA kernel: writes straight to `output`, no fp32 temporaries.
+        # (The pure-torch fallback below upcast both halves to fp32 and
+        # allocated ~8 temporaries per call, blowing up MoE memory.)
+        # Both betas come from FusedMoEConfig; a missing beta means the caller
+        # bypassed the config plumbing, so fail rather than silently use 1.0.
+        # linear_beta is genuinely optional: <= 0 signals "unset" to the kernel
+        # (up passed through), matching SituAndMul(linear_beta=None).
+        assert activation_situ_beta is not None, (
+            "SITU requires activation_situ_beta from FusedMoEConfig"
+        )
+        torch.ops._C.situ_and_mul(
+            output,
+            input,
+            activation_situ_beta,
+            -1.0
+            if activation_situ_linear_beta is None
+            else activation_situ_linear_beta,
+        )
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:

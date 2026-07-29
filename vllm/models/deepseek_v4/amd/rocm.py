@@ -272,153 +272,6 @@ def compute_global_topk_ragged_indices_and_indptr(
     return global_topk_ragged, topk_indptr, topk_lens
 
 
-@triton.jit
-def _compute_combined_lens_kernel(
-    combined_lens_ptr,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
-
-
-@triton.jit
-def _combine_topk_swa_indices_ragged_kernel(
-    combined_ragged_ptr,
-    combined_indptr_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    gather_lens_ptr,
-    M,
-    N,
-    topk_width,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    WINDOW_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    block_idx = tl.program_id(2)
-    num_workers = tl.num_programs(1)
-
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    gather_len = tl.load(gather_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len
-    gather_start = seq_len - gather_len
-
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-        combined_len = topk_len + swa_len
-
-        offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        if block_idx * BLOCK_SIZE < combined_len:
-            out_start = tl.load(combined_indptr_ptr + token_idx)
-            topk_mask = (offset < topk_len) & (offset < topk_width)
-            topk_vals = tl.load(
-                topk_indices_ptr + token_idx * topk_indices_stride + offset,
-                mask=topk_mask,
-                other=-1,
-            )
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                topk_vals + M * batch_idx,
-                mask=topk_mask,
-            )
-
-            swa_offset = offset - topk_len
-            swa_mask = (offset >= topk_len) & (swa_offset < swa_len)
-            tl.store(
-                combined_ragged_ptr + out_start + offset,
-                M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-                mask=swa_mask,
-            )
-
-
-def combine_topk_swa_indices_ragged(
-    topk_indices: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    gather_lens: torch.Tensor,
-    window_size: int,
-    compress_ratio: int,
-    topk: int,
-    M: int,
-    N: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
-    num_tokens = topk_indices.shape[0]
-    num_reqs = seq_lens.shape[0]
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
-    )
-
-    num_workers = 128
-    _compute_combined_lens_kernel[(num_reqs, num_workers)](
-        combined_lens,
-        query_start_loc,
-        seq_lens,
-        TOP_K=topk,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=window_size,
-    )
-
-    combined_indptr = _build_indptr_from_lengths(combined_lens)
-    combined_ragged = torch.empty(
-        num_tokens * (topk + window_size),
-        dtype=torch.int32,
-        device=topk_indices.device,
-    )
-    if combined_ragged.numel() > 0:
-        block = 128
-        _combine_topk_swa_indices_ragged_kernel[
-            (num_reqs, num_workers, triton.cdiv(topk + window_size, block))
-        ](
-            combined_ragged,
-            combined_indptr,
-            topk_indices,
-            topk_indices.stride(0),
-            query_start_loc,
-            seq_lens,
-            gather_lens,
-            M,
-            N,
-            topk_indices.shape[-1],
-            TOP_K=topk,
-            COMPRESS_RATIO=compress_ratio,
-            WINDOW_SIZE=window_size,
-            BLOCK_SIZE=block,
-        )
-    return combined_ragged, combined_indptr, combined_lens
-
-
 def _copy_ragged_to_graph_buffers(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
@@ -518,8 +371,12 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # The non-causal (DSpark draft) path widens each token's SWA index list
+        # to ``noncausal_index_width`` (>= window_size), so size the persistent
+        # ragged buffer to the wider bound to cover both causal and non-causal.
+        swa_index_width = max(self.window_size, self.noncausal_index_width)
         self.decode_swa_ragged_indices_buffer = torch.empty(
-            max_tokens * self.window_size,
+            max_tokens * swa_index_width,
             dtype=torch.int32,
             device=self.device,
         )
@@ -558,7 +415,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                self.window_size,
+                # Actual dense width for this build: window_size (causal) or
+                # noncausal_index_width (DSpark non-causal draft).
+                base.decode_swa_indices.shape[-1],
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
