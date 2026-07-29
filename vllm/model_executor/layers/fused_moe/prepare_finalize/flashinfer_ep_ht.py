@@ -99,7 +99,7 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
             HandleAlgoKnobNumReceivedTokens,
         )
 
-        # GAP 3 opt-in: bind a scalar recv-total counter; populated by the HT metadata
+        # Opt-in: bind a scalar recv-total counter; populated by the HT metadata
         # step at create_handle. Used later for the compute-view trim.
         recv_total = torch.zeros(1, dtype=torch.int32, device=a1.device)
         combine_weights = self._combine_weights(
@@ -158,8 +158,8 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
         # statically sized to max_tokens_per_rank * world (65k+ rows), but a step
         # typically receives a tiny fraction — without the trim every downstream
         # kernel (moe_align, sort, GEMMs, activation, moe_sum) pads to the full
-        # buffer. recv_total was written by the HT metadata step at create_handle
-        # (GAP 3); .item() is a host sync — eager-only, matching this path (the
+        # buffer. recv_total was written by the HT metadata step at create_handle;
+        # .item() is a host sync — eager-only, matching this path (the
         # nccl.ep HT combine below still gets the full static buffer).
         actual = int(recv_total.item())
         m = self._num_recv_full

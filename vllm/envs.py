@@ -307,6 +307,8 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_FLASHINFER_EP_FAULT_TOLERANCE: bool = False
+    VLLM_FLASHINFER_EP_TIMEOUT_MS: int = 0
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -2096,6 +2098,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Enable FlashInfer EP rank masking, so a dead/slow EP peer is skipped
+    # instead of tripping a GPU trap that kills the job. Low-latency
+    # transports only; ignored unless the backend can actually serve it
+    # (see has_flashinfer_moe_ep_fault_tolerance).
+    "VLLM_FLASHINFER_EP_FAULT_TOLERANCE": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_EP_FAULT_TOLERANCE", "0"))
+    ),
+    # GPU wait-loop timeout, in ms, before a peer is considered failed.
+    # 0 keeps the transport default (~100s nccl_ep / 30s nixl_ep). Setting
+    # this too low marks merely-slow ranks dead.
+    "VLLM_FLASHINFER_EP_TIMEOUT_MS": lambda: int(
+        os.getenv("VLLM_FLASHINFER_EP_TIMEOUT_MS", "0")
     ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
