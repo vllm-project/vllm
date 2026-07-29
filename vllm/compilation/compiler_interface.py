@@ -14,6 +14,7 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.side_stream import graph_uses_side_stream
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.env_override import _apply_constrain_to_fx_strides_patch
@@ -290,6 +291,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
+        if graph_uses_side_stream(graph):
+            current_config["triton.autotune_at_compile_time"] = False
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 

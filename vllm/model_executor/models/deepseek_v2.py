@@ -36,6 +36,7 @@ import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.side_stream import register_side_stream
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
@@ -643,6 +644,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
 
 
 class Indexer(nn.Module):
+    # One high-priority stream shared by every indexer layer. Class-level
+    # because the join in MultiHeadLatentAttentionWrapper and the compiled
+    # artifacts must all reference this exact object.
+    side_stream: torch.cuda.Stream | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -716,6 +722,10 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        if current_platform.is_cuda() and Indexer.side_stream is None:
+            _, high_priority = torch.cuda.Stream.priority_range()
+            Indexer.side_stream = torch.cuda.Stream(priority=high_priority)
+            register_side_stream(Indexer.side_stream)
         self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
             current_platform.is_cuda()
@@ -726,6 +736,17 @@ class Indexer(nn.Module):
         )
 
     def forward(
+        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
+    ) -> torch.Tensor:
+        if self.side_stream is None:
+            return self._forward(hidden_states, qr, positions, rotary_emb)
+        # Fork onto the side stream; MultiHeadLatentAttentionWrapper joins it
+        # before attention, so the indexer overlaps the q projection and rope.
+        self.side_stream.wait_stream(torch.accelerator.current_stream())
+        with self.side_stream:
+            return self._forward(hidden_states, qr, positions, rotary_emb)
+
+    def _forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
         q, _ = self.wq_b(qr)
@@ -1150,6 +1171,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_proj=self.q_proj if self.q_lora_rank is None else None,
             indexer=self.indexer,
             indexer_rotary_emb=self.indexer_rope_emb,
+            indexer_side_stream=Indexer.side_stream,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
         )

@@ -27,6 +27,8 @@ class MLAModules:
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    # Stream the indexer forks onto; the wrapper joins it before attention.
+    indexer_side_stream: torch.cuda.Stream | None = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -85,6 +87,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
+        self.indexer_side_stream = mla_modules.indexer_side_stream
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
@@ -161,6 +164,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_proj_layer = self.q_proj
             q_proj_input = hidden_states
 
+        # Issued before the q projection so the indexer's side-stream work
+        # overlaps the main stream's path to attention; joined below.
+        indexer = self.indexer if self.is_sparse and not self.skip_topk else None
+        if indexer is not None:
+            indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
         # Add head dim of 1 to k_pe
@@ -177,9 +186,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
@@ -187,6 +193,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.dcp_q_replicate:
             q_dcp_replicated, q = q, q_proj_layer._local_view(q)
 
+        if indexer is not None and self.indexer_side_stream is not None:
+            torch.accelerator.current_stream().wait_stream(self.indexer_side_stream)
         attn_out = self.mla_attn(
             q,
             kv_c_normed,

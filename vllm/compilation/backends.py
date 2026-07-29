@@ -52,6 +52,7 @@ from .partition_rules import (
 from .passes.inductor_pass import InductorPass, pass_context
 from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
+from .side_stream import graph_uses_side_stream
 
 logger = init_logger(__name__)
 
@@ -636,6 +637,7 @@ def wrap_with_cudagraph_if_needed(
     compilation_config: CompilationConfig,
     is_first_graph: bool,
     is_last_graph: bool,
+    uses_side_stream: bool = False,
 ) -> Any:
     """
     Wrap a piecewise backend with CUDA graph wrapper if needed.
@@ -648,6 +650,7 @@ def wrap_with_cudagraph_if_needed(
         compilation_config: The compilation configuration
         is_first_graph: Whether this is the first graph in the sequence
         is_last_graph: Whether this is the last graph in the sequence
+        uses_side_stream: Whether this graph runs work on the side stream
 
     Returns:
         The wrapped backend if CUDA graphs are enabled, otherwise the original backend
@@ -655,6 +658,7 @@ def wrap_with_cudagraph_if_needed(
     if (
         not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         or compilation_config.use_inductor_graph_partition
+        or uses_side_stream
     ):
         return piecewise_backend
 
@@ -752,6 +756,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
             from .piecewise_backend import PiecewiseBackend
 
+            uses_side_stream = graph_uses_side_stream(submod)
+            self.vllm_backend.uses_side_stream[target] = uses_side_stream
+
             piecewise_backend = PiecewiseBackend(
                 submod,
                 self.vllm_config,
@@ -769,6 +776,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 self.compilation_config,
                 piecewise_backend.is_first_graph,
                 piecewise_backend.is_last_graph,
+                uses_side_stream,
             )
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
@@ -1168,6 +1176,7 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
+        self.uses_side_stream: dict[str, bool] = {}
         self.configure_post_pass()
 
         if self.compilation_config.use_inductor_graph_partition:
