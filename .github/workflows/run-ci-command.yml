@@ -17,6 +17,7 @@ jobs:
   run-ci-command:
     if: >-
       github.event.issue.pull_request &&
+      vars.CI_CONTROL_GATEWAY_MODE != 'active' &&
       (github.event.comment.body == '/ci run' ||
       github.event.comment.body == '/ci retry')
     runs-on: ubuntu-latest

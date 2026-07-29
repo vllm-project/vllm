@@ -86,6 +86,8 @@
 
 # CI & building
 /.buildkite @Harry-Chen @khluu
+/.github/workflows/ci-catalog.yml @Harry-Chen @khluu
+/.github/workflows/run-ci-command.yml @Harry-Chen @khluu
 /docker/Dockerfile @Harry-Chen @khluu
 /pyproject.toml @khluu
 /setup.py @khluu

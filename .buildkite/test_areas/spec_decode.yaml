@@ -163,6 +163,7 @@ steps:
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
 - label: Spec Decode MTP hybrid (B200)
+  key: spec-decode-mtp-hybrid-b200
   timeout_in_minutes: 20
   device: b200-k8s
   optional: true

@@ -3,11 +3,15 @@
 What should I do when a CI job fails on my PR, but I don't think my PR caused
 the failure?
 
+For current-HEAD diagnosis and targeted retries, see the
+[`/ci` control API](ci_control.md).
+
 - Check the dashboard of current CI test failures:  
   👉 [CI Failures Dashboard](https://github.com/orgs/vllm-project/projects/20)
 
-- If your failure **is already listed**, it's likely unrelated to your PR.
-  Help fixing it is always welcome!
+- If your failure **is already listed**, compare its exact fingerprint with
+  `/ci status pr`; a red test group alone does not prove it is the same failure.
+  Help fixing a matching failure is always welcome!
     - Leave comments with links to additional instances of the failure.
     - React with a 👍 to signal how many are affected.
 

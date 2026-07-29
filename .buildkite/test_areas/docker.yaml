@@ -3,6 +3,7 @@ depends_on:
   - image-build-cpu
 steps:
 - label: Docker Build Metadata
+  key: docker-build-metadata
   timeout_in_minutes: 20
   device: cpu-small
   source_file_dependencies:

@@ -1,0 +1,33 @@
+api_version = 1
+
+[catalog]
+groups = ["upstream", "cpu", "amd"]
+# Record reviewed stable-key renames and removals here.
+aliases = {}
+tombstones = []
+# Area names are public selectors too; preserve renames and removals.
+area_aliases = {}
+area_tombstones = []
+# Native AMD is an opaque whole-lane selector until its generated pipeline
+# publishes stable per-job metadata. Do not infer native AMD areas from labels.
+native_amd_selection = "whole_lane"
+
+[authorization]
+minimum_compute_permission = "write"
+minimum_refresh_permission = "write"
+minimum_credit_grant_permission = "maintain"
+committer_teams = ["vllm-committers"]
+credit_admin_teams = []
+
+[credits]
+initial_grant = 300
+reset = "none"
+
+[retry]
+failures_limit = "inf"
+include_states = ["failed", "timed_out", "expired"]
+
+[main_status]
+confirmation_distinct_shas = 2
+resolution_clean_distinct_shas = 3
+evidence_max_age_hours = 72

@@ -1,0 +1,41 @@
+name: CI catalog
+
+on:
+  pull_request:
+    paths:
+      - ".buildkite/**"
+      - ".github/workflows/ci-catalog.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".buildkite/**"
+      - ".github/workflows/ci-catalog.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out proposed catalog
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Check out base catalog
+        if: >-
+          github.event_name == 'pull_request' ||
+          github.event.before != '0000000000000000000000000000000000000000'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: .ci-control-baseline
+          persist-credentials: false
+      - name: Validate policy, jobs, and selector compatibility
+        uses: vllm-project/ci-infra/.github/actions/ci-control-validate@11bc2c60ebd2f99f52c8a764655380b844e26c27
+        with:
+          repository-root: .
+          baseline-repository-root: .ci-control-baseline
