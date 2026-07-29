@@ -67,8 +67,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Granite20bFCToolParser",
     ),
     "granite": (
-        "granite_tool_parser",
-        "GraniteToolParser",
+        "granite_engine_tool_parser",
+        "GraniteEngineToolParser",
     ),
     "granite4": (
         "granite4_tool_parser",
