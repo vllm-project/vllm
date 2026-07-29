@@ -155,7 +155,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
-                    local_block_ids = self.get_sw_clipped_blocks(
+                    local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
 
@@ -262,7 +262,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
-            block_ids = self.get_sw_clipped_blocks(block_ids)
+            block_ids = self.get_exchange_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
 
