@@ -40,7 +40,7 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
 
-GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MB
+GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 
 def _is_masked_mha_available(
@@ -313,32 +313,39 @@ def _scatter_topk_kernel(
     topk_ptr,
     cu_q_lens_ptr,
     num_words: tl.constexpr,
+    mask_row_stride: tl.constexpr,
     num_topk: tl.constexpr,
     topk_stride: tl.constexpr,
     max_q_len: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
-    NUM_REQS: tl.constexpr,
+    BLOCK_WORDS: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
-    req_idx: tl.int32 = 0
-    for i in tl.static_range(NUM_REQS):
-        next_start = tl.load(cu_q_lens_ptr + i + 1)
-        req_idx += tl.where(next_start <= row_idx, 1, 0)
-
-    q_start = tl.load(cu_q_lens_ptr + req_idx)
-    q_local = row_idx - q_start
-    offsets = tl.arange(0, BLOCK_TOPK)
-    in_range = offsets < num_topk
-    indices = tl.load(
-        topk_ptr + row_idx * topk_stride + offsets,
-        mask=in_range,
-        other=-1,
+    row_ptr = mask_ptr + row_idx * mask_row_stride
+    word_offsets = tl.arange(0, BLOCK_WORDS)
+    tl.store(
+        row_ptr + word_offsets,
+        tl.zeros([BLOCK_WORDS], dtype=tl.int32),
+        mask=word_offsets < num_words,
     )
-    valid = in_range & (indices >= 0)
-    word_indices = indices >> 5
-    bits = (1 << (indices & 31)).to(tl.int32)
-    mask_row_ptr = mask_ptr + (req_idx * max_q_len + q_local) * num_words
-    tl.atomic_or(mask_row_ptr + word_indices, bits, mask=valid)
+
+    req_idx = row_idx // max_q_len
+    q_local = row_idx % max_q_len
+    q_start = tl.load(cu_q_lens_ptr + req_idx)
+    q_len = tl.load(cu_q_lens_ptr + req_idx + 1) - q_start
+    if q_local < q_len:
+        src_row = q_start + q_local
+        offsets = tl.arange(0, BLOCK_TOPK)
+        in_range = offsets < num_topk
+        indices = tl.load(
+            topk_ptr + src_row * topk_stride + offsets,
+            mask=in_range,
+            other=-1,
+        )
+        valid = in_range & (indices >= 0)
+        word_indices = indices >> 5
+        bits = (1 << (indices & 31)).to(tl.int32)
+        tl.atomic_or(row_ptr + word_indices, bits, mask=valid)
 
 
 @triton.jit
@@ -346,22 +353,33 @@ def _scatter_topk_single_req_kernel(
     mask_ptr,
     topk_ptr,
     num_words: tl.constexpr,
+    mask_row_stride: tl.constexpr,
     num_topk: tl.constexpr,
     topk_stride: tl.constexpr,
+    total_q: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
+    BLOCK_WORDS: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
-    offsets = tl.arange(0, BLOCK_TOPK)
-    in_range = offsets < num_topk
-    indices = tl.load(
-        topk_ptr + row_idx * topk_stride + offsets,
-        mask=in_range,
-        other=-1,
+    row_ptr = mask_ptr + row_idx * mask_row_stride
+    word_offsets = tl.arange(0, BLOCK_WORDS)
+    tl.store(
+        row_ptr + word_offsets,
+        tl.zeros([BLOCK_WORDS], dtype=tl.int32),
+        mask=word_offsets < num_words,
     )
-    valid = in_range & (indices >= 0)
-    word_indices = indices >> 5
-    bits = (1 << (indices & 31)).to(tl.int32)
-    tl.atomic_or(mask_ptr + row_idx * num_words + word_indices, bits, mask=valid)
+    if row_idx < total_q:
+        offsets = tl.arange(0, BLOCK_TOPK)
+        in_range = offsets < num_topk
+        indices = tl.load(
+            topk_ptr + row_idx * topk_stride + offsets,
+            mask=in_range,
+            other=-1,
+        )
+        valid = in_range & (indices >= 0)
+        word_indices = indices >> 5
+        bits = (1 << (indices & 31)).to(tl.int32)
+        tl.atomic_or(row_ptr + word_indices, bits, mask=valid)
 
 
 def _build_topk_mask(
@@ -374,43 +392,50 @@ def _build_topk_mask(
     """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
-    mask = out[:batch_size, :max_q_len, :num_words]
+    total_rows = batch_size * max_q_len
+    if total_rows == 0:
+        return out[:batch_size, :max_q_len, :num_words]
+
     total_q = sum(q_lens)
-    if total_q == 0:
-        return mask
+    mask_row_stride = out.stride(-2)
+    block_words = triton.next_power_of_2(num_words)
 
     if batch_size == 1:
         topk_packed = topk_indices_per_req[0]
         num_topk = topk_packed.shape[1]
-        _scatter_topk_single_req_kernel[(total_q,)](
-            mask,
+        _scatter_topk_single_req_kernel[(max_q_len,)](
+            out,
             topk_packed,
             num_words=num_words,
+            mask_row_stride=mask_row_stride,
             num_topk=num_topk,
             topk_stride=topk_packed.stride(0),
+            total_q=total_q,
             BLOCK_TOPK=triton.next_power_of_2(num_topk),
+            BLOCK_WORDS=block_words,
         )
-        return mask
+        return out[:1, :max_q_len, :num_words]
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
     q_lens_tensor = np_to_pinned_tensor(np.asarray(q_lens, dtype=np.int32)).to(
-        mask.device, non_blocking=True
+        out.device, non_blocking=True
     )
-    cu_q_lens = mask.new_zeros(batch_size + 1)
+    cu_q_lens = out.new_zeros(batch_size + 1)
     torch.cumsum(q_lens_tensor, dim=0, out=cu_q_lens[1:])
-    _scatter_topk_kernel[(total_q,)](
-        mask,
+    _scatter_topk_kernel[(total_rows,)](
+        out,
         topk_packed,
         cu_q_lens,
         num_words=num_words,
+        mask_row_stride=mask_row_stride,
         num_topk=num_topk,
         topk_stride=topk_packed.stride(0),
         max_q_len=max_q_len,
         BLOCK_TOPK=triton.next_power_of_2(num_topk),
-        NUM_REQS=batch_size,
+        BLOCK_WORDS=block_words,
     )
-    return mask
+    return out[:batch_size, :max_q_len, :num_words]
 
 
 class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
@@ -540,7 +565,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         mask = topk_mask_workspace[:needed].view(
             batch_size, padded_q_len, num_words_padded
         )
-        mask.zero_()
         _build_topk_mask(
             topk_per_req,
             q_lens,
@@ -576,12 +600,18 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         tile_m = 128 if max_seqlen_q <= 128 else 256
         padded_q_len = triton.cdiv(max_seqlen_q, tile_m) * tile_m
         if dense_mask is None:
+            batch_size = len(q_lens)
+            num_words = (max_seqlen_k + 31) // 32
+            assert topk_mask_workspace is not None
+            workspace_3d = topk_mask_workspace[
+                : batch_size * padded_q_len * num_words
+            ].view(batch_size, padded_q_len, num_words)
             dense_mask = _build_topk_mask(
                 topk_per_req,
                 q_lens,
                 padded_q_len,
                 max_seqlen_k,
-                topk_mask_workspace,
+                workspace_3d,
             )
         if key_starts is not None:
             dense_mask[:, 0, -1].copy_(key_starts)
