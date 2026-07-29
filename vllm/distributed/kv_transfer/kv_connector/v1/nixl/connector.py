@@ -94,6 +94,15 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+
+        if vllm_config.kv_transfer_config.kv_role == "kv_both":
+            logger.warning_once(
+                "Using kv_role='kv_both' with NixlConnector is deprecated "
+                "and will be removed in a future release. Please set "
+                "kv_role='kv_producer' for prefill instances and "
+                "kv_role='kv_consumer' for decode instances. "
+            )
+
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
@@ -186,10 +195,6 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """
         Set the PP-aware KV connector handshake metadata for this connector.
-
-        Engine core hands NIXL the full ``{(pp_rank, tp_rank): metadata}``
-        dict. Non-PP unwrap for legacy connectors happens in engine core
-        before the dispatch, so NIXL never sees the int-keyed shape.
 
         Args:
             metadata (dict): the handshake metadata to set.

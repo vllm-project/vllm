@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Patch Author: Anton Alexander
 """Worker-side logic for the NIXL connector."""
 
+import itertools
 import logging
 import os
 import queue
@@ -70,7 +72,6 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -94,9 +95,9 @@ _ShardDescLayout: TypeAlias = tuple[
     int,  # physical_blocks_per_logical
     int,  # mamba_region_count
     tuple[int, ...],  # mamba_region_group_ids
-    tuple[int, ...],  # fa_recovered_region_indices  (#46407)
-    tuple[int, ...],  # fa_recovered_region_group_ids  (#46407)
-    bool,  # producer_registered_fa_members (honesty gate, #46407)
+    tuple[int, ...],  # fa_recovered_region_indices  (P6' v2, #46407)
+    tuple[int, ...],  # fa_recovered_region_group_ids (P6' v2, #46407)
+    bool,  # producer_registered_fa_members (P6' v2 honesty gate, #46407)
 ]
 
 
@@ -307,11 +308,26 @@ class NixlConnectorWorker:
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
             )
+            # 0.20.1-ABI: MambaConvSplitInfo has NO `.ssm_sizes` attr (that was a
+            # v0.22-era field). Derive mamba_ssm_size directly from the MambaSpec
+            # dtypes/shapes, exactly as stock 0.20.1 worker.py does, then build
+            # _conv_decomp separately (it is used only for conv offsets).
+            conv_nbytes, ssm_nbytes = (
+                torch.tensor([], dtype=mamba_spec.dtypes[0]).element_size(),  # type: ignore[misc]
+                torch.tensor([], dtype=mamba_spec.dtypes[1]).element_size(),  # type: ignore[misc]
+            )
+            conv_shape, ssm_shape = (
+                torch.Size(mamba_spec.shapes[0]),
+                torch.Size(mamba_spec.shapes[1]),
+            )
+            mamba_ssm_size = (
+                conv_shape.numel() * conv_nbytes,
+                ssm_shape.numel() * ssm_nbytes,
+            )
             self._conv_decomp = derive_mamba_conv_split(
                 mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
             )
-            mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
@@ -403,19 +419,27 @@ class NixlConnectorWorker:
         # Note: host xfer buffer ops when use_host_buffer is True
         self.copy_blocks: CopyBlocksOp | None = None
 
+        # BUG-6 fix: __init__ default for the (pp_rank, tp_rank) key into
+        # kv_caches_base_addr[engine_id]. The take-theirs merge kept the READ
+        # site (register_kv_caches, the `kv_caches_base_addr[engine_id][
+        # self._local_kv_cache_key] = ...` line) but dropped BOTH pristine
+        # #43368 assignments (this __init__ default + the real (pp_rank,
+        # tp_rank) set in register_kv_caches) -> AttributeError: no attribute
+        # '_local_kv_cache_key'. Restores pristine semantics exactly.
         self._local_kv_cache_key = (0, self.tp_rank)
 
+        self.local_kv_caches_base_addr: list[int] = []
+
         self.device_id: int = 0
-        # Map of engine_id -> kv_caches_base_addr. Under heterogeneous
-        # PP x TP the local rank may pull from multiple remote
-        # (pp_rank, tp_rank) shards, so we key by the producer shard tuple
-        # rather than just tp_rank.
-        # EngineId, dict[(pp_rank, tp_rank), list[int]]
-        #   -> engine_id, (pp_rank, tp_rank), base_addr_for_layer
+        # Remote producer KV base addresses, keyed by the producer shard
+        # (pp_rank, tp_rank) — under PP x TP a request pulls from several shards.
         self.kv_caches_base_addr = defaultdict[
             EngineId, dict[tuple[int, int], list[int]]
         ](dict)
         self.local_seen_layer_names: list[str] = []
+        # Set once a remote engine's full PP x TP handshake completes; doubles as
+        # the "handshake complete" sentinel that gates KV reads.
+        self._remote_pp_size: dict[EngineId, int] = {}
         # Map every local layer name (including pool members that share a
         # NIXL region with another layer) to the region indices its caches
         # occupy. Needed because HMA pooling lets producer and consumer pick
@@ -443,7 +467,7 @@ class NixlConnectorWorker:
         self.src_xfer_handles_by_shard_tp_ratio: dict[
             tuple[EngineId, int, int], list[int]
         ] = {}
-        # Map of engine_id -> {(pp_rank, tp_rank): nixl_prepped_dlist_handle}.
+        # Destination (remote) dlist handles, per remote shard (pp_rank, tp_rank).
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[tuple[int, int], int]](
             dict
         )
@@ -549,11 +573,6 @@ class NixlConnectorWorker:
             self.block_size = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
-    def _get_local_base_addresses(self) -> list[int]:
-        return self.kv_caches_base_addr[self.engine_id].get(
-            self._local_kv_cache_key, []
-        )
-
     def _local_region_indices_for_layer_names(
         self, registered_layer_names: list[str]
     ) -> list[int]:
@@ -593,24 +612,41 @@ class NixlConnectorWorker:
             return tuple(g for g in group_ids for _ in range(2))
         return group_ids
 
-    # -------------------------------------------------------------------- #
-    # #46407 — region-MEMBER based FA recovery under PP + HMA               #
-    # -------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
+    # P6' v2 (vLLM #46407) — region-MEMBER based FA recovery under PP+HMA #
+    # ------------------------------------------------------------------ #
+    # ROOT CAUSE (measured, not inferred — see results/RESULT-p6prime-46407.md
+    # and results/p6prime-instr-dump.txt):
+    #
     # Under PP>1 + the hybrid-memory-allocator (HMA), the producer pools one
-    # layer from EACH kv_cache_group into a single KVCacheTensor. In
-    # register_kv_caches the producer dedups by base address: the first layer
-    # seen for a pooled tensor becomes the region representative in
-    # seen_layer_names; every other group's layer for that tensor (including the
-    # FullAttention layer) is dropped from seen_layer_names and recorded ONLY in
-    # region_members[region_idx]. The Mamba (group 0) layer sorts first per
-    # pooled tensor, so on a hybrid model every representative in
-    # registered_layer_names is a Mamba layer, and any resolver keyed on
-    # registered_layer_names faithfully reports all-SSM — the FA layer names are
-    # ABSENT from the resolver input, not mis-classified. The collapse is at the
-    # SOURCE (producer dedup), not in the consumer resolver; the FA layer names
-    # survive only in region_members. Recovery therefore classifies each producer
-    # region by inspecting ALL of its advertised members (region_members[r]) and
-    # recovers the FA member that was dedup'd out.
+    # layer from EACH kv_cache_group into a single KVCacheTensor
+    # (kv_cache_utils.get_kv_cache_config_from_groups: shared_by =
+    # [group0.layer_names[i], group1.layer_names[i], ...]). In
+    # register_kv_caches() the producer iterates xfer_buffers and DEDUPS by base
+    # address: the FIRST layer seen for a pooled tensor becomes the region
+    # representative in `seen_layer_names`; every other group's layer for that
+    # tensor (incl. the FullAttention layer) is dropped from `seen_layer_names`
+    # and recorded ONLY in `region_members[region_idx]`.
+    #
+    # The Mamba (group 0) layer sorts first per pooled tensor, so on a hybrid
+    # model EVERY representative in `registered_layer_names` is a Mamba layer.
+    # The live dump proves it: registered_layer_names has 6 names, _ssm_layer_names
+    # classifies ALL 6 as SSM, region_group_ids = [0]*12 (6 reps x2 K/V), and
+    # group_spec_types is correctly [Mamba,Mamba,Mamba,Mamba,FullAttention].
+    #
+    # Therefore ANY resolver keyed on `registered_layer_names` — whether it
+    # routes through `group_spec_types[group_id]` (the loop at the old line 2936)
+    # OR through `_layer_specs[name]` (the PRIOR fix's
+    # `_region_spec_types_for_layer_names`) — faithfully reports all-SSM. The
+    # FA regions are not mis-classified; they are ABSENT from the resolver input.
+    # The collapse is at the SOURCE (producer dedup), not in the consumer
+    # resolver. The FA layer names survive ONLY in `region_members`.
+    #
+    # FIX DIRECTION (mechanically different from the prior fix): classify each
+    # producer region by inspecting ALL of its advertised members
+    # (nixl_agent_meta.region_members[r]) and recover the FA member that was
+    # dedup'd out. This routes through region_members (the non-collapsed source),
+    # NOT through registered_layer_names.
     def _region_fa_recovery_for_members(
         self, nixl_agent_meta: "NixlAgentMetadata"
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -722,12 +758,11 @@ class NixlConnectorWorker:
     def _ssm_layer_names(self, registered_layer_names: list[str]) -> list[str]:
         # Filter producer-advertised layer names to SSM/Mamba layers only.
         # For hybrid (Mamba + attention) models, registered_layer_names carries
-        # BOTH layer types once the producer re-advertises the dedup'd members
-        # (#46407); the Mamba descriptor bookkeeping (region count + group ids)
-        # must cover ONLY the SSM layers, else attention layers inflate the count
-        # and shift every real SSM region's descriptor offset (num_fa_descs +
-        # region_id * logical_blocks), so the consumer reads stale/zero Mamba
-        # state -> degenerate output under PP+HMA disagg.
+        # BOTH layer types; the Mamba descriptor bookkeeping (region count +
+        # group ids) must cover ONLY the SSM layers, else attention layers
+        # inflate the count and shift every real SSM region's descriptor offset
+        # (num_fa_descs + region_id * logical_blocks), so the consumer reads
+        # stale/zero Mamba state -> degenerate output under PP+HMA disagg.
         mapping = self._layer_name_to_kv_group_index
         return [
             name
@@ -821,112 +856,110 @@ class NixlConnectorWorker:
         assert self.transfer_topo is not None
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
-        metadata_shards: list[NixlAgentMetadata] = []
         path = make_zmq_path("tcp", host, port)
 
         with zmq_ctx(zmq.REQ, path) as sock:
-            for remote_pp_rank in range(remote_pp_size):
-                for remote_rank in p_remote_ranks:
-                    logger.debug(
-                        "Querying metadata on path: %s at remote pp rank %s, "
-                        "tp rank %s",
-                        path,
-                        remote_pp_rank,
-                        remote_rank,
+            for remote_pp_rank, remote_rank in itertools.product(
+                range(remote_pp_size), p_remote_ranks
+            ):
+                logger.debug(
+                    "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
+                    path,
+                    remote_pp_rank,
+                    remote_rank,
+                )
+
+                start_time = time.perf_counter()
+                # Send query for the request.
+                msg = msgspec.msgpack.encode(
+                    (GET_META_MSG, remote_pp_rank, remote_rank)
+                )
+                # Set receive timeout to 5 seconds to avoid hanging on dead server
+                sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+                sock.send(msg)
+                handshake_bytes = sock.recv()
+
+                # Decode handshake payload to get compatibility hash
+                handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
+                try:
+                    handshake_payload = handshake_decoder.decode(handshake_bytes)
+                except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                    raise RuntimeError(
+                        f"Failed to decode NixlHandshakePayload. This likely indicates "
+                        f"an incompatibility between connector version. Error: {e}"
+                    ) from e
+
+                got_metadata_time = time.perf_counter()
+                logger.debug(
+                    "NIXL handshake: get metadata took: %s",
+                    got_metadata_time - start_time,
+                )
+
+                # Check compatibility hash BEFORE decoding agent metadata
+                assert self.compat_hash is not None
+                if (
+                    self.enforce_compat_hash
+                    and handshake_payload.compatibility_hash != self.compat_hash
+                ):
+                    raise RuntimeError(
+                        f"NIXL compatibility hash mismatch. "
+                        f"Local: {self.compat_hash}, "
+                        f"Remote: {handshake_payload.compatibility_hash}. "
+                        f"Prefill and decode instances have incompatible "
+                        f"configurations. This may be due to: different vLLM versions,"
+                        f" models, dtypes, KV cache layouts, attention backends, etc. "
+                        f"Both instances must use identical configurations."
+                        f"Disable this check using "
+                        f'--kv-transfer-config \'{{"kv_connector_extra_config": '
+                        f'{{"enforce_handshake_compat": false}}}}\''
                     )
 
-                    start_time = time.perf_counter()
-                    # Send query for the request.
-                    msg = msgspec.msgpack.encode(
-                        (GET_META_MSG, remote_pp_rank, remote_rank)
+                logger.info(
+                    "NIXL compatibility check passed (hash: %s)",
+                    handshake_payload.compatibility_hash,
+                )
+
+                # Decode agent metadata
+                metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+                try:
+                    metadata = metadata_decoder.decode(
+                        handshake_payload.agent_metadata_bytes
                     )
-                    # Set receive timeout to 5 seconds to avoid hanging on dead server
-                    sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
-                    sock.send(msg)
-                    handshake_bytes = sock.recv()
+                except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                    # This should not happen if hash matched
+                    raise RuntimeError(
+                        f"Failed to decode NixlAgentMetadata. Error: {e}"
+                    ) from e
 
-                    # Decode handshake payload to get compatibility hash
-                    handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
-                    try:
-                        handshake_payload = handshake_decoder.decode(handshake_bytes)
-                    except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                        raise RuntimeError(
-                            "Failed to decode NixlHandshakePayload. This likely "
-                            "indicates an incompatibility between connector "
-                            f"version. Error: {e}"
-                        ) from e
-
-                    got_metadata_time = time.perf_counter()
-                    logger.debug(
-                        "NIXL handshake: get metadata took: %s",
-                        got_metadata_time - start_time,
+                # Ensure engine id matches.
+                if metadata.engine_id != expected_engine_id:
+                    raise RuntimeError(
+                        f"Remote NIXL agent engine ID mismatch. "
+                        f"Expected {expected_engine_id},"
+                        f"received {metadata.engine_id}."
                     )
 
-                    # Check compatibility hash BEFORE decoding agent metadata
-                    assert self.compat_hash is not None
-                    if (
-                        self.enforce_compat_hash
-                        and handshake_payload.compatibility_hash != self.compat_hash
-                    ):
-                        raise RuntimeError(
-                            f"NIXL compatibility hash mismatch. "
-                            f"Local: {self.compat_hash}, "
-                            f"Remote: {handshake_payload.compatibility_hash}. "
-                            "Prefill and decode instances have incompatible "
-                            "configurations. This may be due to: different vLLM "
-                            "versions, models, dtypes, KV cache layouts, attention "
-                            "backends, etc. Both instances must use identical "
-                            "configurations. Disable this check using "
-                            "--kv-transfer-config "
-                            '\'{"kv_connector_extra_config": '
-                            '{"enforce_handshake_compat": false}}\''
-                        )
-
-                    logger.info(
-                        "NIXL compatibility check passed (hash: %s)",
-                        handshake_payload.compatibility_hash,
-                    )
-
-                    # Decode agent metadata
-                    metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                    try:
-                        metadata = metadata_decoder.decode(
-                            handshake_payload.agent_metadata_bytes
-                        )
-                    except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                        # This should not happen if hash matched
-                        raise RuntimeError(
-                            f"Failed to decode NixlAgentMetadata. Error: {e}"
-                        ) from e
-
-                    # Ensure engine id matches.
-                    if metadata.engine_id != expected_engine_id:
-                        raise RuntimeError(
-                            f"Remote NIXL agent engine ID mismatch. "
-                            f"Expected {expected_engine_id},"
-                            f"received {metadata.engine_id}."
-                        )
-
-                    # Register Remote agent.
-                    remote_agent_name = self.add_remote_agent(
-                        metadata,
-                        remote_rank,
-                        remote_tp_size,
-                        remote_pp_rank=remote_pp_rank,
-                        remote_pp_size=remote_pp_size,
-                    )
-                    metadata_shards.append(metadata)
-                    setup_agent_time = time.perf_counter()
-                    logger.debug(
-                        "NIXL handshake: add agent took: %s",
-                        setup_agent_time - got_metadata_time,
-                    )
-                    remote_rank_to_agent_name[(remote_pp_rank, remote_rank)] = (
-                        remote_agent_name
-                    )
-        self._pp_layer_map[expected_engine_id] = self._build_pp_layer_map_from_metas(
-            metadata_shards, remote_pp_size
-        )
+                # Register Remote agent.
+                remote_agent_name = self.add_remote_agent(
+                    metadata,
+                    remote_rank,
+                    remote_tp_size,
+                    remote_pp_rank=remote_pp_rank,
+                    remote_pp_size=remote_pp_size,
+                )
+                # BUG-7 fix: add_remote_agent returns None for a zero-overlap
+                # PP pair (skipped). Do not record a None agent name — the read
+                # path skips (engine_id, remote_pp_rank) absent from tp_mappings.
+                if remote_agent_name is None:
+                    continue
+                setup_agent_time = time.perf_counter()
+                logger.debug(
+                    "NIXL handshake: add agent took: %s",
+                    setup_agent_time - got_metadata_time,
+                )
+                remote_rank_to_agent_name[(remote_pp_rank, remote_rank)] = (
+                    remote_agent_name
+                )
         return remote_rank_to_agent_name
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -1053,7 +1086,7 @@ class NixlConnectorWorker:
         Failures to handshake are logged and the request is marked as failed.
         """
         with self._handshake_lock:
-            if engine_id in self._remote_agents and engine_id in self._pp_layer_map:
+            if engine_id in self._remote_agents and engine_id in self._remote_pp_size:
                 return None
             fut = self._handshake_futures.get(engine_id)
             if fut is not None:
@@ -1068,11 +1101,16 @@ class NixlConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[tuple[int, int], str]], eid=engine_id):
+            def done_callback(
+                f: Future[dict[tuple[int, int], str]], eid=engine_id, pp=pp_size
+            ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
                         self._remote_agents[eid] = f.result()
+                        # Mark complete only after every PP stage's TP shards are
+                        # registered, so reads never race ahead of a shard handle.
+                        self._remote_pp_size[eid] = pp
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -1085,12 +1123,10 @@ class NixlConnectorWorker:
             return fut
 
     def _handshake_complete(self, engine_id: EngineId, pp_size: int) -> bool:
-        pp_map = self._pp_layer_map.get(engine_id)
         return (
             engine_id in self._remote_agents
             and engine_id not in self._handshake_futures
-            and pp_map is not None
-            and pp_map.pp_size == pp_size
+            and self._remote_pp_size.get(engine_id) == pp_size
         )
 
     def _background_nixl_handshake(
@@ -1206,7 +1242,6 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
-        seen_layer_indices: list[int] = []
         seen_layer_names: list[str] = []
         # Reset before populating: register_kv_caches may run again after a
         # sleep/wake cycle, and stale mappings would point at outdated regions.
@@ -1217,13 +1252,18 @@ class NixlConnectorWorker:
         # HMA cross-group pooled members dedup'd out of seen_layer_names. Drives
         # per-member (all-group) transfer coverage.
         region_members: list[list[str]] = []
-        # #46407: set True iff at least one dedup'd FullAttention / SSM member
-        # was re-advertised as its own NIXL region (the producer half of the
-        # fix). Advertised in NixlAgentMetadata so the consumer's gated recovery
-        # knows real FA regions / de-collapsed SSM regions now exist. Stay False
-        # on PP1 (each layer is already a representative) and on all-attention /
-        # MLA / single-Mamba-group models.
+        # P6' FIX-2 (#46407): set True iff at least one dedup'd FullAttention
+        # member was re-advertised as its own FA-typed NIXL region (the producer
+        # half of the fix). Advertised in NixlAgentMetadata so the consumer's
+        # gated FA-recovery knows real FA regions now exist. Stays False on PP1
+        # (FA already a representative) and on all-attention / MLA models.
         fa_members_registered = False
+        # FIX-9: True once any dedup'd SSM member (a Mamba layer from group 1..N
+        # pooled behind the group-0 Mamba rep at the SAME base) has been
+        # re-advertised as its own region. Drives nothing on the consumer beyond
+        # making registered_layer_names complete — _ssm_layer_names /
+        # _mamba_region_group_ids then naturally de-collapse from [0]*N to
+        # [0,1,2,...]. Stays False on PP1 + all-attention/MLA.
         ssm_members_registered = False
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
@@ -1231,7 +1271,6 @@ class NixlConnectorWorker:
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
-            layer_index = extract_layer_index(layer_name)
             layer_spec = self._layer_specs[layer_name]
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
@@ -1276,90 +1315,145 @@ class NixlConnectorWorker:
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
                     logger.debug("Skipping %s because it's already seen", layer_name)
+                    # [BUG9-GEOM] DECISIVE PROBE (R4): the dedup fired => this FA
+                    # view's data_ptr == the Mamba rep's (offset 0, partition theory
+                    # refuted). Print the FA view's ACTUAL per-block stride vs the
+                    # physical_page_size we re-advertise with. If they differ, the
+                    # contiguous-page FA alias is wrong-STRIDE (the surviving
+                    # hypothesis). element_size * stride(0) = bytes between blocks.
+                    try:
+                        _es = cache.element_size()
+                        logger.info(
+                            "[BUG9-GEOM] layer=%s fa_view base=0x%x shape=%s "
+                            "stride0_bytes=%s stride_full=%s contiguous=%s "
+                            "physical_page_size=%s len(cache_list)=%s numel=%s",
+                            layer_name, base_addr, tuple(cache.shape),
+                            (cache.stride(0) * _es) if cache.dim() > 0 else None,
+                            tuple(s * _es for s in cache.stride()),
+                            cache.is_contiguous(), physical_page_size,
+                            len(cache_list), cache.numel(),
+                        )
+                    except Exception as _e:
+                        logger.info("[BUG9-GEOM] probe failed: %s", _e)
                     # region_members keeps EVERY pooled member (incl. this one)
                     # for the consumer's member-identity / overlap bookkeeping,
-                    # regardless of whether we also re-advertise a region below.
+                    # regardless of whether we also re-advertise an FA region.
                     region_members[existing_region_idx].append(layer_name)
-                    # ---- #46407 producer half ---------------------------------
-                    # Under PP>1 + HMA, the HMA allocator pools ONE layer from
-                    # EACH kv_cache_group into a single tensor (shared_by =
-                    # [groups[j].layer_names[i] for j in range(num_groups)]). The
-                    # Mamba (group 0) layer sorts first and becomes the region
-                    # representative; every OTHER group's layer aliased onto the
-                    # SAME storage is dedup'd here and (pre-fix) DROPPED from the
-                    # advertised region set (seen_layer_names). For a multi-Mamba
-                    # -group hybrid (e.g. Nemotron-3-Ultra: 3 Mamba + 1 FA per
-                    # tensor) that drops both the FullAttention member AND the
-                    # (N-1) non-representative Mamba members. The consumer then
-                    # sees an all-SSM, single-group region set -> region_group_ids
-                    # collapses (FA loop emits nothing; mamba_region_group_ids
-                    # collapses to [0]*N) -> only the group-0 Mamba layers and no
-                    # FA transfer -> coherent-but-wrong decode. At PP1 each layer
-                    # is already its own representative, so this branch does not
-                    # fire and PP1 is unaffected.
+                    # ---- P6' FIX-2 (vLLM #46407) producer half ----------------
+                    # Under PP>1 + HMA, the Mamba layer of each pooled tensor
+                    # sorts first and becomes the region representative; the
+                    # FullAttention layer aliased onto the SAME storage is dedup'd
+                    # here and (pre-fix) DROPPED from the advertised region set
+                    # (`seen_layer_names`). The consumer then never receives an
+                    # FA-typed region for it -> `region_group_ids` collapses to
+                    # all-SSM -> the legacy FA loop skips every region -> zero FA
+                    # descriptors -> degenerate decode. (At PP1 the FA layer is
+                    # already its own representative, so this branch does not fire
+                    # and PP1 is unaffected — confirmed by the +486MB PP1 control.)
                     #
-                    # The dedup'd member is a FULL ALIAS of the representative:
-                    # OFFSET 0, SAME base_addr, SAME page stride. So RE-ADVERTISE
-                    # it as its OWN region (same base, member-typed block_len) so
-                    # registered_layer_names carries every layer and the consumer's
-                    # _ssm_layer_names / _mamba_region_group_ids de-collapse to
-                    # [0,1,2,...]. The K/V split is done virtually at descriptor
-                    # time (blocks-first), so no offset math and no new memory
-                    # registration is needed: the bytes are already registered
-                    # under the representative region's MR.
+                    # FIX-1 proved the FA view is a FULL ALIAS of the pooled
+                    # tensor: OFFSET 0, SAME base_addr, SAME page stride as the
+                    # Mamba region. So we RE-ADVERTISE the already-captured base
+                    # under a SECOND, FA-typed region: append the same base_addr,
+                    # the FA layer name, and the FA physical page as block_len.
+                    # `physical_page_size` here is already the FA physical page
+                    # (non-Mamba branch above: page_size_bytes //
+                    # physical_blocks_per_logical // len(cache_list)) — identical
+                    # to what the non-dedup FA branch below records. The K/V split
+                    # is done virtually at descriptor time (blocks-first), so no
+                    # offset math and no new memory registration is needed: the
+                    # bytes are already registered under the Mamba region's MR.
                     existing_rep = seen_layer_names[existing_region_idx]
                     existing_rep_spec = self._layer_specs[existing_rep]
                     if isinstance(existing_rep_spec, UniformTypeKVCacheSpecs):
                         existing_rep_spec = existing_rep_spec.kv_cache_specs[
                             existing_rep
                         ]
-                    # _is_attention_spec/_is_ssm_spec take a spec CLASS (they call
-                    # issubclass), so pass type(spec), matching every other call
-                    # site that passes self._group_spec_types[...] (a type).
+                    # _is_attention_spec/_is_ssm_spec call issubclass(spec_TYPE,
+                    # ...) — they take a spec CLASS, not an instance. Every other
+                    # call site passes self._group_spec_types[...] (a type). The
+                    # FIX must pass type(spec), not the spec instance, else
+                    # `TypeError: issubclass() arg 1 must be a class`. (Live-caught
+                    # on cgk 2026-06-26 — register_kv_caches crashed here.)
                     fa_on_mamba_region = _is_attention_spec(
                         type(layer_spec)
                     ) and _is_ssm_spec(type(existing_rep_spec))
-                    # Two SSM layers never share a tensor for a true duplicate: the
-                    # allocator pools one layer PER group per tensor, so a dedup'd
-                    # -SSM-behind-SSM-rep is ALWAYS a distinct group's layer needing
-                    # its own transfer (its own block table), never a real dup.
+                    # ---- P6' FIX-9 (vLLM #46407 generalization) ----------------
+                    # ROOT CAUSE (measured + 3/3 frontier-trio quorum 2026-06-26):
+                    # the HMA allocator pools ONE layer from EACH kv_cache_group
+                    # into a single tensor (general case: shared_by =
+                    # [groups[j].layer_names[i] for j in range(num_groups)]). For
+                    # Nemotron-3-Ultra that is 3 Mamba layers (3 distinct SSM
+                    # groups) + 1 FullAttention layer per tensor, all FULL-ALIASED
+                    # at offset 0 (same base_addr; LIVE [BUG9-GEOM] shows
+                    # layers.{2,4,6}.mixer + layers.7.mixer.attn share one base).
+                    # The producer dedups by base and keeps ONLY the group-0 Mamba
+                    # rep. FIX-2 recovered the dedup'd FA member; it did NOT recover
+                    # the OTHER dedup'd MAMBA members (groups 1,2). Those layers
+                    # live in the SAME tensor but at DIFFERENT block ids (each group
+                    # has its own block table — "different parts of the shared
+                    # Tensor"), so group-0's transfer never covers them. They are
+                    # absent from registered_layer_names -> mamba_region_group_ids
+                    # collapses to [0]*N (MEASURED) -> the consumer reads only
+                    # block_ids[group0]; 12 of 18 Mamba layers run on STALE/zero SSM
+                    # state -> fluent but WRONG-content decode. Re-advertise each
+                    # dedup'd Mamba member as its OWN region (same base/offset 0,
+                    # Mamba block_len) so registered_layer_names carries every layer
+                    # and _ssm_layer_names / _mamba_region_group_ids de-collapse to
+                    # [0,1,2,...]. Two SSM layers never share a tensor (the allocator
+                    # pools one layer PER group per tensor), so a dedup'd-SSM-behind-
+                    # SSM-rep is ALWAYS a distinct group's layer needing its own
+                    # transfer -- never a true duplicate. PP1 is unaffected (each
+                    # layer is its own representative; +486MB PP1 control correct).
                     ssm_on_mamba_region = _is_ssm_spec(
                         type(layer_spec)
                     ) and _is_ssm_spec(type(existing_rep_spec))
                     if fa_on_mamba_region or ssm_on_mamba_region:
-                        # By-construction guard: the re-advertise is correct ONLY
-                        # because the dedup'd member is a FULL ALIAS of the
-                        # representative — same base addr, offset 0, equal
-                        # page_size_bytes (HMA invariant; symmetric P/D). Enforce
-                        # the alias here so a future HMA layout change fails LOUD at
-                        # registration instead of silently degenerate-decoding.
+                        # By-construction guard (kernel-tool R2/R8, 3/3 trio): the
+                        # re-advertise is correct ONLY because the dedup'd member is
+                        # a FULL ALIAS of the Mamba representative — same base addr,
+                        # offset 0, equal page_size_bytes (HMA invariant; symmetric
+                        # P/D). That property is WHY reading "the member region"
+                        # moves the right physical bytes (the bug was missing
+                        # descriptors, not wrong bytes). Enforce the alias here so a
+                        # future HMA layout change fails LOUD at registration instead
+                        # of silently degenerate-decoding. (FIX-9: this now covers
+                        # the dedup'd SSM members of groups 1..N too, not just FA —
+                        # they alias the same base at offset 0 with the Mamba page,
+                        # but each has its OWN block table so it needs its own
+                        # region or its SSM state never transfers. See
+                        # ROOTCAUSE-CONFIRMED-multimember-2026-06-26.md.)
                         _member_is_ssm = ssm_on_mamba_region
                         existing_base = seen_base_addresses[existing_region_idx]
                         assert base_addr == existing_base, (
-                            "#46407 alias-invariant violated: dedup'd member "
+                            "P6'-FIX alias-invariant violated: dedup'd member "
                             f"{layer_name!r} base 0x{base_addr:x} != rep region "
                             f"base 0x{existing_base:x} — HMA no longer full-aliases "
                             "the member onto the representative; the same-base "
-                            "re-advertise is unsound."
+                            "re-advertise is unsound. Re-derive the member's "
+                            "base/offset before transferring."
                         )
                         assert (
                             layer_spec.page_size_bytes
                             == existing_rep_spec.page_size_bytes
                         ), (
-                            "#46407 alias-invariant violated: member page_size_bytes "
+                            "P6'-FIX alias-invariant violated: member page_size_bytes "
                             f"{layer_spec.page_size_bytes} != rep "
                             f"{existing_rep_spec.page_size_bytes} — HMA equal-page "
                             "invariant broken; member stride would mis-index the "
                             "shared tensor."
                         )
                         new_region_idx = len(seen_base_addresses)
-                        # SAME base addr (OFFSET 0 — full alias).
+                        # SAME base addr (OFFSET 0 — full alias, FIX-1 §2).
                         seen_base_addresses.append(base_addr)
                         # Per-member block_len, MIRRORING the non-dedup branch
                         # below: a Mamba member records physical_page_size //
                         # _physical_blocks_per_logical_kv_block (the SSM page is
-                        # logical); an FA member records the full physical_page_size
-                        # (no //ratio — that divisor is Mamba-only).
+                        # logical, so _build_mamba_local's page_stride = block_len *
+                        # phys_per_logical recovers the physical stride); an FA
+                        # member records the full physical_page_size (no //ratio —
+                        # that divisor is Mamba-only). Using the wrong one here would
+                        # mis-stride the recovered region in its dlist builder.
                         if _member_is_ssm:
                             self.block_len_per_layer.append(
                                 physical_page_size
@@ -1367,13 +1461,11 @@ class NixlConnectorWorker:
                             )
                         else:
                             self.block_len_per_layer.append(physical_page_size)
-                        # Keep seen_layer_indices parallel to seen_base_addresses /
-                        # seen_layer_names (asserted equal-length + index-consistent
-                        # in _validate_remote_agent_handshake).
-                        seen_layer_indices.append(layer_index)
                         seen_layer_names.append(layer_name)
                         # The member's AUTHORITATIVE descriptor home is the new
-                        # region (NOT the rep it aliases).
+                        # region (NOT the rep it aliases). Map its name solely to
+                        # new_region_idx so the consumer's
+                        # _local_region_indices_for_layer_names resolves it there.
                         self._local_layer_name_to_region_indices[layer_name].append(
                             new_region_idx
                         )
@@ -1383,13 +1475,14 @@ class NixlConnectorWorker:
                         # at the representative so any further pooled member of the
                         # SAME tensor still dedups onto the rep and reaches THIS
                         # branch (each gets its own re-advertised region). This is
-                        # what lets all N-1 dedup'd members be recovered.
+                        # what lets all N-1 dedup'd members (2 SSM + 1 FA per tensor
+                        # for Nemotron-3-Ultra) be recovered, not just the first.
                         if _member_is_ssm:
                             ssm_members_registered = True
                         else:
                             fa_members_registered = True
                         logger.debug(
-                            "#46407: re-advertised %s member %s as region %d "
+                            "P6'-FIX9: re-advertised %s member %s as region %d "
                             "(alias of rep region %d, base=0x%x, block_len=%d)",
                             "SSM" if _member_is_ssm else "FA",
                             layer_name,
@@ -1399,9 +1492,10 @@ class NixlConnectorWorker:
                             self.block_len_per_layer[-1],
                         )
                     else:
-                        # Unchanged upstream behavior: a dedup'd member that is NOT
-                        # an FA/SSM-on-Mamba alias maps to the existing region and
-                        # is carried only in region_members.
+                        # Unchanged upstream behavior: a dedup'd member that is
+                        # NOT an FA-on-Mamba alias (e.g. a true duplicate, or an
+                        # FA member pooled behind an FA representative) maps to the
+                        # existing region and is carried only in region_members.
                         self._local_layer_name_to_region_indices[layer_name].append(
                             existing_region_idx
                         )
@@ -1419,7 +1513,6 @@ class NixlConnectorWorker:
                     )
                 else:
                     self.block_len_per_layer.append(physical_page_size)
-                seen_layer_indices.append(layer_index)
                 seen_layer_names.append(layer_name)
                 self._local_layer_name_to_region_indices[layer_name].append(region_idx)
                 region_members.append([layer_name])
@@ -1457,7 +1550,10 @@ class NixlConnectorWorker:
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
-        assert all(start_layer <= idx < end_layer for idx in seen_layer_indices)
+        # BUG-6 fix: real (pp_rank, tp_rank) key for this worker's region set.
+        # pristine #43368 sets this here, just before local_seen_layer_names;
+        # the take-theirs merge dropped this exact line. pp_rank is in scope
+        # (get_pp_group().rank_in_group, set at the top of register_kv_caches).
         self._local_kv_cache_key = (pp_rank, self.tp_rank)
         self.local_seen_layer_names = seen_layer_names
         self.region_members = region_members
@@ -1478,15 +1574,24 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self._local_kv_cache_key] = (
             seen_base_addresses
         )
-        # #46407: num_regions counts LOGICAL NIXL regions (the descriptor-id
-        # space is keyed on logical regions, not physical MRs). Pre-fix,
-        # len(caches_data) == len(seen_base_addresses) always (both appended
-        # together in the non-dedup branch). The re-advertise adds a LOGICAL
-        # region that shares an already-registered MR, so it grows
-        # seen_base_addresses / block_len_per_layer but NOT caches_data. Basing
+        # Populate the flat alias used by the metadata payload + the PP-aware
+        # local xfer-handler region selection. Without this it stays [] (the
+        # __init__ default), so the producer advertises an EMPTY base-addr list
+        # and the consumer builds zero-address descriptors -> no KV transferred.
+        # (Restores the semantics of the upstream _get_local_base_addresses()
+        # helper that this merge replaced.)
+        self.local_kv_caches_base_addr = seen_base_addresses
+        # P6' FIX-2 index-safety: num_regions counts LOGICAL NIXL regions (the
+        # descriptor-id space is keyed on logical regions, not physical MRs).
+        # Pre-fix, len(caches_data) == len(seen_base_addresses) always (both are
+        # appended together in the non-dedup branch). The FIX-2 re-advertise adds
+        # a LOGICAL FA region that shares an already-registered MR, so it grows
+        # seen_base_addresses/block_len_per_layer but NOT caches_data. Basing
         # num_regions on seen_base_addresses keeps it consistent with
-        # block_len_per_layer and the FA descriptor count in both the legacy and
-        # re-advertise cases.
+        # block_len_per_layer and the FA descriptor count in BOTH the legacy
+        # (len(caches_data)==len) and FIX-2 (FA regions present) cases. This is
+        # the value _compute_desc_ids reads as num_fa_regions; it MUST equal the
+        # number of FA desc-blocks _build_fa_local emits (one per logical region).
         self.num_regions = len(seen_base_addresses)
 
         if self.transfer_topo.virtually_split_kv_in_blocks:
@@ -1541,9 +1646,7 @@ class NixlConnectorWorker:
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             device_id=self.device_id,
-            kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][
-                self._local_kv_cache_key
-            ],
+            kv_caches_base_addr=self.local_kv_caches_base_addr,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             kv_cache_layout=self.kv_cache_layout
@@ -1557,9 +1660,6 @@ class NixlConnectorWorker:
             ),
             pp_rank=pp_rank,
             pp_size=pp_size,
-            start_layer=start_layer,
-            end_layer=end_layer,
-            registered_layer_indices=seen_layer_indices,
             registered_layer_names=seen_layer_names,
             region_members=region_members,
             fa_members_registered=fa_members_registered,
@@ -1775,18 +1875,18 @@ class NixlConnectorWorker:
         #  - registered_layer_names given: one entry per producer region
         #    (representative). Otherwise register all local regions.
         if local_region_indices is not None:
-            local_base_addresses_all = self._get_local_base_addresses()
+            local_base_addresses_all = self.local_kv_caches_base_addr
             local_base_addresses = [
                 local_base_addresses_all[i] for i in local_region_indices
             ]
         elif registered_layer_names is None:
-            local_base_addresses = self._get_local_base_addresses()
+            local_base_addresses = self.local_kv_caches_base_addr
             local_region_indices = list(range(len(local_base_addresses)))
         else:
             local_region_indices = self._local_region_indices_for_layer_names(
                 registered_layer_names
             )
-            local_base_addresses_all = self._get_local_base_addresses()
+            local_base_addresses_all = self.local_kv_caches_base_addr
             local_base_addresses = [
                 local_base_addresses_all[i] for i in local_region_indices
             ]
@@ -1811,17 +1911,17 @@ class NixlConnectorWorker:
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
-            # ---- #46407 consumer companion (index-safety) --------------------
+            # ---- P6' FIX-2 consumer companion (index-safety) -----------------
             # The SSM descriptor-id math addresses exactly mamba_region_count =
             # len(_ssm_layer_names(registered)) * 4 desc-groups, starting at the
             # num_fa_descs boundary. So _build_mamba_local must be fed ONLY the
-            # SSM regions — feeding it the re-advertised FA regions (now present
-            # in registered_layer_names) would build 4 garbage mamba desc-groups
-            # per FA region, inflate the mamba section, and shift every real SSM
-            # region's offset -> stale Mamba state -> degenerate decode.
-            # Pre-recovery, registered was all-SSM on a hybrid PP>1 producer so
-            # this filter is a no-op; it becomes load-bearing once any member is
-            # re-advertised. Filter by the producer-advertised name's spec, in the
+            # SSM regions — feeding it FA regions (which FIX-2 now advertises in
+            # registered_layer_names) would build 4 garbage mamba desc-groups per
+            # FA region (FA page stride at a non-SSM region), inflate the mamba
+            # section, and shift every real SSM region's offset -> stale Mamba
+            # state -> degenerate decode. Pre-FIX-2, registered was all-SSM on a
+            # hybrid PP>1 producer so this filter was a no-op; FIX-2 makes it
+            # load-bearing. Filter by the producer-advertised name's spec, in the
             # SAME order _build_fa_local used, so FA/SSM dlist sections stay
             # aligned with region_group_ids / mamba_region_group_ids.
             mamba_region_indices = local_region_indices
@@ -1858,7 +1958,7 @@ class NixlConnectorWorker:
         *,
         remote_pp_rank: int = 0,
         remote_pp_size: int = 1,
-    ) -> str:
+    ) -> str | None:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -1915,12 +2015,108 @@ class NixlConnectorWorker:
             )
             return self._remote_agents[engine_id][shard_key]
 
+        # BUG-7 fix (PP-stage overlap gate): under PP>1 a consumer stage owns
+        # only a subset of layers. The handshake loops ALL producer PP ranks, so
+        # consumer PPj is asked to pair with producer PP-ranks whose layer range
+        # does NOT overlap its own (e.g. consumer PP1 [54,108) vs producer PP0
+        # [0,54)). Registering such a zero-overlap pair builds tp_mappings +
+        # NIXL descriptors with invalid local region indices -> bytes move to
+        # WRONG offsets -> degenerate output (verified: the "suppress the raise"
+        # attempt moved 97MB at wrong slots). So skip the pair ENTIRELY before
+        # any side effect (transfer-topo registration, tp_mappings, descriptor
+        # layout, validation). 3-LLM consensus (gpt-5.4 + gemini-3-pro +
+        # claude-think, unanimous Option A). _local_layer_name_to_region_indices
+        # is fully populated at register_kv_caches (init) time, before any
+        # handshake, and is a superset of local_seen_layer_names (covers dedup'd
+        # pooled members). Returns None for a skipped pair; callers handle None.
+        if not (
+            set(nixl_agent_meta.registered_layer_names)
+            & set(self._local_layer_name_to_region_indices.keys())
+        ):
+            logger.debug(
+                "BUG-7 gate: skipping remote agent (engine_id=%s, pp_rank=%s, "
+                "tp_rank=%s): zero layer overlap with local stage.",
+                engine_id,
+                remote_pp_rank,
+                remote_tp_rank,
+            )
+            return None
+
+        # ---- BUG-10 / ASYMMETRIC PP fix (prefill_PP != decode_PP) -----------
+        # PARTIAL-overlap companion to the BUG-7 zero-overlap gate above. When
+        # the producer and consumer use DIFFERENT pipeline-parallel degrees
+        # (e.g. prefill PP2 [0:54],[54:108] vs decode PP3 [0:36],[36:72],
+        # [72:108]), a producer PP-stage advertises a layer range that only
+        # PARTIALLY overlaps this consumer stage: some advertised layers are
+        # owned here, some are not. The legacy pipeline assumed full containment
+        # (producer_layers ⊆ consumer_layers) and RAISED on the first non-owned
+        # layer (`_local_region_indices_for_layer_names` ->
+        # "producer registered layer ... has no matching local region"),
+        # dropping KV transfers to 0 -> degenerate decode.
+        #
+        # FIX (consumer-only; 3/3 frontier-trio confirmed after code review,
+        # kernel-review/R10-VERDICT.md): build a FILTERED view of the producer
+        # metadata keeping ONLY the advertised layers this consumer stage owns,
+        # then run the existing (symmetric) pipeline on that intersection view —
+        # asymmetric PP reduces to symmetric per shard-pair. This is SOUND
+        # because the consumer REBUILDS the remote NIXL dlist itself
+        # (`prep_xfer_dlist(remote_agent_name, consumer_built_descs)`): the
+        # remote desc-ids index the consumer-built (filtered) dlist, NOT a
+        # producer-global slot space, so renumbering 0..k-1 stays consistent as
+        # long as BOTH the dlist builders and the desc-layout builders see the
+        # SAME filtered meta. `kv_caches_base_addr[i]` is the producer's already
+        # -resolved absolute base for layer i, so kept layers keep correct
+        # addresses; dropped layers contribute nothing the consumer reads. HMA
+        # pools live WITHIN one PP stage (one process/address space) so a pooled
+        # tensor can never straddle a PP boundary — filtering by name never
+        # splits a pool. region_members is filtered BY THE SAME keep-index
+        # (positional, not re-derived by name) to preserve lockstep with
+        # kv_caches_base_addr / block_lens.
+        _local_names = self._local_layer_name_to_region_indices
+        _keep = [
+            i
+            for i, _n in enumerate(nixl_agent_meta.registered_layer_names)
+            if _n in _local_names
+        ]
+        if 0 < len(_keep) < len(nixl_agent_meta.registered_layer_names):
+            logger.info(
+                "BUG-10 asymmetric-PP filter: engine=%s pp_rank=%s tp_rank=%s "
+                "producer advertised %d layers, this consumer stage owns %d -> "
+                "filtering remote meta to the overlap subset.",
+                engine_id,
+                remote_pp_rank,
+                remote_tp_rank,
+                len(nixl_agent_meta.registered_layer_names),
+                len(_keep),
+            )
+            # NOTE: NixlAgentMetadata has NO registered_layer_indices field (the
+            # layer-index coverage lives only in the agent_metadata blob, used by
+            # the vestigial PPLayerMap path which is not on the transfer critical
+            # path). Do NOT pass it to replace() — it raises TypeError
+            # (live-caught: "unexpected keyword argument 'registered_layer_indices'").
+            # Filter only the real fields the descriptor pipeline consumes.
+            nixl_agent_meta = replace(
+                nixl_agent_meta,
+                registered_layer_names=[
+                    nixl_agent_meta.registered_layer_names[i] for i in _keep
+                ],
+                kv_caches_base_addr=[
+                    nixl_agent_meta.kv_caches_base_addr[i] for i in _keep
+                ],
+                block_lens=[nixl_agent_meta.block_lens[i] for i in _keep],
+                region_members=(
+                    [nixl_agent_meta.region_members[i] for i in _keep]
+                    if nixl_agent_meta.region_members
+                    else []
+                ),
+            )
+
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
         assert nixl_agent_meta.pp_rank == remote_pp_rank
         assert nixl_agent_meta.pp_size == remote_pp_size
-        assert len(nixl_agent_meta.registered_layer_indices) > 0
+        assert len(nixl_agent_meta.registered_layer_names) > 0
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
@@ -1930,8 +2126,6 @@ class NixlConnectorWorker:
             remote_block_len=nixl_agent_meta.block_lens[0],
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
             remote_pp_rank=remote_pp_rank,
-            start_layer=nixl_agent_meta.start_layer,
-            end_layer=nixl_agent_meta.end_layer,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info(
@@ -1960,15 +2154,11 @@ class NixlConnectorWorker:
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-        else:
-            assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id][shard_key] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._remote_agent_metadata[engine_id][shard_key] = nixl_agent_meta
-        self._try_update_pp_layer_map(engine_id, remote_pp_size)
         self._validate_remote_agent_handshake(
             nixl_agent_meta,
             remote_pp_rank,
@@ -2005,10 +2195,38 @@ class NixlConnectorWorker:
                 self._expand_remote_members(nixl_agent_meta)
             )
 
+        # [BUG9-REGIONPICK] (efa11-instr) The trio's region-vs-offset discriminator.
+        # For Mamba (member_identity is OFF), compute what member-identity WOULD
+        # resolve (layer-name -> consumer-local region) vs the legacy positional
+        # region index, and log any DIVERGENCE. If the bases diverge -> the bug is
+        # wrong-region-pick (H2 family). If they're identical -> the bug is purely
+        # the desc-offset math (see [BUG9-OFFSET]); H2 would be a no-op. Read-only.
+        if self._has_mamba and not member_identity:
+            _rp_key = (nixl_agent_meta.engine_id, remote_pp_rank)
+            if _rp_key not in getattr(self, "_bug9_rp_seen", set()):
+                if not hasattr(self, "_bug9_rp_seen"):
+                    self._bug9_rp_seen = set()
+                self._bug9_rp_seen.add(_rp_key)
+                try:
+                    _rm = getattr(nixl_agent_meta, "region_members", None) or []
+                    _diverge = []
+                    for _legacy_idx, _members in enumerate(_rm):
+                        for _ln in _members:
+                            _mi = self._member_to_local_region.get(_ln)
+                            if _mi is not None and _mi != _legacy_idx:
+                                _diverge.append((_ln, _legacy_idx, _mi))
+                    logger.info(
+                        "[BUG9-REGIONPICK] key=%s | producer_regions=%s "
+                        "local_regions=%s diverging_members=%s sample=%s",
+                        _rp_key, len(_rm), len(self._member_to_local_region),
+                        len(_diverge), _diverge[:6],
+                    )
+                except Exception as _e:
+                    logger.info("[BUG9-REGIONPICK] dump failed: %s", _e)
+
         # PP-aware: lazily register a local xfer handler for this producer
         # shard's layers + block size (idempotent across (engine, pp_rank,
-        # block_size)). Replaces main's eager call in register_kv_caches plus
-        # the `block_size_ratio > 1` follow-up.
+        # block_size)).
         local_handle_key = (engine_id, remote_pp_rank, nixl_agent_meta.block_size)
         if local_handle_key not in self.src_xfer_handles_by_remote:
             handle, blocks_data = self.register_local_xfer_handler(
@@ -2018,14 +2236,16 @@ class NixlConnectorWorker:
             )
             self.src_xfer_handles_by_remote[local_handle_key] = handle
             self.src_blocks_data_by_remote[local_handle_key] = blocks_data
-            # #46407: recover FA regions dedup'd out of registered_layer_names by
-            # the producer's HMA pooling.
+            # P6' v2 (#46407): recover FA regions dedup'd out of
+            # registered_layer_names by the producer's HMA pooling.
             _fa_local_idx, _fa_local_gid = (
                 self._region_fa_recovery_for_members(nixl_agent_meta)
                 if not member_identity
                 else ((), ())
             )
-            _prod_fa = bool(getattr(nixl_agent_meta, "fa_members_registered", False))
+            _prod_fa = bool(
+                getattr(nixl_agent_meta, "fa_members_registered", False)
+            )
             self._xfer_desc_layouts[(engine_id, remote_pp_rank, "local")] = (
                 _make_shard_desc_layout(
                     self.num_blocks * block_size_ratio,
@@ -2056,6 +2276,10 @@ class NixlConnectorWorker:
                 )
             )
         src_blocks_data = self.src_blocks_data_by_remote[local_handle_key]
+        # _ShardDescLayout has 8 fields (P6' fix added 3: fa_recovered_region_*,
+        # producer_registered_fa_members). This unpack MUST have 8 slots or it
+        # throws `ValueError: too many values to unpack (expected 7)` and the
+        # NIXL handshake fails (live-caught cgk 2026-06-26).
         local_num_blocks, local_region_group_ids, _, _, _, _, _, _ = (
             self._xfer_desc_layouts[(engine_id, remote_pp_rank, "local")]
         )
@@ -2066,6 +2290,49 @@ class NixlConnectorWorker:
                 nixl_agent_meta.registered_layer_names
             )
         )
+
+        # [BUG9-LRI] DECISIVE probe — FA producer-region -> consumer-local-region
+        # + per-side block_len. `add_remote_agent` has no `side` param; key on
+        # the FA local-region mapping only. (Guard the WHOLE block in try/except
+        # so a probe bug can NEVER break the handshake — the cardinal rule.)
+        if self._has_mamba:
+            try:
+                _lri_key = (nixl_agent_meta.engine_id, remote_pp_rank)
+                if _lri_key not in getattr(self, "_bug9_lri_seen", set()):
+                    if not hasattr(self, "_bug9_lri_seen"):
+                        self._bug9_lri_seen = set()
+                    self._bug9_lri_seen.add(_lri_key)
+                    _rln = nixl_agent_meta.registered_layer_names
+                    _rows = []
+                    for _pi, _ln in enumerate(_rln):
+                        _gi = self._layer_name_to_kv_group_index.get(_ln)
+                        if _gi is not None and _is_attention_spec(
+                            self._group_spec_types[_gi]
+                        ):
+                            _li = (
+                                local_region_indices[_pi]
+                                if _pi < len(local_region_indices)
+                                else None
+                            )
+                            _prod_bl = (
+                                nixl_agent_meta.block_lens[_pi]
+                                if _pi < len(nixl_agent_meta.block_lens)
+                                else None
+                            )
+                            _loc_bl = (
+                                self.block_len_per_layer[_li]
+                                if _li is not None
+                                and _li < len(self.block_len_per_layer)
+                                else None
+                            )
+                            _rows.append((_ln, _pi, _li, _prod_bl, _loc_bl))
+                    logger.info(
+                        "[BUG9-LRI] key=%s | FA (layer,prod_idx,local_idx,"
+                        "prod_bl,local_bl)=%s blpl=%s",
+                        _lri_key, _rows[:8], list(self.block_len_per_layer)[:14],
+                    )
+            except Exception as _e:
+                logger.info("[BUG9-LRI] dump failed: %s", _e)
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_handle_key = (engine_id, remote_pp_rank, tp_ratio)
@@ -2082,7 +2349,7 @@ class NixlConnectorWorker:
             for handle_data in self._build_local_splits_from_plan(
                 plan,
                 src_blocks_data,
-                len(local_region_group_ids) * local_num_blocks,
+                len(local_region_group_ids) * self.num_blocks * block_size_ratio,
             ):
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
@@ -2118,22 +2385,27 @@ class NixlConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            # ---- #46407 consumer companion (remote index-safety) -------------
+            # ---- P6' FIX-2 consumer companion (remote index-safety) ----------
             # Symmetric to the local side: _build_mamba_remote iterates ALL of
-            # nixl_agent_meta.kv_caches_base_addr, which the producer grows to
-            # include the re-advertised FA/SSM regions. The remote SSM desc-id
-            # math only addresses the SSM regions (mamba_region_group_ids), so
-            # the FA regions must be filtered OUT of the meta the mamba builder
-            # sees, or the remote mamba section inflates + misaligns exactly like
-            # the local side. Build an SSM-only view of (kv_caches_base_addr,
-            # block_lens) in registered order. The filter fires whenever the
-            # producer re-advertised ANY member (FA or extra SSM); gating on
-            # either flag covers a no-FA / pure multi-group-SSM producer too, and
-            # the filter itself is type-driven (keep only SSM-group regions) so it
-            # is correct regardless of which member types were recovered. No-op
-            # pre-recovery (registered was all-SSM); load-bearing once any region
-            # is re-advertised.
+            # nixl_agent_meta.kv_caches_base_addr, which FIX-2 grows to include
+            # the re-advertised FA regions. The remote SSM desc-id math only
+            # addresses the SSM regions (mamba_region_group_ids), so the FA
+            # regions must be filtered OUT of the meta the mamba builder sees, or
+            # the remote mamba section inflates + misaligns exactly like the
+            # local side. Build an SSM-only view of (kv_caches_base_addr,
+            # block_lens) in registered order. No-op pre-FIX-2 (registered all
+            # SSM); load-bearing once FA regions are advertised.
             mamba_meta = nixl_agent_meta
+            # FIX-9 generality: the SSM-only filter must fire whenever the
+            # producer re-advertised ANY member (FA or extra SSM) — keying on
+            # fa_members_registered alone was sufficient for this hybrid model
+            # (FA always present) but would miss a no-FA / pure multi-group-SSM
+            # producer. Gate on either flag, and make the filter itself
+            # type-driven (keep only SSM-group regions) so it is correct
+            # regardless of WHICH member types were recovered. (No-op pre-recovery
+            # since registered was all-SSM; load-bearing once any region is
+            # re-advertised.) The filter keeps SSM regions in registered order so
+            # the mamba desc-id math (num_fa_descs + region*logical) stays aligned.
             if not member_identity and (
                 getattr(nixl_agent_meta, "fa_members_registered", False)
                 or getattr(nixl_agent_meta, "ssm_members_registered", False)
@@ -2167,8 +2439,8 @@ class NixlConnectorWorker:
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
 
-        # #46407: recover FA regions dedup'd out of registered_layer_names by the
-        # producer's HMA pooling (remote side).
+        # P6' v2 (#46407): recover FA regions dedup'd out of
+        # registered_layer_names by the producer's HMA pooling (remote side).
         _fa_remote_idx, _fa_remote_gid = (
             self._region_fa_recovery_for_members(nixl_agent_meta)
             if not member_identity
@@ -2224,23 +2496,11 @@ class NixlConnectorWorker:
         assert self.transfer_topo is not None
         assert nixl_agent_meta.pp_rank == remote_pp_rank
         assert nixl_agent_meta.pp_size == remote_pp_size
-        total_layers = self.model_config.get_total_num_hidden_layers()
-        assert (
-            0 <= nixl_agent_meta.start_layer < nixl_agent_meta.end_layer <= total_layers
-        )
         assert (
             len(nixl_agent_meta.kv_caches_base_addr)
             == len(nixl_agent_meta.block_lens)
-            == len(nixl_agent_meta.registered_layer_indices)
             == len(nixl_agent_meta.registered_layer_names)
         )
-        assert all(
-            nixl_agent_meta.start_layer <= global_layer_idx < nixl_agent_meta.end_layer
-            for global_layer_idx in nixl_agent_meta.registered_layer_indices
-        )
-        assert nixl_agent_meta.registered_layer_indices == [
-            extract_layer_index(name) for name in nixl_agent_meta.registered_layer_names
-        ]
         # Will raise if any producer layer-name has no matching local region.
         local_region_indices = self._local_region_indices_for_layer_names(
             nixl_agent_meta.registered_layer_names
@@ -2362,11 +2622,24 @@ class NixlConnectorWorker:
                         == remote_block_len_j
                     ), "KV cache sizes must match between P and D when replicated"
         else:
-            # When MLA is not used, this is a list of the same block length
-            for block_len in nixl_agent_meta.block_lens:
-                assert block_len == remote_block_len, (
-                    "All remote layers must have the same block size"
-                )
+            # When MLA is not used, this is a list of the same block length.
+            # P6' FIX-2 (#46407): EXCEPT for hybrid Mamba models. Pre-FIX-2 a
+            # hybrid PP>1 producer advertised an all-Mamba (uniform) block_lens
+            # because the FA regions were dedup'd out — so this all-equal assert
+            # passed by accident. FIX-2 correctly re-advertises FA regions, whose
+            # block_len (FA physical page) legitimately differs from the Mamba
+            # page (the hybrid allocator pads them to a common page_size_bytes,
+            # but the per-region NIXL block_len we record is the FA-half vs the
+            # Mamba page and they are NOT byte-equal). The other two block_len
+            # checks in this function are already `if not self._has_mamba`
+            # gated (replicated-KV branch above + the tp_ratio branch below);
+            # gate this one identically so hybrid mixed block_lens are allowed.
+            # Pure-attention / MLA models keep the strict uniform-size check.
+            if not self._has_mamba:
+                for block_len in nixl_agent_meta.block_lens:
+                    assert block_len == remote_block_len, (
+                        "All remote layers must have the same block size"
+                    )
 
             # HMA hybrid models (mamba+attention) pad block_len to
             # max(attn_page, mamba_page), so the linear tp_ratio scaling
@@ -2574,8 +2847,74 @@ class NixlConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
+            # [BUG9-BYTES] DECISIVE byte-classification of the received FA KV.
+            # Bisects the 3-way model disagreement in ONE run: read the FA
+            # layer's received block + compare its magnitude to (a) zero, (b) the
+            # aliased Mamba region at the SAME base (NIXL-picked-wrong-MR /
+            # GDAKI-class same-base confusion), (c) a sane attention magnitude.
+            # Whole block guarded in try/except — a probe must NEVER break recv.
+            try:
+                if self._has_mamba and not getattr(self, "_bug9_bytes_seen", False):
+                    self._bug9_bytes_seen = True
+                    import torch as _t
+                    _fa_name = next(
+                        (n for n, g in self._layer_name_to_kv_group_index.items()
+                         if n in self.device_kv_caches
+                         and _is_attention_spec(self._group_spec_types[g])),
+                        None,
+                    )
+                    _mm_name = next(
+                        (n for n, g in self._layer_name_to_kv_group_index.items()
+                         if n in self.device_kv_caches
+                         and _is_ssm_spec(self._group_spec_types[g])),
+                        None,
+                    )
+                    _bids = (meta.local_physical_block_ids[0]
+                             if meta.local_physical_block_ids else [])
+                    _b0 = int(_bids[0]) if len(_bids) else 0
+                    def _stat(nm):
+                        if nm is None or nm not in self.device_kv_caches:
+                            return None
+                        c = self.device_kv_caches[nm]
+                        c = c[0] if isinstance(c, (list, tuple)) else c
+                        try:
+                            blk = c[_b0] if c.dim() > 0 else c
+                            return (float(blk.float().abs().mean().item()),
+                                    float(blk.float().abs().max().item()),
+                                    int((blk != 0).sum().item()), tuple(blk.shape))
+                        except Exception:
+                            return ("err",)
+                    logger.info(
+                        "[BUG9-BYTES] req=%s blk0=%s FA(%s)=%s MAMBA(%s)=%s "
+                        "(absmean,absmax,nonzero,shape) — FA==0?bad-src; "
+                        "FA~MAMBA-magnitude?wrong-MR; FA sane & distinct?wrong-block",
+                        req_id, _b0, _fa_name, _stat(_fa_name), _mm_name, _stat(_mm_name),
+                    )
+            except Exception as _e:
+                logger.info("[BUG9-BYTES] probe failed: %s", _e)
+
             # post processing for heteroblocksize
-            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id, 0)
+            # BUG-8 fix (read-path twin of BUG-7): this hardcoded remote pp_rank=0
+            # assumes producer PP0 is always registered on this consumer. Under the
+            # BUG-7 overlap gate a consumer stage (e.g. decode PP1) does NOT register
+            # the non-overlapping producer PP0, so get_engine_info(engine_id, 0)
+            # raises KeyError -> decode worker dies mid-generation. block geometry
+            # (block_size) is identical across the producer's PP ranks, so read it
+            # from ANY remote pp_rank actually registered for this engine. Prefer 0
+            # when present (unchanged behavior for PP1/non-PP); else the first
+            # registered rank for this engine.
+            _remote_pp = (
+                0
+                if (meta.remote.engine_id, 0) in self.transfer_topo._engines
+                else next(
+                    pp
+                    for (eid, pp) in self.transfer_topo._engines
+                    if eid == meta.remote.engine_id
+                )
+            )
+            remote_info = self.transfer_topo.get_engine_info(
+                meta.remote.engine_id, _remote_pp
+            )
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
             )
@@ -2860,24 +3199,26 @@ class NixlConnectorWorker:
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        # Callers gate on _handshake_complete, which already populates _pp_layer_map.
-        pp_map = self._pp_layer_map[engine_id]
-
-        # Expand to kernel block ids per remote PP stage (each may have a
-        # different physical_blocks_per_logical), not once with rank 0's.
-        # Keep meta.remote logical: it's reused on retry/failure paths.
-        logical_remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
-        full_prefix_hit = len(local_block_ids) == 0
-
-        for remote_pp_rank in range(pp_map.pp_size):
+        # A request's KV is spread across the remote producer's PP stages; read
+        # each stage in turn (its own layer range, TP mapping and block geometry).
+        for remote_pp_rank in range(self._remote_pp_size[engine_id]):
+            # BUG-7 fix: the overlap gate in add_remote_agent skips zero-overlap
+            # (engine_id, remote_pp_rank) pairs, so no tp_mappings entry exists
+            # for them. Skip those producer stages here (this consumer stage
+            # owns none of their layers). Without this guard we'd KeyError.
+            if (engine_id, remote_pp_rank) not in self.tp_mappings:
+                continue
             plan = self.tp_mappings[(engine_id, remote_pp_rank)]
             remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
+            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+
+            # Keep meta.remote.block_ids logical (reused on retry); expand to
+            # kernel block ids per stage, whose geometry may differ.
             remote_block_ids = self._logical_to_remote_kernel_block_ids(
-                logical_remote_block_ids,
+                meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
-            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+            local_block_ids = meta.local_physical_block_ids
             num_groups = len(local_block_ids)
             read_specs = [
                 ReadSpec(
@@ -2920,9 +3261,8 @@ class NixlConnectorWorker:
                     # Remote tp_size > local tp_size: we must perform multiple
                     # reads. Get the memory chunk onto which we will write to.
                     assert remote_block_size == self.block_size
-                    split_key = (engine_id, remote_pp_rank, tp_ratio)
                     local_xfer_side_handle = self.src_xfer_handles_by_shard_tp_ratio[
-                        split_key
+                        (engine_id, remote_pp_rank, tp_ratio)
                     ][i]
                 else:
                     # Single read from remote, we write to the whole memory region.
@@ -2947,21 +3287,21 @@ class NixlConnectorWorker:
                     remote_xfer_side_handle=remote_xfer_side_handle,
                 )
 
+            if self.use_mla and tp_ratio < 0 and read_specs:
                 # ..but we still need to notify the other remote ranks that we
                 # have the blocks we need so they can update the request state.
-                if self.use_mla and tp_ratio < 0:
-                    notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-                    remote_agents = self._remote_agents[meta.remote.engine_id]
-                    for (pp_rank, rank_to_notify), agent in remote_agents.items():
-                        if (
-                            pp_rank == remote_pp_rank
-                            and rank_to_notify != spec.remote_rank
-                        ):
-                            self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+                remote_agents = self._remote_agents[meta.remote.engine_id]
+                for (pp_rank, rank_to_notify), agent in remote_agents.items():
+                    if (
+                        pp_rank == remote_pp_rank
+                        and rank_to_notify != read_specs[0].remote_rank
+                    ):
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
-        if full_prefix_hit:
-            # Notification-only path: the scheduler did not wait for remote KV,
-            # so there is no recv completion to report.
+        if len(meta.local_physical_block_ids) == 0:
+            # Full prefix hit: no remote read happens, so no recv completion will
+            # report this request — drop its pending-recv metadata here.
             self._recving_metadata.pop(req_id, None)
 
     def _read_blocks(
@@ -3061,19 +3401,61 @@ class NixlConnectorWorker:
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
-        remote_block_descs_ids = self._get_block_descs_ids_for_shard(
-            dst_engine_id,
-            remote_pp_rank,
-            "remote",
-            remote_block_ids,
+        # Get descs ids. A single-stage (pp_size == 1) producer registers all of
+        # the engine's KV regions, so compute ids against the whole-engine layout
+        # (which also covers Mamba FA/SSM and cross-layer blocks). Per-PP-stage
+        # descriptor sharding is only needed when the producer is pipelined.
+        #
+        # CANDIDATE-A-P1D2 (P1->D2 consumer desc-id overflow fix): the whole-engine
+        # fast path computes num_fa_descs = self.num_regions * num_blocks in
+        # _compute_desc_ids and uses it BOTH as the FA broadcast width AND as the
+        # FA/SSM boundary offset. self.num_regions is THIS worker's full local
+        # region count. That boundary is only correct when the consumer is ALSO
+        # single-stage: a pipelined consumer (Decode-PP>1) has its per-transfer
+        # remote/local dlist rebuilt from the BUG-10 asymmetric-PP-filtered meta
+        # (fewer regions than self.num_regions), so self.num_regions overshoots the
+        # FA/SSM boundary and the FIRST SSM desc id lands past the rebuilt dlist
+        # (nixl makeXferReq "local index out of range" -> KV read rejected -> stale
+        # SSM state -> coherent-but-wrong decode). Measured P1->D2: num_fa_descs =
+        # 60*609765 = 36585900 == the exact remote dlist bound, first SSM desc
+        # overflows to 37486477. This is the "P and D disagree on num_fa_descs (the
+        # layer-subset offset bug)" case named at the [BUG9-OFFSET] comment below.
+        # "Threading the filtered per-transfer region count into the FA/SSM
+        # boundary" (the intended consumer fix) is EXACTLY what the per-shard path
+        # already does: it derives num_fa_descs = len(region_group_ids) * num_blocks
+        # from the filtered per-side layout (self-consistent for FA broadcast AND
+        # offset), and it is the instrumented path ([BUG9-OFFSET]/[BUG9-FAEMIT]).
+        # So route the pipelined-consumer case there. Fast path preserved for the
+        # proven P1->D1 / P2->D1 topologies (consumer PP==1, no BUG-10 filtering).
+        _consumer_single_stage = (
+            self.vllm_config.parallel_config.pipeline_parallel_size == 1
         )
-        local_block_descs_ids = self._get_block_descs_ids_for_shard(
-            dst_engine_id,
-            remote_pp_rank,
-            "local",
-            local_block_ids,
-        )
+        if self._remote_pp_size[dst_engine_id] == 1 and _consumer_single_stage:
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=remote_physical_per_logical,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            )
+        else:
+            remote_block_descs_ids = self._get_block_descs_ids_for_shard(
+                dst_engine_id,
+                remote_pp_rank,
+                "remote",
+                remote_block_ids,
+            )
+            local_block_descs_ids = self._get_block_descs_ids_for_shard(
+                dst_engine_id,
+                remote_pp_rank,
+                "local",
+                local_block_ids,
+            )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -3126,27 +3508,128 @@ class NixlConnectorWorker:
             producer_registered_fa_members,
         ) = self._xfer_desc_layouts[(engine_id, remote_pp_rank, side)]
 
+        # BUG-9 instrumentation (efa10-instr): emit the STRUCTURE once per
+        # (engine, pp_rank, side) so we can decide the 3 competing hypotheses
+        # from ground truth, not inference:
+        #  Q1 (FA-gap): region_group_ids interleaves FA + SSM groups, so the FA
+        #     loop's enumerate `region_id` counts skipped-SSM slots -> FA descs
+        #     land at shifted offsets. Visible if spec-types below interleave.
+        #  Q2 (x4 sub-region): mamba_region_group_ids has each SSM group repeated
+        #     4x (the conv/ssm expansion); enumerate region_id 0..count maps 4
+        #     consecutive ids to the SAME group_id reading the same block range.
+        #  Q3 (region-order): consumer's local region order != the producer pp
+        #     stage's order the bytes were written in.
+        _instr_key = (engine_id, remote_pp_rank, side)
+        if not hasattr(self, "_bug9_instr_seen"):
+            self._bug9_instr_seen = set()
+        if _instr_key not in self._bug9_instr_seen:
+            self._bug9_instr_seen.add(_instr_key)
+            try:
+                _rg_specs = [
+                    "SSM" if _is_ssm_spec(self._group_spec_types[g]) else "FA"
+                    for g in region_group_ids
+                ]
+                _mg_specs = [
+                    "SSM" if _is_ssm_spec(self._group_spec_types[g]) else "FA"
+                    for g in mamba_region_group_ids
+                ]
+                logger.info(
+                    "[BUG9-INSTR] key=%s | num_blocks=%s pblk/log=%s mamba_count=%s "
+                    "| region_group_ids(len=%s)=%s specs=%s "
+                    "| mamba_region_group_ids(len=%s)=%s specs=%s "
+                    "| num_groups(block_ids)=%s group_spec_types=%s",
+                    _instr_key,
+                    num_blocks,
+                    physical_blocks_per_logical,
+                    mamba_region_count,
+                    len(region_group_ids),
+                    list(region_group_ids),
+                    _rg_specs,
+                    len(mamba_region_group_ids),
+                    list(mamba_region_group_ids),
+                    _mg_specs,
+                    len(block_ids) if hasattr(block_ids, "__len__") else "?",
+                    list(self._group_spec_types),
+                )
+            except Exception as _e:  # instrumentation must never break serving
+                logger.info("[BUG9-INSTR] dump failed: %s", _e)
+
+        # P6' v2 (#46407): report the FA members that the producer dedup'd out
+        # of registered_layer_names by HMA pooling. region_members is the only
+        # non-collapsed source of these names (registered_layer_names is FA-free
+        # on a hybrid model — every representative is a Mamba layer). See
+        # _region_fa_recovery_for_members for the full root-cause writeup.
+        if fa_recovered_region_indices and _instr_key not in getattr(
+            self, "_bug9_farec_seen", set()
+        ):
+            if not hasattr(self, "_bug9_farec_seen"):
+                self._bug9_farec_seen = set()
+            self._bug9_farec_seen.add(_instr_key)
+            logger.info(
+                "[BUG9-FAREC] key=%s | recovered_fa_regions=%s fa_group_ids=%s "
+                "(FA members dedup'd behind a Mamba representative under PP+HMA). "
+                "NOTE: producer block_lens are Mamba-sized for these regions, so "
+                "no FA-granularity descriptor slot exists in its dlist — a "
+                "consumer-only fix CANNOT transfer them; the producer must "
+                "register the dedup'd FA member as its own NIXL region.",
+                _instr_key,
+                list(fa_recovered_region_indices),
+                list(fa_recovered_region_group_ids),
+            )
+
         desc_ids = []
+        _fa_emit_dbg = []  # [BUG9-FAEMIT] (region_id, group_id, first_desc_id, n_blocks)
         for region_id, group_id in enumerate(region_group_ids):
             if self._has_mamba and _is_ssm_spec(self._group_spec_types[group_id]):
                 continue
             group_arr = np.asarray(block_ids[group_id], dtype=np.int64)
             if group_arr.size > 0:
                 desc_ids.append(region_id * num_blocks + group_arr)
+                if len(_fa_emit_dbg) < 14:
+                    _fa_emit_dbg.append(
+                        (region_id, int(group_id), int(region_id * num_blocks + group_arr[0]), int(group_arr.size))
+                    )
+        # [BUG9-FAEMIT] DECISIVE: which (region_id, group_id) the FA loop emits +
+        # the first desc_id, vs producer physical regions (=12) and num_fa_descs.
+        # If FA region_ids 12-23 emit desc_ids that overrun the producer's actual
+        # dlist (which has only producer_regions*num_blocks K-entries before V),
+        # the read targets wrong bytes. Compare first_desc_id to num_fa_descs and
+        # to the K/V doubled layout.
+        if self._has_mamba:
+            _fe_key = (engine_id, remote_pp_rank, side)
+            if _fe_key not in getattr(self, "_bug9_faemit_seen", set()):
+                if not hasattr(self, "_bug9_faemit_seen"):
+                    self._bug9_faemit_seen = set()
+                self._bug9_faemit_seen.add(_fe_key)
+                try:
+                    logger.info(
+                        "[BUG9-FAEMIT] key=%s | num_blocks=%s len(rgi)=%s "
+                        "emitted(region_id,group_id,first_desc,nblk)=%s "
+                        "total_fa_desc_groups=%s",
+                        _fe_key, num_blocks, len(region_group_ids),
+                        _fa_emit_dbg, len(desc_ids),
+                    )
+                except Exception as _e:
+                    logger.info("[BUG9-FAEMIT] dump failed: %s", _e)
 
-        # #46407: emit FA descriptors for regions whose FA member was dedup'd out
-        # of region_group_ids by the producer's HMA pooling. GUARD (honesty gate):
-        # this is ONLY sound when the producer registered a distinct
-        # FA-granularity NIXL region for the dedup'd member, growing its dlist
-        # (and the descriptor-id space) accordingly — advertised via
-        # producer_registered_fa_members. A bounds check alone is INSUFFICIENT:
-        # the recovered region indices are in range even for a v6 producer, yet
-        # its block_lens for those regions are Mamba-sized, so _ridx * num_blocks
-        # would index a Mamba region's bytes with the wrong layout. When the
-        # producer re-advertises (v7/v8), each dedup'd FA member becomes its own
-        # representative in region_group_ids, so the FA loop above already emits
-        # it and _region_fa_recovery_for_members returns empty — this block is the
-        # gated fallback that never moves bytes to a wrong offset.
+        # P6' v2 (#46407): emit FA descriptors for regions whose FA member was
+        # dedup'd out of region_group_ids by the producer's HMA pooling.
+        #
+        # GUARD (honesty gate — soundness, not just bounds): this is ONLY sound
+        # when the producer registered a distinct FA-granularity NIXL region for
+        # the dedup'd member, growing its dlist (and the descriptor-id space)
+        # accordingly. That requires a PRODUCER-SIDE companion change which is
+        # NOT in the as-tested image. A bounds check (`_ridx < len(region_group_ids)`)
+        # is INSUFFICIENT: on the as-tested image the recovered region indices
+        # (0..5) are all in range, yet `block_lens` for those regions are
+        # Mamba-sized, so `_ridx * num_blocks` would index into a Mamba region's
+        # bytes with the wrong layout — i.e. exactly the wrong-offset failure we
+        # are trying to fix. We therefore gate emission on an EXPLICIT producer
+        # capability flag advertised in the handshake metadata
+        # (`fa_members_registered`), which defaults False. Until the producer
+        # sets it (and registers the FA regions), we emit NOTHING for these
+        # members and rely on [BUG9-FAREC] above to report the gap — never
+        # moving bytes to a wrong offset.
         if (
             self._has_mamba
             and fa_recovered_region_indices
@@ -3169,6 +3652,32 @@ class NixlConnectorWorker:
             assert len(mamba_region_group_ids) == mamba_region_count
             logical_blocks = num_blocks // physical_blocks_per_logical
             num_fa_descs = len(region_group_ids) * num_blocks
+            # [BUG9-OFFSET] (efa11-instr) The trio's offset discriminator: dump
+            # num_fa_descs + logical_blocks + the first SSM desc_id for THIS side.
+            # Comparing the side="local" vs side="remote" log lines reveals whether
+            # P and D disagree on num_fa_descs (the layer-subset offset bug) — that
+            # disagreement is invisible to the region-routing fix (H2).
+            if _instr_key not in getattr(self, "_bug9_offset_seen", set()):
+                if not hasattr(self, "_bug9_offset_seen"):
+                    self._bug9_offset_seen = set()
+                self._bug9_offset_seen.add(_instr_key)
+                try:
+                    _first_ssm = None
+                    for _rid, _gid in enumerate(mamba_region_group_ids):
+                        if _is_ssm_spec(self._group_spec_types[_gid]):
+                            _ga = np.asarray(block_ids[_gid], dtype=np.int64)
+                            if _ga.size > 0:
+                                _first_ssm = int(num_fa_descs + _rid * logical_blocks + _ga[0])
+                                break
+                    logger.info(
+                        "[BUG9-OFFSET] key=%s | num_fa_descs=%s logical_blocks=%s "
+                        "num_blocks=%s len(region_group_ids)=%s mamba_region_count=%s "
+                        "first_ssm_desc_id=%s",
+                        _instr_key, num_fa_descs, logical_blocks, num_blocks,
+                        len(region_group_ids), mamba_region_count, _first_ssm,
+                    )
+                except Exception as _e:
+                    logger.info("[BUG9-OFFSET] dump failed: %s", _e)
             for region_id, group_id in enumerate(mamba_region_group_ids):
                 if not _is_ssm_spec(self._group_spec_types[group_id]):
                     continue
@@ -3281,9 +3790,25 @@ class NixlConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
-                    assert num_local_blocks == num_remote_blocks
+                if (
+                    _is_ssm_spec(self._group_spec_types[i])
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
+                    # prior to the last one are placeholders (null blocks). Mind that
+                    # this doesn't really impact transfer, as we only still care about
+                    # the last "block", the full in-place state.
+                    assert num_local_blocks == 1, "SSM can only have one local block"
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif (
+                    self._physical_blocks_per_logical_kv_block
+                    == remote_physical_per_logical
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
+                    # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
                         self._physical_blocks_per_logical_kv_block,
                         remote_physical_per_logical,
@@ -3429,3 +3954,4 @@ class NixlConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
+
