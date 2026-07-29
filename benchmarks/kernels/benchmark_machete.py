@@ -221,7 +221,12 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         )
 
     w_q = ops.gptq_marlin_repack(
-        bt.w_q, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
+        bt.w_q,
+        bt.w_ref.shape[0],
+        bt.w_ref.shape[1],
+        bt.wtype.size_bits,
+        is_a_8bit=bt.a.dtype == torch.int8,
+        is_w4a8_int8=(bt.a.dtype == torch.int8 and bt.wtype == scalar_types.uint4b8),
     )
 
     if bt.a.dtype.is_floating_point:

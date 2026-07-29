@@ -11,7 +11,8 @@
 
 namespace marlin {
 
-template <int const num_threads, int const num_bits, bool is_a_8bit>
+template <int const num_threads, int const num_bits, bool is_a_8bit,
+          bool use_ldmatrix_s4>
 __global__ void gptq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {
@@ -135,9 +136,24 @@ __global__ void gptq_marlin_repack_kernel(
         target_tile_k_size * target_tile_n_size / pack_factor;
     int out_offset = (k_tile_id * n_tiles + n_tile_id) * tile_size;
 
-    // Result of:
-    // https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
-    if constexpr (!is_a_8bit && num_bits == 4) {
+    if constexpr (use_ldmatrix_s4) {
+      static_assert(is_a_8bit && num_bits == 4);
+      uint16_t res[2] = {};
+#pragma unroll
+      for (int j = 0; j < 2; j++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+          res[j] |= (vals[j * 4 + i] ^ 0x8) << (i * 4);
+        }
+      }
+
+      uint16_t* out_s4_ptr = reinterpret_cast<uint16_t*>(&out_ptr[out_offset]);
+      out_s4_ptr[warp_id * 32 + th_id] = res[0];
+      out_s4_ptr[(warp_id + 4) * 32 + th_id] = res[1];
+
+    } else if constexpr (!is_a_8bit && num_bits == 4) {
+      // Result of:
+      // https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
       int pack_idx[8] = {0, 2, 4, 6, 1, 3, 5, 7};
 
       uint32_t res = 0;
@@ -205,21 +221,23 @@ __global__ void gptq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-#define CALL_IF(NUM_BITS, IS_A_8BIT)                                        \
-  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT) {                \
+#define CALL_IF(NUM_BITS, IS_A_8BIT, USE_LDMATRIX_S4)                       \
+  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT &&                \
+           use_ldmatrix_s4 == USE_LDMATRIX_S4) {                            \
     cudaFuncSetAttribute(                                                   \
         marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
-                                          IS_A_8BIT>,                       \
+                                          IS_A_8BIT, USE_LDMATRIX_S4>,      \
         cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
     marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
-                                      IS_A_8BIT>                            \
+                                      IS_A_8BIT, USE_LDMATRIX_S4>           \
         <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
             b_q_weight_ptr, out_ptr, size_k, size_n);                       \
   }
 
 torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
                                          int64_t size_k, int64_t size_n,
-                                         int64_t num_bits, bool is_a_8bit) {
+                                         int64_t num_bits, bool is_a_8bit,
+                                         bool is_w4a8_int8) {
   // Verify compatibility with marlin tile of 16x64
   STD_TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
                   " is not divisible by tile_k_size = ", marlin::tile_k_size);
@@ -228,6 +246,8 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
 
   STD_TORCH_CHECK(num_bits == 4 || num_bits == 8,
                   "num_bits must be 4 or 8. Got = ", num_bits);
+  STD_TORCH_CHECK(!is_w4a8_int8 || (num_bits == 4 && is_a_8bit),
+                  "is_w4a8_int8 requires 4-bit weights and 8-bit activations");
   int const pack_factor = 32 / num_bits;
 
   // Verify B
@@ -254,6 +274,8 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       b_q_weight.scalar_type(), std::nullopt, b_q_weight.device());
 
+  bool use_ldmatrix_s4 = is_w4a8_int8 && num_bits == 4 && is_a_8bit &&
+                         marlin::supports_ldmatrix_s4(device_index);
   // Get ptrs
   uint32_t const* b_q_weight_ptr =
       reinterpret_cast<uint32_t const*>(b_q_weight.const_data_ptr());
@@ -269,20 +291,30 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
 
   if (false) {
   }
-  CALL_IF(4, false)
-  CALL_IF(8, false)
+  CALL_IF(4, false, false)
+  CALL_IF(8, false, false)
 
-  CALL_IF(4, true)
-  CALL_IF(8, true)
+  CALL_IF(4, true, false)
+  CALL_IF(4, true, true)
+  CALL_IF(8, true, false)
 
   else {
     STD_TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
-                    ", is_a_8bit = ", is_a_8bit);
+                    ", is_a_8bit = ", is_a_8bit,
+                    ", is_w4a8_int8 = ", is_w4a8_int8);
   }
 
   return out;
 }
 
+bool marlin_uses_ldmatrix_s4(torch::stable::Tensor& tensor) {
+  if (!tensor.is_cuda()) {
+    return false;
+  }
+  return marlin::supports_ldmatrix_s4(tensor.get_device_index());
+}
+
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("gptq_marlin_repack", TORCH_BOX(&gptq_marlin_repack));
+  m.impl("marlin_uses_ldmatrix_s4", TORCH_BOX(&marlin_uses_ldmatrix_s4));
 }
