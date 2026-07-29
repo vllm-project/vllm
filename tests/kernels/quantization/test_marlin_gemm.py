@@ -294,35 +294,38 @@ def test_gptq_marlin_repack(
 )
 def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
     size_k, size_n = 128, 64
-    q_w = torch.arange(size_k * size_n, dtype=torch.int32, device="cuda").reshape(
+    linear = torch.arange(size_k * size_n, dtype=torch.int32, device="cuda").reshape(
         size_k, size_n
     )
-    q_w %= 16
-    q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+    if not ops.marlin_uses_ldmatrix_s4(linear):
+        pytest.skip("Requires the CUDA 13.4 Hopper ldmatrix.s8.s4 path.")
+
     perm = torch.empty(0, dtype=torch.int32, device="cuda")
+    weight_perm = get_weight_perm(4, True, use_ldmatrix_s4=True)
 
-    use_ldmatrix_s4 = ops.marlin_uses_ldmatrix_s4(q_w_gptq)
-    weight_perm = get_weight_perm(4, True, use_ldmatrix_s4)
-    expected = marlin_weights(
-        q_w,
-        size_k,
-        size_n,
-        4,
-        weight_perm,
-        is_a_8bit=True,
-        use_ldmatrix_s4=use_ldmatrix_s4,
-    )
-    actual = ops.gptq_marlin_repack(
-        q_w_gptq,
-        perm,
-        size_k,
-        size_n,
-        4,
-        is_a_8bit=True,
-        is_w4a8_int8=True,
-    )
+    for shift in range(0, 13, 4):
+        q_w = (linear >> shift) & 0xF
+        q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+        expected = marlin_weights(
+            q_w,
+            size_k,
+            size_n,
+            4,
+            weight_perm,
+            is_a_8bit=True,
+            use_ldmatrix_s4=True,
+        )
+        actual = ops.gptq_marlin_repack(
+            q_w_gptq,
+            perm,
+            size_k,
+            size_n,
+            4,
+            is_a_8bit=True,
+            is_w4a8_int8=True,
+        )
 
-    torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(
