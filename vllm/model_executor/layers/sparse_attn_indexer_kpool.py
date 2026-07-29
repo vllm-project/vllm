@@ -5,6 +5,12 @@
 import os
 
 import torch
+from zllm.vllm.models.glm5next.nvidia.ops.kpool_compress import (
+    append_tail_to_topk,
+    expand_pools_to_tokens,
+    kpool_compress_and_write_cache,
+    kpool_decode_update_and_maybe_write_cache,
+)
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -29,12 +35,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.attention.ops.kpool_compress import (
-    append_tail_to_topk,
-    expand_pools_to_tokens,
-    kpool_compress_and_write_cache,
-    kpool_decode_update_and_maybe_write_cache,
-)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cuda_alike():
