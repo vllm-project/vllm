@@ -260,6 +260,24 @@ return self._trace_dispatch(self.dispatch)(
 `WarmupIntRange(start, stop, step)` follows Python `range(...)` semantics:
 `start` is inclusive, `stop` is exclusive, and `step` defaults to 1.
 
+For non-linear integer sequences, use `advance` to provide the action that
+computes each next value:
+
+```python
+return self._trace_dispatch(self.dispatch)(
+    num_tokens=WarmupIntRange(
+        1,
+        max_tokens + 1,
+        advance=lambda value: next_power_of_2(value) + 1,
+    ),
+)
+```
+
+This is useful for traversing specialization boundaries without enumerating
+every integer. `advance` cannot be combined with a non-default `step`, and it
+must return a value greater than its input so expansion always makes forward
+progress.
+
 ### Independent Alternatives
 
 Use tuples or lists for independent alternatives. Multiple expanded inputs form
