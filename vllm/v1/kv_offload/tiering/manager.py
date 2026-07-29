@@ -91,8 +91,8 @@ class RequestState:
 class _TierState:
     active_promotion_count: int = 0
     active_cascade_count: int = 0
-    primary_write_block_ids: set[int] = field(default_factory=set)
-    primary_read_block_ids: set[int] = field(default_factory=set)
+    primary_write_block_count: int = 0
+    primary_read_block_count: int = 0
 
 
 class _JobMetadata(NamedTuple):
@@ -252,6 +252,7 @@ class TieringOffloadingManager(OffloadingManager):
             tier: _SecondaryTierFacingParent(self, tier, tier_idx)
             for tier_idx, tier in enumerate(self.secondary_tiers)
         }
+
         # Buffers manager-level observations (e.g. lookup delay) between
         # get_stats() calls; merged in and reset each time get_stats() runs.
         self._stats = OffloadingConnectorStats()
@@ -269,13 +270,13 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
         self._jobs[transfer_job.job_id] = _JobMetadata(transfer_job, tier_idx)
         state = self._tier_states[tier_idx]
-        block_ids = {int(block_id) for block_id in transfer_job.block_ids}
+        block_count = len(transfer_job.block_ids)
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
-            state.primary_write_block_ids.update(block_ids)
+            state.primary_write_block_count += block_count
         else:
             state.active_cascade_count += 1
-            state.primary_read_block_ids.update(block_ids)
+            state.primary_read_block_count += block_count
 
     def _pop_job(self, job_id: JobId) -> _JobMetadata | None:
         job_metadata = self._jobs.pop(job_id, None)
@@ -284,13 +285,17 @@ class TieringOffloadingManager(OffloadingManager):
 
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
-        block_ids = {int(block_id) for block_id in transfer_job.block_ids}
+        block_count = len(transfer_job.block_ids)
         if transfer_job.is_promotion:
+            assert state.active_promotion_count > 0
             state.active_promotion_count -= 1
-            state.primary_write_block_ids.difference_update(block_ids)
+            state.primary_write_block_count -= block_count
+            assert state.primary_write_block_count >= 0
         else:
+            assert state.active_cascade_count > 0
             state.active_cascade_count -= 1
-            state.primary_read_block_ids.difference_update(block_ids)
+            state.primary_read_block_count -= block_count
+            assert state.primary_read_block_count >= 0
         return job_metadata
 
     def _record_finished_job_stats(
@@ -330,8 +335,8 @@ class TieringOffloadingManager(OffloadingManager):
         num_primary_blocks = self.primary_tier._num_blocks
         for tier_idx, state in enumerate(self._tier_states):
             labelvalues = self._tier_label(tier_idx)
-            write_blocks = len(state.primary_write_block_ids)
-            read_blocks = len(state.primary_read_block_ids)
+            write_blocks = state.primary_write_block_count
+            read_blocks = state.primary_read_block_count
             write_usage = (
                 write_blocks / num_primary_blocks if num_primary_blocks > 0 else 0.0
             )
@@ -361,12 +366,12 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _observe_lookup(
         self,
-        req_state: RequestState | None,
+        req_state: RequestState,
         labelvalues: TierLabel,
         key: OffloadKey,
         result: LookupResult,
     ) -> None:
-        if req_state is None or req_state.observed_lookups is None:
+        if req_state.observed_lookups is None:
             return
         observed = req_state.observed_lookups.setdefault(labelvalues, set())
         if key in observed:
@@ -504,6 +509,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         primary_hit = self.primary_tier.lookup(key, req_context)
         if primary_hit in (LookupResult.HIT, LookupResult.MISS):
+            assert req_state is not None
             self._observe_lookup(req_state, _PRIMARY_TIER_LABEL, key, primary_hit)
         if primary_hit is LookupResult.HIT:
             return LookupResult.HIT
@@ -520,6 +526,7 @@ class TieringOffloadingManager(OffloadingManager):
             labelvalues = self._tier_label(i)
             result = tier.lookup(key, req_context)
             if result in (LookupResult.HIT, LookupResult.MISS):
+                assert req_state is not None
                 self._observe_lookup(req_state, labelvalues, key, result)
             if result is LookupResult.HIT:
                 promoted = self._initiate_promotion(tier, key, req_context)
@@ -833,7 +840,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-        tier_idx: int | None = None,
+        tier_idx: int,
     ) -> TransferJob:
         """Pin blocks in the primary tier and create a tracked store job.
 
@@ -854,8 +861,7 @@ class TieringOffloadingManager(OffloadingManager):
             is_promotion=False,
             req_context=req_context,
         )
-        if tier_idx is not None:
-            self._register_job(job_metadata, tier_idx)
+        self._register_job(job_metadata, tier_idx)
         return job_metadata
 
     @override
@@ -998,11 +1004,19 @@ class TieringOffloadingManager(OffloadingManager):
         # All tier I/O has stopped; consume their completion notifications
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
+        assert not self._jobs
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        assert all(
+            state.active_promotion_count == 0
+            and state.active_cascade_count == 0
+            and state.primary_write_block_count == 0
+            and state.primary_read_block_count == 0
+            for state in self._tier_states
+        )
 
         finished_req_ids = []
         for req_id, state in self._req_state.items():

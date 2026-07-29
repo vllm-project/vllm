@@ -242,6 +242,45 @@ def test_tiering_manager_records_secondary_lookup_metrics():
     assert ("1:fs",) not in values[TieringOffloadingMetrics.BLOCK_HITS]
 
 
+def test_tiering_manager_stops_lookup_metrics_after_allocation():
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="fs",
+    )
+    tier.lookup_result = LookupResult.HIT
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[tier],
+    )
+    manager.on_new_request(_CTX)
+
+    key = to_keys([1])[0]
+    assert manager.lookup(key, _CTX) is LookupResult.RETRY
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("0:primary",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_QUERIES][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.BLOCK_HITS][("1:fs",)] == 1
+
+    manager.on_schedule_end(
+        ScheduleEndContext(new_req_ids=(_CTX.req_id,), preempted_req_ids=())
+    )
+    assert manager.lookup(key, _CTX) is LookupResult.HIT_PENDING
+
+    stats = manager.get_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.BLOCK_QUERIES not in values
+    assert TieringOffloadingMetrics.BLOCK_HITS not in values
+
+
 def test_tiering_manager_records_finished_job_metrics():
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
