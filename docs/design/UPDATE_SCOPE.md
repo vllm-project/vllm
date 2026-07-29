@@ -1,74 +1,196 @@
-# Weight Update Scope
+# Load Receipts and Weight Update Scopes
 
-## Status
+## Status and purpose
 
-This document defines the implementation plan for explicit weight-update
-scopes. It complements `TRANSACTION.md`; it does not move the existing arena
-verification points or claim to provide rollback.
+This document describes the end-to-end completion protocol implemented by load
+receipts and explicit update scopes. It complements `TRANSACTION.md`: this
+document owns the identity, baseline, scope-resolution, receipt, and
+reconciliation flow, while `TRANSACTION.md` covers the wider reload transaction,
+including storage stability and the engine-level commit decision.
 
-## Goals
+The protocol answers four questions for every update:
 
-An update declares exactly which model state it is allowed to change. The
-declaration is also the completion contract:
+1. What state is the caller allowed to change?
+2. What logical load events must each worker observe?
+3. Did the transport deliver the declared sources and did loaders consume the
+   expected target fragments?
+4. Is the worker allowed to report success?
 
-- omitted state outside the scope is preserved;
-- missing state inside the scope fails completion;
-- state received outside an explicit scope is rejected;
-- checkpoint-format partial updates never split a post-load processing unit;
-- a LoRA update replaces or removes one complete adapter while preserving the
-  base model.
+It does not provide rollback for base-weight updates. A failed base update is
+rejected and serving must not resume with that worker's partially mutated model.
+LoRA replacement is different: it stages a complete adapter before replacing the
+live adapter.
 
-Transport chunks are not scopes. In particular, splitting a full checkpoint or
-adapter into IPC/NCCL buckets does not make each bucket a partial update.
+## Concepts
 
-## Scope kinds
+### Load receipt
 
-### Full checkpoint weights
+A `LoadReceipt` is the result of one logical `weight_loader` invocation:
 
-The default and backward-compatible scope. Every source/target/fragment event
-observed during the initial real checkpoint load is required.
+```text
+LoadReceipt(
+    consumed=True | False,
+    fragment=(loaded_shard_id=q, expert_id=7, ...),
+    collision_policy=unique | overwrite,
+)
+```
 
-### Partial checkpoint weights
+`consumed=False` means that the loader deliberately skipped the source, for
+example because an expert does not belong to the local EP rank. A skipped call
+does not enter the completion baseline.
 
-The caller declares exact checkpoint source names. Each worker resolves those
-names against its rank-local initial-load manifest. A selected source expands
-to every local target fragment it drove during the baseline load.
+The fragment identifies the logical part of a packed target. Examples include
+Q/K/V shards, merged-column indices, and `(shard_id, expert_id, weight_name)` for
+routed experts. A loader invocation is one logical event regardless of how many
+internal `copy_` operations it performs.
 
-Checkpoint restoration and `process_weights_after_loading` operate on whole
-modules. Therefore a partial checkpoint scope is accepted only when, for every
-module, it selects either no baseline events or all baseline events. Selecting
-only Q from a packed QKV layer, one quantization scale, or some experts from a
-post-load processing unit is rejected before layerwise mutation starts.
+Legacy loaders may still return `None` or `bool`; the compatibility adapter
+derives a receipt from known scalar loader arguments. New packed or conditional
+loaders should return a structured receipt deliberately.
 
-Only selected modules are restored to meta, wrapped, replayed, and processed.
+### Load event
 
-### Kernel-format weights
+A consumed receipt becomes a structured, rank-local `LoadEventIdentity`:
 
-The caller declares exact target parameter names. These updates use in-place
-`copy_` and do not restore checkpoint layout or rerun post-load processing.
-Parameter-level subsets are therefore allowed, subject to exact name, shape,
-and dtype checks.
+```text
+(canonical source name, target parameter name, logical fragment)
+```
 
-### LoRA adapter
+For example:
 
-A LoRA scope identifies one adapter and an operation (`replace` or `remove`).
-Replacement means a complete adapter replacement, not an incremental patch of
-the old adapter. The base model is outside the scope.
+```text
+model.layers.0.self_attn.q_proj.weight
+  => model.layers.0.self_attn.qkv_proj.weight[loaded_shard_id='q']
+```
 
-Two payload forms are supported by the completion model:
+Event identity is never reconstructed by parsing this display string. The
+source, target, and fragment remain separate structured fields.
 
-- path/artifact, as used by SkyRL;
-- an exact tensor manifest accumulated across transport buckets, as used by
-  VERL before constructing a tensor-backed LoRA request.
+### Baseline
 
-The adapter is staged and validated before it is installed. Validation covers
-the declared tensor manifest, PEFT configuration identity, supported target
-modules, rank/shape compatibility, and A/B pairing. Expert-parallel workers may
-materialize different local subsets, but must agree on the global declaration.
+The initial known-good load records the exact events consumed by each worker.
+This rank-local baseline is the completion contract for later full reloads and
+the source of truth from which partial checkpoint scopes are resolved.
 
-## Data model
+Baselines must remain rank-local. TP, PP, DP, and EP workers can consume
+different targets or fragments; unioning their events before reconciliation
+could hide a missing shard on one worker behind an event observed by another.
 
-`UpdateScope` is a serializable tagged structure:
+### Update scope
+
+An `UpdateScope` declares which model state one update may change. For an
+explicit scope, the declaration is both an allowlist and an exact completion
+contract:
+
+- missing in-scope state fails completion;
+- consumed out-of-scope state is rejected;
+- state outside the scope is preserved;
+- duplicate transport names are rejected;
+- transport chunks are delivery units, not independent scopes.
+
+## Baseline construction
+
+### Real initial checkpoint load
+
+The recorder wraps effective loaders before the first checkpoint iterator is
+consumed. It records only successful, consumed applications and removes itself
+immediately after loading.
+
+```mermaid
+flowchart TD
+    A[Construct model and weight loaders] --> B[Install load-consumption recorders]
+    B --> C[Iterate canonical checkpoint sources]
+    C --> D[Invoke rank-local weight_loader]
+    D --> E[Loader returns LoadReceipt]
+    E --> F{consumed?}
+    F -- No --> G[Exclude skipped call]
+    F -- Yes --> H[Create source-target-fragment event]
+    H --> I[Audit event key, target alias, and schema]
+    I --> J{Audit clean?}
+    J -- No --> X[Fail initial load]
+    J -- Yes --> K[Add event to rank-local baseline]
+    G --> L{More sources?}
+    K --> L
+    L -- Yes --> C
+    L -- No --> M[Remove recorder wrappers]
+    M --> N[Freeze exact baseline for later reloads]
+```
+
+The collision audit detects event-key collisions, target alias collisions,
+accepted/skipped status conflicts, schema drift, and receipt-schema mismatch.
+This prevents a baseline from silently treating distinct semantic loader calls
+as the same event.
+
+### Dummy model load
+
+A dummy load has no canonical checkpoint source stream. It therefore records a
+provisional target-only baseline. There are two ways to obtain an exact baseline:
+
+```mermaid
+flowchart TD
+    A[Dummy model initialization] --> B[Record local loadable target names]
+    B --> C{Dummy load probe enabled?}
+    C -- Yes --> D[Probe model.load_weights with metadata tensors]
+    D --> E[Record exact source-target-fragment events]
+    E --> F[Exact baseline ready]
+    C -- No --> G[Require declared source manifest on first real update]
+    G --> H[Receive complete real update]
+    H --> I{Every provisional target consumed?}
+    I -- No --> X[Fail; baseline remains provisional]
+    I -- Yes --> J[Promote observed receipts to exact baseline]
+    J --> F
+```
+
+Partial checkpoint updates and adapter-only replacement are rejected while the
+base model has only a provisional dummy baseline. The first real update must be
+complete so that later scopes are based on an authoritative event set.
+
+The baseline API returns `exact`, `provisional`, or `unavailable`. Aggregating
+rank-local reports also exposes `atomic_source_groups`: a legal partial
+checkpoint scope is a union of these groups.
+
+## Common update lifecycle
+
+Checkpoint transports validate completion at two independent levels:
+
+- **source manifest:** did IPC/NCCL deliver exactly the declared source names?
+- **load events:** did rank-local loaders consume the required target fragments?
+
+Matching only one level is insufficient. A source can arrive but be routed to
+the wrong fragment, while correct loader receipts cannot prove that an omitted
+transport chunk was intentional.
+
+```mermaid
+flowchart TD
+    A[Caller declares UpdateScope] --> B[Normalize fields and reject invalid combinations]
+    B --> C[Resolve scope against each worker's baseline]
+    C --> D{Scope valid and layer-closed?}
+    D -- No --> X[Reject before model mutation]
+    D -- Yes --> E[BEGIN: initialize affected state]
+    E --> F[Receive one or more transport chunks]
+    F --> G[Validate names against source allowlist]
+    G --> H[Run loaders and collect LoadReceipts]
+    H --> I[Audit and record consumed events]
+    I --> J{More chunks?}
+    J -- Yes --> F
+    J -- No --> K[Reconcile declared sources with received sources]
+    K --> L[Finalize affected layers and reconcile required events]
+    L --> M[Build rank-local LoadManifestReport]
+    M --> N{Local report clean?}
+    N -- No --> Y[Fail closed; do not resume]
+    N -- Yes --> O{Every worker reports success?}
+    O -- No --> Y
+    O -- Yes --> P[Commit generation and invalidate dependent caches]
+    P --> Q[Resume inference]
+```
+
+The report includes worker parallel coordinates, required and received event
+counts, completion findings, scope kind/mode, declared source names, and the
+rank-local sources selected from the baseline.
+
+## Scope modes
+
+`UpdateScope` is a serializable tagged declaration:
 
 ```text
 kind=base_checkpoint, mode=full
@@ -79,87 +201,216 @@ kind=lora_adapter, operation=replace|remove,
     config_digest=..., artifact_digest=...
 ```
 
-The scope is normalized at the API boundary. Duplicate names, invalid field
-combinations, empty explicit subsets, and inconsistent declarations fail
-before transfer or model mutation.
+`None` normalizes to the backward-compatible full checkpoint scope. Duplicate
+names, empty explicit sets, unknown fields, and inconsistent field combinations
+fail at normalization.
 
-Checkpoint event identity is structured as source, target, and fragment.
-Formatting it into a string is for diagnostics only; scope resolution must not
-parse the legacy display string.
+### Full checkpoint reload
 
-## Lifecycle
+Full checkpoint mode uses every event in the worker's exact baseline. Its
+completion rule is a lower bound: every baseline event must be observed, while
+additional accepted applications remain compatible with legacy full reload.
+Transport source equality is enforced when the caller supplies
+`expected_names`; it is mandatory for the first real update after an unprobed
+dummy load.
 
-```text
-declare scope
-  -> normalize and validate declaration
-  -> resolve rank-local effective manifest
-  -> validate checkpoint layer closure
-  -> initialize only affected state
-  -> receive chunks and reject out-of-scope names
-  -> replay/process affected layers or stage a complete adapter
-  -> reconcile expected == received for explicit scopes
-  -> produce a rank-local report
-  -> caller collects all reports and decides commit/abort
+```mermaid
+flowchart LR
+    A[scope omitted or full] --> B[Select complete local baseline]
+    B --> C[Restore all reloadable layers]
+    C --> D[Receive checkpoint chunks]
+    D --> E[Collect source names and receipts]
+    E --> F[Require baseline events subset of received events]
+    F --> G[Finalize all layers]
+    G --> H[Return rank-local report]
 ```
 
-The existing arena verification remains in its current location. This work
-does not reorder verification relative to copy-back.
+This compatibility mode is suitable for a complete replacement stream. It is
+not a declaration that omitted weights should retain their old values.
 
-## LoRA integration
+### Partial checkpoint reload
 
-SkyRL path:
+The caller supplies exact canonical checkpoint `source_names`. Each worker
+looks those names up in its own baseline and expands them to the corresponding
+target fragments.
 
-```text
-LoRAAdapterScope(artifact declaration)
-  -> load a staged LoRAModel from the shared path
-  -> validate artifact/config/local tensors
-  -> install with the existing load-in-place adapter path
+Checkpoint restoration and `process_weights_after_loading` operate on whole
+layerwise processing units. A partial scope is accepted only if every affected
+unit selects all of its baseline events. Selecting only Q from packed QKV, one
+quantization scale, or a subset of a processed MoE unit is rejected before
+restoration begins.
+
+```mermaid
+flowchart TD
+    A[Partial scope with source_names] --> B[Resolve names in each local baseline]
+    B --> C[Group selected events by layerwise processing unit]
+    C --> D{Each unit selected fully or not at all?}
+    D -- No --> X[Reject before mutation]
+    D -- Yes --> E[Restore and wrap selected units only]
+    E --> F[Receive chunks]
+    F --> G{Source name declared and not duplicate?}
+    G -- No --> Y[Reject chunk]
+    G -- Yes --> H[Collect exact consumed events]
+    H --> I[Require received sources equal declared sources]
+    I --> J[Require received events equal resolved local events]
+    J --> K[Finalize selected units; preserve all others]
+    K --> L[Return rank-local report]
 ```
 
-VERL tensor path:
+PP ranks with no selected local events are valid no-op participants. TP and EP
+ranks can resolve the same global source declaration to different local event
+sets, but each rank must reconcile its own set exactly.
 
-```text
-LoRAAdapterScope(exact tensor_names)
-  -> receive all buckets
-  -> require received_names == tensor_names
-  -> construct and validate the staged LoRAModel
-  -> replace the adapter once
+### Kernel-format update
+
+Kernel-format updates target already processed parameters directly and do not
+restore checkpoint layout or rerun post-load processing. The caller declares
+exact `target_names`; parameter-level subsets are therefore legal.
+
+```mermaid
+flowchart LR
+    A[Kernel scope with target_names] --> B[Validate exact targets]
+    B --> C[Receive in-place patches]
+    C --> D[Reject duplicate or undeclared targets]
+    D --> E[Check target shape and dtype]
+    E --> F[Apply copy or sparse patch]
+    F --> G[Require received targets equal declared targets]
+    G --> H[Finish without checkpoint-layout processing]
 ```
 
-If a dummy base model has not received its first complete real base update,
-adapter-only replacement is rejected.
+This mode does not use checkpoint load receipts because it bypasses
+`weight_loader`. Its equivalent completion evidence is exact target-name,
+shape, dtype, and transport reconciliation.
 
-## Compatibility
+### LoRA adapter replacement from a path
 
-- Omitting a scope retains full checkpoint behavior.
-- Existing `expected_names` is accepted during migration, but when an explicit
-  scope also supplies source/tensor names the declarations must agree.
-- Exact completion is enabled for explicit scopes. Legacy full reload keeps
-  its current compatibility behavior until all loaders emit structured
-  receipts.
+A LoRA scope identifies one adapter and a complete `replace` operation. A
+path-backed request may declare artifact and PEFT configuration digests, but
+cannot declare `tensor_names` because the worker reads the artifact itself.
 
-## Implementation sequence
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant E as Executor
+    participant W as Every worker
+    participant L as Live adapter cache
 
-1. Add scope types, normalization, structured event identities, and
-   scope-aware reports.
-2. Resolve checkpoint source subsets, enforce whole-layer closure, initialize
-   only affected layers, and reconcile the effective manifest.
-3. Add exact kernel-target completion.
-4. Add LoRA artifact/tensor manifests and staged adapter replacement.
-5. Return reports from workers and enforce the all-rank decision above the
-   worker; invalidate prefix, multimodal, and encoder caches after commit.
+    C->>E: add_lora(path request, replace scope)
+    E->>W: prepare_lora_update(request)
+    W->>W: Validate scope identity and digests
+    W->>W: Load complete LoRAModel from path
+    W->>W: Validate config, modules, rank/shape, and A/B pairs
+    W-->>E: Prepared without publishing
+    alt every worker prepared
+        E->>W: commit_lora_update(adapter_id)
+        W->>L: Replace adapter and activate GPU slot
+        E-->>C: Success
+        C->>C: Invalidate prefix, MM, and encoder caches
+    else any worker failed
+        E->>W: abort_lora_update(adapter_id)
+        W->>W: Drop staged adapter; keep old adapter
+        E-->>C: Failure
+    end
+```
 
-## Required tests
+The prepare phase protects the old adapter from load or validation failures.
+Commit is coordinated after all workers prepare, but automatic rollback of a
+commit failure is not provided.
 
-- legacy full reload remains unchanged;
-- one or multiple complete checkpoint layers can be selected;
-- a split QKV, quantized layer, or expert processing unit is rejected before
-  initialization;
-- unknown, missing, duplicate, and unexpected names fail;
-- PP no-op and TP/EP rank-local resolution are valid;
-- kernel target subsets require exact names, shapes, and dtypes;
-- path-backed and tensor-backed LoRA replacement succeed;
-- incomplete A/B pairs, manifest/config mismatch, and adapter update before a
-  real dummy-base sync fail without removing the old adapter;
-- multi-bucket LoRA installs exactly once after all tensors arrive;
-- cache invalidation and all-rank report enforcement occur before resume.
+### LoRA adapter replacement from tensors
+
+The tensor-backed path is intended for training integrations that deliver one
+adapter across multiple buckets. It requires an exact global `tensor_names`
+manifest and a PEFT configuration.
+
+```mermaid
+flowchart TD
+    A[Create TensorLoRAUpdateSession from replace scope] --> B[Receive tensor bucket]
+    B --> C{Names declared, unique, and not seen before?}
+    C -- No --> X[Reject session]
+    C -- Yes --> D[Stage tensors by canonical name]
+    D --> E{More buckets?}
+    E -- Yes --> B
+    E -- No --> F[Require received tensor names equal declared manifest]
+    F --> G[Validate PEFT config digest]
+    G --> H[Construct TensorLoRARequest]
+    H --> I[Each worker builds and validates complete LoRAModel]
+    I --> J{All workers prepared?}
+    J -- No --> K[Abort staged adapters; keep old adapter]
+    J -- Yes --> L[Commit replacement once]
+    L --> M[Invalidate dependent caches]
+```
+
+Transport buckets do not become separate update scopes. Installation occurs
+once, after the complete tensor manifest and all A/B pairs have been validated.
+
+### LoRA adapter removal
+
+A remove scope carries only adapter identity and `operation=remove`; replacement
+fields are invalid. Removal has no receipt stream because no new adapter payload
+is consumed. The controller must remove the identified adapter on every worker
+and invalidate caches that may retain adapter-dependent results.
+
+## Completion semantics by mode
+
+| Mode | Declaration | Completion rule | Out-of-scope input | Processing boundary |
+|---|---|---|---|---|
+| Full checkpoint | Omitted or `mode=full` | Initial local events are a subset of received events | Compatible extras may be accepted | All reloadable layers |
+| Partial checkpoint | Exact source names | Resolved local events equal received events | Reject | Whole layerwise units only |
+| Kernel format | Exact target names | Declared targets equal received targets | Reject | Individual runtime parameters |
+| LoRA path replace | Adapter identity and optional digests | Every worker stages one complete validated adapter | Reject identity/digest mismatch | Complete adapter |
+| LoRA tensor replace | Adapter identity, exact tensor names, config | Declared tensors equal accumulated tensors; every worker stages successfully | Reject unknown/duplicate tensors | Complete adapter |
+| LoRA remove | Adapter identity | Adapter removed on every worker | No payload allowed | Complete adapter |
+
+## Failure boundaries
+
+The protocol fails before mutation whenever possible:
+
+- malformed scope declarations;
+- partial checkpoint scopes that split a processing unit;
+- undeclared or duplicate transport names;
+- load-receipt collision or schema findings;
+- LoRA identity, manifest, digest, module, shape, or A/B-pair mismatch.
+
+Failures discovered after a base checkpoint/kernel mutation are fail-closed:
+the update is unsuccessful and the engine must not resume that generation. The
+current implementation does not reconstruct the previous base-weight values.
+
+LoRA replacement keeps the old adapter until preparation succeeds everywhere.
+An abort discards pending adapters. Once commit begins, however, a worker-level
+commit failure is not automatically rolled back on workers that already
+published the replacement.
+
+## Compatibility and migration
+
+- Omitting a scope preserves legacy full-checkpoint behavior.
+- Existing `expected_names` remains accepted. If an explicit scope also
+  declares names, both declarations must agree.
+- Legacy `None`/`bool` loaders are adapted to receipts while loader schemas are
+  migrated.
+- Exact lower-and-upper-bound completion is required for explicit scopes.
+- Full reload retains lower-bound event completion to tolerate established
+  broadcast and loader behavior.
+- A dummy model must establish an exact baseline through probing or its first
+  complete real update before partial checkpoint or LoRA-only updates.
+
+## Required validation
+
+- a real first load records consumed rank-local events and excludes skipped EP
+  applications;
+- receipt schemas distinguish packed QKV, merged projections, and routed MoE
+  fragments without collisions;
+- dummy probing or first-real-update promotion produces an exact baseline;
+- full reload detects missing baseline events without rejecting compatible
+  extras;
+- partial scopes accept unions of atomic source groups and reject split units;
+- source and event reconciliation catch unknown, missing, duplicate, and
+  unexpected names independently;
+- PP no-op and TP/EP rank-local resolutions succeed;
+- kernel scopes enforce exact target names, shapes, and dtypes;
+- path-backed and multi-bucket tensor-backed LoRA replacement stage before
+  publish and install exactly once;
+- LoRA manifest/config mismatch and incomplete A/B pairs preserve the old
+  adapter;
+- every worker report is checked and dependent caches are invalidated before
+  inference resumes.
