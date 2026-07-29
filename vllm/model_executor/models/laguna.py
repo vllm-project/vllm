@@ -175,18 +175,18 @@ class LagunaMoE(nn.Module):
         )
 
         # Shared expert (optional) - passed to FusedMoE for overlap optimization
-        self.shared_expert: LagunaMLP | None
+        self.shared_experts: LagunaMLP | None
         if config.shared_expert_intermediate_size > 0:
-            self.shared_expert = LagunaMLP(
+            self.shared_experts = LagunaMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,  # Reduce after shared+routed combine
-                prefix=f"{prefix}.shared_expert",
+                prefix=f"{prefix}.shared_experts",
             )
         else:
-            self.shared_expert = None
+            self.shared_experts = None
 
         # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The
         # checkpoint stores one [num_experts] tensor per MoE layer at
@@ -205,7 +205,7 @@ class LagunaMoE(nn.Module):
         # routed_scaling_factor, shared+routed combine, and TP all-reduce
         # internally, so forward() just returns the final hidden states.
         self.experts = FusedMoE(
-            shared_experts=self.shared_expert,
+            shared_experts=self.shared_experts,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,

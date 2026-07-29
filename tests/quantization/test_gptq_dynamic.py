@@ -11,7 +11,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMethod
+from vllm.model_executor.layers.quantization.auto_gptq import (
+    AutoGPTQConfig,
+    AutoGPTQLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
 )
@@ -25,6 +28,123 @@ PROMPT = "On the surface of Mars, we found"
 MODELS = [
     "ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symTrue",
 ]
+
+
+def _make_dynamic_config(
+    dynamic: dict[str, dict[str, int | bool]],
+    packed_modules_mapping: dict[str, list[str]],
+) -> AutoGPTQConfig:
+    config = AutoGPTQConfig(4, 128, False, True, False, dynamic, {})
+    config.packed_modules_mapping = packed_modules_mapping
+    return config
+
+
+def test_dynamic_override_resolves_fused_qkv_shards():
+    dynamic = {
+        rf"+:^model\.layers\.0\.self_attn\.{projection}$": {
+            "bits": 4,
+            "group_size": 32,
+        }
+        for projection in ("q_proj", "k_proj", "v_proj")
+    }
+    config = _make_dynamic_config(
+        dynamic,
+        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+    )
+
+    assert (
+        get_dynamic_override(
+            config,
+            "model.layers.0.self_attn.qkv_proj",
+            "group_size",
+            config.group_size,
+        )
+        == 32
+    )
+    assert (
+        get_dynamic_override(
+            config,
+            "model.layers.1.self_attn.qkv_proj",
+            "group_size",
+            config.group_size,
+        )
+        == 128
+    )
+
+
+def test_dynamic_override_resolves_dotted_fused_mapping():
+    dynamic = {
+        rf"+:^model\.layers\.0\.self_attn\.{projection}$": {"group_size": 32}
+        for projection in ("q_proj", "k_proj", "v_proj")
+    }
+    config = _make_dynamic_config(
+        dynamic,
+        {
+            "self_attn.qkv_proj": [
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+            ]
+        },
+    )
+
+    assert (
+        get_dynamic_override(
+            config,
+            "model.layers.0.self_attn.qkv_proj",
+            "group_size",
+            config.group_size,
+        )
+        == 32
+    )
+
+
+def test_dynamic_override_rejects_mixed_fused_shards():
+    config = _make_dynamic_config(
+        {r"+:^model\.layers\.0\.self_attn\.q_proj$": {"group_size": 32}},
+        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+    )
+
+    with pytest.raises(ValueError, match="does not match across shards"):
+        get_dynamic_override(
+            config,
+            "model.layers.0.self_attn.qkv_proj",
+            "group_size",
+            config.group_size,
+        )
+
+
+@pytest.mark.parametrize(
+    ("dynamic", "expected"),
+    [
+        (
+            {
+                r"+:^model\.layers\..*\.q_proj$": {"group_size": 64},
+                r"+:^model\.layers\.0\.q_proj$": {"group_size": 32},
+            },
+            64,
+        ),
+        (
+            {
+                r"+:^model\.layers\.0\.q_proj$": {"group_size": 32},
+                r"+:^model\.layers\..*\.q_proj$": {"group_size": 64},
+            },
+            32,
+        ),
+    ],
+)
+def test_dynamic_override_preserves_first_match_order(dynamic, expected):
+    config = _make_dynamic_config(dynamic, {})
+
+    assert (
+        get_dynamic_override(
+            config,
+            "model.layers.0.q_proj",
+            "group_size",
+            config.group_size,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("model_id", MODELS)

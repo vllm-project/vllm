@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
-    override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kInt4Static32GroupScale,
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
 )
@@ -68,30 +69,174 @@ from vllm.utils.collection_utils import is_list_of
 logger = init_logger(__name__)
 
 
-def get_moe_quant_method(
+@dataclass(frozen=True)
+class _GPTQQuantConfigValues:
+    weight_bits: int
+    group_size: int
+    desc_act: bool
+    is_sym: bool
+
+
+def _apply_dynamic_override(
+    values: _GPTQQuantConfigValues,
+    override: dict[str, int | bool] | None,
+) -> _GPTQQuantConfigValues:
+    if override is None:
+        return values
+    return _GPTQQuantConfigValues(
+        weight_bits=int(override.get("bits", values.weight_bits)),
+        group_size=int(override.get("group_size", values.group_size)),
+        desc_act=bool(override.get("desc_act", values.desc_act)),
+        is_sym=bool(override.get("sym", values.is_sym)),
+    )
+
+
+def _clone_quant_config(
+    config: "AutoGPTQConfig",
+    values: _GPTQQuantConfigValues,
+) -> "AutoGPTQConfig":
+    cloned_config = deepcopy(config)
+    cloned_config.weight_bits = values.weight_bits
+    cloned_config.group_size = values.group_size
+    cloned_config.desc_act = values.desc_act
+    cloned_config.is_sym = values.is_sym
+    cloned_config.pack_factor = 32 // values.weight_bits
+
+    if (values.weight_bits, values.is_sym) not in cloned_config.TYPE_MAP:
+        raise ValueError(
+            "Unsupported quantization config: "
+            f"bits={values.weight_bits}, sym={values.is_sym}"
+        )
+    cloned_config.quant_type = cloned_config.TYPE_MAP[
+        (values.weight_bits, values.is_sym)
+    ]
+    cloned_config.full_config.update(
+        {
+            "bits": values.weight_bits,
+            "group_size": values.group_size,
+            "desc_act": values.desc_act,
+            "sym": values.is_sym,
+        }
+    )
+    return cloned_config
+
+
+def _resolve_moe_quant_config(
     config: "AutoGPTQConfig",
     layer: RoutedExperts,
     prefix: str,
-    moe_method_cls: type,
-):
-    cloned_config = deepcopy(config)
+) -> tuple["AutoGPTQConfig | None", dict[tuple[int, str], int]]:
+    """Resolve dynamic GPTQ settings for every logical MoE weight shard.
 
-    assert isinstance(layer, RoutedExperts)
-    # False = skip module, None = no override, else = Positive match
-    if (
-        get_dynamic_override(  # noqa: E712
-            cloned_config,  # noqa: E712
-            layer_name=prefix,
+    Fused MoE kernels require one quantization scheme for the whole layer. A
+    smaller group size can represent a larger-group checkpoint losslessly by
+    repeating its scale and zero-point metadata. Other mixed settings cannot be
+    represented by the current kernels and are rejected explicitly.
+    """
+    base_values = _GPTQQuantConfigValues(
+        weight_bits=config.weight_bits,
+        group_size=config.group_size,
+        desc_act=config.desc_act,
+        is_sym=config.is_sym,
+    )
+
+    layer_override = get_dynamic_override(config, layer_name=prefix)
+    if layer_override is False:
+        return None, {}
+    assert layer_override is None or isinstance(layer_override, dict)
+    layer_values = _apply_dynamic_override(base_values, layer_override)
+
+    shard_projections = {
+        "w1": layer.ckpt_gate_proj_name,
+        "w2": layer.ckpt_down_proj_name,
+        "w3": layer.ckpt_up_proj_name,
+    }
+    num_checkpoint_experts = (
+        layer.moe_config.num_logical_experts
+        + layer.expert_map_manager.num_fused_shared_experts
+    )
+    shard_values: dict[tuple[int, str], _GPTQQuantConfigValues | None] = {}
+    for expert_id in range(num_checkpoint_experts):
+        for shard_id, projection_name in shard_projections.items():
+            shard_prefix = f"{prefix}.{expert_id}.{projection_name}"
+            dynamic_override = get_dynamic_override(config, layer_name=shard_prefix)
+            if dynamic_override is False:
+                shard_values[(expert_id, shard_id)] = None
+                continue
+            assert dynamic_override is None or isinstance(dynamic_override, dict)
+            shard_values[(expert_id, shard_id)] = _apply_dynamic_override(
+                layer_values, dynamic_override
+            )
+
+    quantized_values = [value for value in shard_values.values() if value is not None]
+    if not quantized_values:
+        return None, {}
+    if len(quantized_values) != len(shard_values):
+        skipped_shards = [
+            f"expert {expert_id} {shard_id}"
+            for (expert_id, shard_id), value in shard_values.items()
+            if value is None
+        ]
+        raise ValueError(
+            f"AutoGPTQ FusedMoE layer '{prefix}' excludes only some expert "
+            f"shards from quantization: {skipped_shards}"
         )
-        == False
-    ):  # noqa: E712
-        return UnquantizedFusedMoEMethod(layer.moe_config)
 
-    if prefix:
-        # Dynamic per module/layer rules may override base config
-        override_config(cloned_config, prefix=prefix)
+    def get_uniform_value(name: str) -> int | bool:
+        values = {getattr(value, name) for value in quantized_values}
+        if len(values) != 1:
+            raise ValueError(
+                f"AutoGPTQ FusedMoE layer '{prefix}' has mixed {name}: "
+                f"{sorted(values)}. Only group_size may differ between experts."
+            )
+        return next(iter(values))
 
-    return moe_method_cls(cloned_config, layer.moe_config)
+    weight_bits = int(get_uniform_value("weight_bits"))
+    desc_act = bool(get_uniform_value("desc_act"))
+    is_sym = bool(get_uniform_value("is_sym"))
+    source_group_sizes = {
+        shard: value.group_size
+        for shard, value in shard_values.items()
+        if value is not None
+    }
+    unique_group_sizes = set(source_group_sizes.values())
+
+    if len(unique_group_sizes) == 1:
+        group_size = next(iter(unique_group_sizes))
+    else:
+        if desc_act:
+            raise ValueError(
+                f"AutoGPTQ FusedMoE layer '{prefix}' has mixed group_size "
+                f"{sorted(unique_group_sizes)} with desc_act=True, which cannot "
+                "be normalized losslessly."
+            )
+        if any(group_size <= 0 for group_size in unique_group_sizes):
+            raise ValueError(
+                f"AutoGPTQ FusedMoE layer '{prefix}' cannot mix channelwise and "
+                f"group quantization: {sorted(unique_group_sizes)}"
+            )
+        group_size = min(unique_group_sizes)
+        if any(
+            source_group_size % group_size for source_group_size in unique_group_sizes
+        ):
+            raise ValueError(
+                f"AutoGPTQ FusedMoE layer '{prefix}' has incompatible group "
+                f"sizes: {sorted(unique_group_sizes)}"
+            )
+        logger.info_once(
+            "AutoGPTQ FusedMoE checkpoint uses mixed group sizes %s; "
+            "normalizing quantization metadata to group_size=%d.",
+            tuple(sorted(unique_group_sizes)),
+            group_size,
+        )
+
+    resolved_values = _GPTQQuantConfigValues(
+        weight_bits=weight_bits,
+        group_size=group_size,
+        desc_act=desc_act,
+        is_sym=is_sym,
+    )
+    return _clone_quant_config(config, resolved_values), source_group_sizes
 
 
 class AutoGPTQConfig(QuantizationConfig):
@@ -243,21 +388,38 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
+            resolved_config, source_group_sizes = _resolve_moe_quant_config(
+                self, layer, prefix
+            )
+            if resolved_config is None:
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            has_mixed_group_sizes = len(set(source_group_sizes.values())) > 1
             if not check_moe_marlin_supports_layer(
-                layer, self.group_size, allow_tile_padding=not self.desc_act
+                layer,
+                resolved_config.group_size,
+                allow_tile_padding=not resolved_config.desc_act,
             ):
+                if has_mixed_group_sizes:
+                    raise ValueError(
+                        f"Layer '{prefix}' uses mixed AutoGPTQ group sizes "
+                        f"{sorted(set(source_group_sizes.values()))}, but their "
+                        f"normalized group_size={resolved_config.group_size} is "
+                        "not supported by GPTQMoeMarlin. Moe WNA16 fallback "
+                        "cannot represent per-expert group sizes."
+                    )
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels."
                 )
-                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-            moe_quant_method = get_moe_quant_method(
-                self, layer, prefix, AutoGPTQMoEMethod
+                return MoeWNA16Config.from_config(
+                    resolved_config.full_config
+                ).get_quant_method(layer, prefix)
+            moe_quant_method = AutoGPTQMoEMethod(
+                resolved_config,
+                layer.moe_config,
+                source_group_sizes if has_mixed_group_sizes else None,
             )
-            if moe_quant_method is None:
-                return None
             moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
 
@@ -471,12 +633,18 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self,
         quant_config: AutoGPTQConfig,
         moe: FusedMoEConfig,
+        source_group_sizes: dict[tuple[int, str], int] | None = None,
     ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
+        self.source_group_sizes = source_group_sizes or {}
         if self.quant_config.quant_type.size_bits == 4:
             quant_type = scalar_types.uint4b8
-            scale = kInt4StaticGroupScale
+            scale = (
+                kInt4Static32GroupScale
+                if self.quant_config.group_size == 32
+                else kInt4StaticGroupScale
+            )
         elif self.quant_config.quant_type.size_bits == 8:
             quant_type = scalar_types.uint8b128
             scale = kInt8StaticGroupScale
@@ -507,15 +675,22 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_config.quant_type.size_bits == 8, (
-                "W8A8-INT8 is not supported by marlin kernel."
-            )
+            assert (
+                self.quant_config.quant_type.size_bits == 8
+            ), "W8A8-INT8 is not supported by marlin kernel."
 
         intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
 
         self.is_k_full = (not self.quant_config.desc_act) or (
             intermediate_size_per_partition == intermediate_size_full
         )
+
+        source_group_sizes = getattr(self, "source_group_sizes", {})
+        if source_group_sizes:
+            assert "weight_loader" in extra_weight_attrs
+            extra_weight_attrs["weight_loader"] = self.get_weight_loader(
+                extra_weight_attrs["weight_loader"]
+            )
 
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
@@ -673,6 +848,91 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             device = layer.w13_qweight.device
             layer.workspace = marlin_make_workspace_new(device, 4)
 
+    def _normalize_group_metadata(
+        self,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+        expert_id: int,
+    ) -> torch.Tensor:
+        source_group_sizes = getattr(self, "source_group_sizes", {})
+        source_group_size = source_group_sizes.get((expert_id, shard_id))
+        if source_group_size is None:
+            raise ValueError(
+                "Missing source group_size for AutoGPTQ FusedMoE "
+                f"expert {expert_id} shard {shard_id}."
+            )
+
+        target_group_size = self.quant_config.group_size
+        if source_group_size == target_group_size:
+            return loaded_weight
+
+        if (
+            source_group_size <= 0
+            or target_group_size <= 0
+            or source_group_size % target_group_size
+        ):
+            raise ValueError(
+                "Cannot normalize AutoGPTQ FusedMoE group_size "
+                f"{source_group_size} to {target_group_size} for expert "
+                f"{expert_id} shard {shard_id}."
+            )
+
+        repeat_factor = source_group_size // target_group_size
+        if weight_name.endswith(("scales", "qzeros")):
+            return loaded_weight.repeat_interleave(repeat_factor, dim=0)
+
+        if weight_name.endswith("g_idx"):
+            expected_g_idx = (
+                torch.arange(
+                    loaded_weight.numel(),
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                // source_group_size
+            ).reshape_as(loaded_weight)
+            if not torch.equal(loaded_weight, expected_g_idx):
+                raise ValueError(
+                    "Cannot normalize non-sequential g_idx for mixed-group "
+                    f"AutoGPTQ FusedMoE expert {expert_id} shard {shard_id}."
+                )
+            return (
+                torch.arange(
+                    loaded_weight.numel(),
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device,
+                )
+                // target_group_size
+            ).reshape_as(loaded_weight)
+
+        return loaded_weight
+
+    def get_weight_loader(self, weight_loader):
+        def mixed_group_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ):
+            loaded_weight = self._normalize_group_metadata(
+                loaded_weight,
+                weight_name,
+                shard_id,
+                expert_id,
+            )
+            return weight_loader(
+                param,
+                loaded_weight,
+                weight_name,
+                shard_id,
+                expert_id,
+                return_success=return_success,
+            )
+
+        return mixed_group_weight_loader
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         def replace_or_register(name: str, val: torch.Tensor | None):
             if val is None:
@@ -687,9 +947,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
-        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
+        assert (
+            not is_a_8bit or self.quant_config.quant_type.size_bits == 8
+        ), "W8A8-INT8 is not supported by marlin kernel."
 
         w13_bias = getattr(layer, "w13_bias", None)
         if "w13_bias" not in layer._loaded_expert_biases:

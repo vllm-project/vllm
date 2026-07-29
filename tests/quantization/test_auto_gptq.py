@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
+    _resolve_moe_quant_config,
 )
 
 PROMPT = "On the surface of Mars, we found"
@@ -58,6 +59,151 @@ def test_auto_gptq_quantization_method(vllm_runner, model_id: str, monkeypatch):
 def test_auto_gptq_config_get_name():
     """Test that AutoGPTQConfig.get_name() returns 'auto_gptq'."""
     assert AutoGPTQConfig.get_name() == "auto_gptq"
+
+
+def _make_auto_gptq_config(
+    dynamic: dict[str, dict[str, int | bool]],
+    *,
+    group_size: int = 128,
+    desc_act: bool = False,
+) -> AutoGPTQConfig:
+    full_config = {
+        "bits": 4,
+        "group_size": group_size,
+        "desc_act": desc_act,
+        "sym": True,
+        "quant_method": "gptq",
+        "dynamic": dynamic,
+    }
+    return AutoGPTQConfig(
+        4,
+        group_size,
+        desc_act,
+        True,
+        False,
+        dynamic,
+        full_config,
+    )
+
+
+def _make_routed_experts_stub(num_experts: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+        moe_config=SimpleNamespace(num_logical_experts=num_experts),
+        expert_map_manager=SimpleNamespace(num_fused_shared_experts=0),
+    )
+
+
+def test_auto_gptq_moe_resolves_mixed_expert_group_sizes():
+    prefix = "model.layers.0.mlp.experts"
+    escaped_prefix = prefix.replace(".", r"\.")
+    dynamic = {
+        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+            "bits": 4,
+            "group_size": 32,
+        },
+        rf"+:^{escaped_prefix}\.2\.down_proj$": {
+            "bits": 4,
+            "group_size": 32,
+        },
+    }
+
+    resolved, source_group_sizes = _resolve_moe_quant_config(
+        _make_auto_gptq_config(dynamic),
+        _make_routed_experts_stub(),
+        prefix,
+    )
+
+    assert resolved is not None
+    assert resolved.group_size == 32
+    assert source_group_sizes[(0, "w1")] == 128
+    assert source_group_sizes[(1, "w1")] == 32
+    assert source_group_sizes[(2, "w1")] == 128
+    assert source_group_sizes[(2, "w2")] == 32
+
+
+def test_auto_gptq_moe_normalizes_larger_group_metadata():
+    method = object.__new__(AutoGPTQMoEMethod)
+    method.quant_config = _make_auto_gptq_config({}, group_size=32)
+    method.source_group_sizes = {(0, "w1"): 128}
+    loaded: dict[str, torch.Tensor] = {}
+
+    def weight_loader(
+        param,
+        loaded_weight,
+        weight_name,
+        shard_id,
+        expert_id,
+        return_success=False,
+    ):
+        loaded[weight_name] = loaded_weight
+        return return_success
+
+    wrapped_loader = method.get_weight_loader(weight_loader)
+    param = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+
+    scales = torch.arange(6, dtype=torch.float16).reshape(2, 3)
+    assert wrapped_loader(
+        param, scales, "experts.w13_scales", "w1", 0, return_success=True
+    )
+    assert torch.equal(
+        loaded["experts.w13_scales"],
+        scales.repeat_interleave(4, dim=0),
+    )
+
+    qzeros = torch.arange(4, dtype=torch.int32).reshape(2, 2)
+    assert wrapped_loader(
+        param, qzeros, "experts.w13_qzeros", "w1", 0, return_success=True
+    )
+    assert torch.equal(
+        loaded["experts.w13_qzeros"],
+        qzeros.repeat_interleave(4, dim=0),
+    )
+
+    g_idx = torch.arange(256, dtype=torch.int32) // 128
+    assert wrapped_loader(
+        param, g_idx, "experts.w13_g_idx", "w1", 0, return_success=True
+    )
+    assert torch.equal(
+        loaded["experts.w13_g_idx"],
+        torch.arange(256, dtype=torch.int32) // 32,
+    )
+
+
+def test_auto_gptq_moe_rejects_mixed_groups_with_desc_act():
+    prefix = "model.layers.0.mlp.experts"
+    escaped_prefix = prefix.replace(".", r"\.")
+    dynamic = {
+        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+            "group_size": 32,
+        }
+    }
+
+    with pytest.raises(ValueError, match="desc_act=True"):
+        _resolve_moe_quant_config(
+            _make_auto_gptq_config(dynamic, desc_act=True),
+            _make_routed_experts_stub(num_experts=2),
+            prefix,
+        )
+
+
+def test_auto_gptq_moe_rejects_incompatible_group_sizes():
+    prefix = "model.layers.0.mlp.experts"
+    escaped_prefix = prefix.replace(".", r"\.")
+    dynamic = {
+        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+            "group_size": 96,
+        }
+    }
+
+    with pytest.raises(ValueError, match="incompatible group sizes"):
+        _resolve_moe_quant_config(
+            _make_auto_gptq_config(dynamic),
+            _make_routed_experts_stub(num_experts=2),
+            prefix,
+        )
 
 
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
