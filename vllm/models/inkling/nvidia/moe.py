@@ -589,6 +589,9 @@ class InklingMoE(nn.Module):
             param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
                 param.device
             )
+        elif key == "w2_weight_scale" and weight.shape[-1] == 1:
+            # Per-output-channel scales are replicated across TP ranks.
+            param.data[lids] = weight[gids].to(device=param.device, dtype=param.dtype)
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
