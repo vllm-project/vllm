@@ -138,6 +138,36 @@ def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> No
     ]
 
 
+def test_trace_dispatch_expands_custom_integer_progression() -> None:
+    keys = ToyKernel()._trace_dispatch(ToyKernel().dispatch)(
+        tokens=WarmupIntRange(1, 9, advance=lambda value: value * 2),
+        cfg=_config(),
+    )
+
+    assert [key.block_size for key in keys] == [1, 2, 4, 8]
+
+
+def test_custom_integer_progression_rejects_step() -> None:
+    with pytest.raises(ValueError, match="cannot set both step and advance"):
+        ToyKernel()._trace_dispatch(ToyKernel().dispatch)(
+            tokens=WarmupIntRange(
+                1,
+                9,
+                step=2,
+                advance=lambda value: value * 2,
+            ),
+            cfg=_config(),
+        )
+
+
+def test_custom_integer_progression_must_advance() -> None:
+    with pytest.raises(ValueError, match="must return a greater value"):
+        ToyKernel()._trace_dispatch(ToyKernel().dispatch)(
+            tokens=WarmupIntRange(1, 9, advance=lambda value: value),
+            cfg=_config(),
+        )
+
+
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 

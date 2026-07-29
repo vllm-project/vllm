@@ -32,9 +32,12 @@ CompileKeyT = TypeVar("CompileKeyT")
 
 @dataclass(frozen=True)
 class WarmupIntRange:
+    """Expand integers with range semantics or a custom progression."""
+
     start: int
     stop: int
     step: int = 1
+    advance: Callable[[int], int] | None = None
 
 
 WarmupValues = Any
@@ -63,7 +66,22 @@ class _WarmupInputRows:
 
 def _expand_warmup_values(values: WarmupValues) -> tuple[Any, ...]:
     if isinstance(values, WarmupIntRange):
-        return tuple(range(values.start, values.stop, values.step))
+        if values.advance is None:
+            return tuple(range(values.start, values.stop, values.step))
+        if values.step != 1:
+            raise ValueError("WarmupIntRange cannot set both step and advance")
+
+        expanded: list[int] = []
+        value = values.start
+        while value < values.stop:
+            expanded.append(value)
+            next_value = values.advance(value)
+            if next_value <= value:
+                raise ValueError(
+                    "WarmupIntRange.advance must return a greater value"
+                )
+            value = next_value
+        return tuple(expanded)
     if isinstance(values, (list, tuple)):
         return tuple(values)
     return (values,)
