@@ -4335,6 +4335,7 @@ class GPUModelRunner(
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
                     mamba_bufs.preprocess,
+                    align_ctx=mamba_bufs.postprocess_align,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -6064,7 +6065,13 @@ class GPUModelRunner(
                     num_reqs=num_reqs_padded,
                     max_query_len=max_query_len,
                     ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                    for_cudagraph_capture=is_graph_capturing,
+                    # FULL replay reads capture-time metadata buffers. Re-stage them
+                    # from the zeroed dummy block tables instead of retaining state
+                    # indices from the previous real batch.
+                    for_cudagraph_capture=(
+                        is_graph_capturing
+                        or cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    ),
                     slot_mappings=slot_mappings_by_group,
                     use_spec_decode=self.speculative_config is not None,
                 )
