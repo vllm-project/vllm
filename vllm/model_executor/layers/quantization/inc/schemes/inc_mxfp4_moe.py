@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -54,7 +55,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         # select_mxfp4_moe_backend oracle (native XPU kernel or the Marlin
         # weight-only fallback).
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
-        self.experts_cls: type
+        self.experts_cls: type[mk.FusedMoEExperts] | None = None
         if self.use_cutlass_mxfp4:
             self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
             self.experts_cls = CutlassExpertsMxfp4
@@ -198,6 +199,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
+            assert self.experts_cls is not None
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
