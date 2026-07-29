@@ -148,7 +148,12 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let rendered = self.backend.chat_renderer().render(&request)?;
+        let renderer = self.backend.chat_renderer();
+        let (rendered, request) = tokio::task::spawn_blocking(move || {
+            renderer.render(&request).map(|rendered| (rendered, request))
+        })
+        .await
+        .map_err(|e| Error::ChatTemplate(format!("render task join error: {e}")))??;
         let reasoning_parser_kwargs =
             request
                 .sampling_params

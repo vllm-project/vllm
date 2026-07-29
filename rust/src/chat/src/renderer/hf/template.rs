@@ -25,12 +25,19 @@ use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
+/// Default fuel budget for template rendering. Prevents unbounded loops and
+/// string operations from exhausting CPU. Each template instruction consumes
+/// one unit of fuel; when depleted, rendering aborts with an error.
+const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
+
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
 
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
+
+    env.set_fuel(Some(DEFAULT_TEMPLATE_FUEL));
 
     env.add_template_owned("chat".to_owned(), template)?;
 
