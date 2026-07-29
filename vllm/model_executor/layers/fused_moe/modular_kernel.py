@@ -196,6 +196,20 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
+    def allocate_fused_expert_output(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> torch.Tensor | None:
+        """Optionally provide the exact output buffer for the expert kernel.
+
+        Implementations returning a tensor must preserve its identity through
+        finalize; replacing it may silently reintroduce a write-back copy.
+        """
+        return None
+
     @property
     @abstractmethod
     def activation_format(self) -> FusedMoEActivationFormat:
@@ -1125,7 +1139,7 @@ class FusedMoEKernelModularImpl:
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Get intermediate workspace shapes based off the chunked M size.
-        workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
+        chunk_workspace_shapes = self.fused_experts.workspace_shapes(
             M_chunk,
             N,
             K,
@@ -1135,29 +1149,53 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+        workspace13_shape, workspace2_shape, chunk_fused_out_shape = (
+            chunk_workspace_shapes
+        )
 
         # Get final output shape based on the full M size.
-        _, _, fused_out_shape = self.fused_experts.workspace_shapes(
-            M_full,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
+        if M_chunk == M_full:
+            fused_out_shape = chunk_fused_out_shape
+        else:
+            _, _, fused_out_shape = self.fused_experts.workspace_shapes(
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+                activation,
+            )
+
+        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
+            fused_out_shape,
+            workspace_dtype,
+            device,
+            self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
-        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        # Keep the original fused-output reservation even when the output is
+        # externally aliased. The workspace manager profiles and locks a
+        # process-wide high-water mark; later graph shapes may need this
+        # storage for workspace13.
+        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),
         )
         workspace13 = _resize_cache(common_workspace, workspace13_shape)
-        fused_out = _resize_cache(common_workspace, fused_out_shape)
+        if fused_out_alias is None:
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+        else:
+            assert fused_out_alias.shape == fused_out_shape
+            assert fused_out_alias.dtype == workspace_dtype
+            assert fused_out_alias.device == device
+            assert fused_out_alias.is_contiguous()
+            fused_out = fused_out_alias
 
         return workspace13, workspace2, fused_out
 
@@ -1307,10 +1345,8 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        # If caller's output buffer already matches fused_out shape/dtype, alias
-        # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
-        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
-        # double-copy MoE write-back path).
+        # ROCm may alias the caller output when prepare/finalize did not already
+        # provide a more specialized expert-output allocation.
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
