@@ -71,6 +71,7 @@ from .utils import (
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 
@@ -713,17 +714,14 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        mapper = self.hf_to_vllm_mapper
-        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
-            # AITER fused-shared-experts: route the shared_expert checkpoint
-            # weights into the extra fused expert slot. Merge (not mutate) so the
-            # shared class mapper isn't permanently altered.
-            num_routed = getattr(self.config, "num_experts", 0)
-            mapper = mapper | WeightsMapper(
-                orig_to_new_substr={"mlp.shared_expert.": f"mlp.experts.{num_routed}."}
-            )
+        weights = maybe_fuse_shared_experts(
+            weights,
+            n_routed_experts=getattr(self.config, "num_experts", 0),
+            n_shared_experts=1,
+            ckpt_prefix="mlp.shared_expert",
+        )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):

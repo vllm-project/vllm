@@ -618,14 +618,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
