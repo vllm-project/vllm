@@ -18,9 +18,13 @@ logger = init_logger(__name__)
 
 
 def get_block_table_width(
-    max_num_blocks: int, block_size: int, kernel_block_size: int
+    max_num_blocks: int,
+    block_size: int,
+    kernel_block_size: int | None = None,
 ) -> int:
     """Return the aligned width after virtual block splitting."""
+    if kernel_block_size is None:
+        kernel_block_size = block_size
     if block_size % kernel_block_size != 0:
         raise ValueError(
             f"kernel_block_size {kernel_block_size} must divide "
@@ -288,7 +292,7 @@ class MultiGroupBlockTable:
             )
 
         max_num_blocks = [
-            get_block_table_width(n, block_size, block_size)
+            get_block_table_width(n, block_size)
             for n, block_size in zip(max_num_blocks, block_sizes)
         ]
 

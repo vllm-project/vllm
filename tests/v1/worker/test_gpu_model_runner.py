@@ -1381,20 +1381,12 @@ def test_hybrid_block_table_initialization():
     )
 
 
-@pytest.mark.parametrize(
-    ("max_num_blocks", "block_size", "kernel_block_size", "expected_width"),
-    [(1875, 64, 64, 1876), (235, 256, 64, 940)],
-)
-def test_get_block_table_width(
-    max_num_blocks: int,
-    block_size: int,
-    kernel_block_size: int,
-    expected_width: int,
-):
-    assert (
-        get_block_table_width(max_num_blocks, block_size, kernel_block_size)
-        == expected_width
-    )
+def test_get_block_table_width_aligns_to_128_tokens():
+    assert get_block_table_width(1875, 64) == 1876
+
+
+def test_get_block_table_width_splits_virtual_blocks():
+    assert get_block_table_width(235, 256, 64) == 940
 
 
 def test_input_batch_with_kernel_block_sizes():

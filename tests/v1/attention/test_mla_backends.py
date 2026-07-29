@@ -1493,9 +1493,7 @@ def test_backend_correctness(
         )
 
         current_block_num = common_attn_metadata.block_table_tensor.shape[1]
-        padded_block_num = get_block_table_width(
-            current_block_num, block_size, block_size
-        )
+        padded_block_num = get_block_table_width(current_block_num, block_size)
         if padding_cols := padded_block_num - current_block_num:
             padding = torch.zeros(
                 (common_attn_metadata.block_table_tensor.shape[0], padding_cols),

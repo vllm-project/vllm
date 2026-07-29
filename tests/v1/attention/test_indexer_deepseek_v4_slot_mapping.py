@@ -50,9 +50,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
     )
     vllm_config = create_vllm_config(max_model_len=1024)
     max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
-    block_table_width = get_block_table_width(
-        max_num_blocks, kv_cache_spec.block_size, 256
-    )
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["dummy"],
