@@ -71,18 +71,9 @@ pub struct WireNdArray {
 
 impl WireNdArray {
     /// Build a float32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f32(shape: Vec<usize>, data: impl AsRef<[f32]>) -> Result<Self, String> {
-        let data = data.as_ref();
-        validate_element_count(&shape, data.len())?;
-        Ok(Self {
-            dtype: "float32".to_string(),
-            shape,
-            data: WireArrayData::RawView(Bytes::copy_from_slice(cast_slice(data))),
-        })
-    }
-
-    /// Build a float32 tensor/ndarray by taking ownership of its backing buffer.
-    pub fn from_owned_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<Self, String> {
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
             "float32",
@@ -92,18 +83,9 @@ impl WireNdArray {
     }
 
     /// Build a float16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f16(shape: Vec<usize>, data: impl AsRef<[f16]>) -> Result<Self, String> {
-        let data = data.as_ref();
-        validate_element_count(&shape, data.len())?;
-        Ok(Self {
-            dtype: "float16".to_string(),
-            shape,
-            data: WireArrayData::RawView(Bytes::copy_from_slice(cast_slice(data))),
-        })
-    }
-
-    /// Build a float16 tensor/ndarray by taking ownership of its backing buffer.
-    pub fn from_owned_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
             "float16",
@@ -113,18 +95,9 @@ impl WireNdArray {
     }
 
     /// Build a bfloat16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_bf16(shape: Vec<usize>, data: impl AsRef<[bf16]>) -> Result<Self, String> {
-        let data = data.as_ref();
-        validate_element_count(&shape, data.len())?;
-        Ok(Self {
-            dtype: "bfloat16".to_string(),
-            shape,
-            data: WireArrayData::RawView(Bytes::copy_from_slice(cast_slice(data))),
-        })
-    }
-
-    /// Build a bfloat16 tensor/ndarray by taking ownership of its backing buffer.
-    pub fn from_owned_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
             "bfloat16",
@@ -134,18 +107,9 @@ impl WireNdArray {
     }
 
     /// Build an int64 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_i64(shape: Vec<usize>, data: impl AsRef<[i64]>) -> Result<Self, String> {
-        let data = data.as_ref();
-        validate_element_count(&shape, data.len())?;
-        Ok(Self {
-            dtype: "int64".to_string(),
-            shape,
-            data: WireArrayData::RawView(Bytes::copy_from_slice(cast_slice(data))),
-        })
-    }
-
-    /// Build an int64 tensor/ndarray by taking ownership of its backing buffer.
-    pub fn from_owned_i64(shape: Vec<usize>, data: Vec<i64>) -> Result<Self, String> {
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_i64(shape: Vec<usize>, data: Vec<i64>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
             "int64",
@@ -155,18 +119,9 @@ impl WireNdArray {
     }
 
     /// Build a uint32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_u32(shape: Vec<usize>, data: impl AsRef<[u32]>) -> Result<Self, String> {
-        let data = data.as_ref();
-        validate_element_count(&shape, data.len())?;
-        Ok(Self {
-            dtype: "uint32".to_string(),
-            shape,
-            data: WireArrayData::RawView(Bytes::copy_from_slice(cast_slice(data))),
-        })
-    }
-
-    /// Build a uint32 tensor/ndarray by taking ownership of its backing buffer.
-    pub fn from_owned_u32(shape: Vec<usize>, data: Vec<u32>) -> Result<Self, String> {
+    ///
+    /// Takes ownership of the backing buffer without copying its data.
+    pub fn from_u32(shape: Vec<usize>, data: Vec<u32>) -> Result<Self, String> {
         validate_element_count(&shape, data.len())?;
         Ok(Self::from_raw_bytes(
             "uint32",
@@ -207,6 +162,7 @@ impl WireNdArray {
         }
     }
 
+    /// Move a sufficiently large inline buffer into the ordered auxiliary-frame list.
     pub(crate) fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         self.data.extract_aux_frame(aux_frames, threshold);
     }
@@ -251,6 +207,7 @@ pub enum WireArrayData {
 }
 
 impl WireArrayData {
+    /// Replace a sufficiently large raw view with its one-based auxiliary-frame index.
     fn extract_aux_frame(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         let Self::RawView(bytes) = self else {
             return;
@@ -327,11 +284,15 @@ mod tests {
 
     #[test]
     fn constructors_build_raw_view_tensors() {
-        let f32_tensor = WireNdArray::from_f32(vec![2], vec![1.0, 2.5]).unwrap();
+        let f32_data = vec![1.0, 2.5];
+        let f32_data_ptr = f32_data.as_ptr().cast::<u8>();
+        let f32_tensor = WireNdArray::from_f32(vec![2], f32_data).unwrap();
         assert_eq!(f32_tensor.dtype, "float32");
         assert_eq!(f32_tensor.shape, vec![2]);
+        let f32_raw_view = f32_tensor.data.into_raw_view().expect("raw view");
+        assert_eq!(f32_raw_view.as_ptr(), f32_data_ptr);
         assert_eq!(
-            f32_tensor.data.into_raw_view().expect("raw view"),
+            f32_raw_view,
             [1.0_f32, 2.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
         );
 

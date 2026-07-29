@@ -141,6 +141,7 @@ impl EngineCoreRequest {
         Ok(())
     }
 
+    /// Extract large request tensors into ordered auxiliary frames.
     pub(crate) fn extract_aux_frames(&mut self, threshold: usize) -> Vec<Bytes> {
         let mut aux_frames = Vec::new();
         if let Some(features) = &mut self.mm_features {

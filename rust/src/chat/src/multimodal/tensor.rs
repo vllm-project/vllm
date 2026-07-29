@@ -12,19 +12,48 @@ use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireArrayData, Wi
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
+/// Element type retained alongside an encoded tensor during multimodal lowering.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TensorKind {
+    /// 32-bit floating point.
+    F32,
+    /// IEEE 16-bit floating point.
+    F16,
+    /// Brain floating point.
+    Bf16,
+    /// Signed 64-bit integer.
+    I64,
+    /// Unsigned 32-bit integer.
+    U32,
+}
+
+impl TensorKind {
+    const fn element_size(self) -> usize {
+        match self {
+            Self::F32 => size_of::<f32>(),
+            Self::F16 => size_of::<f16>(),
+            Self::Bf16 => size_of::<bf16>(),
+            Self::I64 => size_of::<i64>(),
+            Self::U32 => size_of::<u32>(),
+        }
+    }
+
+    const fn wire_dtype(self) -> &'static str {
+        match self {
+            Self::F32 => "float32",
+            Self::F16 => "float16",
+            Self::Bf16 => "bfloat16",
+            Self::I64 => "int64",
+            Self::U32 => "uint32",
+        }
+    }
+}
+
 /// Representation for multimodal kwarg values for transformation.
 #[derive(Debug)]
 pub(super) enum KwargValue {
-    /// Float tensor with row-major flat data and shape.
-    F32Tensor(WireTensor),
-    /// Float16 tensor with row-major flat data and shape.
-    F16Tensor(WireTensor),
-    /// BFloat16 tensor with row-major flat data and shape.
-    Bf16Tensor(WireTensor),
-    /// Signed integer tensor with row-major flat data and shape.
-    I64Tensor(WireTensor),
-    /// Unsigned integer tensor with row-major flat data and shape.
-    U32Tensor(WireTensor),
+    /// Tensor with row-major flat data and shape.
+    Tensor { kind: TensorKind, wire: WireTensor },
     /// Non-tensor kwarg value that is shared or copied as-is.
     Passthrough(ProtocolKwargValue),
 }
@@ -69,10 +98,12 @@ impl KwargValue {
                 Self::from_f32_tensor(data, shape, float_dtype)?
             }
             ModelSpecificValue::IntTensor { data, shape } => {
-                Self::I64Tensor(WireTensor::from_owned_i64(shape, data).map_err(Error::Multimodal)?)
+                let wire = WireTensor::from_i64(shape, data).map_err(Error::Multimodal)?;
+                Self::tensor(TensorKind::I64, wire)
             }
             ModelSpecificValue::UintTensor { data, shape } => {
-                Self::U32Tensor(WireTensor::from_owned_u32(shape, data).map_err(Error::Multimodal)?)
+                let wire = WireTensor::from_u32(shape, data).map_err(Error::Multimodal)?;
+                Self::tensor(TensorKind::U32, wire)
             }
             ModelSpecificValue::Int(value) => Self::Passthrough(Int(value)),
             ModelSpecificValue::Float(value) => Self::Passthrough(Float(value)),
@@ -98,21 +129,23 @@ impl KwargValue {
     /// Convert a float tensor to the target float dtype if needed, keeping the
     /// same shape.
     fn from_f32_tensor(data: Vec<f32>, shape: Vec<usize>, float_dtype: ModelDtype) -> Result<Self> {
-        match float_dtype {
-            ModelDtype::Float16 => {
-                WireTensor::from_owned_f16(shape, data.into_iter().map(f16::from_f32).collect())
-                    .map(Self::F16Tensor)
-                    .map_err(Error::Multimodal)
-            }
-            ModelDtype::BFloat16 => {
-                WireTensor::from_owned_bf16(shape, data.into_iter().map(bf16::from_f32).collect())
-                    .map(Self::Bf16Tensor)
-                    .map_err(Error::Multimodal)
-            }
-            ModelDtype::Float32 => WireTensor::from_owned_f32(shape, data)
-                .map(Self::F32Tensor)
-                .map_err(Error::Multimodal),
-        }
+        let (kind, wire) = match float_dtype {
+            ModelDtype::Float16 => (
+                TensorKind::F16,
+                WireTensor::from_f16(shape, data.into_iter().map(f16::from_f32).collect()),
+            ),
+            ModelDtype::BFloat16 => (
+                TensorKind::Bf16,
+                WireTensor::from_bf16(shape, data.into_iter().map(bf16::from_f32).collect()),
+            ),
+            ModelDtype::Float32 => (TensorKind::F32, WireTensor::from_f32(shape, data)),
+        };
+        wire.map(|wire| Self::tensor(kind, wire)).map_err(Error::Multimodal)
+    }
+
+    fn tensor(kind: TensorKind, wire: WireTensor) -> Self {
+        debug_assert_eq!(wire.dtype, kind.wire_dtype());
+        Self::Tensor { kind, wire }
     }
 }
 
@@ -120,15 +153,11 @@ impl TryFrom<&KwargValue> for ProtocolKwargValue {
     type Error = Error;
 
     fn try_from(value: &KwargValue) -> Result<Self> {
-        let tensor = match value {
-            KwargValue::F32Tensor(tensor)
-            | KwargValue::F16Tensor(tensor)
-            | KwargValue::Bf16Tensor(tensor)
-            | KwargValue::I64Tensor(tensor)
-            | KwargValue::U32Tensor(tensor) => tensor.clone(),
+        let wire = match value {
+            KwargValue::Tensor { wire, .. } => wire.clone(),
             KwargValue::Passthrough(value) => return Ok(value.clone()),
         };
-        Ok(ProtocolKwargValue::Tensor(tensor))
+        Ok(ProtocolKwargValue::Tensor(wire))
     }
 }
 
@@ -136,11 +165,7 @@ impl KwargValue {
     /// First-axis length for tensor values; `None` for passthrough kwargs.
     pub(super) fn first_dim(&self) -> Option<usize> {
         match self {
-            Self::F32Tensor(tensor)
-            | Self::F16Tensor(tensor)
-            | Self::Bf16Tensor(tensor)
-            | Self::I64Tensor(tensor)
-            | Self::U32Tensor(tensor) => tensor.shape.first().copied(),
+            Self::Tensor { wire, .. } => wire.shape.first().copied(),
             Self::Passthrough(_) => None,
         }
     }
@@ -170,25 +195,13 @@ impl KwargValue {
         end: usize,
         drop_axis: bool,
     ) -> Result<ProtocolKwargValue> {
-        let tensor = match self {
-            Self::F32Tensor(tensor) => {
-                slice_first_axis_range(tensor, size_of::<f32>(), start, end, drop_axis)
-            }
-            Self::F16Tensor(tensor) => {
-                slice_first_axis_range(tensor, size_of::<f16>(), start, end, drop_axis)
-            }
-            Self::Bf16Tensor(tensor) => {
-                slice_first_axis_range(tensor, size_of::<bf16>(), start, end, drop_axis)
-            }
-            Self::I64Tensor(tensor) => {
-                slice_first_axis_range(tensor, size_of::<i64>(), start, end, drop_axis)
-            }
-            Self::U32Tensor(tensor) => {
-                slice_first_axis_range(tensor, size_of::<u32>(), start, end, drop_axis)
+        let wire = match self {
+            Self::Tensor { kind, wire } => {
+                slice_first_axis_range(wire, kind.element_size(), start, end, drop_axis)
             }
             Self::Passthrough(value) => return Ok(value.clone()),
         };
-        tensor.map(ProtocolKwargValue::Tensor)
+        wire.map(ProtocolKwargValue::Tensor)
     }
 }
 
@@ -212,7 +225,10 @@ pub(super) fn flat_range_for_index(
 /// Read a tensor value as per-image sizes for flat slicing.
 fn tensor_as_usize_vec(tensor: &KwargValue) -> Result<Vec<usize>> {
     match tensor {
-        KwargValue::I64Tensor(tensor) => raw_tensor_bytes(tensor, size_of::<i64>())?
+        KwargValue::Tensor {
+            kind: TensorKind::I64,
+            wire,
+        } => raw_tensor_bytes(wire, size_of::<i64>())?
             .chunks_exact(size_of::<i64>())
             .map(|bytes| i64::from_ne_bytes(bytes.try_into().expect("exact int64 chunk")))
             .map(|value| {
@@ -220,7 +236,10 @@ fn tensor_as_usize_vec(tensor: &KwargValue) -> Result<Vec<usize>> {
                     .map_err(|_| multimodal!("negative flat tensor size `{value}`"))
             })
             .collect(),
-        KwargValue::U32Tensor(tensor) => Ok(raw_tensor_bytes(tensor, size_of::<u32>())?
+        KwargValue::Tensor {
+            kind: TensorKind::U32,
+            wire,
+        } => Ok(raw_tensor_bytes(wire, size_of::<u32>())?
             .chunks_exact(size_of::<u32>())
             .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("exact uint32 chunk")) as usize)
             .collect()),
@@ -302,7 +321,10 @@ mod tests {
     fn batched_wire_value_at_drops_first_axis() {
         let data = vec![1.0_f32, 2.0, 3.0, 4.0];
         let expected_ptr = data.as_ptr().cast::<u8>().wrapping_add(2 * size_of::<f32>());
-        let value = KwargValue::F32Tensor(WireTensor::from_owned_f32(vec![2, 2], data).unwrap());
+        let value = KwargValue::tensor(
+            TensorKind::F32,
+            WireTensor::from_f32(vec![2, 2], data).unwrap(),
+        );
 
         let ProtocolKwargValue::Tensor(tensor) = value.batched_wire_value_at(1).unwrap() else {
             panic!("expected tensor");
@@ -319,8 +341,9 @@ mod tests {
 
     #[test]
     fn flat_wire_value_range_keeps_first_axis() {
-        let value = KwargValue::U32Tensor(
-            WireTensor::from_owned_u32(vec![5, 2], (0..10_u32).collect()).unwrap(),
+        let value = KwargValue::tensor(
+            TensorKind::U32,
+            WireTensor::from_u32(vec![5, 2], (0..10_u32).collect()).unwrap(),
         );
 
         let ProtocolKwargValue::Tensor(tensor) = value.flat_wire_value_range(1, 3).unwrap() else {
@@ -336,8 +359,10 @@ mod tests {
 
     #[test]
     fn flat_range_for_index_uses_size_tensor() {
-        let sizes =
-            KwargValue::I64Tensor(WireTensor::from_owned_i64(vec![3], vec![2_i64, 3, 4]).unwrap());
+        let sizes = KwargValue::tensor(
+            TensorKind::I64,
+            WireTensor::from_i64(vec![3], vec![2_i64, 3, 4]).unwrap(),
+        );
 
         assert_eq!(
             flat_range_for_index(&sizes, "image_grid_thw", 1).unwrap(),
