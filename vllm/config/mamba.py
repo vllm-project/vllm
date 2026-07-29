@@ -71,10 +71,7 @@ class MambaConfig:
                 f"Unknown Mamba SSU algorithm: '{self.ssu_algorithm}'. "
                 f"Valid options are: {valid}"
             )
-        if (
-            self.ssu_algorithm != "auto"
-            and self.backend != MambaBackendEnum.FLASHINFER
-        ):
+        if self.ssu_algorithm != "auto" and self.backend != MambaBackendEnum.FLASHINFER:
             raise ValueError(
                 "Mamba SSU algorithm selection is only supported with the "
                 "FlashInfer backend. Please set `--mamba-backend flashinfer`, "
