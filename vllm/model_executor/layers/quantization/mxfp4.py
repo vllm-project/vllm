@@ -935,6 +935,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
 
+        # The router emits fp32 logits, so aiter's biased_grouped_topk upcasts
+        # the bf16 correction bias to match on every step -- a per-layer,
+        # per-token bf16->fp32 copy kernel. Keep the tiny [num_experts] bias in
+        # fp32 so the runtime cast becomes a no-op.
+        if getattr(layer, "e_score_correction_bias", None) is not None:
+            layer.e_score_correction_bias.data = (
+                layer.e_score_correction_bias.data.to(torch.float32)
+            )
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
