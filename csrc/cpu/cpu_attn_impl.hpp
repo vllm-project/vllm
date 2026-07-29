@@ -1550,7 +1550,7 @@ class AttentionMainLoop {
       const int64_t available_cache_size = cpu_utils::get_available_l2_size();
       const int32_t default_tile_size =
           AttentionScheduler::calcu_default_tile_size(
-              available_cache_size, head_dim, sizeof(query_t),
+              available_cache_size, head_dim, sizeof(kv_cache_t),
               sizeof(q_buffer_t), sizeof(logits_buffer_t),
               sizeof(partial_output_buffer_t), max_q_head_num_per_iter,
               max_q_head_num_per_iter);
@@ -1662,7 +1662,7 @@ class AttentionMainLoop {
                   max_q_head_num_per_iter;
               const int32_t kv_tile_size =
                   AttentionScheduler::calcu_tile_size_with_constant_q(
-                      available_cache_size, head_dim, sizeof(query_t),
+                      available_cache_size, head_dim, sizeof(kv_cache_t),
                       sizeof(q_buffer_t), sizeof(logits_buffer_t),
                       sizeof(partial_output_buffer_t), max_q_head_num_per_iter,
                       blocksize_alignment, rounded_q_head_tile_size,

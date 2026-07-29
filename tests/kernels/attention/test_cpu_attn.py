@@ -534,6 +534,7 @@ def varlen_with_paged_kv(
         isa=isa,
         enable_kv_split=False,
         dynamic_causal=dynamic_causal_tensor,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     out_without_split = torch.empty_like(query)
@@ -569,6 +570,7 @@ def varlen_with_paged_kv(
         isa=isa,
         enable_kv_split=True,
         dynamic_causal=dynamic_causal_tensor,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     out_with_split = torch.empty_like(query)
