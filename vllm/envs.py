@@ -153,6 +153,7 @@ if TYPE_CHECKING:
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
     VLLM_USE_RUST_FRONTEND: bool = False
+    VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
@@ -186,13 +187,14 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
-    VLLM_MOE_SKIP_PADDING: bool = False
+    VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -547,22 +549,24 @@ def _deprecated_triton_attn_use_td() -> None:
     return None
 
 
-def _resolve_rust_frontend_path() -> str | None:
-    """Resolve the Rust frontend binary path.
+def _resolve_rust_cli_path() -> str | None:
+    """Resolve the vllm-rs binary path.
 
-    Returns None if VLLM_USE_RUST_FRONTEND is not enabled.
+    Returns None unless VLLM_USE_RUST_FRONTEND or VLLM_USE_RUST_BENCH is enabled.
     When enabled, resolves VLLM_RUST_FRONTEND_PATH ("auto" by default)
     to the actual binary path.
     """
-    use_rust = bool(int(os.environ.get("VLLM_USE_RUST_FRONTEND", "0")))
+    use_rust = bool(int(os.environ.get("VLLM_USE_RUST_FRONTEND", "0"))) or bool(
+        int(os.environ.get("VLLM_USE_RUST_BENCH", "0"))
+    )
     raw = os.environ.get("VLLM_RUST_FRONTEND_PATH", "auto")
 
     if not use_rust:
         if os.environ.get("VLLM_RUST_FRONTEND_PATH") is not None:
             logger.warning(
-                "VLLM_RUST_FRONTEND_PATH is set but VLLM_USE_RUST_FRONTEND "
-                "is not enabled. The Rust frontend will not be used. "
-                "Set VLLM_USE_RUST_FRONTEND=1 to enable it."
+                "VLLM_RUST_FRONTEND_PATH is set without enabling "
+                "VLLM_USE_RUST_FRONTEND or VLLM_USE_RUST_BENCH. "
+                "Set one of them to 1 to use the vllm-rs binary."
             )
         return None
 
@@ -1339,10 +1343,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RUST_FRONTEND": lambda: bool(
         int(os.getenv("VLLM_USE_RUST_FRONTEND", "0"))
     ),
-    # Path to the Rust frontend binary. Defaults to "auto" which discovers
-    # the binary installed with the vllm package. Only used when
-    # VLLM_USE_RUST_FRONTEND=1.
-    "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_frontend_path(),
+    # If set, use the packaged Rust client for `vllm bench serve`.
+    "VLLM_USE_RUST_BENCH": lambda: bool(int(os.getenv("VLLM_USE_RUST_BENCH", "0"))),
+    # Path to the vllm-rs binary. Defaults to "auto" which discovers the
+    # binary installed with the vllm package. Used when VLLM_USE_RUST_FRONTEND=1
+    # or VLLM_USE_RUST_BENCH=1.
+    "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_cli_path(),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -1490,6 +1496,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
+    # Opt-in MLA DCP query replication: skip the decode query all-gather.
+    "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1516,9 +1524,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel; off by default because not all
-    # kernels support it yet.
-    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "0"))),
+    # treats topk_id == -1 as a skip sentinel
+    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1545,7 +1552,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tensors above will instead be sent via a separate message.
     # While the sending side still actually copies the tensor
     # in all cases, on the receiving side, tensors above this
-    # limit will actually be zero-copy decoded.
+    # limit will actually be zero-copy decoded. The unit is bytes.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD": lambda: int(
         os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")
     ),
@@ -2112,6 +2119,13 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
+        # Location-only derived paths: where a cache/config directory lives
+        # cannot affect compiled artifacts, and hashing them means relocating
+        # HOME or the XDG roots silently invalidates every compile cache
+        # (VLLM_CACHE_ROOT above and VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR below
+        # are already ignored for the same reason).
+        "VLLM_XLA_CACHE_PATH",
+        "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
