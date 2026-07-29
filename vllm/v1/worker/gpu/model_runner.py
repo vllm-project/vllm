@@ -140,7 +140,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    BaseSpeculator,
+    DraftModelSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -368,12 +371,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
-            if isinstance(self.speculator, DraftModelSpeculator):
+            if isinstance(self.speculator, BaseSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
-                    )
+                    if isinstance(self.speculator, DraftModelSpeculator):
+                        eplb_models_added = self.eplb.maybe_register_speculator(
+                            self.speculator, self.speculative_config, load_dummy_weights
+                        )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

@@ -60,13 +60,17 @@ def run_test(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    """Verify that the inference result is the same between hf and vllm."""
+    """Verify that vLLM MTP preserves the HF target model's output."""
     with vllm_runner(
         model,
         dtype=dtype,
         max_num_seqs=64,
         limit_mm_per_prompt={"image": 1},
         trust_remote_code=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 1,
+        },
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
@@ -109,7 +113,7 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.2"])
+@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-2.0"])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(

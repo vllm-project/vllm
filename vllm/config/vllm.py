@@ -603,7 +603,11 @@ class VllmConfig:
             # decoding instead of standard next-token sampling, so it has a query
             # for the last sampled token plus queries for each draft token.
             return self.num_speculative_tokens + 1
-        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
+        if (
+            speculative_config.use_eagle()
+            or speculative_config.uses_draft_model()
+            or speculative_config.use_nemotron_parse_mtp()
+        ):
             # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query), so it needs exactly
