@@ -304,13 +304,13 @@ def test_mla_backend_selection(
             assert backend_path == expected_backend_path
 
 
-def test_aiter_fa_requires_mi3xx(mock_vllm_config):
-    """Test that ROCM_AITER_FA requires mi3xx architecture."""
+def test_aiter_fa_requires_supported_architecture(mock_vllm_config):
+    """Test that ROCM_AITER_FA rejects unsupported architectures."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_mi3xx to return False (used by supports_compute_capability)
     with (
         patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.on_gfx90a", return_value=False),
         pytest.raises(
             ValueError,
             match="compute capability not supported",
@@ -330,6 +330,51 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
             selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
             attn_selector_config=attn_selector_config,
         )
+
+
+def test_aiter_fa_supports_gfx90a(mock_vllm_config):
+    """Test explicit ROCM_AITER_FA selection on gfx90a."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    with (
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.on_gfx90a", return_value=True),
+    ):
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="auto",
+            block_size=2048,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+        )
+
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            attn_selector_config=attn_selector_config,
+        )
+
+    assert backend_path == AttentionBackendEnum.ROCM_AITER_FA.get_path()
+
+
+def test_aiter_fa_adds_large_pages_only_on_gfx90a():
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+    )
+
+    with patch("vllm.platforms.rocm.on_gfx90a", return_value=False):
+        assert AiterFlashAttentionBackend.get_supported_kernel_block_sizes() == [
+            16,
+            32,
+        ]
+
+    with patch("vllm.platforms.rocm.on_gfx90a", return_value=True):
+        assert AiterFlashAttentionBackend.get_supported_kernel_block_sizes() == [
+            16,
+            32,
+            2048,
+        ]
 
 
 def test_sparse_not_supported(mock_vllm_config):

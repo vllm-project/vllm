@@ -110,6 +110,21 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def if_aiter_attention_supported(func: Callable) -> Callable:
+    """Allow AITER attention on gfx90a and the existing MI3xx targets."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if current_platform.is_rocm() and IS_AITER_FOUND:
+            from vllm.platforms.rocm import on_gfx90a, on_mi3xx
+
+            if on_gfx90a() or on_mi3xx():
+                return func(*args, **kwargs)
+        return None
+
+    return wrapper
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1443,10 +1458,11 @@ class rocm_aiter_ops:
         after monkey patching the env variables in the unit test.
 
     Check Functions:
-        All check functions (is_*_enabled) are decorated with @if_aiter_supported,
-        which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
-        (3) aiter library is installed. The check function then also verifies
-        the corresponding environment variable is enabled.
+        Check functions (is_*_enabled) use architecture decorators which verify
+        the ROCm platform, supported device target, and AITER installation.
+        Most use @if_aiter_supported. Shuffled attention also supports gfx90a
+        through @if_aiter_attention_supported. Each check then verifies its
+        corresponding environment variable.
         i.e.                                             ___
         is_enabled() == current_platform.is_rocm() and      |     checked by
                         current_platform.is_on_gfx9() and   | @if_aiter_supported
@@ -1681,7 +1697,7 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and cls._CUSTOM_ALL_REDUCE_ENABLED
 
     @classmethod
-    @if_aiter_supported
+    @if_aiter_attention_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
@@ -2828,6 +2844,40 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
+        )
+
+    @staticmethod
+    def mha_batch_prefill_func(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_page_indices: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        softmax_scale: float,
+        causal: bool,
+        out: torch.Tensor,
+        block_table: torch.Tensor,
+        seqlen_k: torch.Tensor,
+    ):
+        from aiter import mha_batch_prefill_func
+
+        return mha_batch_prefill_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            kv_indptr,
+            kv_page_indices,
+            max_seqlen_q,
+            max_seqlen_k,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            out=out,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
         )
 
     @staticmethod
