@@ -338,6 +338,30 @@ def get_fake_process_mamba_fn(
             assert copy_info[0][-1] == expected_temporal_src
             assert copy_info[1][-1] == expected_temporal_dest
 
+    def check_fused_copy_info(
+        action: tuple[int, int],
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext,
+    ):
+        # Align + spec-decode on a hybrid model routes the pre-copy through the
+        # fused kernel (preprocess_mamba -> run_fused_precopy) instead of
+        # do_mamba_copy_block, so copy_info is never populated. Verify from the
+        # fused buffers (req-0 scope, mirroring check_copy_info):
+        #   - the copy DECISION: src_col is -1 iff no pre-copy is scheduled;
+        #   - the DESTINATION column: state_idx == action[1] (curr_state_idx;
+        #     maps directly through block_ids, exactly as check_copy_info's dst).
+        # The source column is NOT asserted here: on the scalar path the source
+        # address is produced by the per-state copy func with an accept-token
+        # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
+        # to action[0] by plain equality. Source block-level exactness (incl.
+        # the accept-bias) is covered by test_precopy_mamba_align.py.
+        src_col = int(align_ctx.precopy_src_col_buf.np[0])
+        state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
+        if action == (-1, -1):
+            assert src_col == -1
+        else:
+            assert src_col != -1
+            assert state_idx == action[1]
+
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
         kv_cache_config: KVCacheConfig,
@@ -348,6 +372,7 @@ def get_fake_process_mamba_fn(
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         copy_bufs: mamba_utils.MambaCopyBuffers,
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
     ):
         nonlocal copy_info
         copy_info = None
@@ -361,14 +386,21 @@ def get_fake_process_mamba_fn(
             forward_context,
             mamba_state_copy_funcs,
             copy_bufs,
+            align_ctx,
         )
         if cur_step_action is not None:
-            check_copy_info(
-                cur_step_action.preprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
-            )
+            if align_ctx is not None:
+                check_fused_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    align_ctx,
+                )
+            else:
+                check_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    kv_cache_config,
+                    forward_context,
+                    input_batch,
+                )
         return ret
 
     def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
