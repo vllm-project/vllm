@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
-from vllm.v1.worker.utils import resolve_block_table_layout
+from vllm.v1.worker.utils import resolve_block_table_width
 
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():
@@ -49,7 +49,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
         compress_ratio=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
-    block_table_layout = resolve_block_table_layout(
+    block_table_width = resolve_block_table_width(
         kv_cache_spec,
         kernel_block_size=256,
         vllm_config=vllm_config,
@@ -60,7 +60,7 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
         layer_names=["dummy"],
         vllm_config=vllm_config,
         device=device,
-        block_table_layout=block_table_layout,
+        block_table_width=block_table_width,
     )
 
     # Construct a single request where:

@@ -235,12 +235,11 @@ from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
     AttentionGroup,
-    BlockTableLayout,
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
-    prepare_block_table_layouts,
+    prepare_block_table_widths,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -7104,36 +7103,36 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
-        block_table_layouts: list[BlockTableLayout],
+        block_table_widths: list[int],
     ) -> None:
         """
         Create the metadata builders for all KV cache groups and attn groups.
         """
-        layout_index = 0
+        block_table_index = 0
         for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
             kv_cache_spec = kv_cache_config.kv_cache_groups[
                 kv_cache_group_id
             ].kv_cache_spec
-            block_table_layout = None
+            kernel_block_size = None
+            block_table_width = None
             if (
                 get_kv_cache_spec_kind(kv_cache_spec)
                 != KVCacheSpecKind.ENCODER_ONLY_ATTENTION
             ):
-                block_table_layout = block_table_layouts[layout_index]
-                layout_index += 1
+                kernel_block_size = kernel_block_sizes[block_table_index]
+                block_table_width = block_table_widths[block_table_index]
+                block_table_index += 1
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 attn_group.create_metadata_builders(
                     self.vllm_config,
                     self.device,
-                    block_table_layout.kernel_block_size
-                    if block_table_layout is not None
-                    else None,
-                    block_table_layout=block_table_layout,
+                    kernel_block_size,
+                    block_table_width=block_table_width,
                     num_metadata_builders=1
                     if not self.parallel_config.use_ubatching
                     else self.parallel_config.num_ubatches,
                 )
-        assert layout_index == len(block_table_layouts)
+        assert block_table_index == len(block_table_widths)
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
         # because some of them change the threshold at init time.
@@ -7233,7 +7232,7 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
-        block_table_layouts: list[BlockTableLayout],
+        block_table_widths: list[int],
     ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
@@ -7245,27 +7244,22 @@ class GPUModelRunner(
         Args:
             kv_cache_config: The KV cache configuration.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
-            block_table_layouts: The resolved block-table layouts.
+            block_table_widths: The resolved block-table widths.
         """
         block_sizes = []
-        block_table_widths = []
         slot_mapping_modes = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        layout_index = 0
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             kv_cache_spec_kind = get_kv_cache_spec_kind(kv_cache_spec)
             if kv_cache_spec_kind == KVCacheSpecKind.ENCODER_ONLY_ATTENTION:
                 continue
-            layout = block_table_layouts[layout_index]
-            layout_index += 1
-            block_sizes.append(layout.kv_block_size)
+            block_sizes.append(kv_cache_spec.block_size)
             if kv_cache_spec_kind == KVCacheSpecKind.MAMBA:
                 slot_mapping_modes.append(SlotMappingMode.NONE)
             else:
                 slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
-            block_table_widths.append(layout.width)
-        assert layout_index == len(block_table_layouts)
+        assert len(block_sizes) == len(block_table_widths)
 
         if (
             block_sizes != self._init_block_sizes
@@ -7646,7 +7640,7 @@ class GPUModelRunner(
             kv_cache_config, self.attn_groups
         )
         self._kernel_block_sizes = kernel_block_sizes
-        block_table_layouts = prepare_block_table_layouts(
+        block_table_widths = prepare_block_table_widths(
             kv_cache_config,
             kernel_block_sizes,
             self.vllm_config,
@@ -7655,12 +7649,12 @@ class GPUModelRunner(
 
         # create metadata builders
         self.initialize_metadata_builders(
-            kv_cache_config, kernel_block_sizes, block_table_layouts
+            kv_cache_config, kernel_block_sizes, block_table_widths
         )
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(
-            kv_cache_config, kernel_block_sizes, block_table_layouts
+            kv_cache_config, kernel_block_sizes, block_table_widths
         )
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes

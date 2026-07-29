@@ -42,22 +42,13 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
-class BlockTableLayout:
-    """Resolved block-table dimensions for one KV-cache group."""
-
-    kv_block_size: int
-    kernel_block_size: int
-    width: int
-
-
-def resolve_block_table_layout(
+def resolve_block_table_width(
     kv_cache_spec: KVCacheSpec,
     kernel_block_size: int,
     vllm_config: VllmConfig,
     max_model_len: int,
-) -> BlockTableLayout:
-    """Resolve the block-table dimensions for a KV-cache group."""
+) -> int:
+    """Resolve the block-table width for a KV-cache group."""
     kv_block_size = kv_cache_spec.block_size
     if kv_block_size % kernel_block_size != 0:
         raise ValueError(
@@ -69,8 +60,7 @@ def resolve_block_table_layout(
     alignment = BLOCK_TABLE_TOKEN_ALIGNMENT // math.gcd(
         BLOCK_TABLE_TOKEN_ALIGNMENT, kernel_block_size
     )
-    width = cdiv(width, alignment) * alignment
-    return BlockTableLayout(kv_block_size, kernel_block_size, width)
+    return cdiv(width, alignment) * alignment
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
@@ -263,7 +253,7 @@ class AttentionGroup:
         vllm_config,
         device,
         kernel_block_size: int | None = None,
-        block_table_layout: BlockTableLayout | None = None,
+        block_table_width: int | None = None,
         num_metadata_builders: int = 1,
     ):
         kv_cache_spec_builder = (
@@ -273,12 +263,12 @@ class AttentionGroup:
         )
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
-        if builder_cls.requires_block_table_layout:
-            if block_table_layout is None:
+        if builder_cls.requires_block_table_width:
+            if block_table_width is None:
                 raise ValueError(
-                    f"{builder_cls.__name__} requires a resolved block-table layout"
+                    f"{builder_cls.__name__} requires the block-table width"
                 )
-            builder_kwargs["block_table_layout"] = block_table_layout
+            builder_kwargs["block_table_width"] = block_table_width
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -411,14 +401,14 @@ def prepare_kernel_block_sizes(
     return kernel_block_sizes
 
 
-def prepare_block_table_layouts(
+def prepare_block_table_widths(
     kv_cache_config: KVCacheConfig,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     max_model_len: int,
-) -> list[BlockTableLayout]:
-    """Resolve block-table layouts for all worker-side KV-cache groups."""
-    layouts = []
+) -> list[int]:
+    """Resolve block-table widths for all worker-side KV-cache groups."""
+    widths = []
     kernel_index = 0
     for kv_cache_group in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -427,8 +417,8 @@ def prepare_block_table_layouts(
             == KVCacheSpecKind.ENCODER_ONLY_ATTENTION
         ):
             continue
-        layouts.append(
-            resolve_block_table_layout(
+        widths.append(
+            resolve_block_table_width(
                 kv_cache_spec,
                 kernel_block_sizes[kernel_index],
                 vllm_config,
@@ -437,7 +427,7 @@ def prepare_block_table_layouts(
         )
         kernel_index += 1
     assert kernel_index == len(kernel_block_sizes)
-    return layouts
+    return widths
 
 
 def sanity_check_mm_encoder_outputs(

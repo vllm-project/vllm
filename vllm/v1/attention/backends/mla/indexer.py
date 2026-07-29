@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -37,9 +36,6 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.utils import BlockTableLayout
 
 logger = init_logger(__name__)
 
@@ -460,7 +456,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
-    requires_block_table_layout = True
+    requires_block_table_width = True
 
     @classmethod
     def get_cudagraph_support(
@@ -470,7 +466,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def __init__(self, *args, block_table_layout: "BlockTableLayout", **kwargs) -> None:
+    def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
@@ -560,7 +556,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
         self.expanded_block_table_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens, block_table_layout.width),
+            (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
             device=self.device,
         )

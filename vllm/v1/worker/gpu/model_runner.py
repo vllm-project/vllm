@@ -53,7 +53,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -436,15 +440,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups,
             attn_cg_support,
             self.kernel_block_sizes,
-            block_table_layouts,
+            block_table_widths,
         ) = init_attn_backend(
             self.kv_cache_config,
             self.vllm_config,
             self.device,
             block_table_max_model_len=block_table_max_model_len,
         )
-        block_sizes = [layout.kv_block_size for layout in block_table_layouts]
-        block_table_widths = [layout.width for layout in block_table_layouts]
+        block_sizes = [
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            if get_kv_cache_spec_kind(group.kv_cache_spec)
+            != KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+        ]
 
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
