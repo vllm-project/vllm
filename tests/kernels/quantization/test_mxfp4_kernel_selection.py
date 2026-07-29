@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
 from vllm.platforms import PlatformEnum
@@ -82,22 +83,24 @@ def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
 @pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic, kMxfp4Static])
 def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
-    kernel_cls, activation_quant_key, capfd
+    kernel_cls, activation_quant_key
 ):
     """Marlin/Humming never quantize activations, so an unset activation key,
     or one that already describes MXFP4-shaped data, is tolerated. When an
     activation key is explicitly set, a warning must be logged noting that it
     is ignored, since these kernels are weight-only (A16)."""
     config = MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
-    can_implement, reason = kernel_cls.can_implement(config)
+    with patch(f"{kernel_cls.__module__}.logger.warning_once") as warning_once:
+        can_implement, reason = kernel_cls.can_implement(config)
     assert can_implement, reason
 
-    captured = capfd.readouterr()
     if activation_quant_key is None:
-        assert "is ignored" not in captured.out + captured.err
+        warning_once.assert_not_called()
     else:
-        assert "the requested activation quantization" in captured.out + captured.err
-        assert "is ignored" in captured.out + captured.err
+        warning_once.assert_called_once()
+        message = warning_once.call_args.args[0]
+        assert "the requested activation quantization" in message
+        assert "is ignored" in message
 
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
@@ -110,7 +113,7 @@ def test_weight_only_kernels_reject_non_mxfp4_activation(kernel_cls):
 
 @pytest.mark.parametrize(
     "activation_quant_key",
-    [None, kMxfp4Dynamic, kMxfp6E3M2Dynamic],
+    [None, kMxfp4Dynamic, kMxfp6E3M2Dynamic, kMxfp6E2M3Dynamic],
 )
 def test_emulation_kernel_accepts_any_config(activation_quant_key):
     """EmulationMxfp4LinearKernel is the universal fallback: it must accept

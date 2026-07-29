@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
     quant_dequant_mxfp4,
@@ -24,6 +25,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+logger = init_logger(__name__)
 
 _ACTIVATION_QUANT_DEQUANT_FUNCS: dict[
     QuantKey, Callable[[torch.Tensor], torch.Tensor]
@@ -57,26 +60,6 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if (
-            current_platform.is_rocm()
-            and current_platform.supports_mx()
-            and config.activation_quant_key == kMxfp4Dynamic
-        ):
-            from vllm._aiter_ops import is_aiter_found_and_supported
-            from vllm.model_executor.kernels.linear import _get_linear_backend
-
-            linear_backend = _get_linear_backend()
-            if linear_backend == "auto":
-                if not is_aiter_found_and_supported():
-                    raise ValueError(
-                        "This platform supports native MXFP4 W4A4 "
-                        "computation via AITER, but AITER is not found or "
-                        "not supported. Please install AITER, or pass "
-                        "--linear-backend=emulation to force the (slow) "
-                        "emulation fallback."
-                    )
-                raise ValueError("Something went wrong, please open an issue.")
-
         if config.activation_quant_key not in (
             None,
             kMxfp4Dynamic,
@@ -84,6 +67,28 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
             kMxfp6E2M3Dynamic,
         ):
             return False, "only supports MXFP4 or MXFP6 or unquantized activations"
+
+        if (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and config.activation_quant_key != kMxfp4Dynamic
+        ):
+            logger.warning_once(
+                "The current platform supports native MXFP4/MXFP6 computation, "
+                f"but kernels for activation_quant_key={config.activation_quant_key} "
+                f"are not yet integrated in vLLM. Using EmulationMxfp4LinearKernel, "
+                "with simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize), with the linear "
+                "layers computed in high precision."
+            )
+
+        if not current_platform.supports_mx():
+            logger.warning_once(
+                "The current platform does not support native MXFP4 "
+                "computation. Using EmulationMxfp4LinearKernel, with simulated weight "
+                "dequantization and activation QDQ (quantize and dequantize), with "
+                "the linear layers computed in high precision."
+            )
 
         return True, None
 
