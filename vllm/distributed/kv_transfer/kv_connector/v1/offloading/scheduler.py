@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
@@ -65,70 +64,6 @@ logger = init_logger(__name__)
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
-
-
-class StoreStrategy(ABC):
-    """Per-request store policy. Stateful: one instance per request.
-
-    The instance lives on ``RequestOffloadState._store_strategy`` (set
-    in ``__post_init__`` from ``offloading_context.store_policy``).
-    State, counters, and per-request config belong on the strategy
-    instance, not on ``RequestOffloadState`` -- the latter is for KV
-    bookkeeping (cursors, block_ids, in-flight jobs). The strategy only
-    answers the single "what's the per-group store boundary this step?"
-    question; reachability filtering and packing are architectural
-    invariants owned by the scheduler and must remain so.
-
-    Two deliberate choices vs #42050's ``OffloadPolicy``:
-      * progress ownership: #42050 stores cursors on the policy
-        (``self._stored_idx: dict[req_id, list[int]]``); this design
-        keeps cursors in ``RequestOffloadState`` and lets the strategy
-        hold only *non-progress* per-request state, so the scheduler's
-        cursor invariants stay in one place.
-      * strategy lifetime: #42050 uses a scheduler-singleton policy
-        with cross-request dict state; this design uses a per-request
-        instance selected from ``offloading_context.store_policy``, so
-        each request can run a different policy.
-    """
-
-    @abstractmethod
-    def store_extent(
-        self,
-        req_status: RequestOffloadState,
-        num_offloadable_tokens: int,
-    ) -> list[int]:
-        """Per-group exclusive chunk boundary for this step.
-
-        Returned in ``config.kv_group_configs`` order; returning
-        ``group_state.next_stored_chunk_idx`` for a group means "defer this
-        step" (no new chunks offered, cursor stays put). The eager default is
-        the eligible boundary computed by ``req_status.storable_chunks``.
-        """
-        ...
-
-
-class EagerStoreStrategy(StoreStrategy):
-    """Default: every group's eligible chunk boundary."""
-
-    def store_extent(self, req_status, num_offloadable_tokens):
-        return req_status.storable_chunks_for_each_group(num_offloadable_tokens)
-
-
-class DeferUntilFinishStoreStrategy(StoreStrategy):
-    """Defer every group until the request reaches a terminal state.
-
-    Related: #42050 introduces ``request_finished`` on
-    ``OffloadingManager``, which lets the manager react when a request
-    ends (e.g. flush a deferred last-block transfer). This strategy is
-    the scheduler-side mirror: deferring all stores until
-    ``req.is_finished()`` so no incremental chunks hit the offload tier
-    during decode. See the #49413 RFC thread for context.
-    """
-
-    def store_extent(self, req_status, num_offloadable_tokens):
-        if req_status.req.is_finished():
-            return req_status.storable_chunks_for_each_group(num_offloadable_tokens)
-        return req_status.store_frontiers()
 
 
 @dataclass(slots=True)
@@ -430,12 +365,11 @@ class RequestOffloadState:
     deferred_lookup_start_time: float | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
-    # Per-request store strategy. Translated from
-    # ``offloading_context.store_policy`` in ``__post_init__``; the
-    # scheduler reads it via ``store_extent`` on every step. The mapping
-    # is a small closed dispatch (see ``__post_init__``) -- new policies
-    # add a branch there, not a registry.
-    _store_strategy: StoreStrategy = field(init=False, repr=False)
+    # Per-request store policy is held in
+    # ``offloading_context.store_policy`` (a ``StorePolicy`` enum set by
+    # the tier's ``on_new_request``). The two built-in policies are
+    # dispatched inline in ``_store_extent`` via a small closed
+    # ``match``.
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -458,17 +392,9 @@ class RequestOffloadState:
                 "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
             )
 
-        # Translate the tier's ``offloading_context.store_policy`` choice
-        # into a concrete ``StoreStrategy`` instance. The tier does not
-        # know about ``StoreStrategy`` (it returns an enum in its
-        # ``on_new_request`` hook); this dispatch is the only place
-        # external intent becomes a scheduler-internal object. New
-        # ``StorePolicy`` values add a branch here.
-        match self.offloading_context.store_policy:
-            case StorePolicy.ON_COMPUTE:
-                self._store_strategy = EagerStoreStrategy()
-            case StorePolicy.ON_FINISH:
-                self._store_strategy = DeferUntilFinishStoreStrategy()
+        # (No strategy instance to construct -- the two built-in policies
+        # are dispatched inline in ``_store_extent`` via a small closed
+        # ``match`` on ``self.offloading_context.store_policy``.)
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -527,23 +453,28 @@ class RequestOffloadState:
     def _store_extent(self, num_offloadable_tokens: int) -> list[int]:
         """Resolve this step's per-group store boundary from the store policy.
 
-        Delegates to the per-request ``StoreStrategy`` instance set in
-        ``__post_init__`` from ``offloading_context.store_policy``. The
-        strategy is *not* a singleton -- each request holds its own
-        instance so per-request state (counters, accumulators, ...) can
-        live on the strategy itself.
+        Dispatches inline on ``offloading_context.store_policy``:
+
+          * ``ON_COMPUTE``: the eager per-group eligible boundary
+            (``storable_chunks_for_each_group``).
+          * ``ON_FINISH``: defer every group until the request
+            reaches a terminal state; once ``req.is_finished()``,
+            fall back to the eager boundary.
 
         Each entry is the exclusive end index of the leading chunks to
-        store for that group this step; returning
-        ``group_state.next_stored_chunk_idx`` for a group means "defer"
-        (no new chunks offered, cursor stays put). The eager default is
-        identical to ``storable_chunks`` for every group.
-
-        Internal: the per-group list is cached in ``_step_extents``
-        and consumed by ``finalize_store_step`` via
-        ``_consume_step_extents``. Callers never see the list.
+        store for that group this step; the per-group store frontier
+        (``group_state.next_stored_chunk_idx``) signals "defer this
+        step" (no new chunks offered, cursor stays put). Callers (the
+        store path) pass ``num_offloadable_tokens``; the per-group
+        extent list is resolved here and never exposed.
         """
-        return self._store_strategy.store_extent(self, num_offloadable_tokens)
+        match self.offloading_context.store_policy:
+            case StorePolicy.ON_COMPUTE:
+                return self.storable_chunks_for_each_group(num_offloadable_tokens)
+            case StorePolicy.ON_FINISH:
+                if self.req.is_finished():
+                    return self.storable_chunks_for_each_group(num_offloadable_tokens)
+                return self.store_frontiers()
 
     def _advance_to_extent(self, ends: list[int]) -> None:
         """Advance each group's store cursor to ``ends[i]``.
@@ -562,20 +493,18 @@ class RequestOffloadState:
     def store_frontiers(self) -> list[int]:
         """Per-group store frontiers (``RequestGroupState.next_stored_chunk_idx``).
 
-        Consulted by ``DeferUntilFinishStoreStrategy`` to report its
-        deferred extent ("stay where you are"). Bulk accessor so
-        strategies don't iterate ``group_states`` directly.
+        Used by the inline ``ON_FINISH`` branch of ``_store_extent``
+        to report its deferred extent ("stay where you are").
         """
         return [gs.next_stored_chunk_idx for gs in self.group_states]
 
     def storable_chunks_for_each_group(self, num_offloadable_tokens: int) -> list[int]:
         """Per-group eligible storable-chunk count.
 
-        Used by ``EagerStoreStrategy.store_extent``: the eager
-        strategy's per-group boundary is "the eligible boundary
-        computed from ``num_offloadable_tokens`` and the per-group
-        chunk size". Bulk accessor so strategies don't iterate
-        ``group_states`` directly.
+        Used by the inline ``ON_COMPUTE`` / finished-``ON_FINISH``
+        branches of ``_store_extent``: the eager boundary is "the
+        eligible boundary computed from ``num_offloadable_tokens``
+        and the per-group chunk size".
         """
         return [
             self.storable_chunks(gc, gs, num_offloadable_tokens)
@@ -1387,12 +1316,23 @@ class OffloadingConnectorScheduler:
             store_output = self.manager.prepare_store(
                 new_offload_keys, req_status.req_context
             )
-            if store_output is None or not store_output.keys_to_store:
-                if store_output is None:
-                    self._connector_stats.increase_counter(
-                        _ConnectorMetricName.ALLOCATION_FAILURE
-                    )
-                    logger.warning("Request %s: cannot store chunks", req_id)
+            if store_output is None:
+                # Allocation failure: keep the per-group store cursors so
+                # the next step re-offers the same candidates (the
+                # manager might recover). This matches the pre-refactor
+                # semantics where prepare_store failure skipped the
+                # advance_to_extent.
+                self._connector_stats.increase_counter(
+                    _ConnectorMetricName.ALLOCATION_FAILURE
+                )
+                logger.warning("Request %s: cannot store chunks", req_id)
+                continue
+
+            if not store_output.keys_to_store:
+                # Manager rejected all candidates -- nothing to store
+                # this step; advance the cursors so next step's
+                # ``ends`` reflects today's eligibility, not stale
+                # state.
                 req_status.finalize_store_step(num_offloadable_tokens)
                 continue
 
