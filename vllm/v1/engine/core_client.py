@@ -1496,14 +1496,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 notification_data
             )
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
-        cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-
-        assert new_data_parallel_size != cur_data_parallel_size, (
-            f"new_data_parallel_size {new_data_parallel_size} must be "
-            f"different from cur_data_parallel_size {cur_data_parallel_size}"
-        )
-
+    def _get_external_eep_coordinator(self) -> ExternalElasticEPScaleCoordinator:
         parallel_config = self.vllm_config.parallel_config
         if not parallel_config.enable_elastic_ep:
             raise NotImplementedError(
@@ -1514,10 +1507,23 @@ class DPAsyncMPClient(AsyncMPClient):
                 "DPAsyncMPClient only supports Elastic EP scaling in external "
                 "load-balancer mode."
             )
-        assert self.external_eep_coordinator is not None
-        await self.external_eep_coordinator.scale(
+        coordinator = self.external_eep_coordinator
+        assert coordinator is not None
+        return coordinator
+
+    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+        cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+
+        assert new_data_parallel_size != cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be "
+            f"different from cur_data_parallel_size {cur_data_parallel_size}"
+        )
+        await self._get_external_eep_coordinator().prepare(
             cur_data_parallel_size, new_data_parallel_size
         )
+
+    async def commit_elastic_ep(self) -> None:
+        await self._get_external_eep_coordinator().commit()
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

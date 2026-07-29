@@ -83,6 +83,7 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
+    num_redundant_experts: int | None = None
 
 
 def _make_control_bundle(node_ip: str) -> dict[str, float]:
@@ -1403,6 +1404,11 @@ def wait_for_engine_startup(
             coord_store_port = msg.get("coord_store_port")
             if coord_store_port is not None and local:
                 parallel_config._coord_store_port = coord_store_port
+            num_redundant_experts = msg.get("num_redundant_experts")
+            if num_redundant_experts is not None and local:
+                parallel_config.eplb_config.num_redundant_experts = (
+                    num_redundant_experts
+                )
 
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
