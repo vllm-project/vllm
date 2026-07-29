@@ -8,6 +8,7 @@ service Control {
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
   rpc Abort (AbortRequest) returns (AbortResponse) {}
+  rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
 }
 
 message GetServerInfoRequest {}
@@ -51,3 +52,23 @@ message AbortRequest {
 }
 
 message AbortResponse {}
+
+// ======================================================================================
+// KV discovery
+// ======================================================================================
+
+message GetKvEventSourcesRequest {}
+message GetKvEventSourcesResponse { repeated KvEventSource sources = 1; }
+
+message KvEventSource {
+  string transport = 1;
+  string endpoint = 2;
+  string topic = 3;
+  string replay_endpoint = 4;
+  optional uint32 data_parallel_rank = 5;
+  string encoding = 6;
+  uint32 schema_version = 7;
+  uint32 buffer_steps = 8;
+  uint32 hwm = 9;
+  uint32 max_queue_size = 10;
+}
