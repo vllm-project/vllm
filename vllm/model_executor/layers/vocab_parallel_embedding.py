@@ -232,7 +232,7 @@ class VocabParallelEmbedding(PluggableLayer):
         padding_size: padding size for the vocabulary.
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
-        replicated: whether to replicate the embedding on every TP rank.
+        disable_tp: If true, tensor parallelism will be disabled for this layer.
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -247,14 +247,18 @@ class VocabParallelEmbedding(PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
-        replicated: bool = False,
+        disable_tp: bool = False,
     ):
         super().__init__()
 
         # Keep the input dimensions.
-        self.replicated = replicated
-        tp_rank = get_tensor_model_parallel_rank() if not replicated else 0
-        self.tp_size = get_tensor_model_parallel_world_size() if not replicated else 1
+        self.disable_tp = disable_tp
+        if disable_tp:
+            tp_rank, self.tp_size = 0, 1
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = tp_rank
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -327,6 +331,13 @@ class VocabParallelEmbedding(PluggableLayer):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+        self.update_param_tp_status()
+
+    def update_param_tp_status(self):
+        for param in self.parameters():
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
 
     @classmethod
     def _get_indices(
@@ -491,13 +502,9 @@ class VocabParallelEmbedding(PluggableLayer):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce sharded embeddings across all the model parallel GPUs.
-        output = (
-            output_parallel
-            if self.replicated
-            else tensor_model_parallel_all_reduce(output_parallel)
-        )
-        return output
+            # Reduce across all the model parallel GPUs.
+            return tensor_model_parallel_all_reduce(output_parallel)
+        return output_parallel
 
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
@@ -524,7 +531,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
-        replicated: whether to replicate the head on every TP rank.
+        disable_tp: If true, tensor parallelism will be disabled for this layer.
     """
 
     # --8<-- [end:parallel_lm_head]
@@ -540,7 +547,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
-        replicated: bool = False,
+        disable_tp: bool = False,
     ):
         super().__init__(
             num_embeddings,
@@ -550,7 +557,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             padding_size,
             quant_config,
             prefix,
-            replicated=replicated,
+            disable_tp=disable_tp,
         )
         self.quant_config = quant_config
         if bias:

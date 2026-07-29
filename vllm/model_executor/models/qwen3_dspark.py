@@ -24,7 +24,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
-    VocabParallelEmbedding,
 )
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
@@ -39,8 +38,11 @@ class DSparkMarkovHead(nn.Module):
     ``markov_w1[token]`` embeds the previously sampled token (target vocab,
     ``vocab_size``); ``markov_w2`` projects it to a draft-vocab bias
     (``draft_vocab_size``) added to the base draft logits. The two sizes
-    coincide for full-vocab drafts. Set ``replicated`` to keep both weights
-    complete on every TP rank and avoid collectives in the sequential path.
+    coincide for full-vocab drafts.
+
+    Both weights are replicated because the head runs sequentially for every
+    draft position. Sharding them would add an all-reduce and a full-vocab
+    gather to each position.
     """
 
     def __init__(
@@ -49,28 +51,26 @@ class DSparkMarkovHead(nn.Module):
         draft_vocab_size: int,
         markov_rank: int,
         prefix: str,
-        *,
-        replicated: bool = False,
     ) -> None:
         super().__init__()
-        self.markov_w1 = VocabParallelEmbedding(
-            vocab_size,
-            markov_rank,
-            prefix=maybe_prefix(prefix, "markov_w1"),
-            replicated=replicated,
-        )
+        self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
         self.markov_w2 = ParallelLMHead(
             draft_vocab_size,
             markov_rank,
+            bias=False,
             prefix=maybe_prefix(prefix, "markov_w2"),
-            replicated=replicated,
+            disable_tp=True,
         )
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         """r-dim Markov embedding of ``token_ids`` ([B] -> [B, r])."""
         return self.markov_w1(token_ids)
 
-    def bias(self, markov_embed: torch.Tensor, logits_processor) -> torch.Tensor:
+    def bias(
+        self,
+        markov_embed: torch.Tensor,
+        logits_processor: LogitsProcessor,
+    ) -> torch.Tensor:
         """Vocab-size transition bias from a Markov embedding ([B, r] -> [B, V])."""
         return logits_processor(self.markov_w2, markov_embed)
 

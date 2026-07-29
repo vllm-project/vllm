@@ -12,11 +12,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.kimi_k3.nvidia import dspark_mla
-from vllm.models.kimi_k3.nvidia.dspark_mla import (
-    K3DSparkForCausalLM,
-    K3DSparkModel,
-    ReplicatedDSparkMarkovHead,
-)
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
@@ -67,7 +63,7 @@ def test_dspark_mla_shares_frozen_target_weights_and_skips_training_head():
 
 
 @pytest.mark.cpu_test
-def test_dspark_markov_head_replication_is_opt_in(
+def test_dspark_markov_head_is_replicated(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm.model_executor.layers import logits_processor, vocab_parallel_embedding
@@ -86,16 +82,10 @@ def test_dspark_markov_head_replication_is_opt_in(
         lambda: SimpleNamespace(model_config=None),
     )
 
-    sharded = DSparkMarkovHead(128, 128, 8, prefix="markov_head")
-    assert sharded.markov_w1.tp_size == 8
-    assert sharded.markov_w2.tp_size == 8
-
-    replicated = ReplicatedDSparkMarkovHead(128, 128, 8, prefix="markov_head")
-    assert isinstance(replicated, DSparkMarkovHead)
-    assert replicated.markov_w1.tp_size == 1
-    assert replicated.markov_w2.tp_size == 1
-    assert replicated.markov_w1.weight.shape == (128, 8)
-    assert replicated.markov_w2.weight.shape == (128, 8)
+    head = DSparkMarkovHead(128, 128, 8, prefix="markov_head")
+    assert head.markov_w2.tp_size == 1
+    assert head.markov_w1.weight.shape == (128, 8)
+    assert head.markov_w2.weight.shape == (128, 8)
 
     def fail_collective(*args, **kwargs):
         raise AssertionError("replicated Markov head must not invoke TP collectives")
@@ -108,8 +98,8 @@ def test_dspark_markov_head_replication_is_opt_in(
     logits_processor = LogitsProcessor(128)
     monkeypatch.setattr(logits_processor, "_gather_logits", fail_collective)
 
-    markov_embed = replicated.embed(torch.tensor([1, 2]))
-    bias = replicated.bias(markov_embed, logits_processor)
+    markov_embed = head.embed(torch.tensor([1, 2]))
+    bias = head.bias(markov_embed, logits_processor)
     assert markov_embed.shape == (2, 8)
     assert bias.shape == (2, 128)
 
@@ -130,7 +120,7 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(dspark_mla, "ReplicatedLinear", DummyModule)
     monkeypatch.setattr(dspark_mla, "RMSNorm", DummyModule)
     monkeypatch.setattr(dspark_mla, "K3DSparkDecoderLayer", DummyModule)
-    monkeypatch.setattr(dspark_mla, "ReplicatedDSparkMarkovHead", make_markov_head)
+    monkeypatch.setattr(dspark_mla, "DSparkMarkovHead", make_markov_head)
 
     config = SimpleNamespace(
         target_hidden_size=16,
