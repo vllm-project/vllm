@@ -305,7 +305,7 @@ def test_kimi_k3_required_accepts_valid_tool_calls(body: str):
     [
         # unknown tool name
         _k3_response()
-        + _k3_tools(_k3_call("get_wether", _k3_arg("city", "string", "x"))),
+        + _k3_tools(_k3_call("get_temperature", _k3_arg("city", "string", "x"))),
         # number arg given a non-numeric JSON value
         _k3_response()
         + _k3_tools(_k3_call("get_weather", _k3_arg("days", "number", "abc"))),

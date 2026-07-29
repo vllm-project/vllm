@@ -319,7 +319,6 @@ class ResponsesRequest(OpenAIBaseModel):
             add_generation_prompt=not continue_final,
             continue_final_message=continue_final,
             reasoning_effort=reasoning_effort,
-            tool_choice=self.tool_choice,
         )
 
         # When reasoning is requested, activate thinking for models whose
@@ -338,6 +337,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

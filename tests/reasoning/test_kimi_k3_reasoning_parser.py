@@ -7,7 +7,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.kimi_k3 import KimiK3Parser
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -32,8 +33,17 @@ class DummyTokenizer:
         return [ord(ch) for ch in text]
 
 
-class ReasoningOnlyParser(DelegatingParser):
+class ReasoningOnlyParser(KimiK3Parser):
     reasoning_parser_cls = KimiK3ReasoningParser
+
+
+def test_parser_manager_selects_kimi_k3_parser_for_reasoning_only():
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="kimi_k3")
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, KimiK3Parser)
+    assert parser_cls.reasoning_parser_cls is KimiK3ReasoningParser
+    assert parser_cls.tool_parser_cls is None
 
 
 def test_parser_selection_thinking_disabled():

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
 from vllm.renderers.registry import RENDERER_REGISTRY
@@ -22,8 +23,10 @@ class StubTokenizer:
     def __init__(self, token_ids: list[int]) -> None:
         self.token_ids = token_ids
         self.calls: list[dict[str, Any]] = []
+        self.conversations: list[list[dict[str, Any]]] = []
 
     def apply_chat_template(self, conversation, **kwargs) -> list[int]:
+        self.conversations.append(conversation)
         self.calls.append(kwargs)
         return list(self.token_ids)
 
@@ -119,9 +122,71 @@ def test_apply_chat_template_translates_standard_thinking_kwargs():
 
     kwargs = tokenizer.calls[-1]
     assert kwargs["thinking"] is False
-    assert kwargs["thinking_effort"] == "none"
+    assert "thinking_effort" not in kwargs
     assert "enable_thinking" not in kwargs
     assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize("reasoning_effort", ["low", "high", "max"])
+def test_apply_chat_template_translates_supported_reasoning_effort(
+    reasoning_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": reasoning_effort})
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    kwargs = tokenizer.calls[-1]
+    assert kwargs["thinking_effort"] == reasoning_effort
+    assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "medium", "xhigh"])
+def test_apply_chat_template_rejects_unsupported_reasoning_effort(
+    reasoning_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": reasoning_effort})
+
+    with pytest.raises(VLLMValidationError, match="thinking_effort") as exc_info:
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert exc_info.value.parameter == "thinking_effort"
+    assert exc_info.value.value == reasoning_effort
+    assert tokenizer.calls == []
+
+
+def test_apply_chat_template_validates_canonical_native_thinking_effort():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(
+        chat_template_kwargs={
+            "thinking_effort": "low",
+            "reasoning_effort": "medium",
+        }
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["thinking_effort"] == "low"
+
+
+@pytest.mark.parametrize("thinking_effort", ["none", "minimal", "medium", "xhigh"])
+def test_apply_chat_template_rejects_unsupported_native_thinking_effort(
+    thinking_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"thinking_effort": thinking_effort})
+
+    with pytest.raises(VLLMValidationError, match="thinking_effort") as exc_info:
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert exc_info.value.parameter == "thinking_effort"
+    assert exc_info.value.value == thinking_effort
+    assert tokenizer.calls == []
 
 
 def test_apply_chat_template_native_k3_kwargs_take_precedence():
@@ -143,6 +208,46 @@ def test_apply_chat_template_native_k3_kwargs_take_precedence():
     assert kwargs["thinking_effort"] == "low"
 
 
+def test_apply_chat_template_adds_k3_api_metadata():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    response_format = {"type": "json_object"}
+    params = ChatParams(
+        tool_choice="required",
+        response_format=response_format,
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    kwargs = tokenizer.calls[-1]
+    assert kwargs["tool_choice"] == "required"
+    assert kwargs["response_format"] == response_format
+
+
+def test_apply_chat_template_auto_tool_choice_keeps_template_kwarg():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(
+        chat_template_kwargs={"tool_choice": "required"},
+        tool_choice="auto",
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["tool_choice"] == "required"
+
+
+def test_apply_chat_template_omits_tool_choice_without_tools():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+
+    renderer._apply_chat_template(
+        [{"role": "user", "content": "hi"}], ChatParams(tool_choice=None)
+    )
+
+    assert "tool_choice" not in tokenizer.calls[-1]
+
+
 def test_render_messages_returns_token_prompt():
     renderer = _make_renderer(StubTokenizer([1, 2, 3]))
 
@@ -153,6 +258,87 @@ def test_render_messages_returns_token_prompt():
     assert prompt == {"prompt_token_ids": [1, 2, 3]}
     assert "multi_modal_data" not in prompt
     assert conversation[0]["role"] == "user"
+
+
+def test_render_messages_derives_private_xtml_tool_attrs():
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, _ = renderer.render_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "lookup:0",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                    {
+                        "id": "lookup:1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "lookup:1",
+                "tool": "client-supplied-name",
+                "index": 99,
+                "content": "second",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "lookup:0",
+                "content": "first",
+            },
+        ],
+        ChatParams(),
+    )
+
+    assert [message["content"] for message in conversation[1:]] == [
+        "first",
+        "second",
+    ]
+    assert conversation[1]["tool"] == "lookup"
+    assert conversation[1]["index"] == 1
+    assert conversation[2]["tool"] == "lookup"
+    assert conversation[2]["index"] == 2
+    assert tokenizer.conversations[-1] == conversation
+
+
+def test_render_messages_ignores_client_supplied_xtml_tool_attrs():
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, _ = renderer.render_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "lookup:0",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "unknown",
+                "tool": "lookup",
+                "index": 1,
+                "content": "result",
+            },
+        ],
+        ChatParams(),
+    )
+
+    assert "tool" not in conversation[1]
+    assert "index" not in conversation[1]
 
 
 @pytest.mark.asyncio
