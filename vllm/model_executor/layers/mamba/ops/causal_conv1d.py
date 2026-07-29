@@ -1080,6 +1080,7 @@ def causal_conv1d_update(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    out: torch.Tensor | None = None,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -1117,7 +1118,8 @@ def causal_conv1d_update(
             for example: conv_state_indices = [null_block_id, 1, 20, null_block_id]
             in this case, the kernel will not process entries at
             indices 0 and 3
-    out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
+    out: optional output tensor with the same shape as `x`. When omitted,
+        the input is overwritten.
     """
     if validate_data:
         assert null_block_id is not None
@@ -1129,10 +1131,22 @@ def causal_conv1d_update(
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
+    if out is None:
+        out = x
+    else:
+        if out.shape != x.shape:
+            raise ValueError(
+                f"`out` shape {tuple(out.shape)} must match `x` shape {tuple(x.shape)}."
+            )
+        if out.dtype != original_x_dtype or out.device != x.device:
+            raise ValueError(
+                "`out` must have the same dtype and device as the input `x`."
+            )
     unsqueeze = query_start_loc is None and x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
         x = x.unsqueeze(-1)
+        out = out.unsqueeze(-1)
     if query_start_loc is None:
         batch, dim, seqlen = x.shape
     else:
@@ -1159,8 +1173,6 @@ def causal_conv1d_update(
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
 
-    # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
-    out = x
     stride_w_dim, stride_w_width = weight.stride()
 
     if query_start_loc is None:
