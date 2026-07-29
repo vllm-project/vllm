@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsMxfp4,
 )
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+    MarlinExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -49,19 +52,25 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe) -> None:
         super().__init__(moe)
         self.group_size = 32
-        # CutlassExpertsMxfp4 (true W4A4 on supported GPUs) is not represented
-        # in the MXFP4 backend oracle, so keep an explicit device check for it;
-        # otherwise defer backend / experts selection to the shared
-        # select_mxfp4_moe_backend oracle (native XPU kernel or the Marlin
-        # weight-only fallback).
+        # Backend selection must stay consistent with the weight preparation in
+        # process_weights_after_loading / get_fused_moe_quant_config, which only
+        # implement three layouts: CUTLASS swizzle (true W4A4), the native XPU
+        # kernel (packed passthrough), and Marlin weight-only. XPU dispatch is
+        # deferred to the shared oracle; every other non-CUTLASS device falls
+        # back to Marlin (mirroring CompressedTensorsW4A4Mxfp4MoEMethod).
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
         if self.use_cutlass_mxfp4:
-            self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
             self.experts_cls = CutlassExpertsMxfp4
             logger.info_once("Using CutlassExpertsMxfp4 for AutoRound MXFP4 MoE")
-        else:
+        elif current_platform.is_xpu():
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        else:
+            self.experts_cls = MarlinExperts
+            logger.info_once(
+                "Using MarlinExperts (weight-only FP4) for AutoRound MXFP4 MoE"
+            )
 
     def create_weights(
         self,
