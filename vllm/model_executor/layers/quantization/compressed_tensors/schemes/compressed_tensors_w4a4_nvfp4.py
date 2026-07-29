@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_aot import (
+    NvFp4LinearRuntime,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -29,6 +32,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self, use_a16: bool = False):
         self.use_a16 = use_a16
         self.kernel = init_nvfp4_linear_kernel(use_a16=use_a16)
+        self.runtime = NvFp4LinearRuntime(self.kernel)
         self.group_size = 16
 
     @classmethod
@@ -48,6 +52,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.params_dtype = params_dtype
 
         # Weight
         weight = ModelWeightParameter(
@@ -137,8 +142,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 requires_grad=False,
             )
 
-        # Convert layer to NVFP4 linear kernel format
-        self.kernel.process_weights_after_loading(layer)
+        self.runtime.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -146,4 +150,4 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        return self.runtime.apply(layer, x, bias)

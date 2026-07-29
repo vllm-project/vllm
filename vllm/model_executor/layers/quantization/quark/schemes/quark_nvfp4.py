@@ -14,6 +14,9 @@ from vllm.model_executor.kernels.linear.nvfp4.emulation import (
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_aot import (
+    NvFp4LinearRuntime,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -40,9 +43,12 @@ class QuarkNVFP4(QuarkScheme):
         self,
     ):
         self.kernel = init_nvfp4_linear_kernel()
+        self.runtime = NvFp4LinearRuntime(self.kernel)
         self.group_size = 16
 
-        if not isinstance(self.kernel, EmulationNvFp4LinearKernel):
+        if not self.runtime.uses_unquantized_linear and not isinstance(
+            self.kernel, EmulationNvFp4LinearKernel
+        ):
             logger.warning_once(
                 "Only EmulationNvFp4LinearKernel NVFP4 dense implementation is "
                 "tested with QuarkNVFP4, got kernel=%s. Correctness is not validated.",
@@ -67,6 +73,7 @@ class QuarkNVFP4(QuarkScheme):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.params_dtype = params_dtype
 
         if input_size_per_partition % self.group_size != 0:
             raise ValueError(
@@ -142,8 +149,7 @@ class QuarkNVFP4(QuarkScheme):
             (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
-        # Convert layer to NVFP4 linear kernel format
-        self.kernel.process_weights_after_loading(layer)
+        self.runtime.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -151,4 +157,4 @@ class QuarkNVFP4(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        return self.runtime.apply(layer, x, bias)

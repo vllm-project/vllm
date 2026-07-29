@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
+    VLLM_NVFP4_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
@@ -1176,6 +1177,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by default.
     "VLLM_USE_OINK_OPS": lambda: (
         os.getenv("VLLM_USE_OINK_OPS", "False").lower() in ("true", "1")
+    ),
+    # When Marlin is selected for NVFP4, optionally expand the weights to
+    # BF16/FP16 once at model load and delegate execution to the unquantized
+    # linear method. This uses roughly four times the weight memory. Default off.
+    "VLLM_NVFP4_DEQUANT_AT_LOAD": lambda: (
+        os.getenv("VLLM_NVFP4_DEQUANT_AT_LOAD", "False").lower() in ("true", "1")
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.

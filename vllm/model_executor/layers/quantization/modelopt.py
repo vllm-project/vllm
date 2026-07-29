@@ -71,6 +71,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_aot import (
+    NvFp4LinearRuntime,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -1124,6 +1127,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.marlin_input_dtype = None
         self.kernel = init_nvfp4_linear_kernel()
+        self.runtime = NvFp4LinearRuntime(self.kernel)
 
     def create_weights(
         self,
@@ -1146,6 +1150,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.params_dtype = params_dtype
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1231,8 +1236,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
-        # Convert layer to NVFP4 linear kernel format
-        self.kernel.process_weights_after_loading(layer)
+        self.runtime.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1240,7 +1244,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        return self.runtime.apply(layer, x, bias)
 
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
@@ -1278,6 +1282,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         # silently try to quantize activations (we have no input_scale). For
         # W4A16 there is exactly one valid kernel, so we pin it.
         self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+        self.runtime = NvFp4LinearRuntime(self.kernel)
 
     def create_weights(
         self,
@@ -1300,6 +1305,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.params_dtype = params_dtype
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1378,7 +1384,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         )
         del layer.weight_scale_2
 
-        self.kernel.process_weights_after_loading(layer)
+        self.runtime.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1386,7 +1392,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        return self.runtime.apply(layer, x, bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
