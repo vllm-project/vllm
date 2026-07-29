@@ -68,7 +68,11 @@ def get_layer_sliding_window_size(
     num_hybrid_layers_types_block: int,
     layer_idx: int,
     sliding_window_size: int,
+    is_mtp_layer: bool = False,
 ) -> int | None:
+    if is_mtp_layer:
+        return None
+
     num_first_layers = len(first_layers_types)
     num_hybrid_block_layers = (
         len(hybrid_layers_types_block) * num_hybrid_layers_types_block
@@ -208,7 +212,13 @@ class IquestMoeV13DenseMLP(nn.Module):
 
 
 class IquestMoeAttention(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        is_mtp_layer: bool = False,
+    ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -298,6 +308,7 @@ class IquestMoeAttention(nn.Module):
                 num_hybrid_layers_types_block=num_hybrid_layers_types_block,
                 layer_idx=layer_idx,
                 sliding_window_size=sliding_window_size,
+                is_mtp_layer=is_mtp_layer,
             )
             # update sliding window size
             self.cache_config.sliding_window = real_sliding_window
@@ -324,7 +335,7 @@ class IquestMoeAttention(nn.Module):
         self.shared_kv_num_layers = config.shared_kv_num_layers
         kv_sharing_target_layer_name = None
         self.cross_kv_cache = False
-        if self.shared_kv_num_layers:
+        if self.shared_kv_num_layers and not is_mtp_layer:
             # use shared kv cache
             # attn name is like:
             # 'model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn'

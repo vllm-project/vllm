@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.models.iquest_moe_v13 import (
+    get_layer_sliding_window_size,
+)
 from vllm.model_executor.models.iquest_moe_v13_mtp import IquestMoeV13MTP
 
 
@@ -23,6 +26,33 @@ class _RecordingExpertParameter:
     ) -> None:
         assert param is self
         self.calls.append((loaded_weight, weight_name, shard_id, expert_id))
+
+
+def test_mtp_layers_skip_backbone_hybrid_attention_schedule() -> None:
+    hybrid_config = {
+        "first_layers_types": ["full_attention"],
+        "last_layers_types": ["full_attention"] * 3,
+        "hybrid_layers_types_block": [
+            "full_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+        ],
+        "num_hybrid_layers_types_block": 21,
+        "sliding_window_size": 4096,
+    }
+
+    assert get_layer_sliding_window_size(**hybrid_config, layer_idx=0) is None
+    assert get_layer_sliding_window_size(**hybrid_config, layer_idx=2) == 4096
+    assert get_layer_sliding_window_size(**hybrid_config, layer_idx=87) is None
+    assert (
+        get_layer_sliding_window_size(**hybrid_config, layer_idx=88, is_mtp_layer=True)
+        is None
+    )
+    assert (
+        get_layer_sliding_window_size(**hybrid_config, layer_idx=89, is_mtp_layer=True)
+        is None
+    )
 
 
 def test_load_weights_accepts_streamed_per_expert_mtp_weights() -> None:

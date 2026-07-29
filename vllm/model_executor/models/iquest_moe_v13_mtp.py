@@ -49,6 +49,7 @@ class IquestMoeV13MTPInnerLayer(nn.Module):
         self.self_attn = IquestMoeAttention(
             vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
+            is_mtp_layer=True,
         )
         self.mlp = IquestMoEBlock(
             num_experts=config.num_experts,
