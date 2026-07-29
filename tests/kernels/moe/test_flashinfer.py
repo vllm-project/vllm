@@ -45,6 +45,19 @@ except ImportError:
             "flashinfer not supported for vLLM on ROCm", allow_module_level=True
         )
 
+try:
+    from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+except ImportError:
+    has_flashinfer_trtllm_fused_moe = lambda: False
+
+requires_trtllm_fp8_moe = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.has_device_capability(100)
+    or not has_flashinfer_trtllm_fused_moe(),
+    reason="trtllm fp8 moe experts require CUDA, sm100 (Blackwell), and a "
+    "flashinfer build with the trtllm fused moe kernels",
+)
+
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     90
 ):
@@ -426,30 +439,41 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     assert w2_converted.shape[0] == num_experts
 
 
+@requires_trtllm_fp8_moe
 @pytest.mark.parametrize("block_shape,is_mxfp8", [([1, 32], True), ([128, 128], False)])
-def test_trtllm_fp8_moe_forwards_swiglu_params_only_for_mxfp8(
+def test_trtllm_fp8_moe_gemm1_swiglu_params_only_forwarded_for_mxfp8(
     block_shape, is_mxfp8, monkeypatch
 ):
-    """gemm1_alpha/beta/clamp_limit are MXFP8 + SwiGLU per-expert params.
+    """gemm1_alpha/beta/clamp_limit must reach flashinfer only on the MXFP8 path.
 
-    They must reach flashinfer only on the MXFP8 path: newer flashinfer rejects
-    them on the DeepSeekFp8 path. Verified for both the modular (pre-routed)
-    and monolithic block-scale entry points by capturing the forwarded kwargs.
+    These are MXFP8 + SwiGLU per-expert parameters. flashinfer 0.6.15+ rejects
+    them on the DeepSeekFp8 path (``Fp8QuantizationType != MxFp8``) via
+    ``_validate_fp8_block_scale_gemm1_activation_params``. A SwiGLU-OAI model
+    sets them (``layer.swiglu_alpha`` -> ``gemm1_alpha`` in fp8.py) even while
+    running the DeepSeekFp8 block-scale path, so vLLM must drop them there.
+
+    This is a forwarding-invariant check: the flashinfer entry points are
+    replaced with a capture stub, so no kernel runs and the result is stable
+    across flashinfer versions. gemm1_alpha/beta/clamp_limit are kept non-None
+    on *both* paths -- the DeepSeekFp8 case only exercises the fix when they
+    are present, since flashinfer short-circuits when all three are None.
     """
     import flashinfer
 
     e, m, k, intermediate, topk = 4, 8, 128, 16, 2
+    swiglu_keys = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+    expected = list(swiglu_keys) if is_mxfp8 else []
 
     def make_quant_config():
-        gemm1 = 1.0 if is_mxfp8 else None
+        # Non-None on both paths: the DeepSeekFp8 case is the real trigger.
         return SimpleNamespace(
             block_shape=block_shape,
             is_per_tensor=False,
             w1_scale=torch.ones(e, device="cuda"),
             w2_scale=torch.ones(e, device="cuda"),
-            gemm1_alpha=gemm1,
-            gemm1_beta=gemm1,
-            gemm1_clamp_limit=gemm1,
+            gemm1_alpha=1.0,
+            gemm1_beta=1.0,
+            gemm1_clamp_limit=10.0,
         )
 
     def make_moe_config():
@@ -471,8 +495,6 @@ def test_trtllm_fp8_moe_forwards_swiglu_params_only_for_mxfp8(
         captured.update(kwargs)
         return torch.zeros(1)
 
-    swiglu_keys = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
-    expected = list(swiglu_keys) if is_mxfp8 else []
     a1q_scale = torch.ones(k // 128, m, device="cuda")
     w1 = torch.zeros(e, 2 * intermediate, k, dtype=torch.float8_e4m3fn, device="cuda")
     w2 = torch.zeros(e, k, intermediate, dtype=torch.float8_e4m3fn, device="cuda")
