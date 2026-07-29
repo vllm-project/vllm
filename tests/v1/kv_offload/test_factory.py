@@ -136,8 +136,12 @@ def test_create_cpu_offloading_spec():
 
 
 def test_cpu_spec_sizes_normalized_worker_layout():
+    # The CPU spec now rounds the offloaded row up to the mmap page size
+    # (matching the shared region), so kv_bytes_per_chunk picks up padding
+    # while cpu_page_size_per_worker stays the un-padded per-worker slot.
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
-        cpu_bytes_to_use=1920,
+        cpu_bytes_to_use=alignment * 3,
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
@@ -147,8 +151,8 @@ def test_cpu_spec_sizes_normalized_worker_layout():
 
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
-    assert spec.kv_bytes_per_chunk == 192
-    assert spec.num_blocks == 10
+    assert spec.kv_bytes_per_chunk == alignment
+    assert spec.num_blocks == 3
 
 
 def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
@@ -267,7 +271,9 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_cpu_spec_replicated_config_preserves_per_rank_sizing(world_size: int):
-    worker_kv_bytes_per_block = 4096
+    # Use a page-multiple per-worker block so the row size is unaffected by the
+    # page-alignment rounding regardless of the host mmap page size.
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * world_size * 2,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -280,6 +286,107 @@ def test_cpu_spec_replicated_config_preserves_per_rank_sizing(world_size: int):
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block * world_size
     assert spec.num_blocks == 2
+
+
+def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=4,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region = MagicMock()
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return region
+
+    def fake_worker_ctor(**kwargs):
+        worker_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(
+        cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
+    )
+
+    kv_caches = MagicMock()
+    spec.create_worker(kv_caches)
+
+    # rank folds the physical device index into [0, world_size): 5 % 4 == 1.
+    assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["engine_id"] == "test-engine"
+    assert region_calls[0]["kv_bytes_per_block"] == worker_kv_bytes_per_block * 4
+    assert worker_calls[0]["kv_caches"] is kv_caches
+    assert worker_calls[0]["mmap_region"] is region
+
+
+def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    spec = _create_spec(worker_kv_bytes_per_block=4096, world_size=4)
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    def fake_region_ctor(**kwargs):
+        region_calls.append(kwargs)
+        return MagicMock()
+
+    def fake_worker_ctor(**kwargs):
+        worker_calls.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        cpu_spec_module.current_platform, "is_cuda_alike", lambda: False
+    )
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+
+    spec.create_worker(MagicMock())
+
+    # Non-CUDA-alike platforms keep the per-rank pinned-tensor path.
+    assert region_calls == []
+    assert worker_calls[0]["mmap_region"] is None
+
+
+def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    # worker_kv_bytes_per_block=0 yields num_blocks=0; a zero-byte region cannot
+    # be mmap'd, so even on CUDA-alike this must fall back to the tensor path.
+    spec = _create_spec(worker_kv_bytes_per_block=0, world_size=4)
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_blocks == 0
+
+    region_calls: list[dict[str, Any]] = []
+    worker_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "SharedOffloadRegion",
+        lambda **kwargs: region_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "CPUOffloadingWorker",
+        lambda **kwargs: worker_calls.append(kwargs),
+    )
+
+    spec.create_worker(MagicMock())
+
+    assert region_calls == []
+    assert worker_calls[0]["mmap_region"] is None
 
 
 def test_offloading_spec_has_replicated_layout_default():
