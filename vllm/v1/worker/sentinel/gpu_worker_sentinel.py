@@ -70,6 +70,8 @@ class WorkerSentinel:
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
         model_runner.execute_model_state = None
+        ft_config = model_runner.vllm_config.parallel_config.fault_tolerance_config
+        resume = ft_config.resume_requests_after_recovery
         if self.worker.use_v2_model_runner:
             runner = cast("GPUModelRunnerV2", model_runner)
             for req_id in list(runner.req_states.req_id_to_index):
@@ -80,8 +82,9 @@ class WorkerSentinel:
             input_batch = model_runner.input_batch
             cached_req_ids = list(input_batch.req_id_to_index)
             for req_id in cached_req_ids:
-                model_runner.requests.pop(req_id, None)
-                model_runner.num_prompt_logprobs.pop(req_id, None)
+                if not resume:
+                    model_runner.requests.pop(req_id, None)
+                    model_runner.num_prompt_logprobs.pop(req_id, None)
                 input_batch.remove_request(req_id)
 
             input_batch.condense()
