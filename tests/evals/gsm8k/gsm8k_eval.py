@@ -10,9 +10,14 @@ import ast
 import asyncio
 import json
 import os
+import sys
 import tempfile
 import time
 from collections.abc import Generator
+from pathlib import Path
+
+if __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import aiohttp
 import numpy as np

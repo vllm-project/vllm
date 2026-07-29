@@ -125,6 +125,7 @@ run_tests_for_model() {
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
+    VLLM_COMPUTE_NANS_IN_LOGITS=1 \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
@@ -150,6 +151,7 @@ run_tests_for_model() {
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
+    VLLM_COMPUTE_NANS_IN_LOGITS=1 \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
@@ -191,7 +193,8 @@ run_tests_for_model() {
 
   # ── Run accuracy test ──
   echo "Running accuracy tests for $model_name ($label)"
-  TEST_MODEL=$model_name python3 -m pytest -s -x \
+  VLLM_TEST_NAN_LOGITS_METRICS_URLS="http://localhost:${PREFILL_PORT}/metrics,http://localhost:${DECODE_PORT}/metrics" \
+    TEST_MODEL=$model_name python3 -m pytest -s -x \
     "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # ── Cleanup ──

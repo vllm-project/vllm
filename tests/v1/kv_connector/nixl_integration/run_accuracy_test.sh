@@ -176,6 +176,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    VLLM_COMPUTE_NANS_IN_LOGITS=1 \
     VLLM_KV_CACHE_LAYOUT='HND' \
     VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
@@ -239,6 +240,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    VLLM_COMPUTE_NANS_IN_LOGITS=1 \
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
     $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
@@ -313,7 +315,14 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  METRICS_URLS=""
+  for PORT in "${PREFILL_PORTS[@]}" "${DECODE_PORTS[@]}"; do
+    METRICS_URLS+="${METRICS_URLS:+,}http://localhost:${PORT}/metrics"
+  done
+  VLLM_TEST_NAN_LOGITS_METRICS_URLS="$METRICS_URLS" \
+    TEST_MODEL=$model_name \
+    python3 -m pytest -s -x \
+    "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

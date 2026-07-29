@@ -5,6 +5,8 @@ import os
 import lm_eval
 import openai
 
+from tests.evals.metrics import assert_no_nan_logits
+
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = 100
 TASK = "gsm8k"
@@ -36,6 +38,9 @@ SIMPLE_PROMPT = (
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
+NAN_LOGITS_METRICS_URLS = os.environ.get("VLLM_TEST_NAN_LOGITS_METRICS_URLS", "").split(
+    ","
+)
 
 
 def run_simple_prompt():
@@ -82,6 +87,9 @@ def test_accuracy():
 
     measured_value = results["results"][TASK][FILTER]
     expected_value = EXPECTED_VALUES.get(MODEL_NAME)
+
+    for metrics_url in filter(None, NAN_LOGITS_METRICS_URLS):
+        assert_no_nan_logits(metrics_url)
 
     print(f"Measured accuracy value: {measured_value}\n")
     if expected_value is None:
