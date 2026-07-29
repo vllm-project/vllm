@@ -15,6 +15,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
+use vllm_chat::{NewChatOutputProcessorOptions, ParserSelection};
+use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use crate::error::{ApiError, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -60,9 +62,7 @@ pub async fn tokenize(
     let max_model_len = state.chat.engine_core_client().max_model_len();
 
     let result = match body {
-        // Completion form: encode the raw `prompt` string (no chat template).
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &tokenizer, req),
-        // Chat form: render `messages` through the template, then encode (see `tokenize_chat`).
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
         TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
     };
 
@@ -83,20 +83,41 @@ pub async fn tokenize(
 
 fn tokenize_completion(
     state: &AppState,
-    tokenizer: &vllm_text::tokenizer::DynTokenizer,
+    request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     check_model(state, req.model.as_deref())?;
-    let tokens = tokenizer
-        .encode(&req.prompt, req.add_special_tokens)
+    let text_request = TextRequest {
+        request_id: request_id.to_string(),
+        prompt: Prompt::Text(req.prompt),
+        mm_features: None,
+        sampling_params: SamplingParams::default(),
+        decode_options: TextDecodeOptions::default(),
+        intermediate: false,
+        priority: 0,
+        cache_salt: None,
+        add_special_tokens: req.add_special_tokens,
+        data_parallel_rank: None,
+        reasoning_parser_kwargs: None,
+        lora_request: None,
+        arrival_time: None,
+    };
+    let prepared = state
+        .chat
+        .text()
+        .request_processor()
+        .prepare(text_request)
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    Ok((tokens, req.return_token_strs))
+    Ok((
+        prepared.generate_request.prompt_token_ids,
+        req.return_token_strs,
+    ))
 }
 
 /// HTTP adapter for the chat-shaped `/tokenize` body.
 ///
-/// Not [`vllm_chat::ChatLlm::tokenize_chat`]: this checks the model name and maps
-/// errors to [`ApiError`]; the chat-crate method does render → finalize → encode.
+/// Checks the model name, prepares without engine submission, and maps errors
+/// to [`ApiError`].
 async fn tokenize_chat(
     state: &AppState,
     request_id: &str,
@@ -106,12 +127,29 @@ async fn tokenize_chat(
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
-    let tokens = state
+    let parser_selection = ParserSelection::Auto;
+    let (text_request, _output_processor) = state
         .chat
-        .tokenize_chat(req.into_chat_request(request_id.to_string())?)
+        .request_processor()
+        .prepare(
+            req.into_chat_request(request_id.to_string())?,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &parser_selection,
+                reasoning_parser: &parser_selection,
+            },
+        )
         .await
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    Ok((tokens, return_token_strs))
+    let prepared = state
+        .chat
+        .text()
+        .request_processor()
+        .prepare(text_request)
+        .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
+    Ok((
+        prepared.generate_request.prompt_token_ids,
+        return_token_strs,
+    ))
 }
 
 pub async fn detokenize(

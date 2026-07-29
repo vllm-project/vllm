@@ -153,6 +153,11 @@ impl TextLlm {
         self.llm.engine_core_client()
     }
 
+    /// Return the text request processor.
+    pub fn request_processor(&self) -> &TextRequestProcessor {
+        &self.processor
+    }
+
     /// Return the tokenizer used by this text backend.
     pub fn tokenizer(&self) -> DynTokenizer {
         self.processor.tokenizer()
