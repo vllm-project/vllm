@@ -270,6 +270,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_ROCM_USE_KIMI_K3_PREROUTE_BF16: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -1900,6 +1901,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Enable the exact-BF16 Kimi-K3 B1 pre-route fusion on gfx950.
+    "VLLM_ROCM_USE_KIMI_K3_PREROUTE_BF16": lambda: bool(
+        int(os.getenv("VLLM_ROCM_USE_KIMI_K3_PREROUTE_BF16", "0"))
+    ),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
