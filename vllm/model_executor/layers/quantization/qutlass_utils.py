@@ -84,6 +84,7 @@ def triton_scale_swizzle(
     )
 
 
+@torch.library.custom_op("vllm::triton_mx_block_rearrange", mutates_args=())
 def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     """
     Rearranges an E8M0 tensor scale from row-major format to
@@ -142,6 +143,14 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     return out
 
 
+@triton_mx_block_rearrange.register_fake
+def _triton_mx_block_rearrange_fake(scale_tensor: torch.Tensor) -> torch.Tensor:
+    rows, cols = scale_tensor.shape
+    padded_rows = cdiv(rows, 128) * 128
+    padded_cols = cdiv(cols, 4) * 4
+    return scale_tensor.new_empty((padded_rows, padded_cols))
+
+
 def to_blocked(
     input_matrix: torch.Tensor, backend: Literal["torch", "triton"] = "triton"
 ) -> torch.Tensor:
@@ -157,7 +166,7 @@ def to_blocked(
         backend: "torch" (PyTorch path) or "triton" (Triton kernel)
 
     Returns:
-        Rearranged tensor of shape (32*cdiv(H,128), 16*cdiv(W,4))
+        Rearranged flattened tensor of size (32*cdiv(H,128) * 16*cdiv(W,4))
     """
     if backend == "triton":
         return triton_mx_block_rearrange(input_matrix).flatten()
