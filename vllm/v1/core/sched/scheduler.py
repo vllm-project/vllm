@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.config import VllmConfig
+from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -2553,6 +2553,9 @@ class Scheduler(SchedulerInterface):
 
     def get_ec_connector(self) -> ECConnectorBase | None:
         return self.ec_connector
+
+    def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
+        return self.kv_event_publisher.get_publisher_config()
 
     def _connector_finished(
         self, request: Request
