@@ -152,8 +152,8 @@ impl ResolvedMultimodalSpec {
 #[derive(Debug, Clone)]
 struct ResolvedPlaceholder {
     token: String,
-    /// The token ID emitted for `token` in the rendered prompt.
-    marker_token_id: u32,
+    /// The token IDs emitted for `token` in the rendered prompt.
+    marker_token_ids: Vec<u32>,
     /// The model-declared embed token ID marked in `is_embed` masks.
     embed_token_id: u32,
 }
@@ -166,18 +166,21 @@ impl ResolvedPlaceholder {
     ) -> Result<Self> {
         let metadata = context.metadata();
         let token = raw.placeholder_token_for(&metadata, modality)?;
-        // This is the rendered prompt marker, so resolve it from the token
-        // string itself. Do not use `ModelProcessorSpec::placeholder_token_id_for()`:
-        // for some specs that ID is the replacement vision/patch token,
-        // not necessarily the token ID of the placeholder token.
-        let marker_token_id = context.tokenizer().token_to_id(&token).ok_or_else(|| {
-            multimodal!("placeholder token `{token}` is not in the tokenizer vocabulary")
-        })?;
+        // This is the rendered prompt marker. It may be ordinary text that
+        // encodes to multiple tokens, while `placeholder_token_id_for()` is
+        // the model's replacement vision/patch token ID.
+        let marker_token_ids = context
+            .tokenizer()
+            .token_to_id(&token)
+            .map(|token_id| vec![token_id])
+            .or_else(|| context.tokenizer().encode(&token, false).ok())
+            .filter(|token_ids| !token_ids.is_empty())
+            .ok_or_else(|| multimodal!("placeholder `{token}` could not be tokenized"))?;
         let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
 
         Ok(Self {
             token,
-            marker_token_id,
+            marker_token_ids,
             embed_token_id,
         })
     }
@@ -409,10 +412,12 @@ impl MultimodalModelInfo {
         });
 
         let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
-            // Placeholder expansion attributes markers to modalities by token
-            // ID, so a marker shared with the image modality is ambiguous.
-            let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
-            if image_marker == Some(placeholder.marker_token_id) {
+            // Placeholder expansion attributes marker sequences to modalities,
+            // so a marker shared with the image modality is ambiguous.
+            let image_marker = image
+                .as_ref()
+                .map(|image| &image.placeholder.marker_token_ids);
+            if image_marker == Some(&placeholder.marker_token_ids) {
                 warn!(
                     model_id = context.model_id,
                     token = placeholder.token,
@@ -490,11 +495,7 @@ pub(crate) async fn finalize_rendered_prompt(
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
     let mut prompt_token_ids = match rendered.prompt {
-        Prompt::Text(prompt) => info
-            .context
-            .tokenizer()
-            .encode(&prompt, request.add_special_tokens)
-            .map_err(|error| multimodal!("{error}"))?,
+        Prompt::Text(prompt) => info.tokenize_prompt(&prompt, request.add_special_tokens)?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
@@ -568,6 +569,74 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
 }
 
 impl MultimodalModelInfo {
+    fn tokenize_prompt(&self, prompt: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+        let tokenizer = self.context.tokenizer();
+        let placeholders = [
+            self.image.as_ref().map(|support| &support.placeholder),
+            self.video.as_ref().map(|support| &support.placeholder),
+            self.audio.as_ref().map(|support| &support.placeholder),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|placeholder| placeholder.marker_token_ids.len() > 1)
+        .collect::<Vec<_>>();
+
+        if placeholders.is_empty() {
+            return tokenizer
+                .encode(prompt, add_special_tokens)
+                .map_err(|error| multimodal!("{error}"));
+        }
+
+        let mut token_ids = Vec::new();
+        let mut cursor = 0;
+        while cursor < prompt.len() {
+            let next = placeholders
+                .iter()
+                .filter_map(|placeholder| {
+                    prompt[cursor..]
+                        .find(&placeholder.token)
+                        .map(|offset| (cursor + offset, *placeholder))
+                })
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, placeholder)) = next else {
+                break;
+            };
+
+            token_ids.extend(
+                tokenizer
+                    .encode(&prompt[cursor..offset], false)
+                    .map_err(|error| multimodal!("{error}"))?,
+            );
+            token_ids.extend_from_slice(&placeholder.marker_token_ids);
+            cursor = offset + placeholder.token.len();
+        }
+        token_ids.extend(
+            tokenizer
+                .encode(&prompt[cursor..], false)
+                .map_err(|error| multimodal!("{error}"))?,
+        );
+
+        if !add_special_tokens {
+            return Ok(token_ids);
+        }
+
+        let plain = tokenizer.encode(prompt, false).map_err(|error| multimodal!("{error}"))?;
+        let with_special =
+            tokenizer.encode(prompt, true).map_err(|error| multimodal!("{error}"))?;
+        let Some(content_offset) =
+            with_special.windows(plain.len()).position(|window| window == plain)
+        else {
+            return Ok(with_special);
+        };
+
+        let mut wrapped =
+            Vec::with_capacity(with_special.len().saturating_sub(plain.len()) + token_ids.len());
+        wrapped.extend_from_slice(&with_special[..content_offset]);
+        wrapped.extend(token_ids);
+        wrapped.extend_from_slice(&with_special[content_offset + plain.len()..]);
+        Ok(wrapped)
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
@@ -808,8 +877,8 @@ mod tests {
             Some("<|video_pad|>")
         );
         assert_ne!(
-            info.image.as_ref().unwrap().placeholder.marker_token_id,
-            info.video.as_ref().unwrap().placeholder.marker_token_id,
+            info.image.as_ref().unwrap().placeholder.marker_token_ids,
+            info.video.as_ref().unwrap().placeholder.marker_token_ids,
         );
     }
 

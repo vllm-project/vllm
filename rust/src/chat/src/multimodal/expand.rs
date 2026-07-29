@@ -16,9 +16,9 @@ use crate::error::{Error, Result, bail_multimodal};
 /// expansion.
 struct ExpansionLane<'a> {
     modality: Modality,
-    marker_token_id: u32,
+    marker_token_ids: &'a [u32],
     embed_token_id: u32,
-    placeholder_token: String,
+    placeholder_token: &'a str,
     replacements: VecDeque<&'a PromptReplacement>,
 }
 
@@ -30,9 +30,9 @@ impl<'a> ExpansionLane<'a> {
 
         Some(Self {
             modality: media.modality,
-            marker_token_id: media.placeholder.marker_token_id,
+            marker_token_ids: &media.placeholder.marker_token_ids,
             embed_token_id: media.placeholder.embed_token_id,
-            placeholder_token: media.placeholder.token.clone(),
+            placeholder_token: &media.placeholder.token,
             replacements: media.replacements.iter().collect(),
         })
     }
@@ -56,26 +56,31 @@ pub(super) fn expand_prompt_token_ids(
         return Ok(HashMap::new());
     }
 
-    let replacement_growth = lanes
-        .iter()
-        .flat_map(|lane| lane.replacements.iter())
-        .fold(0usize, |total, replacement| {
-            total.saturating_add(replacement.tokens.len().saturating_sub(1))
-        });
+    let replacement_growth = lanes.iter().fold(0usize, |total, lane| {
+        lane.replacements.iter().fold(total, |total, replacement| {
+            total.saturating_add(
+                replacement.tokens.len().saturating_sub(lane.marker_token_ids.len()),
+            )
+        })
+    });
     let expanded_len = prompt_token_ids.len().saturating_add(replacement_growth);
 
     let mut expanded = Vec::with_capacity(expanded_len);
     let mut ranges = HashMap::<Modality, Vec<PlaceholderRange>>::new();
 
-    for &token in prompt_token_ids.iter() {
-        let lane = lanes
-            .iter_mut()
-            .find(|lane| lane.marker_token_id == token && !lane.replacements.is_empty());
+    let mut prompt_index = 0;
+    while prompt_index < prompt_token_ids.len() {
+        let lane = lanes.iter_mut().find(|lane| {
+            !lane.replacements.is_empty()
+                && prompt_token_ids[prompt_index..].starts_with(lane.marker_token_ids)
+        });
         let Some(lane) = lane else {
-            expanded.push(token);
+            expanded.push(prompt_token_ids[prompt_index]);
+            prompt_index += 1;
             continue;
         };
 
+        prompt_index += lane.marker_token_ids.len();
         let replacement = lane.replacements.pop_front().expect("lane queue is non-empty");
         debug_assert_eq!(replacement.modality, lane.modality);
         if replacement.tokens.is_empty() {
@@ -145,12 +150,43 @@ mod tests {
             modality,
             placeholder: ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
-                marker_token_id,
+                marker_token_ids: vec![marker_token_id],
                 embed_token_id,
             },
             replacements,
             items: Vec::new(),
         }
+    }
+
+    #[test]
+    fn expand_prompt_tokens_matches_multi_token_placeholder() {
+        let marker_token_ids = vec![40, 41, 42];
+        let replacement = PromptReplacement::repeated(
+            Modality::Image,
+            "<image-placeholder>",
+            QWEN3_IMAGE_PAD_ID as TokenId,
+            2,
+        );
+        let prepared = vec![PreparedMedia {
+            modality: Modality::Image,
+            placeholder: ResolvedPlaceholder {
+                token: "<image-placeholder>".to_string(),
+                marker_token_ids: marker_token_ids.clone(),
+                embed_token_id: QWEN3_IMAGE_PAD_ID,
+            },
+            replacements: vec![replacement],
+            items: Vec::new(),
+        }];
+        let mut prompt_token_ids = vec![1, 40, 41, 42, 2];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![1, QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID, 2]
+        );
+        assert_eq!(ranges[&Modality::Image][0].offset, 1);
+        assert_eq!(ranges[&Modality::Image][0].length, 2);
     }
 
     /// Llama4 image prepared media: the `<|image|>` marker expands to
