@@ -35,10 +35,10 @@ from vllm.v1.kv_cache_interface import (
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
+    INKLING_FA4_REL_ATTENTION_KERNEL,
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
-from .ops.fa4_warmup import INKLING_FA4_REL_ATTENTION_KERNEL
 from .ops.qkvr_prep import fused_qkvr_prep
 from .sconv_swa_attn import _K, _V, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv

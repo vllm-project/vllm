@@ -36,7 +36,7 @@ def _warm_fa4_mla_prefill(worker: Worker) -> None:
 
 def _warm_inkling_fa4_rel_attention(worker: Worker) -> None:
     from vllm.models.inkling.configs import InklingMMConfig, InklingModelConfig
-    from vllm.models.inkling.nvidia.ops.fa4_warmup import (
+    from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
         INKLING_FA4_REL_ATTENTION_KERNEL,
     )
 

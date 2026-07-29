@@ -83,6 +83,16 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         return_softmax_lse: bool = False
         num_splits: int = 0
 
+    @staticmethod
+    def kernel(
+        *args: Any,
+        runtime_kernel: Callable[..., Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        kernel = flash_attn_varlen_func if runtime_kernel is None else runtime_kernel
+        assert kernel is not None
+        return kernel(*args, **kwargs)
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -242,11 +252,6 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             _when=self._is_valid_warmup_shape_probe,
         )
 
-    @staticmethod
-    def kernel(*args: Any, **kwargs: Any) -> Any:
-        assert flash_attn_varlen_func is not None
-        return flash_attn_varlen_func(*args, **kwargs)
-
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
         window_size = (
@@ -281,11 +286,13 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         runtime_kernel: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        kernel = self.kernel if runtime_kernel is None else runtime_kernel
-        return kernel(q=q, k=k, v=v, **kwargs)
-
-
-FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
+        return self.kernel(
+            q=q,
+            k=k,
+            v=v,
+            runtime_kernel=runtime_kernel,
+            **kwargs,
+        )
 
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):
@@ -476,3 +483,5 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             causal=False,  # Context is unmasked
             return_softmax_lse=True,
         )
+
+FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()

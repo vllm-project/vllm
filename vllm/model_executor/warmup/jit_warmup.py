@@ -28,9 +28,12 @@ CompileKeyT = TypeVar("CompileKeyT")
 
 @dataclass(frozen=True)
 class WarmupIntRange:
+    """Expand integers with range semantics or a custom monotonic progression."""
+
     start: int
     stop: int
     step: int = 1
+    advance: Callable[[int], int] | None = None
 
 
 WarmupValues = Any
@@ -59,7 +62,22 @@ class _WarmupInputRows:
 
 def _expand_warmup_values(values: WarmupValues) -> tuple[Any, ...]:
     if isinstance(values, WarmupIntRange):
-        return tuple(range(values.start, values.stop, values.step))
+        if values.advance is None:
+            return tuple(range(values.start, values.stop, values.step))
+        if values.step != 1:
+            raise ValueError("WarmupIntRange cannot set both step and advance")
+
+        expanded: list[int] = []
+        value = values.start
+        while value < values.stop:
+            expanded.append(value)
+            next_value = values.advance(value)
+            if next_value <= value:
+                raise ValueError(
+                    "WarmupIntRange.advance must return a greater value"
+                )
+            value = next_value
+        return tuple(expanded)
     if isinstance(values, (list, tuple)):
         return tuple(values)
     return (values,)
@@ -88,17 +106,14 @@ def zip_inputs(*rows: Mapping[str, WarmupValues]) -> _WarmupInputRows:
     return _WarmupInputRows(rows=tuple(input_rows))
 
 
-def _expand_warmup_value_grid(
+def _expand_warmup_value_axes(
     values: Mapping[str, WarmupValues],
     input_names: frozenset[str],
-) -> tuple[dict[str, Any], ...]:
-    names = tuple(name for name in values if name in input_names)
-    if not names:
-        return ({},)
-
-    expanded_values = tuple(_expand_warmup_values(values[name]) for name in names)
+) -> tuple[tuple[str, tuple[Any, ...]], ...]:
     return tuple(
-        dict(zip(names, value_set)) for value_set in itertools.product(*expanded_values)
+        (name, _expand_warmup_values(value))
+        for name, value in values.items()
+        if name in input_names
     )
 
 
@@ -519,11 +534,26 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 _expand_warmup_input_rows(group.rows, input_names)
                 for group in input_groups
             )
-            expanded_kwargs = _expand_warmup_value_grid(kwargs, input_names)
-            dispatch_value_groups = (*expanded_input_groups, expanded_kwargs)
+            expanded_kwarg_axes = _expand_warmup_value_axes(kwargs, input_names)
+            dispatch_value_axes = (
+                *expanded_input_groups,
+                *(values for _, values in expanded_kwarg_axes),
+            )
+            input_group_count = len(expanded_input_groups)
+            kwarg_names = tuple(name for name, _ in expanded_kwarg_axes)
             compile_keys: dict[CompileKeyT, None] = {}
-            for dispatch_value_group in itertools.product(*dispatch_value_groups):
-                dispatch_values = _merge_warmup_kwargs(dispatch_value_group)
+            for dispatch_value_set in itertools.product(*dispatch_value_axes):
+                dispatch_values = _merge_warmup_kwargs(
+                    (
+                        *dispatch_value_set[:input_group_count],
+                        dict(
+                            zip(
+                                kwarg_names,
+                                dispatch_value_set[input_group_count:],
+                            )
+                        ),
+                    )
+                )
                 if predicate_trace is not None and not predicate_trace.matches(
                     dispatch_values
                 ):

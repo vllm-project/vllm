@@ -105,6 +105,39 @@ def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> No
     ]
 
 
+def test_warmup_range_uses_custom_advancement() -> None:
+    keys = ToyKernel()._trace_dispatch(ToyKernel().dispatch)(
+        tokens=WarmupIntRange(
+            1,
+            10,
+            advance=lambda value: _next_power_of_2(value) + 1,
+        ),
+        cfg=_config(),
+    )
+
+    assert [key.block_size for key in keys] == [1, 2, 4, 8, 16]
+
+
+def test_warmup_range_validates_custom_advancement() -> None:
+    trace_dispatch = ToyKernel()._trace_dispatch(ToyKernel().dispatch)
+
+    with pytest.raises(ValueError, match="both step and advance"):
+        trace_dispatch(
+            tokens=WarmupIntRange(
+                1,
+                10,
+                step=2,
+                advance=lambda value: value + 1,
+            ),
+            cfg=_config(),
+        )
+    with pytest.raises(ValueError, match="must return a greater value"):
+        trace_dispatch(
+            tokens=WarmupIntRange(1, 10, advance=lambda value: value),
+            cfg=_config(),
+        )
+
+
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 
