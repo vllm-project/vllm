@@ -130,12 +130,13 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         backend="gloo",
     )
     from vllm.v1.attention.ops.dcp_output_vmm import (
+        DEFAULT_MAX_ROWS,
         create_dcp_output_vmm_workspace_for_group,
     )
 
     total_heads = 64
     head_dim = 512
-    max_rows = 128
+    max_rows = DEFAULT_MAX_ROWS
     workspace = create_dcp_output_vmm_workspace_for_group(
         max_rows,
         total_heads,
@@ -153,7 +154,7 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         )
         for _ in range(2)
     ]
-    assert workspace.payload_bytes_per_rank == 10_526_720
+    assert workspace.payload_bytes_per_rank == 42_106_880
     assert workspace.peer_partial_outputs.shape == (
         world_size,
         world_size,
@@ -163,7 +164,7 @@ def _worker(rank: int, world_size: int, port: int) -> None:
     )
 
     try:
-        for iteration, rows in enumerate((1, 8, 32, 64, 128)):
+        for iteration, rows in enumerate((1, 8, 32, 64, 128, 512)):
             is_lse_base_on_e = iteration % 2 == 0
             local_output, local_lse = _make_inputs(
                 rank,
