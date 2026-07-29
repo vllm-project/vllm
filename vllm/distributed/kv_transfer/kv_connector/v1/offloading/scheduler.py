@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -65,13 +65,6 @@ logger = init_logger(__name__)
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
-
-
-if TYPE_CHECKING:
-    # Forward reference defined in the per-candidate admission follow-up
-    # (Decision A of #49413). See
-    # ``RequestOffloadState.iterate_candidates_for_store`` for the seam.
-    _StoreCandidate = Any
 
 
 class StoreStrategy(ABC):
@@ -352,6 +345,80 @@ class RequestGroupState:
     # Number of offloaded chunks hit (including GPU prefix cache)
     # when the request first started
     num_hit_chunks: int = 0
+    # Per-group block count per offload chunk. Set by
+    # ``RequestOffloadState.__post_init__`` from the connector's
+    # ``SchedulerOffloadConfig.blocks_per_chunk``; per-connector
+    # invariant, identical across all groups on this scheduler instance.
+    # Held on each group state so ``iter_*`` helpers can address
+    # ``block_ids`` without a parent backref.
+    blocks_per_chunk: int = 0
+
+    def iter_reachable_offloads(
+        self,
+        group_config: GroupOffloadConfig,
+        ends_upper: int,
+    ) -> Iterable[tuple[OffloadKey, int]]:
+        """Yield ``(offload_key, last_block_id)`` for each eligible reachable
+        chunk in ``[self.next_stored_chunk_idx, ends_upper)``.
+
+        Encapsulates the per-group flat addressing
+        (``chunk K -> self.block_ids[K*blocks_per_chunk : (K+1)*blocks_per_chunk]``)
+        and the SWA reachability filter. The caller never reconstructs an
+        absolute chunk index -- the iterator handles the
+        ``abs_chunk_idx = next_stored_chunk_idx + key_idx`` step internally.
+
+        Skips:
+          * chunks whose LAST block is 0 (sliding-window / SSM skip or
+            stale; matches the pre-refactor ``offload_block_ids`` slicing);
+          * chunks where ``is_store_reachable_swa_chunk`` returns False.
+        """
+        start = self.next_stored_chunk_idx
+        bpc = self.blocks_per_chunk
+        for abs_chunk_idx in range(start, ends_upper):
+            chunk_block_ids = self.block_ids[
+                abs_chunk_idx * bpc : (abs_chunk_idx + 1) * bpc
+            ]
+            last_block_id = chunk_block_ids[-1]
+            if last_block_id == 0:
+                continue
+            if not is_store_reachable_swa_chunk(
+                abs_chunk_idx,
+                ends_upper,
+                group_config.alignment_chunk_count,
+                group_config.sliding_window_size_in_chunks,
+                group_config.is_eagle_group,
+            ):
+                continue
+            yield self.offload_keys[abs_chunk_idx], last_block_id
+
+    def iter_paired_offloads(
+        self,
+        group_config: GroupOffloadConfig,  # accepted for signature symmetry
+        ends_upper: int,
+    ) -> Iterable[tuple[int, list[int]]]:
+        """Yield ``(chunk_idx, all_block_ids)`` for each chunk in
+        ``[self.next_stored_chunk_idx, ends_upper)``.
+
+        ``chunk_idx`` is absolute (consumed by
+        ``_events_tracker.record_store`` for slicing ``req.block_hashes``
+        and ``req.all_token_ids``). Yields zero-only chunks too -- the
+        caller's ``if offload_key not in keys_to_store`` filter drops them
+        (preserving pre-refactor semantics where the second per-group
+        loop recorded events for any chunk whose key survived
+        ``prepare_store``).
+
+        ``group_config`` is accepted but unused; keeping the signature
+        symmetric with ``iter_reachable_offloads`` lets callers swap
+        helpers without branching.
+        """
+        del group_config  # explicitly unused
+        start = self.next_stored_chunk_idx
+        bpc = self.blocks_per_chunk
+        for abs_chunk_idx in range(start, ends_upper):
+            yield (
+                abs_chunk_idx,
+                self.block_ids[abs_chunk_idx * bpc : (abs_chunk_idx + 1) * bpc],
+            )
 
 
 @dataclass(slots=True)
@@ -382,7 +449,8 @@ class RequestOffloadState:
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
-            RequestGroupState() for _ in self.config.kv_group_configs
+            RequestGroupState(blocks_per_chunk=self.config.blocks_per_chunk)
+            for _ in self.config.kv_group_configs
         )
         params = self.req.kv_transfer_params
 
@@ -504,21 +572,6 @@ class RequestOffloadState:
             group_state.next_stored_chunk_idx = max(
                 group_state.next_stored_chunk_idx, end
             )
-
-    def iterate_candidates_for_store(
-        self, num_offloadable_tokens: int
-    ) -> Iterator[_StoreCandidate] | None:
-        """Seam for the per-candidate admission follow-up (Decision A of #49413).
-
-        Default returns ``None``, opting in to the per-group dispatch in
-        ``_build_store_jobs``. The per-candidate admission follow-up
-        (after #49506 lands) overrides this to return an iterator that
-        yields ``_StoreCandidate`` tuples in cross-group ending-token
-        order; the scheduler's per-candidate dispatch then consumes the
-        iterator to call ``manager.prepare_store`` once per admitted key
-        with prefix-transactional failure semantics.
-        """
-        return None
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
@@ -956,6 +1009,16 @@ class OffloadingConnectorScheduler:
             req_context=req_context,
             offloading_context=offloading_context,
         )
+        # Publish the scheduler's chosen store policy to tiers via
+        # ``req_context._state``. Tiers read it via
+        # ``req_context.get_state(StorePolicy)`` in later hooks
+        # (``prepare_store``, ``submit_store``, ``lookup`` ...). The write
+        # is intentionally placed AFTER ``RequestOffloadState`` construction
+        # (so ``__post_init__``'s enum-to-strategy translation has run)
+        # and BEFORE ``self._req_status[...]`` publication (so the
+        # ``req_status`` is fully initialized before any downstream
+        # observer can race in).
+        req_context.set_state(offloading_context.store_policy)
         self._req_status[request.request_id] = req_status
 
     def get_num_new_matched_tokens(
@@ -1169,7 +1232,6 @@ class OffloadingConnectorScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> dict[int, TransferJob]:
-        blocks_per_chunk = self.config.blocks_per_chunk
         store_jobs: dict[int, TransferJob] = {}
         for req_id in chain(
             scheduler_output.num_scheduled_tokens,
@@ -1195,49 +1257,21 @@ class OffloadingConnectorScheduler:
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
             # ``ends`` is the policy-adjusted per-group store boundary; see
-            # ``RequestOffloadState.store_extent``.
+            # ``RequestOffloadState.store_extent``. The per-group flat
+            # addressing math and the SWA reachability filter live inside
+            # ``RequestGroupState.iter_reachable_offloads``; this loop never
+            # reconstructs an absolute chunk index. ``range(start, ends_upper)``
+            # is empty when a deferred group's cursor has already reached
+            # its extent, so the helper naturally yields nothing for that
+            # group -- no caller-side skip is required.
             ends = req_status.store_extent(num_offloadable_tokens)
             new_offload_keys: list[OffloadKey] = []
             for group_idx, (group_config, group_state) in enumerate(
                 zip(self.config.kv_group_configs, req_status.group_states)
             ):
-                num_chunks = ends[group_idx]
-
-                start_chunk_idx = group_state.next_stored_chunk_idx
-                if num_chunks <= start_chunk_idx:
-                    continue
-                offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
-                # For each chunk, take the last corresponding GPU block. For
-                # blocks_per_chunk=3 and GPU block IDs 1 5 6 7 2 4 9 3 8,
-                # this selects GPU blocks 6 4 8.
-                # A block_id of 0 means either a sliding window / SSM skip
-                # or a stale entry that was zeroed out — skip it either way.
-                offload_block_ids = group_state.block_ids[
-                    start_chunk_idx * blocks_per_chunk
-                    + blocks_per_chunk
-                    - 1 : num_chunks * blocks_per_chunk : blocks_per_chunk
-                ]
-                assert len(offload_keys) == len(offload_block_ids)
-
-                for key_idx, (offload_key, block_id) in enumerate(
-                    zip(offload_keys, offload_block_ids)
+                for offload_key, _last_block_id in group_state.iter_reachable_offloads(
+                    group_config, ends[group_idx]
                 ):
-                    if block_id == 0:
-                        continue
-                    # Skip SWA chunks that can never serve a load hit:
-                    # within each full-attention alignment segment, only the
-                    # trailing chunks queried by _sliding_window_lookup are
-                    # reachable. EAGLE/MTP requires one additional chunk that
-                    # lookup later drops as its volatile draft tail.
-                    abs_chunk_idx = start_chunk_idx + key_idx
-                    if not is_store_reachable_swa_chunk(
-                        abs_chunk_idx,
-                        num_chunks,
-                        group_config.alignment_chunk_count,
-                        group_config.sliding_window_size_in_chunks,
-                        group_config.is_eagle_group,
-                    ):
-                        continue
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
@@ -1273,30 +1307,29 @@ class OffloadingConnectorScheduler:
                 is_sliding_window = (
                     group_config.sliding_window_size_in_chunks is not None
                 )
-                num_chunks = ends[group_idx]
-                start_chunk_idx = group_state.next_stored_chunk_idx
-                block_ids = group_state.block_ids
+                if ends[group_idx] <= group_state.next_stored_chunk_idx:
+                    group_sizes.append(0)
+                    block_indices.append(0)
+                    continue
                 num_group_blocks = 0
                 start_gpu_block_idx: int | None = None
-                for idx, offload_key in enumerate(
-                    group_state.offload_keys[start_chunk_idx:num_chunks]
+                for chunk_idx, chunk_block_ids in group_state.iter_paired_offloads(
+                    group_config, ends[group_idx]
                 ):
+                    offload_key = group_state.offload_keys[chunk_idx]
                     if offload_key not in keys_to_store:
                         continue
-
-                    chunk_idx = start_chunk_idx + idx
 
                     self._events_tracker.record_store(
                         req, group_config, chunk_idx, offload_key
                     )
 
-                    gpu_block_idx = chunk_idx * blocks_per_chunk
-                    for i in range(blocks_per_chunk):
-                        block_id = block_ids[gpu_block_idx + i]
+                    base = chunk_idx * group_state.blocks_per_chunk
+                    for i, block_id in enumerate(chunk_block_ids):
                         if block_id == 0:
                             continue
                         if start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
+                            start_gpu_block_idx = base + i
                         src_block_ids.append(block_id)
                         num_group_blocks += 1
                         if is_sliding_window:
