@@ -16,7 +16,7 @@ from tests.tool_parsers.utils import (
     split_string_into_token_deltas,
 )
 from vllm.tokenizers import get_tokenizer
-from vllm.tool_parsers.granite_tool_parser import GraniteToolParser
+from vllm.tool_parsers.granite_engine_tool_parser import GraniteEngineToolParser
 
 
 class TestGraniteToolParser(ToolParserTests):
@@ -76,23 +76,6 @@ I'll get that information.""",
             single_tool_call_expected_content=None,
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
-            # xfail markers
-            xfail_streaming={
-                "test_malformed_input": (
-                    "Streaming mode incorrectly creates tool call from malformed JSON"
-                ),
-                "test_surrounding_text": (
-                    "Parser doesn't handle surrounding text correctly in streaming"
-                ),
-                "test_streaming_reconstruction": (
-                    "Streaming mode doesn't strip <|tool_call|> marker from content"
-                ),
-            },
-            xfail_nonstreaming={
-                "test_surrounding_text": (
-                    "Parser doesn't handle surrounding text correctly in non-streaming"
-                ),
-            },
         )
 
     # Granite-Specific Tests
@@ -140,7 +123,7 @@ def test_streaming_parallel_calls_batched_deltas(granite_tokenizer, chunk_size):
     parallel calls must not drop the first call's name. granite streams
     arguments before name, so the name only completes as the next call appears.
     """
-    parser = GraniteToolParser(granite_tokenizer)
+    parser = GraniteEngineToolParser(granite_tokenizer)
     model_output = (
         '<|tool_call|> [{"arguments": {"city": "Tokyo"}, "name": "get_weather"}, '
         '{"arguments": {"timezone": "Asia/Tokyo"}, "name": "get_time"}]'
