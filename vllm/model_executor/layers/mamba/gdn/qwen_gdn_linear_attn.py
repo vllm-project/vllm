@@ -1494,7 +1494,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state_idx=spec_block_idx_last_computed,
                     num_accepted_tokens=num_accepted_tokens,
                     query_start_loc=spec_query_start_loc,
-                    max_query_len=spec_table.size(-1),
+                    # True spec query width (num_spec_tokens + 1), NOT the block-table
+                    # width: max_query_len sizes the kernel's NP2_STATELEN state tile,
+                    # while the per-sequence lengths are re-derived from
+                    # spec_query_start_loc and the state addressing travels via
+                    # conv_state_indices. Passing spec_table.size(-1) (~456) inflated
+                    # the tile to 512 lanes for 3 real tokens (10-20x per call).
+                    max_query_len=spec_state_indices_tensor.size(-1),
                     validate_data=False,
                 )
             else:
