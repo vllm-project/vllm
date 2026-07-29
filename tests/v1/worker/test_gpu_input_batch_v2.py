@@ -5,9 +5,10 @@
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 
 @pytest.mark.parametrize(

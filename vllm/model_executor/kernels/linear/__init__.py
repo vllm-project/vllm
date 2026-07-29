@@ -74,6 +74,9 @@ from vllm.model_executor.kernels.linear.mxfp4 import (
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+    AiterMxfp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
 )
@@ -274,6 +277,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterMxfp4LinearKernel,
     },
     "machete": {
         MacheteLinearKernel,
@@ -468,6 +472,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
         HummingMxFp4LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        AiterMxfp4LinearKernel,
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,
@@ -1079,6 +1086,7 @@ __all__ = [
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
+    "AiterMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
