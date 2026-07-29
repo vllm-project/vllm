@@ -14,6 +14,13 @@ from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.platforms import current_platform
 
 
+@pytest.fixture(autouse=True)
+def resolver_installed() -> None:
+    """register_side_stream() installs the resolver; these tests exercise it
+    without registering a real stream."""
+    side_stream._install_stream_index_resolver()
+
+
 def test_stream_index_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     """Index 0 resolves to the current stream dynamically, registry hits
     resolve normally, and a registry miss falls back to the side stream -

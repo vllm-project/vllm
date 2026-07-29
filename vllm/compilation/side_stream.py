@@ -29,6 +29,11 @@ def register_side_stream(stream: torch.cuda.Stream) -> None:
         "only one side stream per process is supported"
     )
     _side_stream = stream
+    # Layers register during model construction, before anything is compiled or
+    # any AOT artifact module is exec'd, so this is early enough to catch every
+    # binding of the resolver name - and it keeps the patch off processes that
+    # never use a side stream.
+    _install_stream_index_resolver()
 
 
 def graph_uses_side_stream(graph: fx.GraphModule) -> bool:
@@ -84,8 +89,3 @@ def _install_stream_index_resolver() -> None:
     # variables.streams binds the name at import time, so the streams.* op
     # implementations (_get_stream_by_index) need their own rebind.
     dynamo_streams.get_external_object_by_index = resolver
-
-
-# Install at import: deserialized artifacts bind the resolver name when their
-# generated modules are exec'd, which can happen before any compile runs.
-_install_stream_index_resolver()
