@@ -8,6 +8,7 @@ Thread pool:
     Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
 
+import itertools
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
@@ -104,26 +105,33 @@ class DualQueueThreadPool:
             self._threads.append(t)
 
     def _batch_tasks(
-        self, tasks: Iterable[Task], batch_size: int
+        self,
+        tasks: Iterable[Task],
+        n_tasks: int,
+        n_threads: int,
     ) -> Iterator[list[Task]]:
-        """Chunk tasks into lists of at most `batch_size` tasks."""
-        batch: list[Task] = []
-        for task in tasks:
-            batch.append(task)
-            if len(batch) >= batch_size:
-                yield batch
-                batch = []
-        if batch:
+        """
+        Batch tasks so that the request's tasks are split evenly
+        across the n_threads. This is important for load-balancing and TTFT.
+        """
+        tasks = iter(tasks)
+        q, r = divmod(n_tasks, n_threads)
+        batch_sizes = [q + 1 if i < r else q for i in range(n_threads)]
+        for bs in batch_sizes[: min(n_tasks, n_threads)]:
+            batch = list(itertools.islice(tasks, bs))
+            assert len(batch) == bs
             yield batch
+
+        assert next(tasks, None) is None, "Unaccounted tasks"
 
     def _enqueue(
         self,
         queue: deque,
         make_batch_fn: Callable[[list[Task]], Callable[[], None]],
         job_id: JobId,
-        n_tasks: int,
         tasks: Iterable[Task],
-        batch_size: int,
+        n_tasks: int,
+        n_threads: int,
     ) -> None:
         """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
         if n_tasks == 0:
@@ -133,7 +141,7 @@ class DualQueueThreadPool:
         n_batches = 0
         with self._condition:
             self._inflight_jobs += 1
-            for batch in self._batch_tasks(tasks, batch_size):
+            for batch in self._batch_tasks(tasks, n_tasks, n_threads):
                 queue.append((make_batch_fn(batch), len(batch), state))
                 n_batches += 1
             self._condition.notify(n_batches)
@@ -151,9 +159,9 @@ class DualQueueThreadPool:
             self._load_q,
             make_batch_fn,
             job_id,
-            n_tasks,
             tasks,
-            batch_size=max(1, n_tasks // self._n_read_threads),
+            n_tasks=n_tasks,
+            n_threads=self._n_read_threads,
         )
 
     def enqueue_store(
@@ -169,9 +177,9 @@ class DualQueueThreadPool:
             self._store_q,
             make_batch_fn,
             job_id,
-            n_tasks,
             tasks,
-            batch_size=max(1, n_tasks // self._n_write_threads),
+            n_tasks=n_tasks,
+            n_threads=self._n_write_threads,
         )
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
