@@ -617,6 +617,32 @@ def test_human_readable_other_args():
     assert args.max_num_batched_tokens == 2**10 * 4
 
 
+def test_slo_scheduler_cli_args_flow_to_scheduler_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--scheduling-policy",
+            "slo",
+            "--slo-priority-bias=-10.0",
+            "--slo-short-request-token-threshold",
+            "2048",
+            "--slo-waiting-token-reserve-ratio",
+            "0.2",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+
+    assert engine_args.slo_priority_bias == pytest.approx(-10.0)
+    assert engine_args.slo_short_request_token_threshold == 2048
+    assert engine_args.slo_waiting_token_reserve_ratio == 0.2
+
+    scheduler_config = engine_args.create_engine_config().scheduler_config
+    assert scheduler_config.policy == "slo"
+    assert scheduler_config.slo_priority_bias == pytest.approx(-10.0)
+    assert scheduler_config.slo_short_request_token_threshold == 2048
+    assert scheduler_config.slo_waiting_token_reserve_ratio == 0.2
+
+
 def test_numa_bind_args():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

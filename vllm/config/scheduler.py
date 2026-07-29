@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
+SchedulerPolicy = Literal["fcfs", "priority", "slo"]
 
 
 @config
@@ -102,7 +102,23 @@ class SchedulerConfig:
     - "fcfs" means first come first served, i.e. requests are handled in order 
       of arrival.
     - "priority" means requests are handled based on given priority (lower
-      value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties).
+    - "slo" means requests are scheduled by TTFT SLO urgency, prioritizing
+      waiting requests closest to their first-token targets."""
+
+    slo_priority_bias: float = Field(default=0.0, ge=-10.0, le=10.0)
+    """Bias between short and long request TTFT targets in [-10, 10]. Positive
+    values prioritize short requests, negative values prioritize long requests,
+    and zero gives both classes a 20-second target. Magnitudes above one expand
+    both targets with smooth interpolation while preserving the selected
+    preference."""
+
+    slo_short_request_token_threshold: int = Field(default=2048, ge=1)
+    """Requests with prompt length at or below this threshold are treated as
+    short requests for TTFT SLO assignment."""
+
+    slo_waiting_token_reserve_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
+    """Max fraction of step token budget to reserve for urgent waiting prefills."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to

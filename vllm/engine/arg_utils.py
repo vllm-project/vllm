@@ -676,6 +676,13 @@ class EngineArgs:
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
+    slo_priority_bias: float = SchedulerConfig.slo_priority_bias
+    slo_short_request_token_threshold: int = (
+        SchedulerConfig.slo_short_request_token_threshold
+    )
+    slo_waiting_token_reserve_ratio: float = (
+        SchedulerConfig.slo_waiting_token_reserve_ratio
+    )
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
@@ -1557,6 +1564,17 @@ class EngineArgs:
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
         scheduler_group.add_argument(
+            "--slo-priority-bias", **scheduler_kwargs["slo_priority_bias"]
+        )
+        scheduler_group.add_argument(
+            "--slo-short-request-token-threshold",
+            **scheduler_kwargs["slo_short_request_token_threshold"],
+        )
+        scheduler_group.add_argument(
+            "--slo-waiting-token-reserve-ratio",
+            **scheduler_kwargs["slo_waiting_token_reserve_ratio"],
+        )
+        scheduler_group.add_argument(
             "--enable-chunked-prefill",
             **{
                 **scheduler_kwargs["enable_chunked_prefill"],
@@ -2346,6 +2364,9 @@ class EngineArgs:
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
+            slo_priority_bias=self.slo_priority_bias,
+            slo_short_request_token_threshold=self.slo_short_request_token_threshold,
+            slo_waiting_token_reserve_ratio=self.slo_waiting_token_reserve_ratio,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
