@@ -32,6 +32,10 @@ from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
+from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.model_executor.models.qwen3_treedspark_dflare import (
+    Qwen3TreeDSparkDFlareForCausalLM,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
@@ -111,7 +115,12 @@ class SpecDecodeBaseProposer:
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
-            1 if (self.pass_hidden_states_to_model and self.method != "dflash") else 0
+            1
+            if (
+                self.pass_hidden_states_to_model
+                and self.method not in ("dflash", "dspark")
+            )
+            else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
@@ -350,10 +359,24 @@ class SpecDecodeBaseProposer:
         # for those masked slots.
 
         model_hf_config = self.draft_model_config.hf_config
-        # DFlash stores mask_token_id in dflash_config
+        # DFlash stores mask_token_id in dflash_config. DFlare checkpoints
+        # exported by torchspec use ``dflare_config`` for the same fields
+        # (see qwen3_dflash.py: drafter_config merges both keys). Fall back
+        # to a top-level ``mask_token_id`` as well, matching the resolution
+        # order in vllm/v1/worker/gpu/spec_decode/utils.py.
         dflash_config = getattr(model_hf_config, "dflash_config", None)
+        dflare_config = getattr(model_hf_config, "dflare_config", None)
         if dflash_config and "mask_token_id" in dflash_config:
             self.parallel_drafting_token_id = dflash_config["mask_token_id"]
+        elif dflare_config and "mask_token_id" in dflare_config:
+            self.parallel_drafting_token_id = dflare_config["mask_token_id"]
+        elif getattr(model_hf_config, "mask_token_id", None) is not None:
+            self.parallel_drafting_token_id = model_hf_config.mask_token_id
+        elif hasattr(model_hf_config, "dspark_noise_token_id"):
+            # DSpark checkpoints may store the mask/noise token under a
+            # DSpark-specific key (mirrors get_parallel_drafting_token_id in
+            # vllm/v1/worker/gpu/spec_decode/utils.py).
+            self.parallel_drafting_token_id = model_hf_config.dspark_noise_token_id
         elif hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
         elif hasattr(model_hf_config, "ptd_token_id"):
@@ -361,8 +384,10 @@ class SpecDecodeBaseProposer:
         else:
             raise ValueError(
                 "For parallel drafting, the draft model config must have "
-                "`pard_token`, `ptd_token_id`, or "
-                "`dflash_config.mask_token_id` specified in its config.json."
+                "`pard_token`, `ptd_token_id`, "
+                "`dflash_config.mask_token_id`, `dflare_config.mask_token_id`, "
+                "`dspark_noise_token_id`, "
+                "or a top-level `mask_token_id` specified in its config.json."
             )
 
         if self.pass_hidden_states_to_model:
@@ -499,6 +524,30 @@ class SpecDecodeBaseProposer:
     def take_last_draft_probs(self) -> torch.Tensor | None:
         return self._last_draft_probs
 
+    def _finish_parallel_proposal(
+        self,
+        sample_hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        """Sample all draft tokens for parallel-drafting methods in one pass.
+
+        Returns draft token ids shaped ``[num_reqs, num_speculative_tokens]``
+        and caches the per-token draft probabilities into ``_last_draft_probs``
+        (``[num_reqs, num_speculative_tokens, vocab]``) when probabilistic
+        rejection sampling is enabled.
+
+        Subclasses (e.g. DSparkProposer) override this to inject sequential
+        intra-block dependencies instead of a single parallel sample.
+        """
+        draft_token_ids, draft_probs = self._sample_draft_tokens(
+            sample_hidden_states, sampling_metadata
+        )
+        if draft_probs is not None:
+            self._last_draft_probs = draft_probs.view(
+                -1, self.num_speculative_tokens, draft_probs.shape[-1]
+            ).contiguous()
+        return draft_token_ids.view(-1, self.num_speculative_tokens)
+
     def propose(
         self,
         num_speculative_tokens,
@@ -523,7 +572,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             model = self.model
             if isinstance(model, BreakableCUDAGraphWrapper):
                 model = model.unwrap()
@@ -535,12 +584,26 @@ class SpecDecodeBaseProposer:
                     DFlashQwen3ForCausalLM,
                     Eagle3Qwen3ForCausalLM,
                     DFlashLagunaForCausalLM,
+                    Qwen3DSparkForCausalLM,
+                    Qwen3TreeDSparkDFlareForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states
             )
-            assert target_hidden_states.shape[-1] == self.hidden_size
+            # DFlare's ``combine_hidden_states`` is a passthrough that returns
+            # ``[N, T*D]`` (per-layer fusion happens later, inside
+            # ``precompute_and_store_context_kv``). Every other spec-decode
+            # variant collapses to ``[N, D]``, so keep the strict check for
+            # them and allow an integer-multiple hidden dim for DFlare only.
+            last_dim = target_hidden_states.shape[-1]
+            assert last_dim == self.hidden_size or (
+                last_dim % self.hidden_size == 0 and last_dim // self.hidden_size > 1
+            ), (
+                f"combine_hidden_states returned last-dim={last_dim}, expected "
+                f"{self.hidden_size} or an integer multiple of it (DFlare "
+                f"passthrough returns T*hidden_size)."
+            )
 
         num_tokens, token_indices_to_sample, common_attn_metadata = (
             self.set_inputs_first_pass(
@@ -617,14 +680,9 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids, draft_probs = self._sample_draft_tokens(
+            return self._finish_parallel_proposal(
                 sample_hidden_states, sampling_metadata
             )
-            if draft_probs is not None:
-                self._last_draft_probs = draft_probs.view(
-                    -1, self.num_speculative_tokens, draft_probs.shape[-1]
-                ).contiguous()
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1012,7 +1070,8 @@ class SpecDecodeBaseProposer:
             return "DeepSeekMTPModel" in (
                 self.draft_model_config.hf_config.architectures or []
             )
-        return self.method not in ("mtp", "draft_model", "dflash")
+        # DFlash and DSpark backbones return a single hidden-state tensor.
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def prepare_next_token_ids_cpu(
         self,

@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.profiler import record_function
 from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
@@ -308,9 +309,25 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
+        intermediate_sizes = getattr(config, "intermediate_sizes", None)
+        intermediate_size = (
+            intermediate_sizes[layer_idx]
+            if intermediate_sizes is not None
+            else config.intermediate_size
+        )
+        self._profile_attention_name = (
+            f"dflash_dense_attention_i{intermediate_size}"
+            if intermediate_sizes is not None
+            else "dflash_dense_attention"
+        )
+        self._profile_ffn_name = (
+            f"dflash_dense_ffn_i{intermediate_size}"
+            if intermediate_sizes is not None
+            else "dflash_dense_ffn"
+        )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -332,13 +349,15 @@ class DFlashQwen3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        with record_function(self._profile_attention_name):
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+            )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        with record_function(self._profile_ffn_name):
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -354,6 +373,13 @@ class DFlashQwen3Model(nn.Module):
             ".up_proj": (".gate_up_proj", 1),
         },
     )
+    # Decoder-layer class hook. Subclasses (e.g. DFlareQwen3Model) override
+    # this to swap in a specialized layer (adds ``kv_proj_target`` etc.)
+    # WITHOUT re-instantiating ``self.layers`` after ``super().__init__``,
+    # which would double-register the inner ``Attention`` prefix and trip
+    # the ``Duplicate layer name`` check in vllm/model_executor/layers/
+    # attention/attention.py.
+    decoder_layer_class: type = DFlashQwen3DecoderLayer
 
     def __init__(
         self,
@@ -369,6 +395,17 @@ class DFlashQwen3Model(nn.Module):
 
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
+        # DFlare checkpoints (torchspec-exported) use ``dflare_config`` instead
+        # of ``dflash_config`` for the same set of runtime fields
+        # (mask_token_id, target_layer_ids, causal, ...). Merge it in so both
+        # naming conventions are supported transparently.
+        drafter_config.update(getattr(self.config, "dflare_config", {}))
+        # Training-side torchspec exports keep these DFlash fields at the
+        # top level, while Hugging Face speculator checkpoints nest them under
+        # dflash_config. Accept both layouts.
+        for field in ("mask_token_id", "target_layer_ids"):
+            if field not in drafter_config and hasattr(self.config, field):
+                drafter_config[field] = getattr(self.config, field)
 
         if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
             self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
@@ -397,7 +434,7 @@ class DFlashQwen3Model(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                DFlashQwen3DecoderLayer(
+                self.decoder_layer_class(
                     current_vllm_config,
                     config=self.config,
                     layer_idx=layer_idx,
@@ -534,15 +571,17 @@ class DFlashQwen3Model(nn.Module):
         return all_k, all_v
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
-        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
-        # The weight is selected per layer by the outermost (layer) index.
+        # The vLLM RMSNorm kernel accepts one 1-D weight vector and reuses it
+        # for every input row. Normalize each draft layer separately so its
+        # own K-norm weight is applied.
         all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
-        )
+        for layer_idx, weight in enumerate(self._k_norm_weights):
+            ops.rms_norm(
+                all_k_normed[layer_idx],
+                all_k[layer_idx],
+                weight,
+                self._rms_norm_eps,
+            )
         return all_k_normed
 
     def precompute_and_store_context_kv(
@@ -769,11 +808,17 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             result = result.squeeze(0)
         return result
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
         for name, loaded_weight in weights:
+            legacy_name_mapping = {
+                "context_proj.weight": "fc.weight",
+                "context_norm.weight": "hidden_norm.weight",
+                "final_norm.weight": "norm.weight",
+            }
+            name = legacy_name_mapping.get(name, name)
             assert "mask_hidden" not in name, (
                 "DFlash embeds masked slots via mask_token_id (optionally "
                 "overridden by a mask_embedding.pt file); it should not ship a "
@@ -812,8 +857,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_prefixes=None,
             skip_substrs=skip_substrs,
         )
-        loader.load_weights(model_weights.items())
+        loaded_params = loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()
+        return loaded_params
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
         """Checks for an override mask embedding in `mask_embedding.pt` and returns it.

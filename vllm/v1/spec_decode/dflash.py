@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import replace
 from typing import Any
 
@@ -11,13 +12,22 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
     copy_and_expand_dflash_inputs_kernel,
     next_power_of_2,
+    token_logprobs_from_logits,
 )
 
 logger = init_logger(__name__)
+
+_DCUT_FALLBACK_RATIO = 3 / 4
+_DCUT_RATIO_NUMS = (1, 2, 3, 4)
+_DCUT_PROFILE_SEQ_LEN = 2048
+_DCUT_PROFILE_WARMUPS = 3
+_DCUT_PROFILE_STEPS = 10
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
@@ -28,13 +38,27 @@ class DFlashProposer(SpecDecodeBaseProposer):
         runner=None,
     ):
         assert vllm_config.speculative_config is not None
-        assert vllm_config.speculative_config.method == "dflash"
+        # DSparkProposer subclasses DFlashProposer and reuses the same
+        # context-KV precompute + query-block forward machinery, so accept
+        # "dspark" here as well.
+        assert vllm_config.speculative_config.method in ("dflash", "dspark")
         super().__init__(
             vllm_config=vllm_config,
             device=device,
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+        self._runner = runner
+
+        # Number of query tokens emitted per request. DFlash uses the anchor
+        # (bonus) token plus one mask token per speculative token, i.e.
+        # ``1 + num_speculative_tokens``. DSpark's anchor-as-first layout
+        # overrides this in its own __init__.
+        self.num_query_per_req = 1 + self.num_speculative_tokens
+        # Whether the anchor query position is itself a sampled prediction.
+        # DFlash default: the anchor is the bonus token (only mask tokens are
+        # sampled). DSpark sets this to True for its anchor-as-first layout.
+        self.sample_from_anchor = False
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
@@ -79,6 +103,278 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.dflash_causal = not dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
+        self._dcut_keep_lens_cache: torch.Tensor | None = None
+        self._dcut_costs_by_bs: dict[int, torch.Tensor] = {}
+        self._dcut_keep_counts: torch.Tensor | None = None
+
+    @property
+    def dcut_enabled(self) -> bool:
+        return self.speculative_config.dflash_dcut_mode != "off"
+
+    @override
+    def _sample_draft_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sample all draft positions in parallel, optionally scoring for D-Cut."""
+        self._dcut_keep_lens_cache = None
+        if not self.dcut_enabled:
+            return super()._sample_draft_tokens(hidden_states, sampling_metadata)
+
+        logits = self.model.compute_logits(hidden_states)
+        draft_token_ids, draft_probs = self._sample_from_logits(
+            logits, sampling_metadata
+        )
+        token_logprobs = (
+            token_logprobs_from_logits(logits, draft_token_ids)
+            if draft_probs is None
+            else torch.log(
+                draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1)
+            )
+        )
+        self.select_dcut_keep_lens(token_logprobs.view(-1, self.num_speculative_tokens))
+        return draft_token_ids, draft_probs
+
+    def select_dcut_keep_lens(self, logprobs: torch.Tensor) -> None:
+        """Choose per-request keep lengths from ``[bs, num_draft]`` logprobs.
+
+        Caches the result for ``take_dcut_keep_lens``. Callers are the
+        post-drafting sampling paths: DFlash's parallel sample and DSpark's
+        sequential Markov loop, which stacks its per-step logprobs into the
+        same layout.
+        """
+        self._dcut_keep_lens_cache = self._select_dcut_keep_lens(logprobs)
+
+    def _select_dcut_keep_lens(self, logprobs: torch.Tensor) -> torch.Tensor:
+        bs, num_draft_tokens = logprobs.shape
+        cumlogprobs = logprobs.cumsum(dim=1).flatten()
+        profile_bs = min((x for x in self._dcut_costs_by_bs if x >= bs), default=None)
+        if profile_bs is None or self._dcut_keep_counts is None:
+            dcut = self.speculative_config.dflash_dcut
+            if dcut == "auto":
+                logger.warning_once(
+                    "D-Cut selector has no profiled cost for bs=%d; "
+                    "fallback ratio %.2f.",
+                    bs,
+                    _DCUT_FALLBACK_RATIO,
+                )
+                dcut = _DCUT_FALLBACK_RATIO
+            # Budget is over target verification slots (1 + num_spec), not the
+            # drafter's query width, which differs for anchor-as-first DSpark.
+            num_keep_draft_tokens = self._get_dcut_keep_count(
+                bs, 1 + self.num_speculative_tokens, float(dcut)
+            )
+            _, top_indices = torch.topk(cumlogprobs, k=num_keep_draft_tokens)
+            updates = torch.ones_like(top_indices, dtype=torch.int32)
+        else:
+            keep_counts = self._dcut_keep_counts[bs]
+            costs = self._dcut_costs_by_bs[profile_bs]
+            sorted_logprobs, top_indices = torch.sort(cumlogprobs, descending=True)
+            prefix_scores = torch.cumsum(torch.exp(sorted_logprobs), dim=0)
+            candidate_scores = torch.zeros_like(costs)
+            valid = keep_counts > 0
+            candidate_scores[valid] = prefix_scores[keep_counts[valid] - 1]
+            # Every request emits one token per step regardless of how many of
+            # its drafts survive, so the throughput objective is total tokens
+            # per millisecond. Dropping that constant from the numerator
+            # overstates the relative value of extra draft tokens and biases
+            # the argmax toward the widest candidate.
+            candidate_scores += bs
+            num_keep_draft_tokens = keep_counts[torch.argmax(candidate_scores / costs)]
+            updates = (
+                torch.arange(bs * num_draft_tokens, device=self.device)
+                < num_keep_draft_tokens
+            ).to(torch.int32)
+        keep_lens = torch.zeros((bs,), dtype=torch.int32, device=self.device)
+        keep_lens.scatter_add_(0, top_indices // num_draft_tokens, updates)
+        return keep_lens
+
+    @staticmethod
+    def _get_dcut_keep_count(bs: int, num_verify_per_req: int, ratio: float) -> int:
+        """Draft-token budget for a keep ratio over target verification slots.
+
+        One slot per request (the anchor) is always retained, so the budget is
+        the ratio applied to all verification slots minus those anchors.
+        """
+        return max(0, math.ceil(bs * num_verify_per_req * ratio) - bs)
+
+    def take_dcut_keep_lens(self) -> torch.Tensor | None:
+        return self._dcut_keep_lens_cache
+
+    def profile_dcut_cost_table(self) -> None:
+        costs_by_bs: dict[int, list[tuple[int, float]]] = {}
+        max_bs = min(self.max_batch_size, self._runner.max_num_reqs)
+        bs_range = torch.arange(max_bs + 1, device=self.device, dtype=torch.long)[
+            :, None
+        ]
+        ratio_nums = torch.tensor(
+            _DCUT_RATIO_NUMS, device=self.device, dtype=torch.long
+        )
+        keep_counts = torch.div(
+            bs_range * (1 + self.num_speculative_tokens) * ratio_nums + 3,
+            4,
+            rounding_mode="floor",
+        )
+        self._dcut_keep_counts = torch.clamp(keep_counts - bs_range, min=0)
+        for bs in self._get_dcut_profile_batch_sizes():
+            entries: list[tuple[int, float]] = []
+            # Drafting always runs at full width; only verification is pruned.
+            full_draft_tokens = bs * self.num_query_per_req
+            self._dcut_costs_by_bs[bs] = torch.ones(
+                len(_DCUT_RATIO_NUMS), dtype=torch.float32, device=self.device
+            )
+            for keep_count in self._dcut_keep_counts[bs].tolist():
+                target_tokens = bs + keep_count
+                cost = self._profile_dcut_full_cost_ms(
+                    bs=bs,
+                    target_tokens=target_tokens,
+                    draft_tokens=full_draft_tokens,
+                )
+                entries.append((keep_count, cost))
+            # Verifying more tokens cannot be cheaper. Timing noise that
+            # inverts neighbouring candidates would otherwise let a narrow one
+            # look strictly better on both terms and win the argmax outright,
+            # so clamp the profile to be non-decreasing in the keep count.
+            profiled = torch.tensor(
+                [x[1] for x in entries], dtype=torch.float32, device=self.device
+            )
+            costs = profiled.cummax(dim=0).values
+            self._dcut_costs_by_bs[bs] = costs
+            costs_by_bs[bs] = list(zip([x[0] for x in entries], costs.tolist()))
+        if costs_by_bs:
+            logger.info("D-Cut warmup full-cost table: %s", costs_by_bs)
+
+    def _dummy_sample_run(self, hidden_states: torch.Tensor, num_reqs: int) -> None:
+        """Run the draft sampling path on dummy hidden states, for cost profiling.
+
+        Dispatches through ``_finish_parallel_proposal`` so each runtime is timed
+        on its own path: DFlash samples all positions in one pass, while DSpark
+        walks the block sequentially through its correction and Markov heads.
+        Both then run the D-Cut keep-length selection.
+        """
+        num_sample_tokens = num_reqs * self.num_speculative_tokens
+        if hidden_states.shape[0] < num_sample_tokens:
+            return
+        # Dummy hidden states may hold inf/nan, which would break sampling.
+        sample_hidden_states = torch.rand_like(hidden_states[:num_sample_tokens])
+        self._finish_parallel_proposal(
+            sample_hidden_states,
+            self._make_dummy_sampling_metadata(num_reqs),
+        )
+
+    def _make_dummy_sampling_metadata(self, num_reqs: int) -> SamplingMetadata:
+        """Minimal metadata that keeps draft sampling on its production branch.
+
+        Draft sampling reads only ``all_greedy`` and ``temperature`` (top-p/top-k
+        are deliberately not applied to drafts), so the rest is inert. The
+        temperature is size-1 to broadcast over both layouts this is used for:
+        DFlash scores ``[num_reqs * num_spec, vocab]`` in one pass while DSpark
+        scores ``[num_reqs, vocab]`` once per speculative token.
+        """
+        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)  # noqa: E731
+        return SamplingMetadata(
+            temperature=torch.full((1,), 0.5, device=self.device),
+            all_greedy=not self._enable_probabilistic_draft_probs,
+            all_random=False,
+            top_p=None,
+            top_k=None,
+            generators={},
+            max_num_logprobs=None,
+            logprob_token_ids=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.0),
+            presence_penalties=dummy_tensors(0.0),
+            repetition_penalties=dummy_tensors(1.0),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            spec_token_ids=[[] for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=LogitsProcessors(),
+        )
+
+    def _get_dcut_profile_batch_sizes(self) -> tuple[int, ...]:
+        # A full-ratio probe schedules bs * (1 + num_spec) target tokens, so cap
+        # the batch size to keep _dummy_run within max_num_batched_tokens.
+        verify_per_req = 1 + self.num_speculative_tokens
+        max_bs = min(
+            self.max_batch_size,
+            self._runner.max_num_reqs,
+            self._runner.max_num_tokens // verify_per_req,
+        )
+        if max_bs <= 0:
+            return ()
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes or []
+        sizes = [
+            capture_size // verify_per_req
+            for capture_size in capture_sizes
+            if capture_size % verify_per_req == 0
+            and 0 < capture_size // verify_per_req <= max_bs
+        ]
+        sizes.append(max_bs)
+        return tuple(sorted(set(sizes)))
+
+    def _profile_dcut_full_cost_ms(
+        self, *, bs: int, target_tokens: int, draft_tokens: int
+    ) -> float:
+        profile_seq_lens = min(
+            _DCUT_PROFILE_SEQ_LEN,
+            self._runner.max_model_len,
+        )
+        dummy_run_kwargs = dict(
+            force_attention=True,
+            allow_microbatching=False,
+            skip_eplb=True,
+            is_profile=False,
+            dcut_profile_num_reqs=bs,
+            drafter_dummy_num_tokens=draft_tokens,
+            profile_seq_lens=profile_seq_lens,
+        )
+        for _ in range(_DCUT_PROFILE_WARMUPS):
+            self._runner._dummy_run(target_tokens, **dummy_run_kwargs)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(_DCUT_PROFILE_STEPS):
+            self._runner._dummy_run(target_tokens, **dummy_run_kwargs)
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / _DCUT_PROFILE_STEPS
+
+    def _get_dflare_num_target_layers(self) -> int | None:
+        """Return ``T`` (the number of target layers stacked in
+        ``combine_hidden_states``) when the drafter is DFlare, else ``None``.
+
+        DFlare's ``combine_hidden_states`` is a passthrough that returns
+        ``[N, T * hidden_size]`` instead of the classic ``[N, hidden_size]``.
+        ``self.hidden_states`` (the shared dummy-context buffer allocated by
+        the base proposer) is sized ``[N, hidden_size]``, so ``dummy_run`` has
+        to allocate a wider tensor for DFlare's profiling pass.
+
+        ``self.model`` is fully constructed before the first ``dummy_run``
+        call (spec-decode ``load_model`` runs before ``profile_run``), so we
+        read ``num_target_layers`` directly off the loaded draft model rather
+        than trying to parse the checkpoint config — the model's ``__init__``
+        already handled the multiple possible config field locations
+        (``dflash_config.target_layer_ids``, top-level ``target_layer_ids``,
+        or ``eagle_aux_hidden_state_layer_ids``).
+        """
+        # Prefer duck-typing against the loaded model. Only DFlare models
+        # expose ``num_target_layers``; classic DFlash does not.
+        model = getattr(self, "model", None)
+        if model is None:
+            return None
+        # Some execution paths wrap the drafter in a CUDA-graph wrapper;
+        # unwrap defensively.
+        inner = getattr(model, "model", model)
+        num_target_layers = getattr(inner, "num_target_layers", None)
+        if num_target_layers is None:
+            return None
+        try:
+            return int(num_target_layers)
+        except (TypeError, ValueError):
+            return None
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -116,7 +412,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.batch_size()
         num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_per_req = self.num_query_per_req
         num_query_total = batch_size * num_query_per_req
 
         # Store for build_model_inputs_first_pass to use
@@ -168,6 +464,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             total_input_tokens=num_context,
             BLOCK_SIZE=BLOCK_SIZE,
             HAS_NUM_REJECTED=has_num_rejected,
+            SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -214,6 +511,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
+        num_query_tokens: int | None = None,
+        profile_num_reqs: int | None = None,
     ) -> None:
         """
         Key differences to default dummy_run:
@@ -222,8 +521,14 @@ class DFlashProposer(SpecDecodeBaseProposer):
         use the unpadded num_tokens instead of num_input_tokens
         - max_query_tokens is quite small, DFlash only sees spec tokens as queries
         - Multimodal inputs are not currently supported
+
+        When ``profile_num_reqs`` is set, the draft sampling path is run too so
+        that D-Cut cost profiling sees the LM head (once for DFlash, once per
+        speculative token for DSpark's sequential loop) and the keep-length
+        selection. Backbone-only timing would understate the fixed per-step
+        cost that the selector divides its acceptance score by.
         """
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        num_query_tokens = min(num_query_tokens or num_tokens, self.max_query_tokens)
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
                 num_query_tokens, use_cudagraphs=use_cudagraphs
@@ -247,23 +552,43 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Context states will be passed directly to the precomputation without
         # going through the buffer, since no CUDA graph is used for the precomputation.
         # For the dummy run, we use the dummy buffer.
-        context_states = self.hidden_states[:num_tokens]
+        #
+        # DFlare's ``combine_hidden_states`` is a passthrough returning
+        # ``[N, T * hidden_size]`` (per-layer fusion happens inside
+        # ``precompute_and_store_context_kv``). The shared
+        # ``self.hidden_states`` buffer is sized ``[N, hidden_size]``, so for
+        # a DFlare drafter we allocate a temporary wider tensor for the dummy
+        # profiling pass. DFlash falls through to the shared buffer as before.
+        num_target_layers = self._get_dflare_num_target_layers()
+        if num_target_layers is not None:
+            context_states = torch.empty(
+                num_tokens,
+                num_target_layers * self.hidden_size,
+                dtype=self.dtype,
+                device=self.device,
+            )
+        else:
+            context_states = self.hidden_states[:num_tokens]
 
         # Run the KV projection (GEMM + norms + RoPE) for memory profiling,
         self.model.precompute_and_store_context_kv(context_states, context_positions)
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=slot_mapping_dict,
+        with (
+            set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=slot_mapping_dict,
+            ),
         ):
-            self.model(
+            hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self._get_positions(num_input_tokens),
                 inputs_embeds=None,
             )
+        if profile_num_reqs is not None:
+            self._dummy_sample_run(hidden_states, profile_num_reqs)
 
     @override
     def build_model_inputs_first_pass(
@@ -314,4 +639,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
     @property
     def dflash_config(self):
-        return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+        hf_config = self.draft_model_config.hf_config
+        return (
+            getattr(hf_config, "dflash_config", None)
+            or getattr(hf_config, "dflare_config", None)
+            or {}
+        )

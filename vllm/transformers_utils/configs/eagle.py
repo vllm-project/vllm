@@ -68,7 +68,10 @@ class EAGLEConfig(PretrainedConfig):
             )
             kwargs["architectures"] = [
                 arch
-                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                if arch.startswith("DFlash")
+                or arch.endswith("DFlash")
+                or arch.startswith("DFlare")
+                or arch.endswith("DFlare")
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]

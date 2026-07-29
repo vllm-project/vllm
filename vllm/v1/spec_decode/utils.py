@@ -480,9 +480,10 @@ def copy_and_expand_dflash_inputs_kernel(
     total_input_tokens,  # tl.int32
     BLOCK_SIZE: tl.constexpr,
     HAS_NUM_REJECTED: tl.constexpr = False,
+    SAMPLE_FROM_ANCHOR: tl.constexpr = False,
 ):
     """
-    Fused kernel for DFlash first-pass input setup.
+    Fused kernel for DFlash / DSpark first-pass input setup.
 
     Per request, this kernel:
       1. Copies context positions from target_positions to
@@ -552,9 +553,13 @@ def copy_and_expand_dflash_inputs_kernel(
     input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
     tl.store(out_input_ids_ptr + query_out, input_id, mask=is_query)
 
-    # --- Token indices to sample (mask tokens, skip the bonus token) ---
-    is_sample = is_query & (query_off > 0)
-    sample_out_idx = req_idx * num_speculative_tokens + (query_off - 1)
+    # --- Token indices to sample ---
+    # DFlash default: skip the anchor (bonus) token, sample the N mask tokens.
+    # DSpark (SAMPLE_FROM_ANCHOR): the anchor is itself a prediction, so sample
+    # at every query position (offsets 0..N-1).
+    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+    is_sample = is_query & (query_off >= sample_off)
+    sample_out_idx = req_idx * num_speculative_tokens + (query_off - sample_off)
     tl.store(
         out_token_indices_ptr + sample_out_idx,
         query_out,
@@ -599,3 +604,70 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
     rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
+
+
+@triton.jit
+def token_logprob_kernel(
+    output_ptr,
+    logits_ptr,
+    logits_stride,
+    token_ids_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    row_ptr = logits_ptr + row * logits_stride
+
+    max_val = float("-inf")
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        max_val = tl.max(tl.maximum(logits, max_val))
+    max_val = max_val.to(tl.float32)  # type: ignore
+
+    se = 0.0
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
+        # Everything from here on must be FP32: a BF16 denominator rounds to the
+        # logit ULP, which quantizes the result and collapses every token above
+        # roughly 0.94 probability to exactly 0.0.
+        logits = logits.to(tl.float32)
+        e = tl.exp(logits - max_val)
+        e = tl.where(block < vocab_size, e, 0.0)
+        se += tl.sum(e)
+
+    token_id = tl.load(token_ids_ptr + row)
+    selected = tl.load(row_ptr + token_id).to(tl.float32)
+    tl.store(output_ptr + row, selected - max_val - tl.log(se))
+
+
+def token_logprobs_from_logits(
+    logits: torch.Tensor, token_ids: torch.Tensor
+) -> torch.Tensor:
+    """Log-probability of one token per row, without materializing log-softmax.
+
+    Mirrors ``vllm.v1.worker.gpu.sample.logprob.compute_token_logprobs``, cut
+    down to a single token id per row; keep the two numerically in sync. The
+    row is streamed twice instead of building a ``[num_rows, vocab_size]``
+    intermediate, which for a 120k vocabulary is the difference between a few
+    hundred megabytes of transient allocation and none at all.
+
+    Rows may be strided -- DSpark slices one speculative position out of a
+    ``[num_reqs, num_spec, vocab]`` block -- so the row stride is passed
+    explicitly. Elements within a row must still be contiguous.
+    """
+    num_rows, vocab_size = logits.shape
+    assert logits.stride(1) == 1, "vocabulary dimension must be contiguous"
+    logprobs = logits.new_empty((num_rows,), dtype=torch.float32)
+    token_logprob_kernel[(num_rows,)](
+        logprobs,
+        logits,
+        logits.stride(0),
+        token_ids.to(torch.int64),
+        vocab_size,
+        # A 120k vocabulary needs 118 iterations at the upstream block size of
+        # 1024, which measured ~2x slower than streaming it in 8192-wide chunks.
+        BLOCK_SIZE=min(8192, next_power_of_2(vocab_size)),  # type: ignore
+    )
+    return logprobs

@@ -69,7 +69,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hy_v3 import HYV3Config
 
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -433,7 +439,7 @@ class HYV3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class HYV3Model(nn.Module, MixtureOfExperts):
+class HYV3Model(nn.Module, MixtureOfExperts, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -532,7 +538,7 @@ class HYV3Model(nn.Module, MixtureOfExperts):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -544,10 +550,19 @@ class HYV3Model(nn.Module, MixtureOfExperts):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Auxiliary hidden states for EAGLE3-style drafters (DFlash/DFly read
+        # several target layers). Indices are global layer ids, while ``idx``
+        # stays PP-local to preserve the existing per-layer semantics.
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(positions, hidden_states, residual, idx=idx)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer + idx + 1, hidden_states, residual
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -558,6 +573,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
 
         hidden_states = self.norm(hidden_states)
 
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -651,7 +668,7 @@ class HYV3Model(nn.Module, MixtureOfExperts):
         return loaded_params
 
 
-class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -693,7 +710,7 @@ class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

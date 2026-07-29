@@ -130,6 +130,54 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     )
 
 
+@register_speculator("dflare")
+def update_dflare(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply DFlare specific configuration transformations to the `dict` used to
+    construct the Transformers PreTrainedConfig.
+
+    DFlare reuses DFlash's config layout (``dflash_config``) — the two models
+    share the same training-side ``DFlashConfig`` and the same set of runtime
+    fields (mask token, aux hidden state layer ids, sliding-window / causal
+    knobs). The only spec-config difference is the target architecture name
+    (``DFlareDraftModel`` vs. ``DFlashDraftModel``), which selects the
+    per-layer fusion + separate target-KV projection variant instead of
+    DFlash's shared-KV / single-context layout.
+
+    DFlare specific fields:
+    - draft_vocab_size: Size of the draft model's vocabulary
+    - target_hidden_size: Hidden size of the target model
+    - mask_token_id (required): Token ID used for parallel drafting mask
+        placeholders
+    - aux_hidden_state_layer_ids (required): Layer indices from the target
+        model whose intermediate hidden states are used as context for the
+        DFlare drafter. Mapped to both eagle_aux_hidden_state_layer_ids
+        (for gpu_model_runner) and dflash_config.target_layer_ids (for the
+        DFlare model). DFlare fuses these T layers per draft layer via a
+        learnable ``[num_draft_layers, T]`` weight matrix.
+    """
+    pre_trained_config["architectures"] = ["DFlareDraftModel"]
+    pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
+    if config_dict.get("target_hidden_size") is not None:
+        pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
+
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+
+    # DFlare shares DFlash's ``dflash_config`` key (see the module docstring
+    # in vllm/model_executor/models/qwen3_dflare.py — the training stack keys
+    # on ``isinstance(config, DFlashConfig)`` and picks the draft model class
+    # via ``model_arch``). Same indexing convention as DFlash.
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": [i - 1 for i in aux_layer_ids],
+        "model_arch": "dflare",
+    }
+    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
+        "sliding_window_non_causal", True
+    )
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """

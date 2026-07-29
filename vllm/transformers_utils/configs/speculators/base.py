@@ -134,4 +134,10 @@ class SpeculatorsConfig(PretrainedConfig):
         }
         if result["method"] == "peagle":
             result.update({"method": "eagle3", "parallel_drafting": True})
+        # DFlare reuses DFlash's runtime (spec-decode proposer, KV precompute,
+        # parallel drafting) and only swaps in a different draft-model class
+        # via the ``DFlareDraftModel`` architecture name. The vLLM
+        # SpeculativeConfig therefore treats it as ``method="dflash"``.
+        if result["method"] == "dflare":
+            result["method"] = "dflash"
         return result
