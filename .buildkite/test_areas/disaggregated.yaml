@@ -241,3 +241,20 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+
+- label: Kimi-Linear-48B-A3B Disaggregated DP EP
+  key: kimi-linear-disaggregated
+  timeout_in_minutes: 40
+  device: h200
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  env:
+    ENABLE_HMA_FLAG: "1"
+    DP_EP: "1"
+    GPU_MEMORY_UTILIZATION: "0.85"
+    MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
