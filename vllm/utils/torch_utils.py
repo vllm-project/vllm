@@ -69,7 +69,7 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-PIN_MEMORY = PIN_MEMORY()
+PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
