@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import gc
 import tempfile
+import weakref
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
+import httpx
+import huggingface_hub
 import pytest
 from huggingface_hub import _CACHED_NO_EXIST
 
@@ -15,6 +19,74 @@ from vllm.transformers_utils.repo_utils import (
     is_mistral_model_repo,
     list_filtered_repo_files,
 )
+
+
+def test_hf_hub_cached_fallback_does_not_retain_caller(monkeypatch, tmp_path):
+    class Owner:
+        pass
+
+    repo_id = "test-org/test-model"
+    filename = "config.json"
+    commit_hash = "0" * 40
+    storage = tmp_path / "models--test-org--test-model"
+    pointer = storage / "snapshots" / commit_hash / filename
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text("{}")
+    refs = storage / "refs"
+    refs.mkdir()
+    (refs / "main").write_text(commit_hash)
+
+    def fail_metadata_request(*args, **kwargs):
+        try:
+            raise OSError("simulated connection reset")
+        except OSError as error:
+            raise httpx.ConnectError("simulated transient HEAD failure") from error
+
+    monkeypatch.setattr(
+        huggingface_hub.file_download,
+        "get_hf_file_metadata",
+        fail_metadata_request,
+    )
+
+    def download_from_caller(owner):
+        return huggingface_hub.hf_hub_download(
+            repo_id,
+            filename,
+            cache_dir=tmp_path,
+        )
+
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        owner = Owner()
+        owner_ref = weakref.ref(owner)
+        assert Path(download_from_caller(owner)) == pointer
+        del owner
+        assert owner_ref() is None
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+        gc.collect()
+
+
+def test_hf_hub_uncached_metadata_failure_still_raises(monkeypatch, tmp_path):
+    def fail_metadata_request(*args, **kwargs):
+        raise httpx.ConnectError("simulated transient HEAD failure")
+
+    monkeypatch.setattr(
+        huggingface_hub.file_download,
+        "get_hf_file_metadata",
+        fail_metadata_request,
+    )
+
+    with pytest.raises(huggingface_hub.errors.LocalEntryNotFoundError) as exc_info:
+        huggingface_hub.hf_hub_download(
+            "test-org/uncached-model",
+            "config.json",
+            cache_dir=tmp_path,
+        )
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
 
 
 @pytest.mark.parametrize(

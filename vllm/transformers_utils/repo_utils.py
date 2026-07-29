@@ -7,12 +7,13 @@ import json
 import os
 import time
 from collections.abc import Callable
-from functools import cache
+from functools import cache, wraps
 from pathlib import Path
 from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
+from huggingface_hub import file_download as hf_file_download
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -28,6 +29,54 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 _hf_api: HfApi | None = None
+
+
+def _clear_exception_tracebacks(error: BaseException) -> None:
+    """Detach traceback frames from an exception chain."""
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
+def _patch_hf_hub_metadata_error_tracebacks() -> None:
+    """Prevent cached Hub fallbacks from retaining their callers.
+
+    Hugging Face Hub returns metadata exceptions to its download helper. When
+    that helper falls back to a cached file, the exception is discarded with
+    its traceback still attached. The traceback frame chain can retain the
+    caller until cyclic GC runs.
+    """
+    original = getattr(hf_file_download, "_get_metadata_or_catch_error", None)
+    if original is None or getattr(original, "_vllm_tracebacks_cleared", False):
+        return
+
+    @wraps(original)
+    def without_tracebacks(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        if (
+            isinstance(result, tuple)
+            and len(result) == 6
+            and isinstance(result[-1], Exception)
+        ):
+            _clear_exception_tracebacks(result[-1])
+        return result
+
+    without_tracebacks._vllm_tracebacks_cleared = True  # type: ignore[attr-defined]
+    # TODO: Remove this compatibility patch when Hugging Face Hub detaches
+    # metadata errors before returning them to its download helpers.
+    hf_file_download._get_metadata_or_catch_error = without_tracebacks
+
+
+_patch_hf_hub_metadata_error_tracebacks()
 
 
 def hf_api() -> HfApi:
