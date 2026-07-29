@@ -216,7 +216,7 @@ def should_prepare_decode_metadata(
         and current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and kv_cache_dtype in ("fp8", "fp8_e4m3")
-        and 1 < decode_query_len <= _MAX_DECODE_QUERY_LEN
+        and 1 <= decode_query_len <= _MAX_DECODE_QUERY_LEN
         and batch_size >= _MIN_CUTLASS_BATCH_SIZE
         and total_q * num_q_heads <= _MAX_QUERY_HEAD_ROWS
         and _supported_head_geometry(num_q_heads, num_kv_heads)
@@ -276,8 +276,8 @@ def _static_fallback_reason(
     total_q = batch * decode_query_len
     if batch < _MIN_CUTLASS_BATCH_SIZE:
         return f"batch size is below {_MIN_CUTLASS_BATCH_SIZE}"
-    if not 1 < decode_query_len <= _MAX_DECODE_QUERY_LEN:
-        return f"decode query length is outside [2, {_MAX_DECODE_QUERY_LEN}]"
+    if not 1 <= decode_query_len <= _MAX_DECODE_QUERY_LEN:
+        return f"decode query length is outside [1, {_MAX_DECODE_QUERY_LEN}]"
     if query.ndim != 3:
         return "query geometry is unsupported"
     num_q_heads = int(query.shape[1])

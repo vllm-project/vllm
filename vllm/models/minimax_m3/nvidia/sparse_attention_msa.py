@@ -4,7 +4,7 @@
 
 Prefill attends with ``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``).
 Decode uses Triton split-K by default, with an opt-in CUTLASS ``fmha_sm100``
-path for multi-token speculative verification.
+path for regular decode and speculative verification.
 """
 
 from dataclasses import dataclass
@@ -168,7 +168,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
-        # Decode [:nd]: opt-in CUTLASS for spec verification, otherwise Triton.
+        # Decode [:nd]: opt-in CUTLASS, otherwise Triton.
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
