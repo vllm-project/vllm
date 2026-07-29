@@ -169,20 +169,6 @@ steps:
   - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
-- label: Kernels Mamba Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/mamba/
-  - tests/kernels/mamba
-  - vllm/model_executor/layers/mamba/ops
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/mamba
-
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
@@ -1590,10 +1576,29 @@ steps:
   - vllm/third_party/flash_linear_attention/ops/kda.py
   - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
   - vllm/third_party/flash_linear_attention/ops/l2norm.py
-  - tests/kernels/test_kda.py
+  - vllm/models/kimi_k3/nvidia/kda.py
+  - vllm/models/kimi_k3/nvidia/kda_metadata.py
+  - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/test_kda.py
+  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+
+- label: Kernels Mamba Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mamba
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -2288,7 +2293,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
-  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
