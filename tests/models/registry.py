@@ -1471,8 +1471,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
-        is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
+        trust_remote_code=True,
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
