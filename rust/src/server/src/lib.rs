@@ -101,6 +101,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .default_chat_template_kwargs
                 .clone()
                 .unwrap_or_default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
         },
     )
     .await
