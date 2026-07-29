@@ -35,6 +35,12 @@ def _make_parser(*, enable_thinking: bool) -> PoolsideV1ReasoningParser:
     "enable_thinking,token_ids,expected",
     [
         pytest.param(True, [10, 11, END_ID, 20], 2, id="prompt_opened_span"),
+        pytest.param(
+            True,
+            [10, 11, END_ID, 20, START_ID, 21],
+            2,
+            id="prompt_opened_span_with_late_start",
+        ),
         pytest.param(True, [10, 11], 2, id="prompt_opened_truncation"),
         pytest.param(True, [9, START_ID, 10, 11, END_ID, 20], 2, id="explicit_span"),
         pytest.param(False, [20, 21], 0, id="disabled_message"),
