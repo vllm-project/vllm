@@ -4,7 +4,6 @@
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
@@ -43,9 +42,10 @@ class Sampler:
         enable_trace_replay: bool = False,
         reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
+        detect_nans_in_logits: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
-        self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
+        self.compute_nans = detect_nans_in_logits
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
