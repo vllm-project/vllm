@@ -12,7 +12,8 @@ from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.exceptions import VLLMValidationError
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.kimi_k3 import KimiK3Parser
+from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
@@ -36,9 +37,22 @@ class DummyTokenizer:
         return [ord(ch) for ch in text]
 
 
-class KimiK3DelegatingParser(DelegatingParser):
+class KimiK3DelegatingParser(KimiK3Parser):
     reasoning_parser_cls = KimiK3ReasoningParser
     tool_parser_cls = KimiK3ToolParser
+
+
+def test_parser_manager_selects_kimi_k3_parser():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="kimi_k3",
+        reasoning_parser_name="kimi_k3",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, KimiK3Parser)
+    assert parser_cls.reasoning_parser_cls is KimiK3ReasoningParser
+    assert parser_cls.tool_parser_cls is KimiK3ToolParser
 
 
 def _request() -> ChatCompletionRequest:
@@ -171,7 +185,7 @@ def test_delegating_parser_required_tool_choice_uses_xtml_parser():
     reasoning, content, tool_calls = parser.parse(
         output,
         request,
-        enable_auto_tools=False,
+        enable_auto_tools=True,
     )
 
     assert reasoning == "step"
@@ -193,7 +207,7 @@ def test_delegating_parser_named_tool_choice_uses_xtml_parser():
     reasoning, content, tool_calls = parser.parse(
         output,
         _named_request(),
-        enable_auto_tools=False,
+        enable_auto_tools=True,
     )
 
     assert reasoning == "step"
@@ -238,7 +252,7 @@ def test_delegating_parser_required_call_strips_consumed_response_prefix():
     reasoning, content, tool_calls = parser.parse(
         output,
         request,
-        enable_auto_tools=False,
+        enable_auto_tools=True,
     )
 
     assert reasoning is None
@@ -263,7 +277,7 @@ def test_delegating_parser_truncated_tools_do_not_leak_xtml():
     reasoning, content, tool_calls = parser.parse(
         (f'{RESPONSE_CLOSE}{OPEN}tools{SEP}{OPEN}call tool="calc" index="1"'),
         request,
-        enable_auto_tools=False,
+        enable_auto_tools=True,
     )
 
     assert reasoning is None
@@ -384,6 +398,44 @@ def test_streaming_consumed_response_prefix_no_call_keeps_content():
     assert all(CLOSE not in (message.content or "") for message in messages)
 
 
+def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
+    parser = KimiK3DelegatingParser(
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+    )
+    request = _request().model_copy(
+        update={
+            "tool_choice": "none",
+            "chat_template_kwargs": {"thinking": False},
+        }
+    )
+    messages: list[DeltaMessage] = []
+    chunks = [
+        OPEN,
+        "response",
+        f"{SEP}answer",
+        RESPONSE_CLOSE,
+        _tools(_call("calc", 1, _arg("x", "number", "1"))),
+    ]
+
+    for index, chunk in enumerate(chunks, start=1):
+        delta = parser.parse_delta(
+            delta_text=chunk,
+            delta_token_ids=[index],
+            request=request,
+            prompt_token_ids=[1],
+            finished=index == len(chunks),
+        )
+        if delta is not None:
+            messages.append(delta)
+
+    content = "".join(message.content or "" for message in messages)
+    assert content == "answer"
+    assert OPEN not in content
+    assert CLOSE not in content
+    assert SEP not in content
+    assert all(not message.tool_calls for message in messages)
+
+
 def test_adjust_request_keeps_xtml_markers_contiguous():
     parser = KimiK3ToolParser(DummyTokenizer())
     request = _request()
@@ -462,7 +514,7 @@ def test_responses_required_tool_choice_uses_xtml_parser():
     output = RESPONSE_CLOSE + _tools(_call("calc", 1, _arg("x", "number", "1")))
 
     reasoning, content, tool_calls = parser.parse(
-        output, request, enable_auto_tools=False, model_output_token_ids=[]
+        output, request, enable_auto_tools=True, model_output_token_ids=[]
     )
     response_outputs = build_response_output_items(
         reasoning=reasoning,
@@ -488,7 +540,7 @@ def test_responses_named_tool_choice_uses_xtml_parser():
     output = RESPONSE_CLOSE + _tools(_call("calc", 1, _arg("x", "number", "1")))
 
     reasoning, content, tool_calls = parser.parse(
-        output, request, enable_auto_tools=False, model_output_token_ids=[]
+        output, request, enable_auto_tools=True, model_output_token_ids=[]
     )
     response_outputs = build_response_output_items(
         reasoning=reasoning,

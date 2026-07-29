@@ -151,9 +151,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         if params.tool_choice not in (None, "auto"):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:
-            kwargs["response_format"] = _dump_k3_template_value(
-                params.response_format
-            )
+            kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
         return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
 
