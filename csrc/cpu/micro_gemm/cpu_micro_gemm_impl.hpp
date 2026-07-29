@@ -31,6 +31,9 @@ class MicroGemm {
   }
 };
 
+template <cpu_utils::ISA isa, typename scalar_t>
+class MicroGemmINT8;
+
 template <int32_t n_size, typename scalar_t>
 FORCE_INLINE void default_epilogue(float* __restrict__ c_ptr,
                                    scalar_t* __restrict__ d_ptr,
