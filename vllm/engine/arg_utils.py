@@ -654,6 +654,10 @@ class EngineArgs:
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
+    enable_detect_nans_in_logits: bool = (
+        ObservabilityConfig.enable_detect_nans_in_logits
+    )
+    enable_nan_fault_tolerance: bool = ObservabilityConfig.enable_nan_fault_tolerance
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1867,6 +1871,8 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
+            enable_detect_nans_in_logits=self.enable_detect_nans_in_logits,
+            enable_nan_fault_tolerance=self.enable_nan_fault_tolerance,
         )
 
     def create_engine_config(
