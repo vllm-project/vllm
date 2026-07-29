@@ -102,7 +102,7 @@ QWEN3_AUTOROUND_MODELS = [
     ),
 ]
 
-MODEL_RUNNER_KWARGS = {
+MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
     "Intel/Qwen3-8B-w2g64-for-ut": {
