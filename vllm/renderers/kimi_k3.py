@@ -30,6 +30,18 @@ def _merge_k3_media_io_kwargs(
     return merge_media_io_kwargs(_K3_MEDIA_IO_DEFAULTS, media_io_kwargs)
 
 
+def _dump_k3_template_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json", exclude_none=True)
+
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+
+    return value
+
+
 def _normalize_k3_tool_messages(
     conversation: list[ConversationMessage],
 ) -> list[dict[str, Any]]:
@@ -136,6 +148,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             kwargs.setdefault("thinking", enable_thinking)
         if (reasoning_effort := kwargs.pop("reasoning_effort", None)) is not None:
             kwargs.setdefault("thinking_effort", reasoning_effort)
+        if params.tool_choice not in (None, "auto"):
+            kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
+        if params.response_format is not None:
+            kwargs["response_format"] = _dump_k3_template_value(
+                params.response_format
+            )
         kwargs["tokenize"] = True
         return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
 

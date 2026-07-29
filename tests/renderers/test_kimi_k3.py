@@ -145,6 +145,46 @@ def test_apply_chat_template_native_k3_kwargs_take_precedence():
     assert kwargs["thinking_effort"] == "low"
 
 
+def test_apply_chat_template_adds_k3_api_metadata():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    response_format = {"type": "json_object"}
+    params = ChatParams(
+        tool_choice="required",
+        response_format=response_format,
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    kwargs = tokenizer.calls[-1]
+    assert kwargs["tool_choice"] == "required"
+    assert kwargs["response_format"] == response_format
+
+
+def test_apply_chat_template_auto_tool_choice_keeps_template_kwarg():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(
+        chat_template_kwargs={"tool_choice": "required"},
+        tool_choice="auto",
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["tool_choice"] == "required"
+
+
+def test_apply_chat_template_omits_tool_choice_without_tools():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+
+    renderer._apply_chat_template(
+        [{"role": "user", "content": "hi"}], ChatParams(tool_choice=None)
+    )
+
+    assert "tool_choice" not in tokenizer.calls[-1]
+
+
 def test_render_messages_returns_token_prompt():
     renderer = _make_renderer(StubTokenizer([1, 2, 3]))
 

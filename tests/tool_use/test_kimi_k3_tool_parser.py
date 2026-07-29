@@ -427,7 +427,7 @@ def test_adjust_request_rejects_named_tool_choice(tool_request):
     assert "requires strict tool calling" in str(exc_info.value)
 
 
-def test_responses_chat_params_passes_tool_choice_to_template():
+def test_responses_chat_params_carries_tool_choice_metadata():
     request = _responses_request(tool_choice="required")
 
     chat_params = request.build_chat_params(
@@ -435,10 +435,10 @@ def test_responses_chat_params_passes_tool_choice_to_template():
         default_template_content_format="auto",
     )
 
-    assert chat_params.chat_template_kwargs["tool_choice"] == "required"
+    assert chat_params.tool_choice == "required"
 
 
-def test_responses_chat_params_keeps_request_template_tool_choice_when_api_auto():
+def test_responses_chat_params_keeps_template_tool_choice_when_api_auto():
     request = _responses_request().model_copy(
         update={"chat_template_kwargs": {"tool_choice": "required"}}
     )
@@ -449,6 +449,7 @@ def test_responses_chat_params_keeps_request_template_tool_choice_when_api_auto(
     )
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
+    assert chat_params.tool_choice == "auto"
 
 
 def test_responses_required_tool_choice_uses_xtml_parser():
@@ -503,7 +504,7 @@ def test_responses_named_tool_choice_uses_xtml_parser():
     assert json.loads(tool_call.arguments) == {"x": 1}
 
 
-def test_chat_params_passes_tool_choice_to_template():
+def test_chat_params_carries_tool_choice_metadata():
     request = _request().model_copy(update={"tool_choice": "required"})
 
     chat_params = request.build_chat_params(
@@ -511,10 +512,26 @@ def test_chat_params_passes_tool_choice_to_template():
         default_template_content_format="auto",
     )
 
-    assert chat_params.chat_template_kwargs["tool_choice"] == "required"
+    assert chat_params.tool_choice == "required"
 
 
-def test_chat_params_keeps_request_template_tool_choice_when_api_auto():
+def test_chat_params_carries_response_format_metadata():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        response_format={"type": "json_object"},
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert chat_params.response_format is request.response_format
+    assert chat_params.tool_choice is None
+
+
+def test_chat_params_keeps_template_tool_choice_when_api_auto():
     request = _request().model_copy(
         update={
             "tool_choice": "auto",
@@ -528,3 +545,4 @@ def test_chat_params_keeps_request_template_tool_choice_when_api_auto():
     )
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
+    assert chat_params.tool_choice == "auto"
