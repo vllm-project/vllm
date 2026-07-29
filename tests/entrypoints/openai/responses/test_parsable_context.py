@@ -38,7 +38,7 @@ def server():
         "--reasoning-parser",
         "qwen3",
         "--max_model_len",
-        "5000",
+        "6000",
         "--structured-outputs-config.backend",
         "xgrammar",
         "--enable-auto-tool-choice",
@@ -68,7 +68,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 123 * 456?",
+        input="What is 123 * 456? Answer with only the number.",
         temperature=0.0,
     )
     assert response is not None

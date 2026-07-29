@@ -12,6 +12,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
@@ -31,9 +33,11 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
+
+        kwargs["window_size"] = (-1, -1)
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 

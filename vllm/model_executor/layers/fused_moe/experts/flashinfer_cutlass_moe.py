@@ -4,7 +4,6 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -94,9 +93,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(
@@ -191,6 +187,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
+            MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
         ]
@@ -206,9 +203,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -273,6 +267,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
         activation_str_to_value_map = {
             MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.GELU_TANH: ActivationType.Geglu,
             MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
@@ -402,7 +397,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:

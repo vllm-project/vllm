@@ -13,13 +13,14 @@ import os
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
+import lm_eval
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
@@ -32,17 +33,21 @@ CP_TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen3.5-0.8B",  # hybrid attention model
 ]
 
 # GSM8K eval configuration
-NUM_QUESTIONS = 256  # Fast eval for CI
 NUM_SHOTS = 5  # Few-shot examples
+TASK = "gsm8k"
+FILTER = "exact_match,strict-match"
+NUM_CONCURRENT = 128
 # tp accuracy with 2% buffer
 MIN_ACCURACY = {
     # .buildkite/lm-eval-harness/configs/DeepSeek-V2-Lite-Chat.yaml
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 
@@ -121,24 +126,40 @@ class CPTestSettings:
                 )
 
 
-CP_TEXT_GENERATION_MODELS = {
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": [
-        CPTestSettings.detailed(dcp_multipliers=[1]),
-        CPTestSettings.detailed(
-            dcp_multipliers=[0.5],
-            cp_kv_cache_interleave_size=64,
-            attn_backend="FLASHMLA",
-        ),
-    ],
-    "Qwen/Qwen2.5-1.5B-Instruct": [
-        CPTestSettings.detailed(
-            cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
-        ),
-        CPTestSettings.detailed(
-            cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
-        ),
-    ],
-}
+if current_platform.is_rocm():
+    CP_TEXT_GENERATION_MODELS = {
+        "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+        ],
+        "Qwen/Qwen2.5-1.5B-Instruct": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+        ],
+    }
+else:
+    CP_TEXT_GENERATION_MODELS = {
+        "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+            CPTestSettings.detailed(
+                dcp_multipliers=[0.5],
+                cp_kv_cache_interleave_size=64,
+                attn_backend="FLASHMLA",
+            ),
+        ],
+        "Qwen/Qwen2.5-1.5B-Instruct": [
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
+            ),
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+            ),
+        ],
+        "Qwen/Qwen3.5-0.8B": [
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16,
+                attn_backend="FLASH_ATTN",
+            ),
+        ],
+    }
 
 
 def _test_cp_gsm8k(
@@ -227,19 +248,23 @@ def _test_cp_gsm8k(
         server_args,
         max_wait_seconds=720,
     ) as remote_server:
-        host = f"http://{remote_server.host}"
-        port = remote_server.port
+        url = f"{remote_server.url_for('v1')}/completions"
 
-        # Run GSM8K evaluation
-        results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_SHOTS,
-            host=host,
-            port=port,
+        model_args = (
+            f"model={model_id},"
+            f"base_url={url},"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+        )
+
+        results = lm_eval.simple_evaluate(
+            model="local-completions",
+            model_args=model_args,
+            tasks=TASK,
+            num_fewshot=NUM_SHOTS,
         )
 
         # Validate accuracy is reasonable
-        accuracy = results["accuracy"]
+        accuracy = results["results"][TASK][FILTER]
         min_accuracy = MIN_ACCURACY[model_id]
         assert accuracy >= min_accuracy, (
             f"TP+DCP accuracy too low: {accuracy:.3f} < {min_accuracy:.3f}"
