@@ -41,7 +41,9 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
     )
 
 
-def _req(request_id: str, params: dict | None, status=RequestStatus.FINISHED_LENGTH_CAPPED):
+def _req(
+    request_id: str, params: dict | None, status=RequestStatus.FINISHED_LENGTH_CAPPED
+):
     return SimpleNamespace(
         request_id=request_id,
         kv_transfer_params=params,

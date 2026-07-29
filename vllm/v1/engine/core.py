@@ -94,6 +94,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -1057,8 +1058,10 @@ class EngineCoreProc(EngineCore):
                 self.has_coordinator,
                 self.frontend_stats_publish_address,
             )
-            self.external_lb = vllm_config.parallel_config.data_parallel_external_lb
-            internal_dp_balancing = self.has_coordinator and not self.external_lb
+            internal_dp_balancing = (
+                self.has_coordinator
+                and not vllm_config.parallel_config.data_parallel_external_lb
+            )
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
