@@ -732,6 +732,8 @@ class LoRAModelManager:
         ]
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
+        if lora_model.is_runtime_packed:
+            return
         for module_name, new_module_names in self.packed_modules.items():
             # For 2D FusedMoE modules with EP, narrow the per-expert
             # sub-module list to this rank's owned experts so pack_moe
@@ -823,6 +825,8 @@ class LoRAModelManager:
                 else:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
+
+        lora_model.is_runtime_packed = True
 
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str

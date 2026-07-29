@@ -196,8 +196,9 @@ rank-local sources selected from the baseline.
 kind=base_checkpoint, mode=full
 kind=base_checkpoint, mode=partial, source_names=[...]
 kind=base_kernel, target_names=[...]
-kind=lora_adapter, operation=replace|remove,
-    adapter_id=..., adapter_name=..., tensor_names=[...],
+kind=lora_adapter, operation=replace|patch|remove,
+    adapter_id=..., adapter_name=..., base_generation=...,
+    module_names=[...], tensor_names=[...],
     config_digest=..., artifact_digest=...
 ```
 
@@ -351,15 +352,40 @@ fields are invalid. Removal has no receipt stream because no new adapter payload
 is consumed. The controller must remove the identified adapter on every worker
 and invalidate caches that may retain adapter-dependent results.
 
+### LoRA adapter partial patch
+
+A patch updates complete runtime LoRA modules while preserving every module
+outside the scope. The caller obtains `module_names` and `generation` from
+`GET /weight_update_manifest`, then declares the selected modules and matching
+`base_generation`. Packed QKV and MoE modules are atomic runtime modules; their
+internal fragments cannot be patched independently.
+
+```mermaid
+flowchart TD
+    A[Read adapter manifest and generation] --> B[Declare patch module_names]
+    B --> C[Validate adapter on every worker]
+    C --> D[Validate base_generation and global module union]
+    D --> E[Load patch payload without publishing]
+    E --> F[Pack payload into runtime LoRA modules]
+    F --> G[Require complete selected modules and A/B pairs]
+    G --> H[Clone current adapter metadata]
+    H --> I[Replace selected modules and preserve unselected modules]
+    I --> J{Every worker prepared the same generation?}
+    J -- No --> K[Abort candidates and keep current adapter]
+    J -- Yes --> L[Commit candidates and increment generation]
+    L --> M[Invalidate dependent caches]
+```
+
 ## Completion semantics by mode
 
 | Mode | Declaration | Completion rule | Out-of-scope input | Processing boundary |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Full checkpoint | Omitted or `mode=full` | Initial local events are a subset of received events | Compatible extras may be accepted | All reloadable layers |
 | Partial checkpoint | Exact source names | Resolved local events equal received events | Reject | Whole layerwise units only |
 | Kernel format | Exact target names | Declared targets equal received targets | Reject | Individual runtime parameters |
 | LoRA path replace | Adapter identity and optional digests | Every worker stages one complete validated adapter | Reject identity/digest mismatch | Complete adapter |
 | LoRA tensor replace | Adapter identity, exact tensor names, config | Declared tensors equal accumulated tensors; every worker stages successfully | Reject unknown/duplicate tensors | Complete adapter |
+| LoRA partial patch | Adapter identity, generation, modules, payload | Every selected runtime module has complete A/B weights on every owning worker | Reject stale generation or undeclared modules | Selected complete runtime modules |
 | LoRA remove | Adapter identity | Adapter removed on every worker | No payload allowed | Complete adapter |
 
 ## Failure boundaries

@@ -66,6 +66,8 @@ class LoRAModel:
         rank: int,
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
+        adapter_name: str | None = None,
+        is_runtime_packed: bool = False,
     ) -> None:
         """
         Args:
@@ -86,17 +88,22 @@ class LoRAModel:
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
         self.is_3d_lora_weight = is_3d_lora_weight
+        self.adapter_name = adapter_name
+        self.is_runtime_packed = is_runtime_packed
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
 
         Will share the underlying tensors."""
-        return self.__class__(
+        clone = self.__class__(
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
             is_3d_lora_weight=self.is_3d_lora_weight,
         )
+        clone.adapter_name = self.adapter_name
+        clone.is_runtime_packed = self.is_runtime_packed
+        return clone
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""

@@ -1094,14 +1094,14 @@ class AsyncLLM(EngineClient):
             "start_weight_update", kwargs={"update_scope": update_scope}
         )
 
-    async def get_weight_update_baseline(self) -> dict:
-        """Return the global initial-load manifest used to build partial scopes."""
+    async def get_weight_update_manifest(self) -> dict:
+        """Return all model-weight and LoRA state available for update."""
         from vllm.model_executor.model_loader.reload.baseline import (
-            aggregate_weight_update_baselines,
+            aggregate_weight_update_manifests,
         )
 
-        reports = await self.collective_rpc("get_weight_update_baseline")
-        return aggregate_weight_update_baselines(reports)
+        manifests = await self.collective_rpc("get_weight_update_manifest")
+        return aggregate_weight_update_manifests(manifests)
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1132,14 +1132,11 @@ class AsyncLLM(EngineClient):
                 f"{len(failed)} worker(s): {failed[:4]}"
             )
         scoped_reports = [
-            report
-            for report in reports
-            if getattr(report, "declared_source_names", ())
+            report for report in reports if getattr(report, "declared_source_names", ())
         ]
         if scoped_reports:
             declarations = {
-                frozenset(report.declared_source_names)
-                for report in scoped_reports
+                frozenset(report.declared_source_names) for report in scoped_reports
             }
             if len(declarations) != 1:
                 raise RuntimeError(

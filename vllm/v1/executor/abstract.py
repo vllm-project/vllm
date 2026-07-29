@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -292,8 +292,43 @@ class Executor(ABC):
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
         if getattr(lora_request, "update_scope", None) is not None:
+            from vllm.model_executor.model_loader.reload.scope import (
+                LoRAAdapterScope,
+                normalize_update_scope,
+            )
+
+            scope = normalize_update_scope(lora_request.update_scope)
+            if isinstance(scope, LoRAAdapterScope) and scope.operation == "patch":
+                worker_manifests: list[list[dict[str, Any]]] = self.collective_rpc(
+                    "get_lora_update_manifests"
+                )
+                matching = [
+                    adapter
+                    for manifest in worker_manifests
+                    for adapter in manifest
+                    if adapter["adapter_id"] == scope.adapter_id
+                    and adapter["adapter_name"] == scope.adapter_name
+                ]
+                if len(matching) != len(worker_manifests):
+                    raise ValueError(
+                        "The LoRA adapter to patch is not present on every worker"
+                    )
+                generations = {adapter["generation"] for adapter in matching}
+                if generations != {scope.base_generation}:
+                    raise ValueError(
+                        "LoRA patch base generation does not match every worker"
+                    )
+                available_modules = {
+                    name for adapter in matching for name in adapter["module_names"]
+                }
+                unknown = set(scope.module_names or ()) - available_modules
+                if unknown:
+                    raise ValueError(
+                        "LoRA patch references unknown runtime modules: "
+                        f"{sorted(unknown)[:20]}"
+                    )
             try:
-                prepared = self.collective_rpc(
+                prepared: list[bool] = self.collective_rpc(
                     "prepare_lora_update", args=(lora_request,)
                 )
                 if not all(prepared):

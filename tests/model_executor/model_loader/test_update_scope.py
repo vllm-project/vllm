@@ -5,16 +5,22 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.request import LoRARequest
 from vllm.lora.update import (
     TensorLoRAUpdateSession,
     config_digest,
+    merge_lora_patch,
     validate_complete_lora_weights,
 )
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.model_loader.reload.baseline import (
     WeightUpdateBaselineEvent,
     WeightUpdateBaselineGroup,
     WeightUpdateBaselineReport,
     aggregate_weight_update_baselines,
+    aggregate_weight_update_manifests,
     get_weight_update_baseline,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -70,11 +76,7 @@ class _ScopedModel(nn.Module):
 def _record_baseline(model: nn.Module, names: tuple[str, ...]) -> None:
     record_metadata_for_reloading(model)
     record_load_consumption(model)
-    model.load_weights(
-        observe_weight_sources(
-            (name, torch.ones(2)) for name in names
-        )
-    )
+    model.load_weights(observe_weight_sources((name, torch.ones(2)) for name in names))
     finalize_load_recording(model)
 
 
@@ -91,9 +93,7 @@ def test_partial_scope_initializes_only_selected_layers() -> None:
     assert model.second.weight is second_before
 
     model.load_weights(
-        observe_weight_sources(
-            [("first.weight", torch.full((2,), 3.0))]
-        )
+        observe_weight_sources([("first.weight", torch.full((2,), 3.0))])
     )
     finalize_layerwise_reload(model, _Cfg())
 
@@ -282,3 +282,205 @@ def test_lora_remove_scope_rejects_replacement_manifest() -> None:
             operation="remove",
             tensor_names=("q_proj.lora_A.weight",),
         )
+
+
+def _lora_layer(name: str, value: float) -> LoRALayerWeights:
+    return LoRALayerWeights(
+        name,
+        rank=2,
+        lora_alpha=2,
+        lora_a=torch.full((2, 4), value),
+        lora_b=torch.full((4, 2), value),
+    )
+
+
+def test_lora_partial_patch_preserves_unselected_modules() -> None:
+    old_left = _lora_layer("model.left", 1)
+    old_right = _lora_layer("model.right", 2)
+    current = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.left": old_left, "model.right": old_right},
+        adapter_name="policy",
+        is_runtime_packed=True,
+    )
+    new_left = _lora_layer("model.left", 9)
+    patch = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.left": new_left},
+        adapter_name="policy",
+        is_runtime_packed=True,
+    )
+
+    merged = merge_lora_patch(current, patch, {"model.left"})
+
+    assert merged is not current
+    assert merged.loras["model.left"] is new_left
+    assert merged.loras["model.right"] is old_right
+    assert current.loras["model.left"] is old_left
+
+
+def test_lora_partial_patch_requires_exact_runtime_modules() -> None:
+    current = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.left": _lora_layer("model.left", 1)},
+        is_runtime_packed=True,
+    )
+    patch = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.right": _lora_layer("model.right", 2)},
+        is_runtime_packed=True,
+    )
+
+    with pytest.raises(ValueError, match="module manifest mismatch"):
+        merge_lora_patch(current, patch, {"model.left"})
+
+
+def test_lora_partial_patch_rejects_incomplete_packed_module() -> None:
+    q, k = _lora_layer("model.q", 1), _lora_layer("model.k", 2)
+    current = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.qkv": PackedLoRALayerWeights.pack([q, k])},
+        is_runtime_packed=True,
+    )
+    patch = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.qkv": PackedLoRALayerWeights.pack([q, None])},
+        is_runtime_packed=True,
+    )
+
+    with pytest.raises(ValueError, match="fragment presence mismatch"):
+        merge_lora_patch(current, patch, {"model.qkv"})
+
+
+def test_lora_patch_scope_requires_base_generation() -> None:
+    with pytest.raises(ValueError, match="base_generation"):
+        LoRAAdapterScope(
+            adapter_id=7,
+            adapter_name="policy",
+            operation="patch",
+            module_names=("model.left",),
+        )
+
+
+def test_lora_partial_patch_prepares_then_commits(monkeypatch) -> None:
+    old_left = _lora_layer("model.left", 1)
+    old_right = _lora_layer("model.right", 2)
+    current = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.left": old_left, "model.right": old_right},
+        adapter_name="policy",
+        is_runtime_packed=True,
+    )
+    patch = LoRAModel(
+        7,
+        rank=2,
+        loras={"model.left": _lora_layer("model.left", 9)},
+        adapter_name="policy",
+        is_runtime_packed=True,
+    )
+
+    class FakeAdapterManager:
+        capacity = 2
+
+        def __init__(self):
+            self.current = current
+
+        def get_adapter(self, adapter_id):
+            return self.current if self.current.id == adapter_id else None
+
+        def _create_merged_loras_inplace(self, lora):
+            lora.is_runtime_packed = True
+
+        def remove_adapter(self, adapter_id):
+            self.current = None
+            return True
+
+        def add_adapter(self, lora):
+            self.current = lora
+            return True
+
+        def activate_adapter(self, adapter_id):
+            return True
+
+        def __len__(self):
+            return int(self.current is not None)
+
+    manager = object.__new__(LRUCacheWorkerLoRAManager)
+    manager._adapter_manager = FakeAdapterManager()
+    manager._adapter_generations = {7: 1}
+    monkeypatch.setattr(manager, "_load_adapter", lambda request: patch)
+    monkeypatch.setattr(manager, "list_adapters", lambda: {7})
+    request = LoRARequest(
+        lora_name="policy",
+        lora_int_id=7,
+        lora_path="/unused",
+        load_inplace=True,
+        update_scope={
+            "kind": "lora_adapter",
+            "operation": "patch",
+            "adapter_id": 7,
+            "adapter_name": "policy",
+            "base_generation": 1,
+            "module_names": ["model.left"],
+        },
+    )
+
+    assert manager.prepare_adapter(request)
+    assert manager._adapter_manager.current is current
+    assert manager.commit_adapter(7)
+    assert (
+        manager._adapter_manager.current.loras["model.left"]
+        is patch.loras["model.left"]
+    )
+    assert manager._adapter_manager.current.loras["model.right"] is old_right
+    assert manager._adapter_generations[7] == 2
+
+
+def test_weight_update_manifest_separates_model_and_lora_state() -> None:
+    model_report = WeightUpdateBaselineReport(
+        scope=LoadManifestScope(), state="exact", groups=()
+    )
+    local_adapter = {
+        "adapter_id": 7,
+        "adapter_name": "policy",
+        "rank": 2,
+        "generation": 3,
+        "module_names": ["model.left"],
+        "modules": [
+            {
+                "module_name": "model.left",
+                "lora_a": {"shape": [2, 4], "dtype": "torch.float32"},
+                "lora_b": {"shape": [4, 2], "dtype": "torch.float32"},
+            }
+        ],
+        "replace_scope_template": {"operation": "replace"},
+        "patch_scope_template": {
+            "operation": "patch",
+            "base_generation": 3,
+        },
+        "remove_scope_template": {"operation": "remove"},
+    }
+
+    manifest = aggregate_weight_update_manifests(
+        [
+            {
+                "model_weights": model_report,
+                "lora_adapters": [local_adapter],
+            }
+        ]
+    )
+
+    assert set(manifest) == {"model_weights", "lora_adapters"}
+    assert manifest["model_weights"]["ready"] is True
+    assert manifest["lora_adapters"][0]["module_names"] == ["model.left"]
+    assert manifest["lora_adapters"][0]["modules"][0]["workers"][0]["lora_a"][
+        "shape"
+    ] == [2, 4]
+    assert manifest["lora_adapters"][0]["generation"] == 3

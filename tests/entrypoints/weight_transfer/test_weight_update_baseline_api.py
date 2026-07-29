@@ -7,32 +7,35 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from vllm.entrypoints.serve.dev.rlhf.api_router import (
-    get_weight_update_baseline,
+    get_weight_update_manifest,
 )
 
 
-def test_weight_update_baseline_endpoint_returns_engine_manifest() -> None:
-    baseline = {
-        "ready": True,
-        "scope_template": {
-            "kind": "base_checkpoint",
-            "mode": "partial",
-            "source_names": [],
+def test_weight_update_manifest_endpoint_returns_engine_manifest() -> None:
+    manifest = {
+        "model_weights": {
+            "ready": True,
+            "scope_template": {
+                "kind": "base_checkpoint",
+                "mode": "partial",
+                "source_names": [],
+            },
+            "source_names": ["layer.weight"],
+            "atomic_source_groups": [["layer.weight"]],
+            "workers": [],
+            "reason": None,
         },
-        "source_names": ["layer.weight"],
-        "atomic_source_groups": [["layer.weight"]],
-        "workers": [],
-        "reason": None,
+        "lora_adapters": [],
     }
     engine = SimpleNamespace(
-        get_weight_update_baseline=AsyncMock(return_value=baseline)
+        get_weight_update_manifest=AsyncMock(return_value=manifest)
     )
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(engine_client=engine))
     )
 
-    response = asyncio.run(get_weight_update_baseline(request))
+    response = asyncio.run(get_weight_update_manifest(request))
 
     assert response.status_code == 200
-    assert json.loads(response.body) == baseline
-    engine.get_weight_update_baseline.assert_awaited_once_with()
+    assert json.loads(response.body) == manifest
+    engine.get_weight_update_manifest.assert_awaited_once_with()

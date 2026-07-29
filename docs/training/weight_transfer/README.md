@@ -51,7 +51,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
-| `/weight_update_baseline` | GET | Get checkpoint sources grouped into legal partial-update units |
+| `/weight_update_manifest` | GET | Get updatable model-weight and LoRA manifests |
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the weight update and run post-processing |
@@ -64,11 +64,12 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 ### Discovering legal partial-update scopes
 
-Call `GET /weight_update_baseline` after model loading. The response includes
+Call `GET /weight_update_manifest` after model loading. The response includes
+separate `model_weights` and `lora_adapters` fields. `model_weights` contains
 all source names observed during the initial checkpoint load and
-`atomic_source_groups`. The corresponding `atomic_update_scopes` entries can
-be sent directly to `/start_weight_update`. A larger legal partial scope is a
-union of complete atomic groups:
+`atomic_source_groups`. The corresponding `atomic_update_scopes` entries can be
+sent directly to `/start_weight_update`. A larger legal partial scope is a union
+of complete atomic groups:
 
 ```json
 {
@@ -82,9 +83,15 @@ union of complete atomic groups:
 ```
 
 The groups are merged across workers, so TP, PP, and EP closure constraints
-are preserved. Use the scope only when the response has `"ready": true`.
+are preserved. Use the scope only when `model_weights.ready` is `true`.
 A dummy model without metadata probing returns a provisional baseline until it
 has completed one real full base-weight update.
+
+Each entry in `lora_adapters` includes adapter identity, generation, the union
+of rank-local runtime module names, and templates for replacement, partial
+patch, and removal. A patch must use the current `base_generation`, select
+complete runtime modules, and provide complete A/B pairs for every selected
+module. Unselected modules retain their current weights.
 
 ## Trainer-Side API
 

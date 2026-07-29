@@ -19,6 +19,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest, TensorLoRARequest
 from vllm.lora.update import (
+    merge_lora_patch,
     validate_complete_lora_weights,
     validate_lora_update_scope,
 )
@@ -71,6 +72,7 @@ class WorkerLoRAManager:
                 text_config, "max_position_embeddings", None
             )
         self.device = device
+        self._adapter_generations: dict[int, int] = {}
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
 
@@ -126,9 +128,7 @@ class WorkerLoRAManager:
             if isinstance(lora_request, TensorLoRARequest):
                 lora_path = None
                 peft_helper = PEFTHelper.from_dict(lora_request.peft_config)
-                peft_helper.vllm_max_position_embeddings = (
-                    self.max_position_embeddings
-                )
+                peft_helper.vllm_max_position_embeddings = self.max_position_embeddings
             else:
                 lora_path = get_adapter_absolute_path(lora_request.lora_path)
                 peft_helper = PEFTHelper.from_local_dir(
@@ -184,6 +184,7 @@ class WorkerLoRAManager:
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+            lora.adapter_name = lora_request.lora_name
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -320,9 +321,43 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         if pending is None:
             pending = {}
             self._pending_adapters = pending
+        lora = self._load_adapter(lora_request)
+        from vllm.model_executor.model_loader.reload.scope import LoRAAdapterScope
+
+        scope = validate_lora_update_scope(lora_request)
+        if isinstance(scope, LoRAAdapterScope) and scope.operation == "patch":
+            current = self._adapter_manager.get_adapter(lora_request.lora_int_id)
+            if current is None:
+                raise ValueError(
+                    f"Cannot patch unknown LoRA adapter {lora_request.lora_int_id}"
+                )
+            generation = self._adapter_generations.get(current.id, 1)
+            if scope.base_generation != generation:
+                raise ValueError(
+                    "LoRA patch base generation is stale: "
+                    f"expected={generation}, received={scope.base_generation}"
+                )
+            self._adapter_manager._create_merged_loras_inplace(lora)
+            declared = set(scope.module_names or ())
+            current_names = set(current.loras)
+            patch_names = set(lora.loras)
+            local_expected = declared & current_names
+            unexpected = (patch_names & current_names) - declared
+            if unexpected:
+                raise ValueError(
+                    "LoRA patch module manifest mismatch: "
+                    f"unexpected={sorted(unexpected)[:20]}"
+                )
+            lora.loras = {
+                name: lora.loras[name] for name in local_expected if name in lora.loras
+            }
+            merged = merge_lora_patch(current, lora, local_expected)
+            merged.adapter_name = current.adapter_name or lora_request.lora_name
+            lora = merged
         pending[lora_request.lora_int_id] = (
             lora_request,
-            self._load_adapter(lora_request),
+            lora,
+            None if scope is None else scope.base_generation,
         )
         return True
 
@@ -335,17 +370,80 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         pending = getattr(self, "_pending_adapters", None)
         if pending is None or lora_id not in pending:
             return self._adapter_manager.get_adapter(lora_id) is not None
-        lora_request, lora = pending.pop(lora_id)
+        lora_request, lora, base_generation = pending.pop(lora_id)
+        if (
+            base_generation is not None
+            and self._adapter_generations.get(lora_id, 1) != base_generation
+        ):
+            raise RuntimeError(
+                f"LoRA adapter {lora_id} changed after its patch was prepared"
+            )
         return self._install_adapter(lora_request, lora)
 
     def _install_adapter(self, lora_request, lora) -> bool:
+        next_generation = self._adapter_generations.get(lora.id, 0) + 1
         self._adapter_manager.remove_adapter(lora.id)
         if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
             assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
             self._adapter_manager.remove_oldest_adapter()
         loaded = self._adapter_manager.add_adapter(lora)
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        self._adapter_generations[lora.id] = next_generation
         return loaded
+
+    def get_adapter_manifests(self) -> list[dict[str, object]]:
+        """Return rank-local manifests for adapters that can be updated."""
+
+        def tensor_spec(
+            value: torch.Tensor | list[torch.Tensor | None],
+        ) -> object:
+            if isinstance(value, list):
+                return [None if item is None else tensor_spec(item) for item in value]
+            return {"shape": list(value.shape), "dtype": str(value.dtype)}
+
+        manifests = []
+        for adapter_id, adapter in self._adapter_manager.list_adapters().items():
+            module_names = sorted(adapter.loras)
+            adapter_name = adapter.adapter_name or str(adapter_id)
+            generation = self._adapter_generations.get(adapter_id, 1)
+            manifests.append(
+                {
+                    "adapter_id": adapter_id,
+                    "adapter_name": adapter_name,
+                    "rank": adapter.rank,
+                    "generation": generation,
+                    "module_names": module_names,
+                    "modules": [
+                        {
+                            "module_name": name,
+                            "lora_a": tensor_spec(adapter.loras[name].lora_a),
+                            "lora_b": tensor_spec(adapter.loras[name].lora_b),
+                        }
+                        for name in module_names
+                    ],
+                    "replace_scope_template": {
+                        "kind": "lora_adapter",
+                        "operation": "replace",
+                        "adapter_id": adapter_id,
+                        "adapter_name": adapter_name,
+                    },
+                    "patch_scope_template": {
+                        "kind": "lora_adapter",
+                        "operation": "patch",
+                        "adapter_id": adapter_id,
+                        "adapter_name": adapter_name,
+                        "base_generation": generation,
+                        "module_names": [],
+                    },
+                    "remove_scope_template": {
+                        "kind": "lora_adapter",
+                        "operation": "remove",
+                        "adapter_id": adapter_id,
+                        "adapter_name": adapter_name,
+                    },
+                }
+            )
+        return manifests
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple

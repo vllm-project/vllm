@@ -171,7 +171,7 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
-- `/weight_update_baseline` - List legal partial checkpoint update groups
+- `/weight_update_manifest` - List updatable model weights and LoRA adapters
 - `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/finish_weight_update` - Finalizes the weight update

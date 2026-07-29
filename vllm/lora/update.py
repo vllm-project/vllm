@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Completion and staging helpers for explicit LoRA replacement scopes."""
+"""Completion and staging helpers for explicit LoRA update scopes."""
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.request import LoRARequest, TensorLoRARequest
 from vllm.model_executor.model_loader.reload.scope import (
     LoRAAdapterScope,
@@ -59,10 +61,10 @@ def validate_lora_update_scope(
     scope = normalize_update_scope(request.update_scope)
     if not isinstance(scope, LoRAAdapterScope):
         raise ValueError("A LoRA request requires a lora_adapter update scope")
-    if scope.operation != "replace":
-        raise ValueError("add_lora only accepts a LoRA replace scope")
+    if scope.operation not in ("replace", "patch"):
+        raise ValueError("add_lora only accepts a LoRA replace or patch scope")
     if not request.load_inplace:
-        raise ValueError("A scoped LoRA replacement requires load_inplace=True")
+        raise ValueError("A scoped LoRA update requires load_inplace=True")
     if (scope.adapter_id, scope.adapter_name) != (
         request.lora_int_id,
         request.lora_name,
@@ -114,7 +116,7 @@ def validate_lora_update_scope(
     return scope
 
 
-def validate_complete_lora_weights(loras: dict[str, object]) -> None:
+def validate_complete_lora_weights(loras: Mapping[str, object]) -> None:
     """Require every staged module to contain both low-rank matrices."""
     incomplete = sorted(
         name
@@ -129,8 +131,71 @@ def validate_complete_lora_weights(loras: dict[str, object]) -> None:
         )
 
 
+def merge_lora_patch(
+    current: LoRAModel,
+    patch: LoRAModel,
+    module_names: set[str],
+) -> LoRAModel:
+    """Build a copy-on-write adapter by replacing complete runtime modules."""
+    if current.rank != patch.rank:
+        raise ValueError(
+            f"LoRA patch rank mismatch: current={current.rank}, patch={patch.rank}"
+        )
+    if current.is_3d_lora_weight != patch.is_3d_lora_weight:
+        raise ValueError("LoRA patch storage format does not match the adapter")
+    missing_current = module_names - set(current.loras)
+    missing_patch = module_names - set(patch.loras)
+    unexpected = set(patch.loras) - module_names
+    if missing_current or missing_patch or unexpected:
+        raise ValueError(
+            "LoRA patch module manifest mismatch: "
+            f"unknown={sorted(missing_current)[:20]}, "
+            f"missing={sorted(missing_patch)[:20]}, "
+            f"unexpected={sorted(unexpected)[:20]}"
+        )
+    for name in module_names:
+        current_weights = current.loras[name]
+        patch_weights = patch.loras[name]
+        _validate_patch_tensor_layout(
+            current_weights.lora_a, patch_weights.lora_a, f"{name}.lora_a"
+        )
+        _validate_patch_tensor_layout(
+            current_weights.lora_b, patch_weights.lora_b, f"{name}.lora_b"
+        )
+    merged = current.clone(current.id)
+    merged.loras.update({name: patch.loras[name] for name in module_names})
+    return merged
+
+
+def _validate_patch_tensor_layout(
+    current: torch.Tensor | list[torch.Tensor | None],
+    patch: torch.Tensor | list[torch.Tensor | None],
+    name: str,
+) -> None:
+    if isinstance(current, list) or isinstance(patch, list):
+        if not isinstance(current, list) or not isinstance(patch, list):
+            raise ValueError(f"LoRA patch layout mismatch for {name}")
+        if len(current) != len(patch):
+            raise ValueError(f"LoRA patch fragment count mismatch for {name}")
+        for index, (current_item, patch_item) in enumerate(zip(current, patch)):
+            if current_item is None or patch_item is None:
+                if current_item is not patch_item:
+                    raise ValueError(
+                        f"LoRA patch fragment presence mismatch for {name}[{index}]"
+                    )
+                continue
+            _validate_patch_tensor_layout(current_item, patch_item, f"{name}[{index}]")
+        return
+    if current.shape != patch.shape or current.dtype != patch.dtype:
+        raise ValueError(
+            f"LoRA patch tensor mismatch for {name}: "
+            f"current=({tuple(current.shape)}, {current.dtype}), "
+            f"patch=({tuple(patch.shape)}, {patch.dtype})"
+        )
+
+
 class TensorLoRAUpdateSession:
-    """Accumulate transport buckets and construct one complete replacement."""
+    """Accumulate transport buckets and construct one LoRA update."""
 
     def __init__(
         self,
@@ -140,9 +205,13 @@ class TensorLoRAUpdateSession:
         normalized = normalize_update_scope(scope)
         if not isinstance(normalized, LoRAAdapterScope):
             raise ValueError("TensorLoRAUpdateSession requires a LoRA scope")
-        if normalized.operation != "replace" or normalized.tensor_names is None:
+        if (
+            normalized.operation not in ("replace", "patch")
+            or normalized.tensor_names is None
+        ):
             raise ValueError(
-                "Tensor LoRA updates require replace and an exact tensor manifest"
+                "Tensor LoRA updates require replace or patch and an exact "
+                "tensor manifest"
             )
         self.scope = normalized
         self.peft_config = peft_config
@@ -171,6 +240,12 @@ class TensorLoRAUpdateSession:
                 "operation": self.scope.operation,
                 "adapter_id": self.scope.adapter_id,
                 "adapter_name": self.scope.adapter_name,
+                "base_generation": self.scope.base_generation,
+                "module_names": (
+                    None
+                    if self.scope.module_names is None
+                    else list(self.scope.module_names)
+                ),
                 "tensor_names": list(self.scope.tensor_names or ()),
                 "config_digest": self.scope.config_digest,
                 "artifact_digest": self.scope.artifact_digest,
@@ -184,6 +259,7 @@ __all__ = [
     "TensorLoRAUpdateSession",
     "artifact_digest",
     "config_digest",
+    "merge_lora_patch",
     "validate_complete_lora_weights",
     "validate_lora_update_scope",
 ]

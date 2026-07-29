@@ -42,7 +42,9 @@ class KernelWeightScope:
 class LoRAAdapterScope:
     adapter_id: int
     adapter_name: str
-    operation: Literal["replace", "remove"] = "replace"
+    operation: Literal["replace", "patch", "remove"] = "replace"
+    base_generation: int | None = None
+    module_names: tuple[str, ...] | None = None
     tensor_names: tuple[str, ...] | None = None
     config_digest: str | None = None
     artifact_digest: str | None = None
@@ -53,26 +55,37 @@ class LoRAAdapterScope:
             raise ValueError("adapter_id must be greater than zero")
         if not isinstance(self.adapter_name, str) or not self.adapter_name:
             raise ValueError("adapter_name must not be empty")
-        if self.operation not in ("replace", "remove"):
+        if self.operation not in ("replace", "patch", "remove"):
             raise ValueError(f"Unsupported LoRA operation: {self.operation}")
+        if self.module_names is not None:
+            _validate_names("module_names", self.module_names)
         if self.tensor_names is not None:
             _validate_names("tensor_names", self.tensor_names)
+        if self.operation == "patch" and self.module_names is None:
+            raise ValueError("A LoRA patch scope requires module_names")
+        if self.operation == "patch" and (
+            not isinstance(self.base_generation, int) or self.base_generation < 1
+        ):
+            raise ValueError("A LoRA patch scope requires a positive base_generation")
+        if self.operation != "patch" and self.base_generation is not None:
+            raise ValueError("base_generation is only valid for a LoRA patch")
+        if self.operation != "patch" and self.module_names is not None:
+            raise ValueError("module_names is only valid for a LoRA patch")
         if self.operation == "remove" and any(
             value is not None
             for value in (
+                self.module_names,
                 self.tensor_names,
                 self.config_digest,
                 self.artifact_digest,
+                self.base_generation,
             )
         ):
             raise ValueError("A LoRA remove scope cannot declare replacement data")
 
 
 UpdateScope: TypeAlias = (
-    FullBaseWeightScope
-    | PartialBaseWeightScope
-    | KernelWeightScope
-    | LoRAAdapterScope
+    FullBaseWeightScope | PartialBaseWeightScope | KernelWeightScope | LoRAAdapterScope
 )
 
 
@@ -137,11 +150,14 @@ def normalize_update_scope(scope: UpdateScope | dict[str, Any] | None) -> Update
 
     adapter_id = values.pop("adapter_id", None)
     adapter_name = values.pop("adapter_name", None)
+    module_names = values.pop("module_names", None)
     tensor_names = values.pop("tensor_names", None)
     result = LoRAAdapterScope(
         adapter_id=adapter_id,
         adapter_name=adapter_name,
         operation=values.pop("operation", "replace"),
+        base_generation=values.pop("base_generation", None),
+        module_names=None if module_names is None else tuple(module_names),
         tensor_names=None if tensor_names is None else tuple(tensor_names),
         config_digest=values.pop("config_digest", None),
         artifact_digest=values.pop("artifact_digest", None),

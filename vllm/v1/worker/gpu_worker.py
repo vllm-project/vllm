@@ -1208,13 +1208,18 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.start_weight_update(update_scope)
         self._weight_update_active = True
 
-    def get_weight_update_baseline(self):
-        """Return this rank's initial-load manifest for partial update scopes."""
+    def get_weight_update_manifest(self):
+        """Return this rank's updatable model-weight and LoRA manifests."""
         from vllm.model_executor.model_loader.reload.baseline import (
-            get_weight_update_baseline,
+            get_weight_update_manifest,
         )
 
-        return get_weight_update_baseline(self.get_model())
+        return get_weight_update_manifest(
+            self.get_model(), self.model_runner.get_lora_update_manifests()
+        )
+
+    def get_lora_update_manifests(self):
+        return self.model_runner.get_lora_update_manifests()
 
     def update_weights(self, update_info: dict) -> None:
         """

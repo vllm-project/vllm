@@ -298,3 +298,8 @@ class LoRAModelRunnerMixin:
     def list_loras(self) -> set[int]:
         self._ensure_lora_enabled()
         return self.lora_manager.list_adapters()
+
+    def get_lora_update_manifests(self) -> list[dict[str, object]]:
+        if not hasattr(self, "lora_manager"):
+            return []
+        return self.lora_manager.get_adapter_manifests()

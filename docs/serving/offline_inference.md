@@ -62,7 +62,7 @@ For further details on metrics, please refer to [this page](../design/metrics.md
 For further details on Weight Transfer, please refer to [this page](../training/weight_transfer/README.md).
 
 - `LLM.init_weight_transfer_engine` - Initializes the weight transfer engine for RL training.
-- `LLM.get_weight_update_baseline` - Lists legal partial checkpoint update groups.
+- `LLM.get_weight_update_manifest` - Lists updatable model weights and LoRA adapters.
 - `LLM.start_weight_update` - Starts a new weight update cycle.
 - `LLM.update_weights` - Updates the model weights.
 - `LLM.finish_weight_update` - Finishes the current weight update cycle.

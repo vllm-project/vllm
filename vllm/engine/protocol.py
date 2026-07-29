@@ -253,8 +253,8 @@ class EngineClient(ABC):
         """Start a new weight update."""
         raise NotImplementedError
 
-    async def get_weight_update_baseline(self) -> dict:
-        """Return the initial-load manifest used to build partial scopes."""
+    async def get_weight_update_manifest(self) -> dict:
+        """Return all model-weight and LoRA state available for update."""
         raise NotImplementedError
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:

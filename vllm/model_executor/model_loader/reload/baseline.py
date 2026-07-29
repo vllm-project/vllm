@@ -179,10 +179,91 @@ def aggregate_weight_update_baselines(
     }
 
 
+def get_weight_update_manifest(
+    model: torch.nn.Module,
+    lora_adapters: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return one worker's model-weight and LoRA update manifests."""
+    return {
+        "model_weights": get_weight_update_baseline(model),
+        "lora_adapters": list(lora_adapters or ()),
+    }
+
+
+def aggregate_weight_update_manifests(
+    manifests: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate all worker-local updatable-weight manifests."""
+    model_weights = aggregate_weight_update_baselines(
+        [manifest["model_weights"] for manifest in manifests]
+    )
+    adapters: dict[tuple[int, str], dict[str, Any]] = {}
+    for worker_index, manifest in enumerate(manifests):
+        for local in manifest.get("lora_adapters", ()):
+            key = (local["adapter_id"], local["adapter_name"])
+            adapter = adapters.setdefault(
+                key,
+                {
+                    "adapter_id": local["adapter_id"],
+                    "adapter_name": local["adapter_name"],
+                    "rank": local["rank"],
+                    "generation": local["generation"],
+                    "module_names": set(),
+                    "modules": {},
+                    "workers": [],
+                    "replace_scope_template": local["replace_scope_template"],
+                    "patch_scope_template": local["patch_scope_template"],
+                    "remove_scope_template": local["remove_scope_template"],
+                },
+            )
+            if adapter["rank"] != local["rank"]:
+                raise RuntimeError(
+                    "Workers disagree on LoRA rank for adapter "
+                    f"{local['adapter_id']} ({local['adapter_name']!r})"
+                )
+            if adapter["generation"] != local["generation"]:
+                raise RuntimeError(
+                    "Workers disagree on LoRA generation for adapter "
+                    f"{local['adapter_id']} ({local['adapter_name']!r})"
+                )
+            adapter["module_names"].update(local["module_names"])
+            for module in local["modules"]:
+                adapter["modules"].setdefault(module["module_name"], []).append(
+                    {
+                        "worker_index": worker_index,
+                        "lora_a": module["lora_a"],
+                        "lora_b": module["lora_b"],
+                    }
+                )
+            adapter["workers"].append(
+                {
+                    "worker_index": worker_index,
+                    "module_names": local["module_names"],
+                }
+            )
+    lora_adapters = []
+    for adapter in adapters.values():
+        adapter["module_names"] = sorted(adapter["module_names"])
+        adapter["modules"] = [
+            {"module_name": name, "workers": workers}
+            for name, workers in sorted(adapter["modules"].items())
+        ]
+        lora_adapters.append(adapter)
+    lora_adapters.sort(
+        key=lambda adapter: (adapter["adapter_id"], adapter["adapter_name"])
+    )
+    return {
+        "model_weights": model_weights,
+        "lora_adapters": lora_adapters,
+    }
+
+
 __all__ = [
     "WeightUpdateBaselineEvent",
     "WeightUpdateBaselineGroup",
     "WeightUpdateBaselineReport",
     "aggregate_weight_update_baselines",
+    "aggregate_weight_update_manifests",
     "get_weight_update_baseline",
+    "get_weight_update_manifest",
 ]
