@@ -1273,6 +1273,15 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.compilation_config.pass_config.fuse_allreduce_rms
+        ):
+            logger.warning_once(
+                "Disabling all-reduce/RMSNorm fusion because it does not support "
+                "batch-invariant inference."
+            )
+            self.compilation_config.pass_config.fuse_allreduce_rms = False
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "

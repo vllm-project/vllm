@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/batch_invariant.hpp"
 #include "custom_collective_common.cuh"
 
 namespace vllm {
@@ -284,13 +285,15 @@ class CustomAllreduce {
             ". Valid values: 1stage, oneshot, 2stage, twoshot");
       }
     }
+    const bool batch_invariant_1stage =
+        vllm_is_batch_invariant() && (world_size_ == 2 || world_size_ == 4);
 
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
 #define REDUCE_CASE(ngpus)                              \
   case ngpus: {                                         \
-    if (force_1stage) {                                 \
+    if (force_1stage || batch_invariant_1stage) {       \
       KL(ngpus, cross_device_reduce_1stage);            \
     } else if (force_2stage) {                          \
       KL(ngpus, cross_device_reduce_2stage);            \
