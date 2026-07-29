@@ -53,11 +53,10 @@ class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
             return 0
 
         assert isinstance(self._parser, DeepSeekR1ReasoningParser)
-        if self._parser.start_token_id in token_ids:
-            return self._parser.count_reasoning_tokens(token_ids)
-
-        # Laguna's generation prompt can contain the opening <think> token.
+        # The first marker distinguishes explicit from prompt-opened reasoning.
         for index, token_id in enumerate(token_ids):
+            if token_id == self._parser.start_token_id:
+                return self._parser.count_reasoning_tokens(token_ids)
             if token_id == self._parser.end_token_id:
                 return index
         return len(token_ids)
