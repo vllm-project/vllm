@@ -3,10 +3,10 @@ depends_on:
   - image-build
 steps:
 - label: ":nvidia: (H100) Fault Tolerance E2E"
-  key: fault-tolerance-e2e-2xh100
+  key: fault-tolerance-e2e-4xh100
   timeout_in_minutes: 35
   device: h100
-  num_devices: 2
+  num_devices: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/fault_tolerance/
