@@ -90,6 +90,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
 )
 from vllm.config.observability import DetailedTraceModules
@@ -596,6 +597,7 @@ class EngineArgs:
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_processor_device: MMProcessorDevice = MultiModalConfig.mm_processor_device
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
@@ -1354,6 +1356,9 @@ class EngineArgs:
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         multimodal_group.add_argument(
+            "--mm-processor-device", **multimodal_kwargs["mm_processor_device"]
+        )
+        multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
         )
@@ -1742,6 +1747,7 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
+            mm_processor_device=self.mm_processor_device,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,

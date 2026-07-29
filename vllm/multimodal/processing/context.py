@@ -227,13 +227,28 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
-        def _postprocess_one(x: object):
-            if isinstance(x, torch.Tensor):  # noqa: SIM102
-                # This mimics the behavior of transformers.BatchFeature
-                if x.is_floating_point():
-                    x = x.to(dtype=self.model_config.dtype)
+        # "torch_shm" puts tensors on a torch.multiprocessing queue, which
+        # shares device tensors by CUDA IPC handle, so a device-side processor
+        # can hand `pixel_values` straight to the worker. Every other transport
+        # serializes host bytes, so the result has to be copied back first.
+        keep_on_device = (
+            self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
+        )
 
-            return x
+        def _postprocess_one(x: object):
+            if not isinstance(x, torch.Tensor):
+                return x
+
+            # Bind to a Tensor-typed local: reassigning the `object`-typed
+            # parameter would discard the isinstance narrowing.
+            tensor = x
+            # This mimics the behavior of transformers.BatchFeature
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=self.model_config.dtype)
+            if not tensor.is_cpu and not keep_on_device:
+                tensor = tensor.cpu()
+
+            return tensor
 
         return json_map_leaves(_postprocess_one, output)
 
@@ -257,6 +272,12 @@ class InputProcessingContext:
         assert callable(hf_processor)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+
+        mm_config = self.model_config.get_multimodal_config()
+        if mm_config.mm_processor_device == "cuda":
+            # Dropped again by get_allowed_kwarg_only_overrides for processors
+            # that do not accept `device` (i.e. the non-fast, PIL-backed ones).
+            merged_kwargs.setdefault("device", "cuda")
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -364,9 +385,23 @@ class BaseProcessingInfo:
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
+    def build_data_parser(self) -> MultiModalDataParser:
+        """Build the model's parser and stamp deployment-derived settings on it.
+
+        `get_data_parser` is the model-facing hook; anything that depends on the
+        deployment rather than the model is applied here, so models don't have
+        to thread it through their own constructors.
+        """
+        parser = self.get_data_parser()
+        mm_config = self.ctx.model_config.multimodal_config
+        parser.allow_out_of_band_embeds = (
+            mm_config is not None and mm_config.mm_embeds_out_of_band
+        )
+        return parser
+
     @cached_property
     def data_parser(self) -> MultiModalDataParser:
-        return self.get_data_parser()
+        return self.build_data_parser()
 
     @property
     def skip_prompt_length_check(self) -> bool:

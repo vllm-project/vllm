@@ -286,6 +286,20 @@ def nested_tensors_equal(
     return a == b
 
 
+def _nested_tensors_are_cpu(tensors: NestedTensors) -> bool:
+    """Whether every tensor in `tensors` lives in host memory."""
+    on_cpu = True
+
+    def _check(x: object) -> object:
+        nonlocal on_cpu
+        if isinstance(x, torch.Tensor) and not x.is_cpu:
+            on_cpu = False
+        return x
+
+    json_map_leaves(_check, tensors)
+    return on_cpu
+
+
 def _nested_tensors_h2d(
     tensors: NestedTensors,
     device: torch.types.Device,
@@ -478,6 +492,11 @@ class BaseMultiModalField(ABC):
             pin_memory = False
 
         batch = [elem.data for elem in elems]
+        if pin_memory and not _nested_tensors_are_cpu(batch):
+            # Data already sits on an accelerator (e.g. a device-side HF
+            # processor handed it over by IPC). Pinning is a host-memory
+            # concept, and `pin_memory()` rejects device tensors outright.
+            pin_memory = False
         out = self._reduce_data(batch, pin_memory=pin_memory)
         return _nested_tensors_h2d(out, device=device)
 

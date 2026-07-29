@@ -518,6 +518,15 @@ class MultiModalDataParser:
             during model inference.
     """
 
+    allow_out_of_band_embeds: bool = False
+    """Whether `*_embeds` may be absent from a pre-computed-embedding input.
+
+    Not a constructor argument: `BaseProcessingInfo.build_data_parser` stamps it
+    from `MultiModalConfig.mm_embeds_out_of_band` after the model has built its
+    parser, so subparsers get the setting without every model having to thread
+    it through `get_data_parser`.
+    """
+
     def __init__(
         self,
         *,
@@ -536,6 +545,22 @@ class MultiModalDataParser:
         self.target_channels = target_channels
         self.video_needs_metadata = video_needs_metadata
         self.expected_hidden_size = expected_hidden_size
+
+    def embedding_required_fields(self, embeds_key: str, *others: str) -> set[str]:
+        """Required fields for a `DictEmbeddingItems`, minus out-of-band embeds.
+
+        `embeds_key` is dropped when the embeddings arrive out of band (EPD:
+        published by the encoder instance through the EC connector), leaving
+        only the metadata the frontend needs to size the placeholder range.
+
+        Args:
+            embeds_key: The embedding field, e.g. `"image_embeds"`.
+            others: Fields that are always required, e.g. `"image_grid_thw"`.
+        """
+        fields = set(others)
+        if not self.allow_out_of_band_embeds:
+            fields.add(embeds_key)
+        return fields
 
     @classmethod
     def is_embeddings(

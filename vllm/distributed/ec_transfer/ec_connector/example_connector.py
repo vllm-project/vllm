@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 
@@ -164,6 +164,39 @@ class ECExampleConnector(ECConnectorBase):
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Report each item's cache key and grid so a consumer can skip the
+        image transform.
+
+        A consumer only needs the grid to size the prompt's placeholder range;
+        the embedding itself arrives through this connector. Reporting the grid
+        the producer actually computed keeps the two sides in agreement without
+        the caller re-deriving it from the raw media.
+        """
+        if not self.is_producer:
+            return False, None
+
+        items = []
+        for feature in request.mm_features:
+            grids = {}
+            if feature.data is not None:
+                grids = {
+                    key: value.tolist()
+                    for key, value in feature.data.get_data().items()
+                    if key.endswith("_grid_thw") and hasattr(value, "tolist")
+                }
+            # `data` is None for items served from the processor cache, in which
+            # case the grid is unavailable here and the consumer has to fall
+            # back to processing the media itself.
+            items.append({"mm_hash": feature.identifier, **grids})
+
+        if not items:
+            return False, None
+        return False, {"ec_items": items}
 
     # ==============================
     # Helper functions
