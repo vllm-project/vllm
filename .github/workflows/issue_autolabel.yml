@@ -130,6 +130,25 @@ jobs:
                   },
                 ],
               },
+              kimi: {
+                keywords: [
+                  { term: "Kimi",     searchIn: "both" },
+                  { term: "Moonshot", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "moonshotai/", searchIn: "both" },
+                  { term: "kimi",        searchIn: "title" },
+                ],
+              },
+              k3: {
+                keywords: [
+                  { term: "Kimi K3", searchIn: "both" },
+                  { term: "K3",      searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "moonshotai/kimi-k3", searchIn: "both" },
+                ],
+              },
               quantization: {
                 keywords: [
                   {
