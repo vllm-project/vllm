@@ -921,6 +921,7 @@ def test_sparse_backend_prefill_correctness(
         model_type="deepseek_v2",
     )
     model_config.dtype = dtype
+    model_config.model_arch_config.total_num_attention_heads = num_heads
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads, model_config
     )

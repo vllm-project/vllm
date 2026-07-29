@@ -19,8 +19,11 @@ def test_build_topk_mask_single_request_matches_generic_path() -> None:
         device="cuda",
     )
 
-    single_req = _build_topk_mask([topk], [2], 2, 128, topk.device)
-    generic = _build_topk_mask([topk[:1], topk[1:]], [1, 1], 1, 128, topk.device)
+    num_words = (128 + 31) // 32
+    single_out = torch.zeros(1, 2, num_words, dtype=torch.int32, device="cuda")
+    generic_out = torch.zeros(2, 1, num_words, dtype=torch.int32, device="cuda")
+    single_req = _build_topk_mask([topk], [2], 2, 128, single_out)
+    generic = _build_topk_mask([topk[:1], topk[1:]], [1, 1], 1, 128, generic_out)
 
     torch.testing.assert_close(single_req[0, 0], generic[0, 0])
     torch.testing.assert_close(single_req[0, 1], generic[1, 0])
