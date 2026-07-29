@@ -79,6 +79,36 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
+        # SITU (SituGLU) TRTLLM-Gen kernel computes
+        #   left  = alpha * tanh(x0 / alpha) * sigmoid(x0)   # gate (x0)
+        #   right = beta  * tanh(x1 / beta)                  # up   (x1)
+        # which matches vLLM's situ_and_mul with (beta, linear_beta), so map
+        # situ beta -> gatedActAlpha (gemm1_alpha) and situ linear_beta ->
+        # gatedActBeta (gemm1_beta). Both must be > 0.
+        if moe_config.activation == MoEActivation.SITU:
+            situ_beta = moe_config.activation_situ_beta
+            situ_linear_beta = moe_config.activation_situ_linear_beta
+            assert situ_beta is not None and situ_beta > 0, (
+                "SITU requires activation_situ_beta > 0"
+            )
+            assert situ_linear_beta is not None and situ_linear_beta > 0, (
+                "TRTLLM SiTuGlu requires activation_situ_linear_beta > 0 "
+                "(the private cubin has no up-passthrough path)"
+            )
+            self.gemm1_alpha = torch.full(
+                (self.local_num_experts,),
+                float(situ_beta),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.gemm1_beta = torch.full(
+                (self.local_num_experts,),
+                float(situ_linear_beta),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.gemm1_clamp_limit = None
+
         self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
@@ -103,7 +133,19 @@ class TrtLlmMxfp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU,
+            MoEActivation.SITU,
+        )
+
+    @staticmethod
+    def _flashinfer_activation_type(activation: MoEActivation) -> int:
+        from flashinfer.fused_moe.core import ActivationType
+
+        if activation == MoEActivation.SITU:
+            return ActivationType.Situ.value
+        return ActivationType.Swiglu.value
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -122,6 +164,9 @@ class TrtLlmMxfp4ExpertsMonolithic(
     Wraps flashinfer.trtllm_fp4_block_scale_moe().
     """
 
+    def supports_routing_replay_capture(self) -> bool:
+        return True
+
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
@@ -139,6 +184,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         activation_key: QuantKey | None,
     ) -> bool:
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
         ]
@@ -184,9 +230,13 @@ class TrtLlmMxfp4ExpertsMonolithic(
             device=hidden_states.device,
         )
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
         trtllm_fp4_block_scale_moe(
-            routing_logits=router_logits.to(torch.bfloat16),
-            routing_bias=None,
+            routing_logits=router_logits,
+            routing_bias=e_score_correction_bias,
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
             gemm1_weights=w1,
@@ -203,18 +253,22 @@ class TrtLlmMxfp4ExpertsMonolithic(
             output2_scale_scalar=None,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=None,
-            topk_group=None,
+            n_group=(num_expert_group or 0),
+            topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
+            activation_type=self._flashinfer_activation_type(activation),
             tune_max_num_tokens=max(self.max_capture_size, 1),
             output=output,
+            routing_replay_out=routing_replay_out,
         )
-
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
         return output
 
 
@@ -328,6 +382,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             "routing_method_type": RoutingMethodType.Renormalize,
             "do_finalize": True,
             "enable_pdl": True,
+            "activation_type": self._flashinfer_activation_type(activation),
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }

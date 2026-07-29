@@ -542,18 +542,15 @@ class ParallelLMHead(VocabParallelEmbedding):
         )
         self.quant_config = quant_config
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)
-            )
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
+            self._register_bias()
         else:
             self.register_parameter("bias", None)
+
+    def _register_bias(self):
+        data = torch.empty(self.num_embeddings_per_partition, dtype=self.params_dtype)
+        self.bias = Parameter(data, requires_grad=False)
+        weight_attrs = dict(output_dim=0, weight_loader=self.weight_loader)
+        set_weight_attrs(weight=self.bias, weight_attrs=weight_attrs)
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""

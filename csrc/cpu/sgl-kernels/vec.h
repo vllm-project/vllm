@@ -9,10 +9,18 @@
 #define CPU_CAPABILITY_AVX512
 #endif
 
+#if defined(__riscv_v_min_vlen) && (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+#define CPU_CAPABILITY_RVV
+#endif
+
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
 #if defined(CPU_CAPABILITY_AVX512)
 #include <immintrin.h>
+#endif
+
+#if defined(CPU_CAPABILITY_RVV)
+#include "../cpu_types_riscv_defs.hpp"
 #endif
 namespace {
 

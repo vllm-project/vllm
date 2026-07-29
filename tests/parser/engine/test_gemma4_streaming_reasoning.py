@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
@@ -57,6 +58,8 @@ def _make_tokenizer(sequence: list[tuple[int, str]]) -> MagicMock:
         return "".join(parts)
 
     tokenizer.decode.side_effect = decode
+    tokenizer.all_special_tokens = list(SPECIAL_TOKEN_MAP.values())
+    tokenizer.all_special_ids = list(SPECIAL_TOKEN_MAP.keys())
     return tokenizer
 
 
@@ -375,15 +378,14 @@ _PRE_INIT_THOUGHT_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 class TestGemma4PreInitReasoningRobustness:
     """Tests for the ``(REASONING, THINK_START)`` no-op transition and
-    cooperating ``thought\\n`` prefix stripping when the engine has been
-    pre-initialised to ``REASONING`` from the prompt.
+    cooperating ``thought\\n`` prefix stripping.
 
-    These cover the case the reviewer raised: prompt ends with
-    ``<|turn>model\\n`` (``is_reasoning_end`` returns ``False`` because
-    thinking is enabled, so the engine is pre-initialised), but the model
-    still emits its own ``<|channel>thought\\n…<channel|>content``. The
-    ``thought\\n`` prefix must be stripped, the ``<|channel>`` must not
-    leak as text, and the post-``<channel|>`` text must appear as content.
+    Covers both engine start states: a new-turn prompt (engine starts in
+    ``CONTENT`` and the model emits its own ``<|channel>`` opener) and a
+    prompt ending inside an open ``<|channel>`` block (engine
+    pre-initialised to ``REASONING``). In both cases the ``thought\\n``
+    prefix must be stripped, the ``<|channel>`` must not leak as text,
+    and the post-``<channel|>`` text must appear as content.
     """
 
     @pytest.fixture
@@ -394,13 +396,12 @@ class TestGemma4PreInitReasoningRobustness:
     def pre_init_parser(self, pre_init_tokenizer):
         return Gemma4Parser(pre_init_tokenizer)
 
-    def test_redundant_channel_open_swallowed_after_new_turn(
+    def test_model_emitted_channel_open_after_new_turn(
         self, pre_init_parser, pre_init_tokenizer, request_obj
     ):
-        # Prompt ends with ``<|turn>model\n``-style sentinel. With
-        # ``enable_thinking=True`` (the default), ``is_reasoning_end``
-        # returns ``False`` for a ``<|turn>`` tail, so the engine is
-        # pre-initialised to ``REASONING``.
+        # Prompt ends with a ``<|turn>model\n``-style sentinel, i.e. not
+        # inside an open ``<|channel>`` block, so the engine starts in
+        # ``CONTENT`` and the model's own opener drives the transition.
         results = _stream_tokens_batched(
             pre_init_parser,
             pre_init_tokenizer,
@@ -411,8 +412,7 @@ class TestGemma4PreInitReasoningRobustness:
 
         reasoning, content, _ = _collect_fields(results)
 
-        # ``thought\n`` prefix must be stripped from reasoning even though
-        # the engine was pre-initialised to REASONING.
+        # ``thought\n`` prefix must be stripped from reasoning.
         assert reasoning.startswith("Reason"), (
             f"thought\\n prefix leaked into reasoning: {reasoning!r}"
         )
@@ -459,6 +459,80 @@ class TestGemma4PreInitReasoningRobustness:
         )
         assert "Reasoning body" in reasoning
         assert "Final content" in content
+
+
+# ── Channel-less direct answer (no reasoning markers at all) ──────────
+
+_PLAIN_ANSWER_TEXT = "This is a direct final answer without channel markers."
+_PLAIN_ANSWER_TOKENS: list[tuple[int, str]] = []
+for _i, _word in enumerate(_PLAIN_ANSWER_TEXT.split(" ")):
+    _prefix = " " if _i > 0 else ""
+    _PLAIN_ANSWER_TOKENS.append((7000 + _i, _prefix + _word))
+
+
+class TestGemma4ChannelLessOutputConsistency:
+    """Streaming and non-streaming must classify channel-less output
+    identically.
+
+    With ``enable_thinking=True``, a prompt that merely starts a new model
+    turn (ends with ``<|turn>model\\n``) used to pre-initialise the
+    streaming engine to ``REASONING``, so a direct answer containing no
+    channel markers was streamed entirely as ``reasoning`` while the
+    non-streaming path returned the same text as ``content``.
+
+    Regression test for vllm-project/vllm#48217.
+    """
+
+    @pytest.fixture
+    def plain_tokenizer(self):
+        return _make_tokenizer(_PLAIN_ANSWER_TOKENS)
+
+    @pytest.fixture
+    def plain_parser(self, plain_tokenizer):
+        return Gemma4Parser(plain_tokenizer)
+
+    def test_streaming_channel_less_output_is_content(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            plain_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            # New-turn tail: ``<|turn>model\n``.
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+
+        reasoning, content, _ = _collect_fields(results)
+
+        assert content == _PLAIN_ANSWER_TEXT, (
+            f"Channel-less output missing from content: {content!r}"
+        )
+        assert not reasoning, (
+            f"Channel-less output misclassified as reasoning: {reasoning!r}"
+        )
+
+    def test_streaming_matches_non_streaming(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        reasoning, content = plain_parser.extract_reasoning(
+            _PLAIN_ANSWER_TEXT, request_obj
+        )
+        assert reasoning is None
+        assert content == _PLAIN_ANSWER_TEXT
+
+        stream_parser = Gemma4Parser(plain_tokenizer)
+        results = _stream_tokens_batched(
+            stream_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+        stream_reasoning, stream_content, _ = _collect_fields(results)
+
+        assert (stream_reasoning or None) == reasoning
+        assert (stream_content or None) == content
 
 
 # ── Second model output: two tool calls with holdback ────────────────
@@ -657,19 +731,15 @@ class TestGemma4ReasoningTruncationWithHoldback:
 @pytest.fixture
 def tool_call_tokenizer():
     """Mock tokenizer with Gemma4 special token vocab."""
-    tokenizer = MagicMock()
-    tokenizer.encode.return_value = [1, 2, 3]
-    tokenizer.get_vocab.return_value = {
-        "<|tool_call>": TOOL_CALL_START_ID,
-        "<tool_call|>": TOOL_CALL_END_ID,
-        "<|channel>": CHANNEL_START_ID,
-        "<channel|>": CHANNEL_END_ID,
-        '<|"|>': QUOTED_ID,
-    }
-    tokenizer.decode.side_effect = lambda ids: "".join(
-        SPECIAL_TOKEN_MAP.get(i, chr(i) if i < 128 else f"<{i}>") for i in ids
+    return make_mock_tokenizer(
+        vocab={
+            "<|tool_call>": TOOL_CALL_START_ID,
+            "<tool_call|>": TOOL_CALL_END_ID,
+            "<|channel>": CHANNEL_START_ID,
+            "<channel|>": CHANNEL_END_ID,
+            '<|"|>': QUOTED_ID,
+        },
     )
-    return tokenizer
 
 
 @pytest.fixture
@@ -1407,3 +1477,133 @@ class TestBareThoughtWithoutChannelOpener:
         assert reasoning == ""
         assert content == ""
         assert len(tool_calls) == 0
+
+
+# ── Regression: commas inside <|"|>-delimited string values ─────────
+#
+# _make_tokenizer sets all_special_tokens, which activates the auto-drop
+# mechanism in _build_drop_info. If <|"|> is not in configured_texts,
+# it gets silently dropped and commas inside string values become field
+# separators, e.g. "San Francisco, CA" → {"location": "San Francisco"}.
+
+
+COMMA_TOKEN_SEQUENCE: list[tuple[int, str]] = [
+    (TOOL_CALL_START_ID, "<|tool_call>"),
+    (4000, "call"),
+    (4001, ":"),
+    (4002, "get_weather"),
+    (4003, "{"),
+    (4004, "location"),
+    (4005, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4006, "San Francisco"),
+    (4007, ", CA"),
+    (QUOTED_ID, '<|"|>'),
+    (4008, ","),
+    (4009, "unit"),
+    (4010, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4011, "celsius"),
+    (QUOTED_ID, '<|"|>'),
+    (4012, "}"),
+    (TOOL_CALL_END_ID, "<tool_call|>"),
+]
+
+MULTI_COMMA_TOKEN_SEQUENCE: list[tuple[int, str]] = [
+    (TOOL_CALL_START_ID, "<|tool_call>"),
+    (4000, "call"),
+    (4001, ":"),
+    (4020, "send_message"),
+    (4003, "{"),
+    (4021, "destination"),
+    (4005, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (4022, "456 Oakwood Avenue"),
+    (4023, ", Rivermist"),
+    (4024, ", 83214"),
+    (QUOTED_ID, '<|"|>'),
+    (4012, "}"),
+    (TOOL_CALL_END_ID, "<tool_call|>"),
+]
+
+
+class TestCommaInStringValueRegression:
+    """Regression: <|"|> delimiters must not be auto-dropped.
+
+    When _build_drop_info discovers <|"|> as a special token and it is
+    not in configured_texts, the delimiter is silently removed. Without
+    it, _parse_gemma4_args treats commas inside string values as field
+    separators.
+    """
+
+    @pytest.fixture
+    def comma_tokenizer(self):
+        return _make_tokenizer(COMMA_TOKEN_SEQUENCE)
+
+    @pytest.fixture
+    def comma_parser(self, comma_tokenizer):
+        return Gemma4Parser(comma_tokenizer)
+
+    @pytest.fixture
+    def multi_comma_tokenizer(self):
+        return _make_tokenizer(MULTI_COMMA_TOKEN_SEQUENCE)
+
+    @pytest.fixture
+    def multi_comma_parser(self, multi_comma_tokenizer):
+        return Gemma4Parser(multi_comma_tokenizer)
+
+    def test_batched_streaming_comma_in_value(
+        self, comma_parser, comma_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            comma_parser,
+            comma_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[],
+        )
+        _, _, tool_calls = _collect_fields(results)
+        assert len(tool_calls) > 0
+        args_text = "".join(
+            tc.function.arguments
+            for tc in tool_calls
+            if tc.function and tc.function.arguments
+        )
+        parsed = json.loads(args_text)
+        assert parsed["location"] == "San Francisco, CA"
+        assert parsed["unit"] == "celsius"
+
+    def test_batched_streaming_multiple_commas(
+        self, multi_comma_parser, multi_comma_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            multi_comma_parser,
+            multi_comma_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[],
+        )
+        _, _, tool_calls = _collect_fields(results)
+        assert len(tool_calls) > 0
+        args_text = "".join(
+            tc.function.arguments
+            for tc in tool_calls
+            if tc.function and tc.function.arguments
+        )
+        parsed = json.loads(args_text)
+        assert parsed["destination"] == "456 Oakwood Avenue, Rivermist, 83214"
+
+    def test_non_streaming_comma_in_value(self, comma_parser, request_obj):
+        text = "".join(text for _, text in COMMA_TOKEN_SEQUENCE)
+        result = comma_parser.extract_tool_calls(text, request_obj)
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["location"] == "San Francisco, CA"
+        assert args["unit"] == "celsius"
+
+    def test_non_streaming_multiple_commas(self, multi_comma_parser, request_obj):
+        text = "".join(text for _, text in MULTI_COMMA_TOKEN_SEQUENCE)
+        result = multi_comma_parser.extract_tool_calls(text, request_obj)
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["destination"] == "456 Oakwood Avenue, Rivermist, 83214"

@@ -22,11 +22,12 @@ logger = init_logger(__name__)
 _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
-    "grok2": ("grok2", "Grok2Renderer"),
     "hf": ("hf", "HfRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
+    "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
+    "inkling": ("inkling", "InklingRenderer"),
 }
 
 

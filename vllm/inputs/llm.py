@@ -115,6 +115,12 @@ class TokensPrompt(_PromptOptions):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when offsets were requested
+    AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
+    was present. The list length equals the length of `prompt_token_ids`."""
+
 
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""

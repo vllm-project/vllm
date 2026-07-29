@@ -729,8 +729,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:

@@ -4,8 +4,10 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
     ChatMessage,
@@ -15,14 +17,14 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseChoice,
 )
 from vllm.entrypoints.openai.engine.protocol import ToolCall
-from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
-from vllm.entrypoints.serve.disagg.protocol import GenerateResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -72,7 +74,23 @@ class OnlineDerenderer:
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
+        # Detokenization, logprob resolution and parsing are CPU-bound;
+        # offload them in one hop to keep the event loop responsive.
+        self._derender_chat_async = make_async(
+            self._derender_chat, executor=renderer._executor
+        )
+        self._derender_completion_async = make_async(
+            self._derender_completion, executor=renderer._executor
+        )
+
     async def derender_chat(
+        self,
+        generate_response: GenerateResponse,
+        chat_request: ChatCompletionRequest | None = None,
+    ) -> list[ChatCompletionResponseChoice]:
+        return await self._derender_chat_async(generate_response, chat_request)
+
+    def _derender_chat(
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
@@ -136,6 +154,13 @@ class OnlineDerenderer:
                     else []
                 )
 
+                is_named_tool_choice = (
+                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                )
+                is_required_tool_choice = chat_request.tool_choice == "required"
+                if is_named_tool_choice or is_required_tool_choice:
+                    content = content or ""
+
                 message = ChatMessage(
                     role="assistant",
                     reasoning=reasoning,
@@ -161,6 +186,13 @@ class OnlineDerenderer:
         return choices
 
     async def derender_completion(
+        self,
+        generate_responses: list[GenerateResponse],
+        prompt_tokens: list[int] | None = None,
+    ) -> tuple[list[CompletionResponseChoice], int, int]:
+        return await self._derender_completion_async(generate_responses, prompt_tokens)
+
+    def _derender_completion(
         self,
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,

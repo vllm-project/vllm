@@ -31,7 +31,7 @@ from vllm.entrypoints.serve.utils.error_response import (
     create_error_response,
     sanitize_message,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -325,6 +325,16 @@ async def log_response(request: Request, call_next):
     return response
 
 
+async def vllm_error_handler(req: Request, exc: VLLMError):
+    """Dispatch a vLLM-specific error to the appropriate handler."""
+    if isinstance(exc, (EngineGenerateError, EngineDeadError)):
+        return await engine_error_handler(req, exc)
+    elif isinstance(exc, GenerationError):
+        return await generation_error_handler(req, exc)
+    else:
+        return await exception_handler(req, exc)
+
+
 async def engine_error_handler(
     req: Request, exc: EngineDeadError | EngineGenerateError
 ):
@@ -509,13 +519,16 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
         if loc:
             param = clean_loc_for_param(loc)
 
-    exc_str = str(exc)
-    errors_str = str(errors)
-
-    if errors and errors_str and errors_str != exc_str:
-        message = f"{exc_str} {errors_str}"
+    # Build the message from exc.errors() instead of str(exc) - str(exc)
+    # leaks the server's file path via FastAPI's endpoint context.
+    if errors:
+        count = len(errors)
+        label = "error" if count == 1 else "errors"
+        message = f"{count} validation {label}:\n"
+        message += "".join(f"  {err}\n" for err in errors)
+        message = message.rstrip()
     else:
-        message = exc_str
+        message = "Validation error"
 
     err = ErrorResponse(
         error=ErrorInfo(

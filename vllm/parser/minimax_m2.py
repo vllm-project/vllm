@@ -38,13 +38,21 @@ INVOKE_END = "</invoke>"
 NAME_END_DQ = '">'
 NAME_END_SQ = "'>"
 NAME_END_UNQUOTED = ">"
-
+PARAM_START = "<parameter name="
+PARAM_END = "</parameter>"
 _PARAM_RE = re.compile(
     r"<\s*parameter\s+name\s*=\s*"
     r"(?:\"(?P<dq_name>[^\"]*)\"|'(?P<sq_name>[^']*)'|(?P<bare_name>[^>\s]+))"
     r"\s*>"
     r"(?P<value>.*?)"
-    r"<\s*/\s*parameter\s*>",
+    r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s+name\s*=))",
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    r"<\s*parameter\s+name\s*=\s*"
+    r"(?:\"(?P<dq_name>[^\"]*)\"|'(?P<sq_name>[^']*)'|(?P<bare_name>[^>\s]+))"
+    r"\s*>"
+    r"(?P<value>.*)$",
     re.DOTALL,
 )
 
@@ -61,7 +69,23 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
         ).strip()
         if not name:
             continue
-        params[name] = match.group("value").strip()
+        # Keep the value verbatim (like the glm47 converter): it is inline
+        # between `>` and `</parameter>`, so surrounding whitespace is data.
+        params[name] = match.group("value")
+
+    if partial:
+        remaining = _PARAM_RE.sub("", raw_args)
+        match = _PARTIAL_PARAM_RE.search(remaining)
+        if match:
+            name = (
+                match.group("dq_name")
+                or match.group("sq_name")
+                or match.group("bare_name")
+                or ""
+            ).strip()
+            if name:
+                # Verbatim, same as the complete-match loop above.
+                params[name] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -75,6 +99,8 @@ def minimax_m2_config() -> ParserEngineConfig:
             "THINK_START": THINK_START,
             "THINK_END": THINK_END,
             "TOOL_START": TOOL_CALL_START,
+            "PARAM_START": PARAM_START,
+            "PARAM_END": PARAM_END,
             "TOOL_END": TOOL_CALL_END,
             "INVOKE_PREFIX_DQ": INVOKE_PREFIX_DQ,
             "INVOKE_PREFIX_SQ": INVOKE_PREFIX_SQ,
@@ -110,6 +136,14 @@ def minimax_m2_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_END"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
             ),
             (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
                 ParserState.CONTENT,
