@@ -37,6 +37,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
+    _has_message_level_tools,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -935,9 +936,10 @@ class OpenAIServingChat(GenerateBaseServing):
             elif not request.tool_choice or request.tool_choice == "none":
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            # handle when there are tools and tool choice is auto
+            # handle when there are tools (request-level or message-level)
+            # and tool choice is auto
             elif (
-                request.tools
+                (request.tools or _has_message_level_tools(request.messages))
                 and (request.tool_choice == "auto" or request.tool_choice is None)
                 and self.enable_auto_tools
                 and tool_parser_cls

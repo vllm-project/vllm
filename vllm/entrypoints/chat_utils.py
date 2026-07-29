@@ -1889,8 +1889,13 @@ def _parse_chat_message_content(
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
 
-        if role == "developer":
-            result_msg["tools"] = message.get("tools", None)
+        # Tool declarations on individual messages (e.g. "developer" or
+        # "system" roles) pass through for the chat template to expand.
+        if (
+            role in ("developer", "system")
+            and (msg_tools := message.get("tools")) is not None
+        ):
+            result_msg["tools"] = msg_tools
     return result
 
 
