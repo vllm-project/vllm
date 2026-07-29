@@ -8,6 +8,26 @@ toc_depth: 2
 
 --8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
 
+## Persist the compile cache across containers
+
+Mounting the Hugging Face cache keeps model weights across containers, but each
+new container still starts with an empty `VLLM_CACHE_ROOT` (default
+`~/.cache/vllm`) and recompiles the model's `torch.compile` artifacts. Mount a
+named volume at that path to reuse the inductor, Triton, and AOT artifacts from
+the second container onward:
+
+```bash
+docker run --rm --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-cache:/root/.cache/vllm \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    meta-llama/Llama-3.1-8B-Instruct
+```
+
+See [Faster Startup](../configuration/optimization.md#faster-startup) for the
+mechanism and for what invalidates the cache.
+
 ## Run as a non-root user
 
 The CUDA `vllm/vllm-openai` image runs as root by default for backward
