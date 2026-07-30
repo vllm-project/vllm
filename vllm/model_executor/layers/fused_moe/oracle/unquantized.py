@@ -98,9 +98,8 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # fallback so VLLM_BATCH_INVARIANT=1 still resolves to a valid
         # (batch-invariant) backend on XPU.
         #
-        # When the EP all-to-all backend emits the batched activation format,
-        # the fused XPUExperts kernel can't consume it; auto-select the batched
-        # moe_mmk kernel so no separate --moe-backend flag is needed.
+        # XPUExperts cannot consume the batched activation format, so prefer
+        # BATCHED_TRITON when the dispatch emits it.
         if moe_config.moe_parallel_config.use_batched_activation_format:
             _AVAILABLE_BACKENDS = [
                 UnquantizedMoeBackend.BATCHED_TRITON,
