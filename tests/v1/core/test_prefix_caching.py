@@ -358,17 +358,17 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     )
     first = make_request("first", list(range(128)), block_size, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    assert manager.are_hisparse_requests_fully_resident(["first"])
+    assert manager.hisparse.are_requests_fully_resident(["first"])
     assert manager.block_pools[1].get_num_free_blocks() == 1
 
     second = make_request("second", list(range(16)), block_size, sha256)
     assert manager.allocate_slots(second, num_new_tokens=16) is None
-    assert manager.has_pending_hisparse_reclamation()
-    spills = manager.take_hisparse_spills()
+    assert manager.hisparse.has_pending_reclamation()
+    spills = manager.hisparse.take_spills()
     assert spills is not None and len(spills) == 4
-    manager.complete_hisparse_spills([spill.spill_id for spill in spills])
-    assert not manager.has_pending_hisparse_reclamation()
-    assert not manager.are_hisparse_requests_fully_resident(["first"])
+    manager.hisparse.complete_spills([spill.spill_id for spill in spills])
+    assert not manager.hisparse.has_pending_reclamation()
+    assert not manager.hisparse.are_requests_fully_resident(["first"])
     assert manager.allocate_slots(second, num_new_tokens=16) is not None
 
     first_blocks = manager.get_block_ids("first")
@@ -379,11 +379,11 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
 
     first.num_computed_tokens = 128
     assert manager.allocate_slots(first, num_new_tokens=16) is None
-    assert manager.has_pending_hisparse_reclamation()
-    spills = manager.take_hisparse_spills()
+    assert manager.hisparse.has_pending_reclamation()
+    spills = manager.hisparse.take_spills()
     assert spills is not None and len(spills) == 2
-    manager.complete_hisparse_spills([spill.spill_id for spill in spills])
-    assert not manager.has_pending_hisparse_reclamation()
+    manager.hisparse.complete_spills([spill.spill_id for spill in spills])
+    assert not manager.hisparse.has_pending_reclamation()
     assert manager.allocate_slots(first, num_new_tokens=16) is not None
 
 
@@ -442,14 +442,14 @@ def test_hisparse_reclamation_caps_each_worker_spill_batch():
         request = make_request(request_id, list(range(128)), block_size, sha256)
         assert manager.allocate_slots(request, num_new_tokens=128) is not None
 
-    manager.coordinator.reclaim_hisparse_resident_blocks(1, 100)
-    spills = manager.take_hisparse_spills()
+    manager.hisparse.reclaim_resident_blocks(1, 100)
+    spills = manager.hisparse.take_spills()
     assert spills is not None
     assert len(spills) * block_size == max_model_len
-    assert manager.has_pending_hisparse_reclamation()
+    assert manager.hisparse.has_pending_reclamation()
 
-    manager.complete_hisparse_spills([spill.spill_id for spill in spills])
-    assert not manager.has_pending_hisparse_reclamation()
+    manager.hisparse.complete_spills([spill.spill_id for spill in spills])
+    assert not manager.hisparse.has_pending_reclamation()
 
 
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
@@ -508,12 +508,12 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     blocks = manager.get_block_ids(request.request_id)
     assert len(blocks[2]) == 1
     assert blocks[3] == []
-    assert manager.are_hisparse_requests_fully_resident([request.request_id])
+    assert manager.hisparse.are_requests_fully_resident([request.request_id])
 
-    spills = manager.take_hisparse_spills()
+    spills = manager.hisparse.take_spills()
     assert spills is not None and len(spills) == 1
     assert spills[0].after_forward
-    manager.complete_hisparse_spills([spills[0].spill_id])
+    manager.hisparse.complete_spills([spills[0].spill_id])
     blocks = manager.get_block_ids(request.request_id)
     assert len(blocks[2]) == 1
     assert blocks[3] == []
@@ -534,7 +534,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     reused_blocks = manager.get_block_ids(reused.request_id)
     assert reused_blocks[2][0] == 0
     assert len(reused_blocks[3]) == 2
-    assert not manager.are_hisparse_requests_fully_resident([reused.request_id])
+    assert not manager.hisparse.are_requests_fully_resident([reused.request_id])
 
 
 def make_kv_cache_config_hybrid_model(

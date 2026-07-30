@@ -574,7 +574,7 @@ class Scheduler(SchedulerInterface):
                     # allocatable after the worker acknowledges the spill.
                     # Yield this scheduling iteration instead of preempting a
                     # request whose resident pages are already being reclaimed.
-                    if self.kv_cache_manager.has_pending_hisparse_reclamation():
+                    if self.kv_cache_manager.hisparse.has_pending_reclamation():
                         break
 
                     # The request cannot be scheduled.
@@ -1160,9 +1160,9 @@ class Scheduler(SchedulerInterface):
             hisparse_block_table_updates=(
                 self.kv_cache_manager.take_hisparse_block_table_updates()
             ),
-            hisparse_spills=self.kv_cache_manager.take_hisparse_spills(),
+            hisparse_spills=self.kv_cache_manager.hisparse.take_spills(),
             hisparse_fully_resident=(
-                self.kv_cache_manager.are_hisparse_requests_fully_resident(
+                self.kv_cache_manager.hisparse.are_requests_fully_resident(
                     list(num_scheduled_tokens)
                 )
             ),
@@ -1602,7 +1602,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         hisparse_stats = model_runner_output.hisparse_stats
-        self.kv_cache_manager.complete_hisparse_spills(
+        self.kv_cache_manager.hisparse.complete_spills(
             model_runner_output.hisparse_spill_completions
         )
         cudagraph_stats = model_runner_output.cudagraph_stats

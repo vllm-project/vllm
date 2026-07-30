@@ -20,7 +20,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
-    HiSparseSpill,
     KVCacheConfig,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -166,6 +165,7 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pools = self.coordinator.block_pools
         self.block_pool = self.coordinator.block_pool
+        self.hisparse = self.coordinator.hisparse
         self._block_pool_by_object_id = {
             id(block): pool for pool in self.block_pools for block in pool.blocks
         }
@@ -557,7 +557,7 @@ class KVCacheManager:
             ):
                 shortage = required + watermark + reserved - pool.get_num_free_blocks()
                 if shortage > 0:
-                    self.coordinator.reclaim_hisparse_resident_blocks(pool_id, shortage)
+                    self.hisparse.reclaim_resident_blocks(pool_id, shortage)
             lacks_capacity = any(
                 required + watermark > pool.get_num_free_blocks() - reserved
                 for required, watermark, reserved, pool in zip(
@@ -612,26 +612,13 @@ class KVCacheManager:
     def take_hisparse_block_table_updates(
         self,
     ) -> dict[str, tuple[list[int], ...]] | None:
-        request_ids = self.coordinator.take_hisparse_block_table_update_requests()
+        request_ids = self.hisparse.take_block_table_update_requests()
         if not request_ids:
             return None
         return {
             request_id: self.get_blocks(request_id).get_block_ids()
             for request_id in request_ids
         }
-
-    def take_hisparse_spills(self) -> list[HiSparseSpill] | None:
-        return self.coordinator.take_hisparse_spills()
-
-    def complete_hisparse_spills(self, spill_ids: list[int] | None) -> None:
-        if spill_ids:
-            self.coordinator.complete_hisparse_spills(spill_ids)
-
-    def has_pending_hisparse_reclamation(self) -> bool:
-        return self.coordinator.has_pending_hisparse_reclamation()
-
-    def are_hisparse_requests_fully_resident(self, request_ids: Sequence[str]) -> bool:
-        return self.coordinator.are_hisparse_requests_fully_resident(request_ids)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
