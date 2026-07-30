@@ -228,7 +228,11 @@ class BuildkiteClient:
         body: Mapping[str, Any] | None = None,
         method: str = "GET",
     ) -> Any:
-        if url != self.base_url and not url.startswith(f"{self.base_url}/"):
+        if (
+            url != self.base_url
+            and not url.startswith(f"{self.base_url}?")
+            and not url.startswith(f"{self.base_url}/")
+        ):
             raise ApiError(None, "Buildkite API returned an invalid pagination URL.")
         return self.transport.request(
             url,

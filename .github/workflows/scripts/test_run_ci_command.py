@@ -496,6 +496,26 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(call["url"].endswith("/123/retry_failed_jobs"))
         self.assertEqual(call["body"], {"states": RETRY_STATES})
 
+    def test_buildkite_list_builds_allows_query_on_builds_endpoint(self) -> None:
+        transport = FakeTransport([])
+        client = BuildkiteClient(
+            "secret",
+            "vllm",
+            "ci",
+            transport=transport,
+        )
+
+        builds = client.list_builds(
+            "current-commit",
+            metadata=("github-pr-number", "42"),
+        )
+
+        self.assertEqual(builds, [])
+        url = transport.calls[0]["url"]
+        self.assertIn("?exclude_jobs=true", url)
+        self.assertIn("commit=current-commit", url)
+        self.assertIn("meta_data%5Bgithub-pr-number%5D=42", url)
+
     def test_buildkite_failed_jobs_follow_cursor_pagination(self) -> None:
         next_url = (
             "https://api.buildkite.com/v2/organizations/vllm/pipelines/ci/"
