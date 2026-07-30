@@ -53,7 +53,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         (32, 8),
         (64, 8),
     ]
-    head_dim = 128
+    head_dim_list = [64, 128, 256]
     in_dtype: torch.dtype = torch.bfloat16
     rotary_ratio = 1.0
     is_neox = True
@@ -61,8 +61,8 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     device = "cuda"
     inputs = {}
 
-    for num_tokens, (num_q_heads, num_kv_heads) in product(
-        num_tokens_list, num_heads_pair
+    for num_tokens, (num_q_heads, num_kv_heads), head_dim in product(
+        num_tokens_list, num_heads_pair, head_dim_list
     ):
         total_dim = (num_q_heads + 2 * num_kv_heads) * head_dim
         qkv = torch.empty(
@@ -84,6 +84,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 "q_heads": num_q_heads,
                 "kv_heads": num_kv_heads,
                 "num_tokens": num_tokens,
+                "head_dim": head_dim,
             }
         )
         inputs[config_key] = (
