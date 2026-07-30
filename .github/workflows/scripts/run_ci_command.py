@@ -12,6 +12,7 @@ from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
 COMMAND_RETRY_FAILED = "/ci retry"
+CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 ACTIVE_BUILD_STATES = {
@@ -174,6 +175,9 @@ class GitHubClient:
 
     def list_reviews(self, number: int) -> list[dict[str, Any]]:
         return self._paginate(self._repo_path(f"/pulls/{number}/reviews"))
+
+    def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
+        return self._paginate(self._repo_path(f"/issues/{number}/comments"))
 
     def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
         return self._paginate(
@@ -484,11 +488,89 @@ def add_reaction_safely(
         print(f"Could not add {content} reaction: {error}", file=sys.stderr)
 
 
-def is_already_handled(github: GitHubClient, comment_id: int) -> bool:
+def command_comment_marker(comment_id: int) -> str:
+    return f"<!-- vllm-ci-command:{comment_id} -->"
+
+
+def has_bot_comment_marker(
+    github: GitHubClient,
+    issue_number: int,
+    marker: str,
+) -> bool:
     return any(
+        marker in str(comment.get("body", ""))
+        and (comment.get("user") or {}).get("login") == "github-actions[bot]"
+        for comment in github.list_issue_comments(issue_number)
+    )
+
+
+def is_already_handled(
+    github: GitHubClient,
+    issue_number: int,
+    comment_id: int,
+) -> bool:
+    terminal_reaction = any(
         reaction.get("content") in {"rocket", "-1"}
         and (reaction.get("user") or {}).get("login") == "github-actions[bot]"
         for reaction in github.list_reactions(comment_id)
+    )
+    if terminal_reaction:
+        return True
+    return has_bot_comment_marker(
+        github,
+        issue_number,
+        command_comment_marker(comment_id),
+    )
+
+
+def notify_authorized(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+    trusted_users_value: str = "",
+) -> None:
+    pr = event["pull_request"]
+    if pr["state"] != "open" or pr["draft"]:
+        return
+
+    trusted_users = parse_trusted_users(trusted_users_value)
+    author = pr["user"]["login"]
+    author_permission = github.get_permission(author)
+    if (
+        is_trusted_permission(author_permission)
+        or author.casefold() in trusted_users
+        or has_bot_comment_marker(
+            github,
+            pr["number"],
+            CI_AUTHORIZED_COMMENT_MARKER,
+        )
+    ):
+        return
+
+    if "label" in event:
+        if (
+            event.get("action") != "labeled"
+            or event["label"]["name"] not in READY_LABELS
+            or has_trusted_approval(github, pr["number"], trusted_users)
+        ):
+            return
+    elif "review" in event:
+        if (
+            event.get("action") != "submitted"
+            or str(event["review"].get("state", "")).casefold() != "approved"
+            or has_ready_label(pr)
+            or not has_trusted_approval(github, pr["number"], trusted_users)
+        ):
+            return
+    else:
+        return
+
+    github.add_comment(
+        pr["number"],
+        (
+            f"@{author}, CI is now available for this PR. Comment `/ci run` "
+            "to run full CI or `/ci retry` to retry failed jobs.\n\n"
+            f"{CI_AUTHORIZED_COMMENT_MARKER}"
+        ),
     )
 
 
@@ -652,7 +734,7 @@ def run(
     comment_id = event["comment"]["id"]
     actor = event["comment"]["user"]["login"]
 
-    if is_already_handled(github, comment_id):
+    if is_already_handled(github, issue_number, comment_id):
         print(f"Comment {comment_id} was already handled.")
         return
     add_reaction_safely(github, comment_id, "eyes")
@@ -661,7 +743,11 @@ def run(
         pr = github.get_pr(issue_number)
         permission = github.get_permission(actor)
         if pr["state"] != "open":
-            github.add_comment(issue_number, "CI commands require an open PR.")
+            github.add_comment(
+                issue_number,
+                "CI commands require an open PR.\n\n"
+                f"{command_comment_marker(comment_id)}",
+            )
             return
 
         trusted_users = parse_trusted_users(trusted_users_value)
@@ -685,8 +771,10 @@ def run(
             trusted_users=trusted_users,
         )
         if not allowed:
-            add_reaction_safely(github, comment_id, "-1")
-            github.add_comment(issue_number, f"@{actor}, {reason}")
+            github.add_comment(
+                issue_number,
+                f"@{actor}, {reason}\n\n{command_comment_marker(comment_id)}",
+            )
             return
 
         print(f"Authorized @{actor}: {reason}")
@@ -718,13 +806,37 @@ def main() -> None:
     with open(event_path, encoding="utf-8") as event_file:
         event = json.load(event_file)
 
-    if not parse_command(event["comment"]["body"]):
-        return
-
     github = GitHubClient(
         os.environ.get("GH_TOKEN", ""),
         os.environ["GITHUB_REPOSITORY"],
     )
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "issue_comment")
+    if event_name == "pull_request_target":
+        notify_authorized(
+            event,
+            github,
+            os.environ.get("CI_TRUSTED_USERS", ""),
+        )
+        return
+    if event_name == "workflow_run":
+        pull_requests = event["workflow_run"].get("pull_requests") or []
+        if not pull_requests:
+            return
+        pr = github.get_pr(int(pull_requests[0]["number"]))
+        notify_authorized(
+            {
+                "action": "submitted",
+                "pull_request": pr,
+                "review": {"state": "approved"},
+            },
+            github,
+            os.environ.get("CI_TRUSTED_USERS", ""),
+        )
+        return
+
+    if not parse_command(event["comment"]["body"]):
+        return
+
     buildkite = BuildkiteClient(
         os.environ.get("BUILDKITE_API_TOKEN", ""),
         os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
