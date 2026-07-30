@@ -13,7 +13,7 @@ import psutil
 import torch
 
 from vllm import envs
-from vllm.config import CompilationMode, VllmConfig
+from vllm.config import CompilationMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import (
@@ -31,6 +31,31 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
+
+
+def _get_cpushm_dist_ident(
+    parallel_config: ParallelConfig,
+    distributed_init_method: str,
+) -> str:
+    # Keep multi-node DP on the torch.distributed fallback path. The CPU SHM
+    # fastpath is only expected to work for single-node groups.
+    if (
+        parallel_config.data_parallel_size > 1
+        and parallel_config.nnodes == 1
+        and not parallel_config.enable_elastic_ep
+        and parallel_config.distributed_executor_backend != "external_launcher"
+    ):
+        dp_port = (
+            parallel_config._data_parallel_master_port_list[-1]
+            if parallel_config._data_parallel_master_port_list
+            else parallel_config.data_parallel_master_port
+        )
+        return f"{parallel_config.data_parallel_master_ip}:{dp_port}"
+
+    if distributed_init_method.startswith("file://"):
+        return os.path.basename(distributed_init_method.removeprefix("file://"))
+
+    return distributed_init_method.rsplit(":", maxsplit=1)[-1]
 
 
 class CPUWorker(Worker):
@@ -131,11 +156,10 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        init_method = self.distributed_init_method
-        os.environ["VLLM_DIST_IDENT"] = (
-            os.path.basename(init_method.removeprefix("file://"))
-            if init_method.startswith("file://")
-            else init_method.split(":")[-1]
+        # Note: unique identifier for creating allreduce shared memory.
+        os.environ["VLLM_DIST_IDENT"] = _get_cpushm_dist_ident(
+            self.parallel_config,
+            self.distributed_init_method,
         )
         # Initialize the distributed environment.
         init_worker_distributed_environment(

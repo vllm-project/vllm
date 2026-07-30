@@ -1367,8 +1367,13 @@ class FusedMoEKernelModularImpl:
             )
         )
 
+        # Ragged CPU dispatch makes the local/global shape equality data-dependent.
         use_output_alias = (
-            not fused_out_is_specialized
+            (
+                not current_platform.is_cpu()
+                or self.prepare_finalize.num_dispatchers() == 1
+            )
+            and not fused_out_is_specialized
             and output_alias is not None
             and output_alias.shape == fused_out.shape
             and output_alias.dtype == fused_out.dtype
