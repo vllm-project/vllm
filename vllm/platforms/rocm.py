@@ -185,20 +185,49 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
+def _gfx_arch_from_kfd_target_version(target_version: int) -> str:
+    major = target_version // 10000
+    minor = (target_version // 100) % 100
+    stepping = target_version % 100
+    return f"gfx{major}{minor}{stepping:x}"
+
+
+def _query_gcn_arch_from_kfd_topology() -> str:
+    """Query GCN arch from KFD topology without initializing HIP/CUDA."""
+    topology_root = "/sys/class/kfd/kfd/topology/nodes"
+    for node in os.scandir(topology_root):
+        properties_path = os.path.join(node.path, "properties")
+        properties: dict[str, str] = {}
+        with open(properties_path, encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition(" ")
+                properties[key] = value.strip()
+        target_version = int(properties.get("gfx_target_version", "0"))
+        if int(properties.get("vendor_id", "0")) == 0x1002 and target_version > 0:
+            return _gfx_arch_from_kfd_target_version(target_version)
+    raise RuntimeError("KFD topology did not return valid GCN arch")
+
+
 def _get_gcn_arch() -> str:
-    """
-    Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
+    """Get GCN arch without CUDA init, falling back to torch.cuda.
+
     Called once at module level; result stored in _GCN_ARCH.
     """
     try:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        logger.warning_once(
-            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
-            "This will initialize CUDA and may cause "
-            "issues if CUDA_VISIBLE_DEVICES is not set yet."
-        )
+
+    try:
+        return _query_gcn_arch_from_kfd_topology()
+    except Exception as e:
+        logger.debug("Failed to get GCN arch via KFD topology: %s", e)
+
+    logger.warning_once(
+        "Failed to get GCN arch via amdsmi or KFD topology, falling back "
+        "to torch.cuda. This will initialize CUDA and may cause issues if "
+        "CUDA_VISIBLE_DEVICES is not set yet."
+    )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 

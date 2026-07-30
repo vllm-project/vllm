@@ -107,6 +107,32 @@ def cuda_platform_plugin() -> str | None:
     return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
 
+def _kfd_topology_has_amd_gpu(
+    topology_root: str = "/sys/class/kfd/kfd/topology/nodes",
+) -> bool:
+    """Return True if KFD topology exposes at least one AMD GPU node.
+
+    This does not initialize HIP/CUDA and is a useful fallback when amdsmi
+    cannot enumerate GPUs after ROCm runtime libraries are loaded.
+    """
+    try:
+        for node in os.scandir(topology_root):
+            properties_path = os.path.join(node.path, "properties")
+            properties: dict[str, str] = {}
+            with open(properties_path, encoding="utf-8") as f:
+                for line in f:
+                    key, _, value = line.partition(" ")
+                    properties[key] = value.strip()
+            if (
+                int(properties.get("vendor_id", "0")) == 0x1002
+                and int(properties.get("gfx_target_version", "0")) > 0
+            ):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 def rocm_platform_plugin() -> str | None:
     is_rocm = False
     logger.debug("Checking if ROCm platform is available.")
@@ -124,6 +150,10 @@ def rocm_platform_plugin() -> str | None:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
+
+    if not is_rocm and _kfd_topology_has_amd_gpu():
+        is_rocm = True
+        logger.debug("Confirmed ROCm platform via KFD topology.")
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
