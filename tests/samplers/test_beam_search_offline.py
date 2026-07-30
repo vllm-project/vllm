@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import torch
+
 from vllm import CompletionOutput, RequestOutput
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
-from vllm.sampling_params import BeamSearchParams
+from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
+from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 
 class _Tokenizer:
@@ -70,3 +74,68 @@ def test_offline_beam_search_disables_incremental_detokenization() -> None:
 
     assert serving.captured_params, "expected the engine to be invoked at least once"
     assert all(not p.detokenize for p in serving.captured_params)
+
+
+_VOCAB_SIZE = 64
+
+
+class _Grammar:
+    """Grammar stub that allows a fixed set of token IDs and never terminates."""
+
+    allowed_token_ids = (3, 7)
+
+    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        return True
+
+    def is_terminated(self) -> bool:
+        return False
+
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        bitmask[batch_index].zero_()
+        for token_id in self.allowed_token_ids:
+            bitmask[batch_index][token_id // 32] |= 1 << (token_id % 32)
+
+
+class _Backend:
+    def compile_grammar(self, request_type, grammar_spec) -> _Grammar:
+        return _Grammar()
+
+
+class _ModelConfig:
+    @staticmethod
+    def get_vocab_size() -> int:
+        return _VOCAB_SIZE
+
+
+def test_structured_output_beam_params_disable_detokenization() -> None:
+    """Same as above for the structured-output path, which builds its own
+    per-beam SamplingParams instead of reusing the base ones."""
+    serving = _FakeOffline()
+    serving.model_config = _ModelConfig()
+    base_params = SamplingParams(
+        logprobs=4,
+        max_tokens=1,
+        temperature=0.0,
+        detokenize=False,
+        skip_clone=True,
+    )
+    beams = [
+        BeamSearchSequence(
+            orig_prompt={"type": "token", "prompt": "prompt", "prompt_token_ids": [1]},
+            tokens=[1, 3],
+            logprobs=[],
+        )
+        for _ in range(2)
+    ]
+
+    built = serving._build_beam_sampling_params(
+        beams,
+        base_params,
+        _Backend(),
+        (StructuredOutputOptions.JSON, "{}"),
+        torch.zeros(1, _VOCAB_SIZE // 32, dtype=torch.int32),
+    )
+
+    assert len(built) == len(beams)
+    assert all(entry is not None for entry in built)
+    assert all(not entry[0].detokenize for entry in built)
