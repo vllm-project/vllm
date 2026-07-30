@@ -10,8 +10,8 @@ from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
     ModelRunnerOutput,
-    SamplingMaskLists,
     PoolerOutput,
+    SamplingMaskLists,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
