@@ -89,7 +89,7 @@ def test_hisparse_memory_usage_keeps_indexer_source_on_host():
     )
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
 
-    assert kv_cache_utils._hisparse_gpu_host_usage_split(config, [group]) == (50, 350)
+    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == 50
 
 
 @pytest.mark.parametrize("block_size", [64, 128, 256])
