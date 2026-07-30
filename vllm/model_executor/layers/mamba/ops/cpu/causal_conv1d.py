@@ -15,11 +15,10 @@ def resolve_cpu_conv_weights(
     conv: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Return authoritative plain weights and an optional packed native weight."""
-    plain_weight = getattr(conv, "_cpu_unpacked_conv_weight", None)
-    if plain_weight is None:
-        plain_weight = conv.weight.flatten(start_dim=1)
-        return plain_weight, None
-    return plain_weight, conv.weight
+    original_weight = conv.original_weight
+    if original_weight is None:
+        original_weight = conv.weight.flatten(start_dim=1)
+    return original_weight, conv.packed_weight
 
 
 def causal_conv1d_fn_cpu(
@@ -32,7 +31,8 @@ def causal_conv1d_fn_cpu(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
-    native_weight: torch.Tensor | None = None,
+    packed_weight: torch.Tensor | None = None,
+    use_native_conv: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_fwd."""
@@ -41,10 +41,10 @@ def causal_conv1d_fn_cpu(
     elif isinstance(activation, bool):
         activation = None
 
-    if native_weight is not None and _can_use_native_fwd(x, conv_states):
+    if use_native_conv and packed_weight is not None and _can_use_native_fwd(x):
         return ops.causal_conv1d_fwd_cpu(
             x=x,
-            weight=native_weight,
+            weight=packed_weight,
             bias=bias,
             conv_states=conv_states,
             query_start_loc=query_start_loc,
@@ -120,34 +120,31 @@ def causal_conv1d_update_cpu(
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
-    native_weight: torch.Tensor | None = None,
+    packed_weight: torch.Tensor | None = None,
+    use_native_conv: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_update."""
     if isinstance(activation, bool):
         activation = "silu" if activation else None
 
-    if (
-        native_weight is not None
-        and num_accepted_tokens is None
-        and _can_use_native_conv(conv_state)
-    ):
+    if use_native_conv and packed_weight is not None and num_accepted_tokens is None:
         native_x = x
     else:
         native_x = _prepare_native_update_input(
             x=x,
             weight=weight,
-            conv_state=conv_state,
             conv_state_indices=conv_state_indices,
             query_start_loc=query_start_loc,
             num_accepted_tokens=num_accepted_tokens,
-            native_weight=native_weight,
+            packed_weight=packed_weight,
+            use_native_conv=use_native_conv,
         )
     if native_x is not None:
         out = ops.causal_conv1d_update_cpu(
             x=native_x,
             conv_states=conv_state,
-            weight=native_weight,
+            weight=packed_weight,
             bias=bias,
             silu_activation=activation in ("silu", "swish"),
             conv_state_indices=conv_state_indices,
@@ -196,34 +193,20 @@ def causal_conv1d_update_cpu(
     )
 
 
-def _can_use_native_conv(conv_state: torch.Tensor) -> bool:
-    return (
-        torch.cpu._is_amx_tile_supported()
-        and conv_state.dim() == 3
-        and conv_state.stride(-2) == 1
-        and conv_state.stride(-1) == conv_state.size(1)
-    )
-
-
-def _can_use_native_fwd(x: torch.Tensor, conv_state: torch.Tensor) -> bool:
-    return (
-        _can_use_native_conv(conv_state)
-        and x.dim() == 2
-        and x.stride(-2) == 1
-        and x.stride(-1) == x.size(-2)
-    )
+def _can_use_native_fwd(x: torch.Tensor) -> bool:
+    return x.dim() == 2 and x.stride(-2) == 1 and x.stride(-1) == x.size(-2)
 
 
 def _prepare_native_update_input(
     x: torch.Tensor,
     weight: torch.Tensor,
-    conv_state: torch.Tensor,
     conv_state_indices: torch.Tensor | None,
     query_start_loc: torch.Tensor | None,
     num_accepted_tokens: torch.Tensor | None,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
+    use_native_conv: bool,
 ) -> torch.Tensor | None:
-    if native_weight is None or not _can_use_native_conv(conv_state):
+    if not use_native_conv or packed_weight is None:
         return None
     if num_accepted_tokens is None:
         return x

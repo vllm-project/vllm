@@ -430,6 +430,41 @@ def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor
     return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
 
 
+@pytest.mark.parametrize("amx_supported", [False, True])
+@torch.inference_mode()
+def test_cpu_causal_conv_weight_dispatch_registers_weight_views(
+    monkeypatch: pytest.MonkeyPatch,
+    amx_supported: bool,
+) -> None:
+    from vllm.model_executor.layers import utils as layer_utils
+
+    layer = types.SimpleNamespace(
+        weight=torch.nn.Parameter(
+            torch.arange(8, dtype=torch.bfloat16).view(2, 1, CONV_KERNEL),
+            requires_grad=False,
+        )
+    )
+    original_weight = layer.weight.detach().clone().flatten(start_dim=1)
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: amx_supported)
+    monkeypatch.setattr(
+        layer_utils.ops,
+        "causal_conv1d_weight_pack",
+        lambda weight: weight + 1,
+    )
+    layer_utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+    if not amx_supported:
+        assert layer.original_weight is None
+        assert layer.packed_weight is None
+        torch.testing.assert_close(layer.weight, original_weight.view_as(layer.weight))
+        return
+
+    torch.testing.assert_close(layer.original_weight, original_weight)
+    torch.testing.assert_close(layer.packed_weight, original_weight + 1)
+    torch.testing.assert_close(layer.weight, original_weight + 1)
+
+
 @torch.inference_mode()
 def test_spec_aware_mixed_routing_preserves_token_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -471,7 +506,7 @@ def test_spec_aware_mixed_routing_preserves_token_order(
         core_attn_out=core_attn_out,
         width=CONV_KERNEL,
         conv_weight=torch.empty(0),
-        native_weight=None,
+        packed_weight=None,
     )
 
     expected_inputs = (mixed_qkv, b, a)
@@ -502,12 +537,14 @@ def test_spec_aware_nonspec_materializes_state_indices(
     )
 
     recorded_indices = None
-    forwarded_native_weight = None
+    forwarded_packed_weight = None
+    forwarded_use_native_conv = None
 
     def causal_conv1d_fn_cpu(**kwargs):
-        nonlocal recorded_indices, forwarded_native_weight
+        nonlocal recorded_indices, forwarded_packed_weight, forwarded_use_native_conv
         recorded_indices = kwargs["cache_indices"]
-        forwarded_native_weight = kwargs["native_weight"]
+        forwarded_packed_weight = kwargs["packed_weight"]
+        forwarded_use_native_conv = kwargs["use_native_conv"]
         return kwargs["x"]
 
     def fused_gdn_gating_cpu(**kwargs):
@@ -517,7 +554,6 @@ def test_spec_aware_nonspec_materializes_state_indices(
         out = torch.zeros(1, 4, 1, 1)
         return out, kwargs["initial_state"]
 
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(gdn_attention, "causal_conv1d_fn_cpu", causal_conv1d_fn_cpu)
     monkeypatch.setattr(gdn_attention.ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu)
@@ -529,7 +565,11 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
     layer = types.SimpleNamespace(
         activation="silu",
-        conv1d=types.SimpleNamespace(weight=torch.empty(1, CONV_KERNEL), bias=None),
+        conv1d=types.SimpleNamespace(
+            weight=torch.empty(1, CONV_KERNEL),
+            bias=None,
+        ),
+        use_native_conv=True,
         A_log=torch.empty(0),
         dt_bias=torch.empty(0),
         rearrange_mixed_qkv=lambda x: (
@@ -549,12 +589,13 @@ def test_spec_aware_nonspec_materializes_state_indices(
         ssm_state=torch.zeros(8, 1, 1, 1),
         width=4,
         conv_weight=layer.conv1d.weight,
-        native_weight=layer.conv1d.weight,
+        packed_weight=layer.conv1d.weight,
     )
 
     assert recorded_indices is not None
     assert recorded_indices.is_contiguous()
-    assert forwarded_native_weight is layer.conv1d.weight
+    assert forwarded_packed_weight is layer.conv1d.weight
+    assert forwarded_use_native_conv is True
     torch.testing.assert_close(
         recorded_indices, torch.tensor([0, 4], dtype=torch.int32)
     )
@@ -578,22 +619,24 @@ def test_spec_forward_prepares_native_conv_metadata(
     forwarded_counts = None
     forwarded_x = None
     forwarded_query_start_loc = None
-    forwarded_native_weight = None
+    forwarded_packed_weight = None
+    forwarded_use_native_conv = None
 
     def causal_conv1d_update_cpu(**kwargs):
         nonlocal forwarded_counts
         nonlocal forwarded_indices
-        nonlocal forwarded_native_weight
+        nonlocal forwarded_packed_weight
         nonlocal forwarded_query_start_loc
+        nonlocal forwarded_use_native_conv
         nonlocal forwarded_x
         forwarded_indices = kwargs["conv_state_indices"]
         forwarded_counts = kwargs["num_accepted_tokens"]
         forwarded_x = kwargs["x"]
         forwarded_query_start_loc = kwargs["query_start_loc"]
-        forwarded_native_weight = kwargs["native_weight"]
+        forwarded_packed_weight = kwargs["packed_weight"]
+        forwarded_use_native_conv = kwargs["use_native_conv"]
         return kwargs["x"]
 
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
@@ -607,6 +650,7 @@ def test_spec_forward_prepares_native_conv_metadata(
     layer = types.SimpleNamespace(
         activation="silu",
         conv1d=types.SimpleNamespace(weight=torch.empty(1, CONV_KERNEL), bias=None),
+        use_native_conv=True,
         A_log=None,
         dt_bias=None,
         rearrange_mixed_qkv=lambda x: (x.unsqueeze(0),) * 3,
@@ -620,7 +664,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         conv_buf=torch.empty(0),
         ssm_state=torch.empty(0),
         conv_weight=layer.conv1d.weight,
-        native_weight=layer.conv1d.weight,
+        packed_weight=layer.conv1d.weight,
     )
 
     expected = (
@@ -638,7 +682,8 @@ def test_spec_forward_prepares_native_conv_metadata(
     torch.testing.assert_close(
         forwarded_query_start_loc, torch.tensor([0, 4, 8], dtype=torch.int32)
     )
-    assert forwarded_native_weight is layer.conv1d.weight
+    assert forwarded_packed_weight is layer.conv1d.weight
+    assert forwarded_use_native_conv is True
 
 
 @torch.inference_mode()
@@ -651,7 +696,7 @@ def test_causal_conv1d_update_cpu_dispatches_native(
     x = torch.zeros(8, dim, dtype=torch.bfloat16)
     conv_state = torch.zeros(2, 6, dim, dtype=torch.bfloat16).transpose(1, 2)
     weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
-    native_weight = torch.ones_like(weight)
+    packed_weight = torch.ones_like(weight)
     indices = torch.tensor([0, 1], dtype=torch.int32)
     query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     accepted = torch.tensor([1, 4], dtype=torch.int32)
@@ -663,7 +708,7 @@ def test_causal_conv1d_update_cpu_dispatches_native(
         return expected
 
     monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu", native_update)
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
     actual = causal_conv.causal_conv1d_update_cpu(
         x=x,
         conv_state=conv_state,
@@ -672,13 +717,14 @@ def test_causal_conv1d_update_cpu_dispatches_native(
         conv_state_indices=indices,
         query_start_loc=query_start_loc,
         num_accepted_tokens=accepted,
-        native_weight=native_weight,
+        packed_weight=packed_weight,
+        use_native_conv=True,
     )
 
     assert actual.shape == x.shape
     torch.testing.assert_close(actual, expected.view_as(x))
     assert forwarded["x"].shape == (2, 4, dim)
-    assert forwarded["weight"] is native_weight
+    assert forwarded["weight"] is packed_weight
     assert forwarded["num_accepted_tokens"] is accepted
     assert forwarded["is_vnni"] is True
     assert forwarded["silu_activation"] is True
@@ -720,7 +766,6 @@ def test_causal_conv1d_update_cpu_ragged_fallback_matches_python(
         raise AssertionError("heterogeneous queries must use the ragged fallback")
 
     monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu", fail_native_update)
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     actual = causal_conv.causal_conv1d_update_cpu(
         x=x,
         conv_state=conv_state,
@@ -731,7 +776,8 @@ def test_causal_conv1d_update_cpu_ragged_fallback_matches_python(
         query_start_loc=query_start_loc,
         pad_slot_id=-1,
         num_accepted_tokens=accepted,
-        native_weight=weight,
+        packed_weight=weight,
+        use_native_conv=True,
     )
 
     torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
@@ -746,7 +792,7 @@ def test_causal_conv1d_fn_cpu_dispatches_native(
 
     x = torch.zeros(4, 32, dtype=torch.bfloat16).transpose(0, 1)
     weight = torch.zeros(32, CONV_KERNEL, dtype=torch.bfloat16)
-    native_weight = torch.ones_like(weight)
+    packed_weight = torch.ones_like(weight)
     conv_states = torch.zeros(2, CONV_KERNEL - 1, 32, dtype=torch.bfloat16).transpose(
         1, 2
     )
@@ -761,7 +807,7 @@ def test_causal_conv1d_fn_cpu_dispatches_native(
         return expected
 
     monkeypatch.setattr(causal_conv.ops, "causal_conv1d_fwd_cpu", native_fwd)
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
     actual = causal_conv.causal_conv1d_fn_cpu(
         x=x,
         weight=weight,
@@ -771,11 +817,12 @@ def test_causal_conv1d_fn_cpu_dispatches_native(
         cache_indices=cache_indices,
         has_initial_state=has_initial_state,
         activation="silu",
-        native_weight=native_weight,
+        packed_weight=packed_weight,
+        use_native_conv=True,
     )
 
     assert actual is expected
-    assert forwarded["weight"] is native_weight
+    assert forwarded["weight"] is packed_weight
     assert forwarded["query_start_loc"] is query_start_loc
     assert forwarded["cache_indices"] is cache_indices
     assert forwarded["has_initial_state"] is has_initial_state

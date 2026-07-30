@@ -62,7 +62,7 @@ def cpu_gdn_attention_core(
         state_len = conv_cache.size(-2)
 
     spec_decode_cache = state_len > (width - 1)
-    conv_weight, native_weight = resolve_cpu_conv_weights(layer.conv1d)
+    conv_weight, packed_weight = resolve_cpu_conv_weights(layer.conv1d)
 
     if not spec_decode_cache:
         # Conv-state is exactly (..., dim, width - 1).
@@ -74,7 +74,7 @@ def cpu_gdn_attention_core(
             a,
             core_attn_out,
             conv_weight,
-            native_weight,
+            packed_weight,
         )
         return
 
@@ -88,7 +88,7 @@ def cpu_gdn_attention_core(
         core_attn_out,
         width,
         conv_weight,
-        native_weight,
+        packed_weight,
     )
 
 
@@ -103,7 +103,7 @@ def _cpu_gdn_attention_nonspec(
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
     conv_weight: torch.Tensor,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
 ) -> None:
     assert (
         attn_metadata_i.spec_sequence_masks is None
@@ -144,7 +144,8 @@ def _cpu_gdn_attention_nonspec(
             bias=layer.conv1d.bias,
             activation=layer.activation,
             conv_state_indices=decode_state_indices,
-            native_weight=native_weight,
+            packed_weight=packed_weight,
+            use_native_conv=layer.use_native_conv,
         )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
@@ -194,7 +195,8 @@ def _cpu_gdn_attention_nonspec(
             cache_indices=prefill_state_indices,
             has_initial_state=prefill_has_initial_state,
             activation=layer.activation,
-            native_weight=native_weight,
+            packed_weight=packed_weight,
+            use_native_conv=layer.use_native_conv,
         ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
@@ -255,7 +257,7 @@ def _cpu_gdn_attention_spec_aware(
     core_attn_out: torch.Tensor,
     width: int,
     conv_weight: torch.Tensor,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
 ) -> None:
     spec_sequence_masks = attn_metadata_i.spec_sequence_masks
     conv_buf = _conv_buffer_view(layer)  # (num_slots, dim, state_len)
@@ -277,7 +279,7 @@ def _cpu_gdn_attention_spec_aware(
             ssm_state,
             width,
             conv_weight,
-            native_weight,
+            packed_weight,
         )
         return
 
@@ -308,7 +310,7 @@ def _cpu_gdn_attention_spec_aware(
         conv_buf,
         ssm_state,
         conv_weight,
-        native_weight,
+        packed_weight,
     )
 
     # Process the (rare) non-spec subset (prefill) tokens, if any.
@@ -327,7 +329,7 @@ def _cpu_gdn_attention_spec_aware(
             ssm_state,
             width,
             conv_weight,
-            native_weight,
+            packed_weight,
         )
 
     # Scatter outputs back to their token positions.
@@ -348,7 +350,7 @@ def _spec_forward(
     conv_buf: torch.Tensor,
     ssm_state: torch.Tensor,
     conv_weight: torch.Tensor,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
 ) -> torch.Tensor:
     """Run the GDN core for the multi-query (speculative) tokens.
 
@@ -376,7 +378,8 @@ def _spec_forward(
         num_accepted_tokens=num_accepted[:num_spec_decodes]
         .to("cpu", torch.int32)
         .contiguous(),
-        native_weight=native_weight,
+        packed_weight=packed_weight,
+        use_native_conv=layer.use_native_conv,
     )
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
@@ -418,7 +421,7 @@ def _spec_aware_nonspec(
     ssm_state: torch.Tensor,
     width: int,
     conv_weight: torch.Tensor,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
 ) -> None:
     """Non-spec prefill/decode with a wide conv buffer."""
     state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
@@ -444,7 +447,8 @@ def _spec_aware_nonspec(
             bias=layer.conv1d.bias,
             activation=layer.activation,
             conv_state_indices=decode_state_indices,
-            native_weight=native_weight,
+            packed_weight=packed_weight,
+            use_native_conv=layer.use_native_conv,
         )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
@@ -490,7 +494,8 @@ def _spec_aware_nonspec(
             cache_indices=prefill_state_indices,
             has_initial_state=prefill_has_initial_state,
             activation=layer.activation,
-            native_weight=native_weight,
+            packed_weight=packed_weight,
+            use_native_conv=layer.use_native_conv,
         ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
@@ -527,7 +532,7 @@ def _spec_aware_nonspec_subset(
     ssm_state: torch.Tensor,
     width: int,
     conv_weight: torch.Tensor,
-    native_weight: torch.Tensor | None,
+    packed_weight: torch.Tensor | None,
 ) -> torch.Tensor:
     """Process non-spec (prefill) tokens that coexist with spec sequences.
 
@@ -549,7 +554,8 @@ def _spec_aware_nonspec_subset(
         cache_indices=prefill_state_indices,
         has_initial_state=has_initial_state,
         activation=layer.activation,
-        native_weight=native_weight,
+        packed_weight=packed_weight,
+        use_native_conv=layer.use_native_conv,
     ).transpose(0, 1)
 
     query, key, value = layer.rearrange_mixed_qkv(conv_out)
