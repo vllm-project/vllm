@@ -35,16 +35,10 @@ def _get_deep_gemm_impl() -> _PrenormGemmImpl:
     return tf32_hc_prenorm_gemm
 
 
-def _run_cutedsl(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
-    n_splits: int,
-) -> None:
+def _get_cutedsl_gemm_impl() -> _PrenormGemmImpl:
     from vllm.model_executor.kernels.mhc.cutedsl import run_hc_prenorm_gemm
 
-    run_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
+    return run_hc_prenorm_gemm
 
 
 def _tilelang_hc_prenorm_gemm(
@@ -153,7 +147,7 @@ class HCPrenormGemm:
             self._impl = _get_deep_gemm_impl()
         elif _can_use_cutedsl_hc_prenorm_gemm(x, fn, preferred_n_splits):
             self.n_splits = preferred_n_splits
-            self._impl = _run_cutedsl
+            self._impl = _get_cutedsl_gemm_impl()
         else:
             self.n_splits = 1
             self._impl = _get_tilelang_impl(hidden_size, hc_mult)
