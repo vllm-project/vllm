@@ -29,9 +29,12 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+logger = init_logger(__name__)
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -105,6 +108,12 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
+        if self.use_adaptive_verification and model.model.confidence_head is None:
+            logger.warning_once(
+                "DSpark checkpoint has no confidence head; disabling adaptive "
+                "verification and using fixed-length verification."
+            )
+            self.use_adaptive_verification = False
         return model
 
     def _sample_logits(

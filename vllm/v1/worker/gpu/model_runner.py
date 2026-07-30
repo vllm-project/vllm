@@ -117,6 +117,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -522,16 +523,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             self.speculative_config is not None
             and self.speculative_config.use_adaptive_verification
+            # The checkpoint may lack a confidence head (the speculator clears
+            # its flag at load time).
+            and getattr(self.speculator, "use_adaptive_verification", False)
         ):
-            self.adaptive_verification = AdaptiveVerificationManager(
-                self.req_states,
-                self.input_buffers.query_start_loc,
-                self.model_state.num_new_sampled_tokens_per_step,
-                self.speculative_config.adaptive_verification_ema_alpha,
-                max_total_logits=max_chunk_logits(self.vocab_size),
-                count_rejected_drafts=not self.scheduler_config.async_scheduling,
-            )
-            self.step_timing.consumer = self.adaptive_verification.consume_step_timing
+            if isinstance(self.model_state, DefaultModelState):
+                self.adaptive_verification = AdaptiveVerificationManager(
+                    self.req_states,
+                    self.input_buffers.query_start_loc,
+                    self.model_state.num_new_sampled_tokens_per_step,
+                    self.speculative_config.adaptive_verification_ema_alpha,
+                    max_total_logits=max_chunk_logits(self.vocab_size),
+                    count_rejected_drafts=not self.scheduler_config.async_scheduling,
+                )
+                self.step_timing.consumer = (
+                    self.adaptive_verification.consume_step_timing
+                )
+            else:
+                # Hybrid model states derive per-request structure from the
+                # scheduled counts, which are placeholders under trimming.
+                logger.warning_once(
+                    "DSpark adaptive verification is not supported with %s; "
+                    "using fixed-length verification.",
+                    type(self.model_state).__name__,
+                )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
