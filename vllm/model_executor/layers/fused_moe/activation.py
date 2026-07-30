@@ -22,6 +22,7 @@ class MoEActivation(Enum):
     # expects the *packed* layout ([all gates; all ups]), as produced by a
     # MergedColumnParallelLinear gate_up_proj (e.g. MiniMax-M3).
     SWIGLUOAI = "swigluoai"
+    SITU = "situ"
     SWIGLUOAI_UNINTERLEAVE = "swigluoai_uninterleave"
     SWIGLUSTEP = "swiglustep"
 
@@ -77,6 +78,7 @@ _CUSTOM_OP_NAMES: dict[MoEActivation, str] = {
     MoEActivation.SILU: "silu_and_mul",
     MoEActivation.GELU: "gelu_and_mul",
     MoEActivation.GELU_TANH: "gelu_tanh_and_mul",
+    MoEActivation.SITU: "situ_and_mul",
     MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
     MoEActivation.SWIGLUOAI_UNINTERLEAVE: "silu_and_mul_with_clamp",
     MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
@@ -133,6 +135,8 @@ def apply_moe_activation(
     beta: float = 0.0,
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function.
 
@@ -163,6 +167,25 @@ def apply_moe_activation(
         torch.ops._C.gelu_and_mul(output, input)
     elif activation == MoEActivation.GELU_TANH:
         torch.ops._C.gelu_tanh_and_mul(output, input)
+    elif activation == MoEActivation.SITU:
+        # Fused CUDA kernel: writes straight to `output`, no fp32 temporaries.
+        # (The pure-torch fallback below upcast both halves to fp32 and
+        # allocated ~8 temporaries per call, blowing up MoE memory.)
+        # Both betas come from FusedMoEConfig; a missing beta means the caller
+        # bypassed the config plumbing, so fail rather than silently use 1.0.
+        # linear_beta is genuinely optional: <= 0 signals "unset" to the kernel
+        # (up passed through), matching SituAndMul(linear_beta=None).
+        assert activation_situ_beta is not None, (
+            "SITU requires activation_situ_beta from FusedMoEConfig"
+        )
+        torch.ops._C.situ_and_mul(
+            output,
+            input,
+            activation_situ_beta,
+            -1.0
+            if activation_situ_linear_beta is None
+            else activation_situ_linear_beta,
+        )
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:

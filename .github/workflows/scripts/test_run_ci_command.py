@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import unittest
 from typing import Any
 
@@ -97,15 +98,18 @@ class FakeBuildkite:
     def __init__(
         self,
         build_lists: list[list[dict[str, Any]]] | None = None,
+        failed_job_lists: list[list[dict[str, Any]]] | None = None,
     ) -> None:
         self.build_lists = build_lists or []
         self.created_builds: list[dict[str, Any]] = []
-        self.list_calls: list[tuple[str, tuple[str, str] | None]] = []
+        self.failed_job_lists = failed_job_lists or []
+        self.job_list_calls: list[int] = []
+        self.list_calls: list[tuple[str | None, tuple[str, str] | None]] = []
         self.retry_calls: list[tuple[int, str]] = []
 
     def list_builds(
         self,
-        commit: str,
+        commit: str | None,
         *,
         metadata: tuple[str, str] | None = None,
     ) -> list[dict[str, Any]]:
@@ -127,6 +131,10 @@ class FakeBuildkite:
         self.retry_calls.append((build_number, states))
         return {"retried_jobs_count": 3}
 
+    def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
+        self.job_list_calls.append(build_number)
+        return self.failed_job_lists.pop(0)
+
 
 class FakeTransport:
     def __init__(self, response: Any) -> None:
@@ -135,6 +143,8 @@ class FakeTransport:
 
     def request(self, url: str, **kwargs: Any) -> Any:
         self.calls.append({"url": url, **kwargs})
+        if isinstance(self.response, tuple):
+            return self.response[len(self.calls) - 1]
         return self.response
 
 
@@ -280,6 +290,7 @@ class RunCiCommandTest(unittest.TestCase):
                 "pull_request_base_branch": "main",
                 "pull_request_repository": ("https://github.com/contributor/vllm.git"),
                 "pull_request_labels": ["ready", "v1"],
+                "ignore_pipeline_branch_filters": True,
                 "env": {
                     "VLLM_CI_GITHUB_COMMENT_ID": "99",
                     "VLLM_CI_TRIGGERED_BY": "reviewer",
@@ -342,6 +353,134 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(buildkite.retry_calls, [(123, RETRY_STATES)])
         self.assertIn("Queued 3 failed job", github.comments[0])
 
+    def test_ci_retry_creates_filtered_build_for_new_head(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        source_build = {
+            "commit": "old-commit",
+            "created_at": "2026-07-28T01:00:00Z",
+            "finished_at": "2026-07-28T02:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        buildkite = FakeBuildkite(
+            [[], [source_build]],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "basic-models-test-other-cpu",
+                        "type": "script",
+                    },
+                    {
+                        "state": "failed",
+                        "step_key": "basic-models-test-other-cpu",
+                        "type": "script",
+                    },
+                    {
+                        "state": "timed_out",
+                        "step_key": "distributed-tests-2xh100-2xmi300",
+                        "type": "script",
+                    },
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.job_list_calls, [122])
+        self.assertEqual(len(buildkite.created_builds), 1)
+        payload = buildkite.created_builds[0]
+        self.assertEqual(payload["commit"], "0123456789abcdef")
+        self.assertEqual(payload["message"], "PR #42 /ci retry by @author")
+        self.assertEqual(
+            json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
+            [
+                "basic-models-test-other-cpu",
+                "distributed-tests-2xh100-2xmi300",
+            ],
+        )
+        self.assertEqual(
+            payload["meta_data"]["github-retry-source-build"],
+            "122",
+        )
+        self.assertEqual(
+            payload["meta_data"]["github-retry-source-commit"],
+            "old-commit",
+        )
+        self.assertIn("running 2 failed step", github.comments[0])
+        self.assertIn("Buildkite CI #122", github.comments[0])
+
+    def test_ci_retry_new_head_requires_stable_step_keys(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 122,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/122",
+                    }
+                ],
+            ],
+            [[{"state": "failed", "step_key": None, "type": "script"}]],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("without stable step keys", github.comments[0])
+        self.assertIn("Use `/ci run`", github.comments[0])
+
+    def test_ci_retry_new_head_rejects_incomplete_setup_failure(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 122,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/122",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "image-build",
+                        "type": "script",
+                    }
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("failed during CI setup", github.comments[0])
+        self.assertIn("Use `/ci run`", github.comments[0])
+
     def test_buildkite_retry_uses_retry_failed_jobs_endpoint(self) -> None:
         transport = FakeTransport({"retried_jobs_count": 2})
         client = BuildkiteClient(
@@ -356,6 +495,57 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(call["method"], "PUT")
         self.assertTrue(call["url"].endswith("/123/retry_failed_jobs"))
         self.assertEqual(call["body"], {"states": RETRY_STATES})
+
+    def test_buildkite_list_builds_allows_query_on_builds_endpoint(self) -> None:
+        transport = FakeTransport([])
+        client = BuildkiteClient(
+            "secret",
+            "vllm",
+            "ci",
+            transport=transport,
+        )
+
+        builds = client.list_builds(
+            "current-commit",
+            metadata=("github-pr-number", "42"),
+        )
+
+        self.assertEqual(builds, [])
+        url = transport.calls[0]["url"]
+        self.assertIn("?exclude_jobs=true", url)
+        self.assertIn("commit=current-commit", url)
+        self.assertIn("meta_data%5Bgithub-pr-number%5D=42", url)
+
+    def test_buildkite_failed_jobs_follow_cursor_pagination(self) -> None:
+        next_url = (
+            "https://api.buildkite.com/v2/organizations/vllm/pipelines/ci/"
+            "builds/123/jobs?after=cursor"
+        )
+        transport = FakeTransport(
+            (
+                {
+                    "items": [{"id": "first"}],
+                    "links": {"next": next_url},
+                },
+                {
+                    "items": [{"id": "second"}],
+                    "links": {"next": None},
+                },
+            )
+        )
+        client = BuildkiteClient(
+            "secret",
+            "vllm",
+            "ci",
+            transport=transport,
+        )
+
+        jobs = client.list_failed_jobs(123)
+
+        self.assertEqual(jobs, [{"id": "first"}, {"id": "second"}])
+        self.assertIn("state%5B%5D=failed", transport.calls[0]["url"])
+        self.assertIn("include_retried_jobs=false", transport.calls[0]["url"])
+        self.assertEqual(transport.calls[1]["url"], next_url)
 
 
 if __name__ == "__main__":
