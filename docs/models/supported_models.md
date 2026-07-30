@@ -504,6 +504,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `Apertus1p5ForConditionalGeneration` | Apertus 1.5 | T + I<sup>+</sup> + A<sup>+</sup> | `swiss-ai/Apertus-v1.5-8B`, `swiss-ai/Apertus-v1.5-70B` | ✅︎ | ✅︎ |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |

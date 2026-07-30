@@ -777,6 +777,11 @@ _AUTOMATIC_CONVERTED_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "Apertus1p5ForConditionalGeneration": _HfExamplesInfo(
+        "swiss-ai/Apertus-v1.5-8B",
+        # TODO: Update to the latest released Transformers version.
+        min_transformers_version="5.14",
+    ),
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf",
