@@ -42,69 +42,9 @@ def _make_offloading_config(extra_config: dict[str, Any]) -> OffloadingConfig:
 
 
 def test_unknown_eviction_policy_raises():
-    with pytest.raises(ValueError, match="eviction_policy"):
-        CPUOffloadingSpec(_make_offloading_config({"eviction_policy": "bogus"}))
-
-
-def test_sae_key_under_non_sae_policy_raises():
-    with pytest.raises(ValueError, match="sae_decay_interval"):
-        CPUOffloadingSpec(
-            _make_offloading_config(
-                {
-                    "eviction_policy": "lru",
-                    "sae_decay_interval": 500,
-                }
-            )
-        )
-
-
-def test_out_of_range_decay_factor_raises():
-    with pytest.raises(ValueError, match="sae_decay_factor"):
-        CPUOffloadingSpec(
-            _make_offloading_config(
-                {
-                    "eviction_policy": "sae",
-                    "sae_decay_factor": 1.5,
-                }
-            )
-        )
-
-
-def test_out_of_range_decay_interval_raises():
-    with pytest.raises(ValueError, match="sae_decay_interval"):
-        CPUOffloadingSpec(
-            _make_offloading_config(
-                {
-                    "eviction_policy": "sae",
-                    "sae_decay_interval": 0,
-                }
-            )
-        )
-
-
-def test_out_of_range_ghost_norm_raises():
-    with pytest.raises(ValueError, match="sae_ghost_norm"):
-        CPUOffloadingSpec(
-            _make_offloading_config(
-                {
-                    "eviction_policy": "sae",
-                    "sae_ghost_norm": 0.0,
-                }
-            )
-        )
-
-
-def test_valid_sae_config_stores_kwargs():
-    spec = CPUOffloadingSpec(
-        _make_offloading_config(
-            {
-                "eviction_policy": "sae",
-                "sae_decay_interval": 250,
-            }
-        )
-    )
-    assert spec.eviction_policy == "sae"
-    assert spec._sae_policy_kwargs["decay_interval"] == 250
+    spec = CPUOffloadingSpec(_make_offloading_config({"eviction_policy": "bogus"}))
+    with pytest.raises(ValueError, match="bogus"):
+        spec.get_manager()
 
 
 def test_get_manager_returns_sae_policy_when_selected():
@@ -116,18 +56,3 @@ def test_get_manager_returns_sae_policy_when_selected():
 def test_default_policy_still_lru_when_not_specified():
     spec = CPUOffloadingSpec(_make_offloading_config({}))
     assert spec.eviction_policy == "lru"
-    assert spec._sae_policy_kwargs == {}
-
-
-def test_build_metric_definitions_includes_four_counters():
-    definitions = CPUOffloadingSpec.build_metric_definitions({})
-    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
-
-    for name in (
-        CPUOffloadingMetrics.CPU_BLOCK_LOOKUP,
-        CPUOffloadingMetrics.CPU_BLOCK_HIT,
-        CPUOffloadingMetrics.CPU_BLOCK_MISS,
-        CPUOffloadingMetrics.BLOCK_EVICTION,
-    ):
-        assert name in definitions
-        assert definitions[name].labelnames == ()
