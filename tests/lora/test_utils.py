@@ -175,7 +175,7 @@ def test_get_adapter_absolute_path_local_existing(mock_abspath, mock_exist):
     assert get_adapter_absolute_path(path) == absolute_path
 
 
-@patch("huggingface_hub.snapshot_download")
+@patch("huggingface_hub.HfApi.snapshot_download")
 @patch("os.path.exists")
 def test_get_adapter_absolute_path_huggingface(mock_exist, mock_snapshot_download):
     # Hugging Face model identifier
@@ -186,7 +186,7 @@ def test_get_adapter_absolute_path_huggingface(mock_exist, mock_snapshot_downloa
     assert get_adapter_absolute_path(path) == absolute_path
 
 
-@patch("huggingface_hub.snapshot_download")
+@patch("huggingface_hub.HfApi.snapshot_download")
 @patch("os.path.exists")
 def test_get_adapter_absolute_path_huggingface_error(
     mock_exist, mock_snapshot_download

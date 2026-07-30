@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import TypeAlias
+from typing import Annotated, TypeAlias
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
@@ -17,6 +17,7 @@ from ..base.protocol import (
     CompletionRequestMixin,
     FixedMaxLenTokenizeParamsMixin,
     PoolingBasicRequestMixin,
+    reject_removed_pooling_parameters,
 )
 
 logger = init_logger(__name__)
@@ -48,9 +49,10 @@ class ClassificationChatRequest(
         )
 
 
-ClassificationRequest: TypeAlias = (
-    ClassificationCompletionRequest | ClassificationChatRequest
-)
+ClassificationRequest: TypeAlias = Annotated[
+    ClassificationCompletionRequest | ClassificationChatRequest,
+    BeforeValidator(reject_removed_pooling_parameters),
+]
 
 
 class ClassificationData(OpenAIBaseModel):

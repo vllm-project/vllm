@@ -15,7 +15,7 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
-from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 if has_deep_ep():
@@ -26,9 +26,18 @@ if has_deep_ep():
         DeepEPLLPrepareAndFinalize,
     )
 
+if has_deep_ep_v2():
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
 ## Parallel Processes Utils
 
 P = ParamSpec("P")
+
+
+class GINNotAvailableError(RuntimeError):
+    pass
 
 
 @dataclasses.dataclass
@@ -55,11 +64,10 @@ def _worker_parallel_launch(
     torch.accelerator.set_device_index(local_rank)
     device = torch.device("cuda", local_rank)
     torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend="nccl",
         init_method=init_method,
         rank=rank,
         world_size=world_size,
-        device_id=device,
     )
     barrier = torch.tensor([rank], device=device)
     torch.distributed.all_reduce(barrier)
@@ -92,19 +100,27 @@ def parallel_launch(
     **kwargs: P.kwargs,
 ) -> None:
     assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-            worker,
+    try:
+        spawn(
+            _worker_parallel_launch,
+            args=(
+                world_size,
+                world_size,
+                0,
+                f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
+                worker,
+            )
+            + args,
+            nprocs=world_size,
+            join=True,
         )
-        + args,
-        nprocs=world_size,
-        join=True,
-    )
+    except Exception as exc:
+        # pytest.skip cannot propagate directly through torch.multiprocessing.
+        if "GINNotAvailableError" in str(exc):
+            import pytest
+
+            pytest.skip("NCCL GIN not available (no IBGDA-capable hardware)")
+        raise
 
 
 ## DeepEP specific utils
@@ -200,3 +216,54 @@ def make_deepep_a2a(
 
     assert deepep_ll_args is not None
     return make_deepep_ll_a2a(pg, pgi, deepep_ll_args, q_dtype, block_shape)
+
+
+@dataclasses.dataclass
+class DeepEPV2Args:
+    num_local_experts: int
+    num_experts: int
+    num_topk: int
+    hidden_size: int
+    max_tokens_per_rank: int
+    use_fp8_dispatch: bool
+
+
+def make_deepep_v2_a2a(
+    pg: ProcessGroup,
+    pgi: ProcessGroupInfo,
+    dp_size: int,
+    v2_args: DeepEPV2Args,
+    use_cudagraph: bool = False,
+):
+    import deep_ep
+
+    from vllm.utils.nccl import query_nccl_gin_type
+
+    # ElasticBuffer can segfault when GIN is unavailable. Initialize the
+    # lazy communicator and reject unsupported systems before entering DeepEP.
+    probe = torch.zeros(1, device=pgi.device)
+    torch.distributed.all_reduce(probe, group=pg)
+    gin_type = query_nccl_gin_type(pg)
+    if gin_type is None:
+        raise RuntimeError("Failed to determine NCCL GIN support")
+    if gin_type == 0:
+        raise GINNotAvailableError("NCCL GIN not available")
+
+    buffer = deep_ep.ElasticBuffer(
+        group=pg,
+        num_max_tokens_per_rank=v2_args.max_tokens_per_rank,
+        hidden=v2_args.hidden_size,
+        num_topk=v2_args.num_topk,
+        use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        explicitly_destroy=True,
+    )
+    return DeepEPV2PrepareAndFinalize(
+        buffer=buffer,
+        num_dispatchers=pgi.world_size,
+        dp_size=dp_size,
+        rank_expert_offset=pgi.rank * v2_args.num_local_experts,
+        num_experts=v2_args.num_experts,
+        num_topk=v2_args.num_topk,
+        use_fp8_dispatch=v2_args.use_fp8_dispatch,
+        use_cudagraph=use_cudagraph,
+    )

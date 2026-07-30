@@ -45,6 +45,12 @@ DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        # Runs as kv_both, but is a best-effort cache: a dropped save is just a
+        # future cache miss, so opt out of the producer-role default.
+        return False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -96,10 +102,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         if role == KVConnectorRole.SCHEDULER:
+            from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+
+            assert kv_cache_config is not None
+            scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
             self.scheduler_manager = SimpleCPUOffloadScheduler(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
+                scheduler_block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
             )
         elif role == KVConnectorRole.WORKER:
@@ -237,10 +251,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.take_events()
         return []
 
+    # NOTE: Workers are not contacted. In-flight transfers drain naturally,
+    # and stale completions are ignored by the guarded
+    # SimpleCPUOffloadScheduler._process_store_event().
     def reset_cache(self) -> bool | None:
-        raise NotImplementedError(
-            "SimpleCPUOffloadConnector does not support reset_cache(). "
-            "reset_prefix_cache() requires synchronizing all pending "
-            "CPU offload transfers before clearing GPU prefix cache blocks, "
-            "which is not yet implemented."
-        )
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.reset()
+        return None

@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
+    get_visible_memory_node,
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -49,7 +50,7 @@ class CpuPlatform(Platform):
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
-            return [torch.bfloat16, torch.float32]
+            return [torch.bfloat16, torch.float32, torch.float16]
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
@@ -124,6 +125,14 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
+        # AMX GDN requires float32 state
+        if (
+            torch.cpu._is_amx_tile_supported()
+            and cache_config.mamba_ssm_cache_dtype != "float32"
+        ):
+            cache_config.mamba_ssm_cache_dtype = "float32"
+            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
+
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
@@ -135,15 +144,20 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
-        # OMP requires the MP executor to function correctly, UniProc is not
-        # supported as it is not possible to set the OMP environment correctly
-        if parallel_config.distributed_executor_backend == "uni":
+        if (
+            os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
+            and parallel_config.distributed_executor_backend == "uni"
+        ):
+            # OMP requires the MP executor to function correctly, UniProc
+            # is not supported as it is not possible to set the OMP
+            # environment correctly
             parallel_config.distributed_executor_backend = "mp"
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
-            logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
+            logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
@@ -187,6 +201,18 @@ class CpuPlatform(Platform):
             and "-gelu" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+gelu")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_tanh" not in compilation_config.custom_ops
+            and "-gelu_tanh" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_tanh")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_and_mul" not in compilation_config.custom_ops
+            and "-gelu_and_mul" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_and_mul")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
@@ -211,13 +237,22 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
+        # For efficient conv state memory access
+        if torch.cpu._is_amx_tile_supported():
+            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
 
         if (
             platform.system() == "Linux"
             and cpu_architecture
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            in (
+                CpuArchEnum.ARM,
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.X86,
+                CpuArchEnum.S390X,
+            )
             and not (
                 "libomp" in ld_preload_str
                 or "libgomp" in ld_preload_str
@@ -280,7 +315,7 @@ class CpuPlatform(Platform):
         )
 
         if model_config is not None and model_config.use_mla:
-            logger.info(
+            logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
             )
@@ -385,6 +420,10 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.get_num_threads()
+
+    @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
             # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
@@ -398,13 +437,13 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning("Failed to import from vllm._C: %r", e)
+                        logger.warning_once("Failed to import from vllm._C: %r", e)
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
-                            logger.warning(
+                            logger.warning_once(
                                 "Failed to import from vllm._C_AVX512: %r", e
                             )
             else:
@@ -412,21 +451,17 @@ class CpuPlatform(Platform):
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %r", e)
 
     @classmethod
     def pack_kv_cache(
         cls,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_ids: list[int],
+        kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
         """
@@ -437,15 +472,26 @@ class CpuPlatform(Platform):
         from vllm._custom_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
+        num_blocks, num_kv_heads, block_size, fused_head_size = kv_cache.shape
+        head_size = fused_head_size // 2
+
+        # Fused path used by heterogeneous NIXL CPU_ATTN post-processing.
+        blocks_to_update = kv_cache.index_select(0, indices)
+        key = blocks_to_update[..., :head_size]
+        value = blocks_to_update[..., head_size:]
+
+        key_cache, value_cache = kv_cache.view(
+            num_blocks, num_kv_heads, block_size * 2, head_size
+        ).chunk(2, dim=2)
+
         dtype = key.dtype
         # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
-        _, _, block_size, head_size = key_cache.shape
         key = key.permute(0, 2, 1, 3).flatten(0, 1)
         value = value.permute(0, 2, 1, 3).flatten(0, 1)
 
         isa = _get_attn_isa(dtype, block_size, head_size)
         block_offsets = torch.arange(block_size, device="cpu", dtype=torch.long)
-        num_blocks = len(block_ids)
+        num_blocks = indices.numel()
         slot_mapping = (
             block_offsets.reshape(1, block_size)
             + indices.reshape(num_blocks, 1) * block_size
@@ -462,3 +508,15 @@ class CpuPlatform(Platform):
             slot_mapping,
             isa,
         )
+
+    @classmethod
+    def get_current_memory_usage(
+        cls, device: torch.types.Device | None = None
+    ) -> float:
+        allowed_mem_node_list = get_visible_memory_node()
+        mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
+        memory_usage = 0
+        for s in mem_status_list:
+            memory_usage += s.total_memory - s.available_memory
+
+        return memory_usage

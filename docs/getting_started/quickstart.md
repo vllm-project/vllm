@@ -3,7 +3,7 @@
 This guide will help you quickly get started with vLLM to perform:
 
 - [Offline batched inference](#offline-batched-inference)
-- [Online serving using OpenAI-compatible server](#openai-compatible-server)
+- [Online serving](#online-serving)
 
 ## Prerequisites
 
@@ -65,6 +65,15 @@ This guide will help you quickly get started with vLLM to perform:
     !!! tip
         A nightly Docker image is also available as [vllm/vllm-openai-rocm:nightly](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags) for testing the latest development builds.
 
+=== "Intel GPU"
+
+    vLLM supports Intel GPUs through the XPU backend. Pre-built XPU wheels will be available soon.
+
+    Official Docker images for Intel GPUs are added to the vLLM release starting from v0.26.0. Nightly Docker image is also available as [vllm/vllm-openai-xpu:nightly](https://hub.docker.com/r/vllm/vllm-openai-xpu/tags).
+
+    !!! tip
+        For more detailed instructions, including building from source and Docker image setup, please refer to the [GPU installation guide](installation/gpu.md) and select the "Intel XPU" tab.
+
 === "Google TPU"
 
     To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
@@ -75,6 +84,15 @@ This guide will help you quickly get started with vLLM to perform:
 
     !!! note
         For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
+=== "Ascend NPU"
+
+    If you are using Ascend NPUs, you can run vLLM through [vLLM Ascend](https://github.com/vllm-project/vllm-ascend), a community-maintained hardware plugin.
+
+    Follow the installation instructions in the [vLLM Ascend quick start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html).
+
+    !!! note
+        Ascend setup depends on your NPU hardware and CANN version. For supported versions, Docker images, and troubleshooting, please refer to the [vLLM Ascend documentation](https://docs.vllm.ai/projects/ascend/en/latest/).
 
 === "Apple Silicon (Mac)"
 
@@ -182,7 +200,7 @@ for output in outputs:
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         ```
 
-## OpenAI-Compatible Server
+## Online Serving
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
 By default, it starts the server at `http://localhost:8000`. You can specify the address with `--host` and `--port` arguments. The server currently hosts one model at a time and implements endpoints such as [list models](https://platform.openai.com/docs/api-reference/models/list), [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create), and [create completion](https://platform.openai.com/docs/api-reference/completions/create) endpoints.
@@ -195,7 +213,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 
 !!! note
     By default, the server uses a predefined chat template stored in the tokenizer.
-    You can learn about overriding it [here](../serving/openai_compatible_server.md#chat-template).
+    You can learn about overriding it [here](../serving/online_serving/README.md#chat-template).
 !!! important
     By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 

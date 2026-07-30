@@ -50,13 +50,13 @@ def test_rms_norm_registration():
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestRMSNorm:
-    @classmethod
-    def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_type)
-
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
-            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
+            num_tokens=4,
+            hidden_size=8,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
         out = rms_norm_native(x, weight, epsilon=epsilon)
 
@@ -87,7 +87,11 @@ class TestRMSNorm:
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.rms_norm.impls[provider]
         x, weight, eps = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
         args = (x, weight, eps)
 
@@ -119,7 +123,11 @@ class TestRMSNorm:
             pytest.skip(f"{provider} impl not supported on this platform")
 
         args = ir.ops.rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
 
         # When checking the torch op, we have to set priority and use dispatch
@@ -132,13 +140,63 @@ class TestRMSNorm:
     reason="aiter is only supported on ROCm",
 )
 def test_aiter_rejects_unsupported_dtypes():
-    torch.set_default_device(current_platform.device_type)
     impl = ir.ops.rms_norm.impls["aiter"]
     for dtype in [torch.float32, torch.float64]:
         args = ir.ops.rms_norm.generate_inputs(
-            num_tokens=8, hidden_size=4096, dtype=dtype, epsilon=1e-5
+            num_tokens=8,
+            hidden_size=4096,
+            dtype=dtype,
+            epsilon=1e-5,
+            device=current_platform.device_type,
         )
         assert not impl.supports_args(*args), f"aiter should reject dtype={dtype}"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c RMSNorm needs explicit ND input handling",
+)
+def test_vllm_c_rms_norm_accepts_nd_input():
+    impl = ir.ops.rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    base = torch.randn(
+        3, 8, 192, dtype=torch.float16, device=current_platform.device_type
+    )
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16, device=current_platform.device_type)
+    epsilon = 1e-5
+
+    output = impl.impl_fn(x, weight, epsilon)
+    ref_output = rms_norm_native(x, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert_close(ir.ops.rms_norm, output, ref_output)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c RMSNorm needs a contiguous output for strided inputs",
+)
+def test_vllm_c_rms_norm_accepts_transposed_input():
+    impl = ir.ops.rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    x = torch.randn(
+        1, 320, 120, dtype=torch.float16, device=current_platform.device_type
+    ).transpose(1, 2)
+    assert x.reshape(-1, x.shape[-1]).stride(-1) != 1
+    weight = torch.randn(320, dtype=torch.float16, device=current_platform.device_type)
+    epsilon = 1e-5
+
+    output = impl.impl_fn(x, weight, epsilon)
+    ref_output = rms_norm_native(x, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert_close(ir.ops.rms_norm, output, ref_output)
 
 
 fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
@@ -167,6 +225,37 @@ def test_fused_add_rms_norm_registration():
     assert actual == expected
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c fused_add_rms_norm needs explicit ND input handling",
+)
+def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
+    impl = ir.ops.fused_add_rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    base = torch.randn(
+        3, 8, 192, dtype=torch.float16, device=current_platform.device_type
+    )
+    residual_base = torch.randn(
+        3, 8, 192, dtype=torch.float16, device=current_platform.device_type
+    )
+    x = base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    x_residual = residual_base.split(64, dim=-1)[0].view(3, 8, 4, 16)
+    assert not x.is_contiguous()
+    assert not x_residual.is_contiguous()
+    weight = torch.randn(16, dtype=torch.float16, device=current_platform.device_type)
+    epsilon = 1e-5
+
+    output, residual = impl.impl_fn(x.clone(), x_residual.clone(), weight, epsilon)
+    ref_output, ref_residual = fused_add_rms_norm_native(x, x_residual, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert residual.shape == x_residual.shape
+    assert_close(ir.ops.fused_add_rms_norm, output, ref_output)
+    assert_close(ir.ops.fused_add_rms_norm, residual, ref_residual)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
@@ -176,13 +265,13 @@ def test_fused_add_rms_norm_registration():
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestFusedAddRMSNorm:
-    @classmethod
-    def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_type)
-
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
+            num_tokens=4,
+            hidden_size=8,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
         out, residual_out = fused_add_rms_norm_native(x, x_residual, weight, eps)
 
@@ -227,7 +316,11 @@ class TestFusedAddRMSNorm:
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.fused_add_rms_norm.impls[provider]
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
         args = (x, x_residual, weight, eps, None)
 
@@ -273,7 +366,11 @@ class TestFusedAddRMSNorm:
             pytest.skip(f"{provider} impl not supported on this platform")
 
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
 
         # Test default overload - should NOT modify inputs even with inplace impl
@@ -317,7 +414,11 @@ class TestFusedAddRMSNorm:
     @pytest.mark.parametrize("provider", supported_providers(ir.ops.fused_add_rms_norm))
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         args = ir.ops.fused_add_rms_norm.generate_inputs(
-            num_tokens=n_tokens, hidden_size=hidden_size, dtype=dtype, epsilon=epsilon
+            num_tokens=n_tokens,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            epsilon=epsilon,
+            device=current_platform.device_type,
         )
         args = args + (None,)  # Add variance_size parameter
 

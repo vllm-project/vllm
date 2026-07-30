@@ -4,8 +4,15 @@ import pytest
 import torch
 from torch import Generator
 
+from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p_pytorch,
+    random_sample,
+)
+from vllm.v1.sample.sampler import Sampler
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -37,6 +44,10 @@ def _flashinfer_topk_topp_supported() -> bool:
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
 
 
+def _seed_default_generator(seed: int) -> None:
+    set_random_seed(seed)
+
+
 @pytest.fixture(autouse=True)
 def reset_default_device():
     """
@@ -46,6 +57,80 @@ def reset_default_device():
     original_device = torch.get_default_device()
     yield
     torch.set_default_device(original_device)
+
+
+def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
+    sampler = Sampler(use_fp64_gumbel=True)
+
+    assert sampler.topk_topp_sampler.use_fp64_gumbel
+
+
+def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class MockPlatform:
+        @staticmethod
+        def is_cuda():
+            return False
+
+        @staticmethod
+        def is_cpu():
+            return False
+
+        @staticmethod
+        def is_xpu():
+            return False
+
+    class MockRocmAiterOps:
+        @staticmethod
+        def is_enabled():
+            return True
+
+    real_import = __import__
+
+    def guard_aiter_sampling_import(name, *args, **kwargs):
+        if name == "aiter.ops.sampling":
+            raise AssertionError("aiter sampling import should be deferred")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
+    monkeypatch.setattr(topk_topp_sampler, "rocm_aiter_ops", MockRocmAiterOps())
+    monkeypatch.setattr("builtins.__import__", guard_aiter_sampling_import)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8)
+    k = torch.full((2,), 2, dtype=torch.int32)
+    generators = {0: torch.Generator(device=logits.device).manual_seed(0)}
+
+    token_ids, logits_to_return = sampler(logits, generators, k, None)
+
+    assert token_ids.shape == (2,)
+    assert logits_to_return is None
+
+
+def test_random_sample_uses_fp64_exponential_race_when_requested():
+    torch.set_default_device(DEVICE_TYPE)
+    probs = torch.tensor(
+        [
+            [0.70, 0.20, 0.10],
+            [0.05, 0.15, 0.80],
+            [0.25, 0.25, 0.50],
+        ],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+    _seed_default_generator(12345)
+    q = torch.empty(probs.shape, dtype=torch.float64, device=probs.device)
+    q.exponential_()
+    expected = q.reciprocal_().mul_(probs).argmax(dim=-1).view(-1)
+
+    _seed_default_generator(12345)
+    actual = random_sample(probs.clone(), {}, use_fp64_gumbel=True)
+
+    assert torch.equal(actual, expected)
 
 
 def test_topk_impl_equivalence():
@@ -151,7 +236,7 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif("cpu" in DEVICE_TYPE, reason="CUDA/XPU not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -319,6 +404,95 @@ class TestTritonTopkTopp:
         p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
 
         self._compare_results(logits, k, p)
+
+    @large_gpu_mark(min_gb=24)
+    def test_large_batch_int64_row_offset(self):
+        """Regression: per-row offset (row * vocab_size) must not overflow int32.
+
+        Speculative decoding expands the logits batch (e.g. DFlash drafts K
+        tokens per request), so batch_size * vocab_size can exceed 2**31. With
+        int32 offset arithmetic the per-row pointer wraps to a negative address
+        and the kernel hits a CUDA illegal memory access. Use a batch where
+        batch_size * vocab_size > 2**31 and give the highest-offset row the same
+        logits as row 0: an overflow there would read a different row and change
+        the kept set.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        if not current_platform.is_cuda():
+            pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
+        vocab_size = 131072
+        batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
+        # logits is modified in place; the only extra device memory is the
+        # per-SM scratch buffer (~num_sm * vocab), so allow ~1 GB of headroom.
+        required_bytes = batch_size * vocab_size * 4 + (1 << 30)
+        if torch.accelerator.get_memory_info()[0] < required_bytes:
+            pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
+
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[batch_size - 1] = logits[0]
+        k = torch.full((batch_size,), 5, dtype=torch.int32)
+        result = apply_top_k_top_p_triton(logits, k, None)
+        torch.accelerator.synchronize()  # surface any async illegal memory access
+        kept_first = (result[0] > float("-inf")).nonzero(as_tuple=True)[0]
+        kept_last = (result[batch_size - 1] > float("-inf")).nonzero(as_tuple=True)[0]
+        assert kept_first.numel() == 5, f"row 0 kept {kept_first.numel()}, expected 5"
+        assert torch.equal(kept_first, kept_last), (
+            "highest-offset row produced a different top-k mask than the "
+            "identical row 0 (int32 row-offset overflow)"
+        )
+
+    @pytest.mark.parametrize(
+        "mode",
+        ["topk_only", "topp_only", "topk_and_topp"],
+    )
+    def test_noncontiguous_logits_match_contiguous(self, mode: str):
+        """Non-contiguous logits views should behave like contiguous inputs."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        device = torch.device(DEVICE_TYPE)
+        batch_size, vocab_size, pad = 16, 4096, 8
+        backing = torch.full(
+            (batch_size, vocab_size + pad),
+            -1000.0,
+            device=device,
+            dtype=torch.float32,
+        )
+        base = torch.linspace(
+            10.0, -10.0, vocab_size, device=device, dtype=torch.float32
+        )
+        source = base[None, :] + (
+            torch.arange(batch_size, device=device, dtype=torch.float32)[:, None]
+            / 1000.0
+        )
+
+        logits = backing[:, :vocab_size]
+        logits.copy_(source)
+        contig_logits = source.clone()
+        pytorch_logits = source.clone()
+
+        assert logits.shape == (batch_size, vocab_size)
+        assert logits.stride() == (vocab_size + pad, 1)
+        assert not logits.is_contiguous()
+
+        k: torch.Tensor | None = None
+        p: torch.Tensor | None = None
+        if mode in ("topk_only", "topk_and_topp"):
+            k = torch.full((batch_size,), 154, device=device, dtype=torch.int32)
+        if mode in ("topp_only", "topk_and_topp"):
+            p = torch.full((batch_size,), 0.95, device=device, dtype=torch.float32)
+
+        noncontig_out = apply_top_k_top_p_triton(logits, k, p)
+        contig_out = apply_top_k_top_p_triton(contig_logits, k, p)
+        pytorch_out = apply_top_k_top_p_pytorch(pytorch_logits, k, p)
+
+        assert noncontig_out.data_ptr() == logits.data_ptr()
+        assert not noncontig_out.is_contiguous()
+        assert torch.equal(logits, noncontig_out)
+        assert torch.equal(torch.isfinite(noncontig_out), torch.isfinite(contig_out))
+        assert torch.equal(torch.isfinite(noncontig_out), torch.isfinite(pytorch_out))
 
     # -----------------------------------------------------------------
     # Tests for -inf logits (e.g. from grammar / structured output masks)

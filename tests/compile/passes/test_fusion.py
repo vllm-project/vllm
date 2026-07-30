@@ -195,8 +195,6 @@ class TestModel(torch.nn.Module):
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_group_quant_op()]
-            if self.use_aiter_fusion:
-                return [torch.ops.vllm.triton_per_token_group_quant_fp8.default]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -521,7 +519,7 @@ class _MockGDNLayer:
         self.head_v_dim = head_v_dim
         self.tp_size = tp_size
 
-        from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+        from vllm.model_executor.layers.mamba.gdn.base import (
             GatedDeltaNetAttention,
         )
 

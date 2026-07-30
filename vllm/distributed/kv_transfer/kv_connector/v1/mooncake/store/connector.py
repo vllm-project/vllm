@@ -26,6 +26,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -37,6 +44,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .data import MooncakeStoreConnectorMetadata
+from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
 
@@ -76,7 +84,7 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
 
 
-class MooncakeStoreConnector(KVConnectorBase_V1):
+class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @property
@@ -86,6 +94,36 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
             str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
             == "true"
         )
+
+    @staticmethod
+    def _validate_kv_cache_config(
+        vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    ) -> None:
+        from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+
+        unsupported: list[str] = []
+        cache_block_size = vllm_config.cache_config.block_size
+        for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
+            spec = g.kv_cache_spec
+            if isinstance(spec, CrossAttentionSpec):
+                unsupported.append(f"group {g_idx}: CrossAttentionSpec")
+            # Enforce Mamba align mode
+            if isinstance(spec, MambaSpec) and spec.block_size != cache_block_size:
+                unsupported.append(
+                    f"group {g_idx}: MambaSpec with block_size="
+                    f"{spec.block_size} != cache_config.block_size="
+                    f"{cache_block_size} (mamba_cache_mode != 'align')"
+                )
+        pcp = vllm_config.parallel_config.prefill_context_parallel_size
+        dcp = vllm_config.parallel_config.decode_context_parallel_size
+        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
+            unsupported.append(
+                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
+            )
+        if unsupported:
+            raise ValueError(
+                "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
+            )
 
     def __init__(
         self,
@@ -99,6 +137,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,  # type: ignore[arg-type]
         )
         assert vllm_config.kv_transfer_config is not None
+        assert kv_cache_config is not None, "kv_cache_config is required"
+        self._validate_kv_cache_config(vllm_config, kv_cache_config)
+        self._kv_cache_config = kv_cache_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
 
@@ -106,9 +147,26 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self.connector_worker: MooncakeStoreWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = MooncakeStoreScheduler(vllm_config)
+            self.connector_scheduler = MooncakeStoreScheduler(
+                vllm_config, kv_cache_config
+            )
         else:
-            self.connector_worker = MooncakeStoreWorker(vllm_config)
+            self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+    def shutdown(self):
+        """Release connector resources on teardown.
+
+        Closes the worker's MooncakeDistributedStore handle so its
+        TransferEngine and RDMA registrations are released. Invoked from the
+        engine's explicit shutdown path and as a backstop from ``__del__``;
+        a no-op on the scheduler role, which holds no store handle.
+        """
+        worker = getattr(self, "connector_worker", None)
+        if worker is not None:
+            worker.close()
+
+    def __del__(self):
+        self.shutdown()
 
     # ============================================================
     # Scheduler-side methods
@@ -118,7 +176,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -147,8 +205,32 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished_all_groups(request, (block_ids,))
+
+    def request_finished_all_groups(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def reset_cache(self) -> bool | None:
+        """Reset the external Mooncake store on prefix-cache reset.
+
+        Drains the worker send queue, then runs ``remove_all`` on the
+        Mooncake master. Caller must first pause generation (e.g.
+        ``pause_generation``) so no new puts are enqueued during drain.
+
+        Returns True on ack, False on failure, None for the worker role.
+        """
+        if self.role == KVConnectorRole.SCHEDULER:
+            assert self.connector_scheduler is not None
+            # Clear local references to keys we're about to wipe.
+            self.connector_scheduler.load_specs.clear()
+            self._kv_cache_events = None
+            return self.connector_scheduler.reset_store()
+        return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         kv_cache_events = connector_output.kv_cache_events
@@ -184,6 +266,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self, kv_cache: torch.Tensor, attn_backend: type
     ):
         assert self.connector_worker is not None
+        assert (
+            self._kv_cache_config is not None
+            and len(self._kv_cache_config.kv_cache_groups) == 1
+        ), "Cross-layer KV cache does not supported with hybrid models"
         self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
@@ -216,6 +302,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def get_kv_connector_kv_cache_events(
         self,
     ) -> MooncakeStoreKVEvents | None:
@@ -227,3 +317,30 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         kv_events = MooncakeStoreKVEvents(num_workers=1)
         kv_events.add_events(events)
         return kv_events
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            MooncakeStoreConnectorStats(data=data)
+            if data is not None
+            else MooncakeStoreConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MooncakeStorePromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )

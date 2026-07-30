@@ -16,9 +16,15 @@ from vllm._custom_ops import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
+# The CPU grouped-gemm MoE kernels (AMX and vector) tile the expert
+# intermediate ("N") dimension in blocks of this size and have no tail/
+# remainder handling, so a shard is only eligible for the fast path when
+# its per-partition intermediate size is a multiple of it.
+_MOE_GROUPED_GEMM_N_TILE = 32
 
 
 def _swigluoai_forward_native(
@@ -50,9 +56,13 @@ def _gelu_and_mul(
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
-    MoEActivation.SILU: lambda x: SiluAndMul(compile_native=False).forward_native(x),
+    MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
+    MoEActivation.GELU_TANH: (
+        lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
+        * x[..., x.shape[-1] // 2 :]
+    ),
 }
 
 
@@ -213,6 +223,10 @@ class SGLFusedMOE:
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
             True,  # is_vnni
         )
 
@@ -221,6 +235,7 @@ class CPUFusedMOE:
     """CPU-based fused MoE implementation."""
 
     def __init__(self, layer: torch.nn.Module) -> None:
+        self._pad_moe_intermediate_for_grouped_gemm(layer)
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
         if use_grouped_gemm:
@@ -275,6 +290,69 @@ class CPUFusedMOE:
             apply_router_weight_on_input,
         )
 
+    def _pad_moe_intermediate_for_grouped_gemm(self, layer: torch.nn.Module) -> None:
+        """Zero-pad the per-partition MoE intermediate dim up to a multiple
+        of _MOE_GROUPED_GEMM_N_TILE, so the AMX/vector grouped-gemm kernels
+        can be used even when TP sharding (moe_intermediate_size // tp_size)
+        lands on an unaligned value (e.g. moe_intermediate_size=704 at tp=4
+        -> 176). Only applies to the x86 (AMX/vec) kernels and half-split
+        gate/up activations; interleaved layouts (swigluoai) are left
+        untouched.
+        """
+        if not hasattr(torch.ops._C, "prepack_moe_weight"):
+            return
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+            return
+
+        intermediate_size = layer.w2_weight.size(2)
+        remainder = intermediate_size % _MOE_GROUPED_GEMM_N_TILE
+        if remainder == 0:
+            return
+        if layer.activation == MoEActivation.SWIGLUOAI:
+            return
+
+        pad = _MOE_GROUPED_GEMM_N_TILE - remainder
+        padded_size = intermediate_size + pad
+        num_experts, _, hidden_size = layer.w13_weight.shape
+
+        new_w13 = layer.w13_weight.new_zeros(num_experts, 2 * padded_size, hidden_size)
+        new_w13[:, :intermediate_size] = layer.w13_weight[:, :intermediate_size]
+        new_w13[:, padded_size : padded_size + intermediate_size] = layer.w13_weight[
+            :, intermediate_size:
+        ]
+        replace_parameter(layer, "w13_weight", new_w13)
+
+        new_w2 = layer.w2_weight.new_zeros(num_experts, hidden_size, padded_size)
+        new_w2[:, :, :intermediate_size] = layer.w2_weight
+        replace_parameter(layer, "w2_weight", new_w2)
+
+        if hasattr(layer, "w13_bias"):
+            new_bias = layer.w13_bias.new_zeros(num_experts, 2 * padded_size)
+            new_bias[:, :intermediate_size] = layer.w13_bias[:, :intermediate_size]
+            new_bias[:, padded_size : padded_size + intermediate_size] = layer.w13_bias[
+                :, intermediate_size:
+            ]
+            replace_parameter(layer, "w13_bias", new_bias)
+
+    def _grouped_gemm_alignment_error(self, layer: torch.nn.Module) -> str:
+        # w2's input size is the per-partition MoE intermediate size (the
+        # dimension TP-sharding splits), and it's what most commonly breaks
+        # alignment, e.g. moe_intermediate_size=704 at tp=4 gives
+        # 704 // 4 == 176, which isn't a multiple of 32.
+        intermediate_size_per_partition = layer.w2_weight.size(2)
+        return (
+            "CPU fused-MoE AMX grouped-gemm kernel cannot be used for a "
+            f"layer with w13 shape {tuple(layer.w13_weight.shape)} / w2 "
+            f"shape {tuple(layer.w2_weight.shape)}: the per-partition MoE "
+            f"intermediate size ({intermediate_size_per_partition}) is not "
+            f"a multiple of {_MOE_GROUPED_GEMM_N_TILE}, and automatic "
+            "zero-padding could not resolve this (typically because the "
+            "activation uses an interleaved gate/up layout, e.g. "
+            "swigluoai). vLLM refuses to silently fall back to the much "
+            "slower per-expert torch loop on AMX-capable CPUs; consider a "
+            "different --tensor-parallel-size."
+        )
+
     def check_grouped_gemm(
         self,
         layer: torch.nn.Module,
@@ -288,20 +366,35 @@ class CPUFusedMOE:
         w2_input_size = layer.w2_weight.size(2)
         w2_output_size = layer.w2_weight.size(1)
 
+        supports_amx = torch.cpu._is_amx_tile_supported()
+        if supports_amx:
+            if (
+                dtype == torch.bfloat16
+                and w13_output_size % 32 == 0
+                and w2_output_size % 32 == 0
+                and w13_input_size % 32 == 0
+                and w2_input_size % 32 == 0
+            ):
+                return True, "amx"
+            raise RuntimeError(self._grouped_gemm_alignment_error(layer))
+
         if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
             return False, "none"
 
-        supports_amx = torch.cpu._is_amx_tile_supported()
-
         if (
-            supports_amx
-            and dtype == torch.bfloat16
-            and w13_input_size % 32 == 0
-            and w2_input_size % 32 == 0
+            layer.activation == MoEActivation.SWIGLUOAI
+            and w2_input_size % _MOE_GROUPED_GEMM_N_TILE != 0
         ):
-            return True, "amx"
+            return False, "none"
 
-        if supports_amx:
+        supports_neon = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        if supports_neon:
+            if (
+                dtype == torch.bfloat16
+                and w13_input_size % 4 == 0
+                and w2_input_size % 4 == 0
+            ):
+                return True, "neon"
             return False, "none"
 
         return True, "vec"
