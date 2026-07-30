@@ -1450,7 +1450,6 @@ def _make_hisparse_coordinator(
         block_stride=block_size * row_width * torch.float32.itemsize,
         num_blocks=num_blocks,
         block_size=block_size,
-        hot_group_id=0,
     )
     block_table = torch.arange(
         max_num_reqs * blocks_per_request,
@@ -1757,7 +1756,6 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         block_stride=stride_elements * torch.float32.itemsize,
         num_blocks=2,
         block_size=block_size,
-        hot_group_id=0,
     )
 
     source = (
@@ -2254,7 +2252,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
         block_stride=block_size * head_size * dtype.itemsize,
         num_blocks=num_hot_blocks,
         block_size=block_size,
-        hot_group_id=0,
     )
     coordinator.bind_hot_block_table(
         torch.arange(num_hot_blocks, dtype=torch.int32, device=device).view(

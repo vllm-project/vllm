@@ -421,7 +421,6 @@ def init_hisparse_runtime(
             block_stride=tensor_config.block_stride,
             num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
             block_size=hot_spec.block_size,
-            hot_group_id=group_id,
         )
         coordinator.bind_hot_block_table(block_tables.input_block_tables[group_id])
         if id(coordinator) not in seen_coordinators:

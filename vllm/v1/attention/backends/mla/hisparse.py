@@ -468,12 +468,10 @@ class HiSparseCoordinator:
         self.attention_hot_cache: torch.Tensor | None = None
         self.resident_block_table: torch.Tensor | None = None
         self.resident_slot_mapping: torch.Tensor | None = None
-        self.resident_cache: torch.Tensor | None = None
         self.resident_group_id = -1
         self.resident_block_size = 0
         self.fully_resident_batch = False
         self.hot_block_table: torch.Tensor | None = None
-        self.hot_group_id = -1
         self.attention_block_stride = 0
         self._hot_indices = torch.empty(
             (max_num_reqs, config.top_k), dtype=torch.int32, device=self.device
@@ -561,7 +559,6 @@ class HiSparseCoordinator:
         block_stride: int,
         num_blocks: int,
         block_size: int,
-        hot_group_id: int,
     ) -> None:
         """Bind this layer's strided view into the shared GPU HMA slab."""
         itemsize = self.kv_dtype.itemsize
@@ -580,7 +577,6 @@ class HiSparseCoordinator:
             -1, block_size, self.row_width
         )
         self.attention_block_stride = block_stride // row_bytes
-        self.hot_group_id = hot_group_id
 
     def bind_hot_block_table(self, block_table: torch.Tensor) -> None:
         self.hot_block_table = block_table
@@ -615,7 +611,6 @@ class HiSparseCoordinator:
             assert resident.stride() == self.hot_cache.stride()
         self.resident_block_table = block_table
         self.resident_slot_mapping = slot_mapping
-        self.resident_cache = resident
         self.resident_group_id = group_id
         self.resident_block_size = block_size
 
@@ -860,40 +855,17 @@ class HiSparseCoordinator:
         dst = flat_slots.to(device=self.device, dtype=torch.int64).contiguous()
         real_kv_rows = kv_c_normed[:num_rows]
         real_pe_rows = k_pe[:num_rows]
-        if self.resident_slot_mapping is not None:
-            assert self.hot_cache is not None
-            src = self.resident_slot_mapping[:num_rows]
-            ops.concat_and_cache_mla(
-                real_kv_rows,
-                real_pe_rows.squeeze(1),
-                self.hot_cache,
-                src,
-                kv_cache_dtype=kv_cache_dtype,
-                scale=k_scale,
-            )
-            self._backup_rows(self.hot_cache, src, dst)
-            return
-
-        if kv_cache_dtype == "fp8_ds_mla":
-            rows = torch.empty(
-                (num_rows, self.row_width),
-                dtype=self.kv_dtype,
-                device=self.device,
-            )
-            ops.concat_and_cache_mla(
-                real_kv_rows,
-                real_pe_rows.squeeze(1),
-                rows.view(-1, 1, self.row_width),
-                torch.arange(num_rows, dtype=torch.int64, device=self.device),
-                kv_cache_dtype=kv_cache_dtype,
-                scale=k_scale,
-            )
-        else:
-            rows = torch.cat(
-                [real_kv_rows, real_pe_rows.squeeze(1)], dim=-1
-            ).contiguous()
-        src = torch.arange(num_rows, dtype=torch.int64, device=self.device)
-        self._backup_rows(rows, src, dst)
+        assert self.hot_cache is not None and self.resident_slot_mapping is not None
+        src = self.resident_slot_mapping[:num_rows]
+        ops.concat_and_cache_mla(
+            real_kv_rows,
+            real_pe_rows.squeeze(1),
+            self.hot_cache,
+            src,
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
+        self._backup_rows(self.hot_cache, src, dst)
 
     # ---------------------------------------------------------------- swap-in
 
