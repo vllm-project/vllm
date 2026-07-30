@@ -12,9 +12,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
     SamplingMaskLists,
-    SamplingMaskTensors,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 
 
 class AsyncOutput(AsyncModelRunnerOutput):

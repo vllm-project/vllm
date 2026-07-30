@@ -82,23 +82,6 @@ class SamplingMaskLists(NamedTuple):
         return SamplingMaskLists(token_ids, offsets)
 
 
-class SamplingMaskTensors(NamedTuple):
-    """Compact device-side sampling support data pending async D2H."""
-
-    # [num_kept_tokens]
-    token_ids: torch.Tensor
-    # [num_requests]
-    counts: torch.Tensor
-
-    def to_cpu_nonblocking(self) -> "SamplingMaskTensors":
-        if self.token_ids.device.type == "cpu":
-            return self
-        return SamplingMaskTensors(
-            self.token_ids.to("cpu", non_blocking=True),
-            self.counts.to("cpu", non_blocking=True),
-        )
-
-
 class LogprobsTensors(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
