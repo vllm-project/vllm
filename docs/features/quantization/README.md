@@ -8,7 +8,7 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
-- [BitsAndBytes (plugin)](bnb.md)
+- [BitsAndBytes](bnb.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
 - [LLM Compressor](llm_compressor/README.md)
@@ -55,7 +55,7 @@ th:not(:first-child) {
 | llm-compressor INT8 (W8A8)| ❌    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ✅︎      | ✅︎      |
 | llm-compressor INT8 (W4A8)| ❌    | ❌     | ❌     | ❌  | ❌     | ❌      | ❌        | ❌      | ✅︎      |
 | llm-compressor FP8 (W8A8) | ❌    | ❌     | ❌     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      | ❌      |
-| bitsandbytes (plugin)     | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
+| bitsandbytes.             | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
 | DeepSpeedFP               | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
 | GGUF                      | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      | ❌      |
 
