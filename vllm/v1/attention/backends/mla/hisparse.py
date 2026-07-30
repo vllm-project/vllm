@@ -170,19 +170,8 @@ def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     aligned_offset = (-backing.data_ptr()) % page
     registered = backing[aligned_offset : aligned_offset + padded_size]
     pin_tensor(registered)
-    note_registered_host_range(registered.data_ptr(), registered.nbytes)
     _STATE.pinned_host_pools.append(registered)
     return registered[:size]
-
-
-def note_registered_host_range(ptr: int, nbytes: int) -> None:
-    _STATE.registered_host_ranges.append((ptr, nbytes))
-
-
-def discard_registered_host_range(ptr: int) -> None:
-    _STATE.registered_host_ranges[:] = [
-        (p, n) for p, n in _STATE.registered_host_ranges if p != ptr
-    ]
 
 
 def register_indexer_source(layer_name: str, cache: torch.Tensor) -> None:
@@ -204,13 +193,13 @@ def get_indexer_source(
 
 def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
     return any(
-        p <= ptr and ptr + nbytes <= p + n for p, n in _STATE.registered_host_ranges
+        pool.data_ptr() <= ptr and ptr + nbytes <= pool.data_ptr() + pool.nbytes
+        for pool in _STATE.pinned_host_pools
     )
 
 
-def release_pinned_state() -> bool:
+def release_pinned_state() -> None:
     """Synchronize, unregister host KV pools, and drop global state."""
-    released = bool(_STATE.pinned_host_pools or _STATE.pinned_staging is not None)
     if _STATE.pinned_host_pools:
         try:
             torch.accelerator.synchronize()
@@ -221,7 +210,7 @@ def release_pinned_state() -> bool:
                 e,
                 len(_STATE.pinned_host_pools),
             )
-            return released
+            return
 
         cudart = torch.cuda.cudart()
         release_start = time.perf_counter()
@@ -239,7 +228,6 @@ def release_pinned_state() -> bool:
                 cudart.cudaGetLastError()
                 break
             freed_bytes += tensor.nbytes
-            discard_registered_host_range(tensor.data_ptr())
             _STATE.pinned_host_pools.pop()
         if freed_bytes:
             logger.info(
@@ -254,7 +242,6 @@ def release_pinned_state() -> bool:
         for coordinator in (leader, *leader.group_shared):
             if coordinator._host_cache is not None:
                 coordinator._host_cache = None
-                released = True
     _STATE.coordinators.clear()
     _STATE.metrics_calls = 0
     _STATE.metrics_last = HiSparseStats()
@@ -264,7 +251,6 @@ def release_pinned_state() -> bool:
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
     _STATE.indexer_sources.clear()
-    return released
 
 
 def _pinned_to_device(values: list[int], device: torch.device) -> torch.Tensor:
@@ -422,7 +408,6 @@ class _HiSparseProcessState:
     current_group_leader: HiSparseCoordinator | None = None
     pinned_staging: torch.Tensor | None = None
     pinned_staging_event: torch.Event | None = None
-    registered_host_ranges: list[tuple[int, int]] = field(default_factory=list)
     pinned_host_pools: list[torch.Tensor] = field(default_factory=list)
     indexer_sources: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = field(
         default_factory=dict
