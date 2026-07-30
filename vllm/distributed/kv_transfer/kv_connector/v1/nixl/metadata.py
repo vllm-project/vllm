@@ -95,14 +95,27 @@ def _get_speculative_compatibility_factors(
         None,
     )
 
+    # kv_cache_dtype is a user override that defaults to None, meaning "inherit
+    # the target's --kv-cache-dtype". Resolve it to the effective value so an
+    # explicit setting on one side and inheritance on the other (same effective
+    # dtype) don't spuriously mismatch.
+    kv_cache_dtype = (
+        speculative_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
+    )
+
+    # Note: the draft attention_backend is intentionally not hashed. Its only
+    # transfer-relevant effect is the KV block layout/size, which is validated
+    # per region at runtime in _validate_remote_agent_handshake. The connector
+    # only sees the raw override here (usually None = auto-select), never the
+    # resolved backend, so hashing it would cause false mismatches without
+    # catching anything the runtime layout check misses.
     return {
         "method": speculative_config.method,
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
         "parallel_drafting": speculative_config.parallel_drafting,
-        "kv_cache_dtype": str(speculative_config.kv_cache_dtype),
-        "attention_backend": str(speculative_config.attention_backend),
+        "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
         ),

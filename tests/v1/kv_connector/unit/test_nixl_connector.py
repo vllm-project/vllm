@@ -2837,7 +2837,10 @@ def _set_test_speculative_config(
         ({"revision": "different-revision"}, False),
         ({"parallel_drafting": True}, False),
         ({"kv_cache_dtype": "fp8"}, False),
-        ({"attention_backend": "FLASHINFER"}, False),
+        # attention_backend is intentionally not part of the compat hash
+        # (see _get_speculative_compatibility_factors); overriding it must
+        # not change the hash.
+        ({"attention_backend": "FLASHINFER"}, True),
         ({"auxiliary_layer_ids": (2, 16, 30)}, False),
     ],
 )
@@ -2868,6 +2871,39 @@ def test_missing_speculative_config_changes_compatibility_hash():
     )
 
     assert regular_hash != speculative_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_speculative_kv_cache_dtype_resolves_to_target():
+    # The draft kv_cache_dtype override defaults to None ("inherit the target's
+    # --kv-cache-dtype"). An explicit setting on one side that matches the
+    # other side's inherited (resolved) dtype must not spuriously mismatch.
+    local_config = create_vllm_config(cache_dtype="fp8")
+    remote_config = create_vllm_config(cache_dtype="fp8")
+    _set_test_speculative_config(local_config, kv_cache_dtype="fp8")  # explicit
+    _set_test_speculative_config(remote_config, kv_cache_dtype=None)  # inherits
+
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+
+    assert local_hash == remote_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_speculative_attention_backend_not_in_compatibility_hash():
+    # The draft attention_backend is intentionally excluded from the hash: the
+    # connector only has the raw override (auto-select), and its transfer-
+    # relevant effect is validated per region at runtime. Differing overrides
+    # must not change the hash.
+    local_config = create_vllm_config()
+    remote_config = create_vllm_config()
+    _set_test_speculative_config(local_config, attention_backend=None)
+    _set_test_speculative_config(remote_config, attention_backend="FLASHINFER")
+
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+
+    assert local_hash == remote_hash
 
 
 @pytest.mark.parametrize(

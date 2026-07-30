@@ -92,6 +92,9 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `block-size` (heterogeneous block size, subject to restrictions above)
 - Number of KV cache blocks (determined by available memory on each instance)
 - `num_speculative_tokens` (prefill and decode may use different draft depths)
+- Draft-model `attention_backend` (each instance auto-selects independently; the
+  resulting KV block layout is validated at handshake time rather than via the
+  compatibility hash)
 
 ### KV cache layout
 
