@@ -11,8 +11,14 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    RoutedExpertsManager,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -70,6 +76,32 @@ def _make_modular_routed_experts():
     return types.SimpleNamespace(
         quant_method=types.SimpleNamespace(is_monolithic=False),
     )
+
+
+def test_routed_experts_manager_uses_gemma4_top_k_experts():
+    hf_config = SimpleNamespace(
+        num_experts=8,
+        top_k_experts=2,
+        num_hidden_layers=3,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=hf_config)
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    manager = RoutedExpertsManager(vllm_config, kv_cache_config)
+
+    assert manager.routed_experts_by_slot.shape == (8, 3, 2)
 
 
 def test_base_router_capture_pre_eplb_mapping():
