@@ -18,6 +18,7 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight,
     cpu_prepack_moe_weight_int8,
     fused_experts_cpu,
+    fused_experts_cpu_local_skip,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import (
@@ -530,6 +531,31 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             )
         )
 
+        if expert_map is not None:
+            # Routing produces global expert ids while the weights only hold
+            # this rank's local experts.
+            fused_experts_cpu_local_skip(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                expert_map,
+                CPUQuantMethod.FP8_W8A16,  # moe_comp_method
+                self.w1_scale,  # w1_scale
+                self.w2_scale,  # w2_scale
+                None,  # w1_zero
+                None,  # w2_zero
+                block_shape,  # block_size
+                None,  # w1_bias
+                None,  # w2_bias
+                None,  # alpha
+                None,  # limit
+                True,  # is_vnni
+            )
+            return
+
         fused_experts_cpu(
             output,
             hidden_states,
@@ -611,7 +637,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -826,7 +852,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -1018,7 +1044,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(

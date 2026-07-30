@@ -3415,6 +3415,48 @@ def fused_experts_cpu(
     )
 
 
+def fused_experts_cpu_local_skip(
+    out: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    moe_comp_method: CPUQuantMethod,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_size: list[int] | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    alpha: float | None = None,
+    limit: float | None = None,
+    is_vnni: bool = True,
+) -> None:
+    torch.ops._C.fused_experts_cpu_local_skip(
+        out,
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        expert_map,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_size,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
+        is_vnni,
+    )
+
+
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
 
     @register_fake("_C::int8_scaled_mm_with_quant")
