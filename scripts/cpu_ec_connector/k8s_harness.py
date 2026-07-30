@@ -72,7 +72,7 @@ def patch_deployment_yaml(
     gpu_memory_utilization: float,
     ec_role: str,
     engine_id: str,
-    num_ec_blocks: int,
+    ec_cpu_bytes: int,
     side_channel_port: int,
     producer: bool,
     different_nodes: bool,
@@ -100,7 +100,7 @@ def patch_deployment_yaml(
             "ec_connector": "ECCPUConnector",
             "ec_role": ec_role,
             "engine_id": engine_id,
-            "ec_connector_extra_config": {"num_ec_blocks": num_ec_blocks},
+            "ec_connector_extra_config": {"ec_cpu_bytes": ec_cpu_bytes},
         }
     )
 
@@ -315,7 +315,7 @@ class K8sHarness:
             gpu_memory_utilization=spec.gpu_memory_utilization,
             ec_role=f"ec_{role}",
             engine_id=spec.engine_id,
-            num_ec_blocks=spec.num_ec_blocks,
+            ec_cpu_bytes=spec.ec_cpu_bytes,
             side_channel_port=spec.side_channel_port,
             producer=(role == "producer"),
             different_nodes=self._different_nodes,
