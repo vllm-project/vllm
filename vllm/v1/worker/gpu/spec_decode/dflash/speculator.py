@@ -344,13 +344,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
 
-        self._copy_request_inputs(
-            num_reqs,
-            input_batch.idx_mapping,
-            temperature,
-            seeds,
-        )
-
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
             # Since DFlash needs to build its own attention metadata, we must skip the
@@ -385,11 +378,15 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_indices,
                 self.sample_pos,
                 self.sample_idx_mapping,
+                self.temperature,
+                self.seeds,
                 input_batch,
                 num_sampled,
                 num_rejected,
                 last_sampled,
                 next_prefill_tokens,
+                temperature,
+                seeds,
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.kernel_block_sizes[gid],
                 self.parallel_drafting_token_id,
@@ -482,6 +479,8 @@ def _prepare_dflash_inputs_kernel(
     out_sample_indices_ptr,
     out_sample_pos_ptr,
     out_sample_idx_mapping_ptr,
+    out_temperature_ptr,
+    out_seeds_ptr,
     # Inputs from target batch
     target_positions_ptr,
     target_query_start_loc_ptr,
@@ -490,6 +489,9 @@ def _prepare_dflash_inputs_kernel(
     next_prefill_tokens_ptr,
     num_sampled_ptr,
     num_rejected_ptr,
+    # Sampling params
+    temperature_ptr,
+    seeds_ptr,
     # Block table for slot mapping lookup.
     block_table_ptr,
     block_table_stride,
@@ -585,6 +587,12 @@ def _prepare_dflash_inputs_kernel(
         # reads up to (context + query), not just the count of accepted
         # tokens this step.
         tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+        # Copy sampling state.
+        tl.store(
+            out_temperature_ptr + req_state_idx,
+            tl.load(temperature_ptr + req_state_idx),
+        )
+        tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
@@ -626,6 +634,8 @@ def prepare_dflash_inputs(
     sample_indices: torch.Tensor,
     sample_pos: torch.Tensor,
     sample_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
     input_batch: InputBatch,
     # [num_reqs]
     num_sampled: torch.Tensor,
@@ -635,6 +645,10 @@ def prepare_dflash_inputs(
     last_sampled: torch.Tensor,
     # [max_num_reqs]
     next_prefill_tokens: torch.Tensor,
+    # [max_num_reqs]
+    input_temperature: torch.Tensor,
+    # [max_num_reqs]
+    input_seeds: torch.Tensor,
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
@@ -665,6 +679,8 @@ def prepare_dflash_inputs(
         sample_indices,
         sample_pos,
         sample_idx_mapping,
+        temperature,
+        seeds,
         input_batch.positions,
         input_batch.query_start_loc,
         input_batch.idx_mapping,
@@ -672,6 +688,8 @@ def prepare_dflash_inputs(
         next_prefill_tokens,
         num_sampled,
         num_rejected,
+        input_temperature,
+        input_seeds,
         block_table,
         block_table.stride(0),
         parallel_drafting_token_id,
