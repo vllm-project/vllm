@@ -61,7 +61,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.ops.attn_res import attn_res, attn_res_fused
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -153,6 +153,42 @@ def _apply_attn_res(
         num_valid_blocks,
         norm.variance_epsilon,
     )
+
+
+def _can_fuse_out_norm(out_norm: RMSNorm) -> bool:
+    return out_norm.has_weight and out_norm.variance_size_override is None
+
+
+def _apply_attn_res_norm(
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    proj: ReplicatedLinear,
+    norm: RMSNorm,
+    num_valid_blocks: int,
+    out_norm: RMSNorm,
+    addend: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply attn-res with its output norm and optional input residual add."""
+    if num_valid_blocks <= 0 or not _can_fuse_out_norm(out_norm):
+        if addend is not None:
+            prefix_sum = prefix_sum + addend
+        mixed = _apply_attn_res(
+            prefix_sum, block_residual, proj, norm, num_valid_blocks
+        )
+        return out_norm(mixed), prefix_sum
+
+    normed, fused_prefix_sum = attn_res_fused(
+        prefix_sum,
+        block_residual,
+        norm.weight,
+        proj.weight.squeeze(0),
+        num_valid_blocks,
+        norm.variance_epsilon,
+        addend=addend,
+        out_norm_weight=out_norm.weight,
+        out_norm_eps=out_norm.variance_epsilon,
+    )
+    return normed, (prefix_sum if addend is None else fused_prefix_sum)
 
 
 class KimiMoE(nn.Module):
@@ -601,38 +637,39 @@ class KimiDecoderLayer(nn.Module):
         block_residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
-        hidden_states = _apply_attn_res(
+        hidden_states, prefix_sum = _apply_attn_res_norm(
             prefix_sum,
             block_residual,
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            self.input_layernorm,
         )
 
         if self.is_block_write_layer:
             block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self._run_self_attn(positions, hidden_states)
-
-        if prefix_sum is not None:
-            prefix_sum = prefix_sum + hidden_states
-        else:
-            prefix_sum = hidden_states
 
         mlp_valid_blocks = self.prev_valid_blocks + (
             1 if self.is_block_write_layer else 0
         )
-        hidden_states = _apply_attn_res(
+        if prefix_sum is None:
+            prefix_sum = hidden_states
+            addend = None
+        else:
+            addend = hidden_states
+        hidden_states, prefix_sum = _apply_attn_res_norm(
             prefix_sum,
             block_residual,
             self.mlp_res_proj,
             self.mlp_res_norm,
             mlp_valid_blocks,
+            self.post_attention_layernorm,
+            addend=addend,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         prefix_sum = prefix_sum + hidden_states
         return prefix_sum, block_residual

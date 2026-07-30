@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.ops.attn_res import attn_res, attn_res_fused
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -100,3 +100,56 @@ def test_amd_attn_res_matches_reference(
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
     assert actual.shape == prefix.shape
     assert actual.is_contiguous()
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 320])
+@pytest.mark.parametrize("has_addend", [False, True])
+def test_amd_attn_res_fused_matches_reference(
+    num_tokens: int,
+    has_addend: bool,
+) -> None:
+    hidden_size = 7168
+    num_blocks = 4
+    eps = 1e-5
+    prefix = _randn_with_row_padding(num_tokens, hidden_size)
+    addend = torch.randn_like(prefix) if has_addend else None
+    blocks = _randn_with_row_padding(num_tokens, num_blocks, hidden_size)
+    norm_weight = torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16)
+    qk_weight = (
+        torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16) / hidden_size**0.5
+    )
+    out_norm_weight = torch.randn_like(norm_weight)
+
+    expected_prefix = prefix + addend if addend is not None else prefix
+    expected = _reference(
+        expected_prefix,
+        blocks,
+        norm_weight,
+        qk_weight,
+        num_blocks,
+        eps,
+    )
+    expected = F.rms_norm(
+        expected.to(torch.bfloat16),
+        (hidden_size,),
+        out_norm_weight,
+        eps,
+    )
+
+    actual, actual_prefix = attn_res_fused(
+        prefix,
+        blocks,
+        norm_weight,
+        qk_weight,
+        num_blocks,
+        eps,
+        addend=addend,
+        out_norm_weight=out_norm_weight,
+        out_norm_eps=eps,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+    if has_addend:
+        torch.testing.assert_close(actual_prefix, expected_prefix, atol=0, rtol=0)
+    else:
+        assert actual_prefix is None
