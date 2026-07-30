@@ -92,8 +92,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             assert req_id not in self._reqs_to_send
 
         # Add to requests that are waiting to be read and track expiration.
+        # Deadlines are stamped with the scheduler process's perf_counter,
+        # which is not comparable to ours when the worker runs in another
+        # process on another node (perf_counter epochs differ by boot time).
+        # Rebase the remaining TTL onto our clock; broadcast latency only
+        # lengthens the lease, which is the safe direction. A cross-node
+        # epoch gap larger than the TTL otherwise expires the lease on
+        # arrival and the blocks are freed before D reads them.
+        now_local = time.perf_counter()
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
+                if metadata.scheduler_clock:
+                    expiration_time = now_local + (
+                        expiration_time - metadata.scheduler_clock
+                    )
                 self._reqs_to_send[req_id] = expiration_time
 
         # Send heartbeats to P-side engines to keep KV blocks alive while
