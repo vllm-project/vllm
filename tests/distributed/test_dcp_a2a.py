@@ -106,8 +106,9 @@ class TestDCPCommBackendConfig:
     """Test --dcp-comm-backend config validation."""
 
     def test_default_is_ag_rs(self):
-        """Default comm backend is ag_rs."""
+        """Comm backend resolves to ag_rs unless the model asks otherwise."""
         config = ParallelConfig()
+        config.set_dcp_defaults()
         assert config.dcp_comm_backend == "ag_rs"
 
     def test_a2a_requires_dcp_greater_than_1(self):
