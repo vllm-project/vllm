@@ -41,13 +41,15 @@ logger = init_logger(__name__)
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
+    if not any(num_nans_in_logits.values()):
+        return
+
     corrupted_requests = {
         req_id: num_nans
         for req_id, num_nans in num_nans_in_logits.items()
         if num_nans > 0
     }
-    if corrupted_requests:
-        raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+    raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
