@@ -3,6 +3,7 @@
 
 import ctypes
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -113,6 +114,45 @@ def test_get_device_capability_uses_visible_device_ordinal(monkeypatch):
     assert capability is not None
     assert capability.to_int() == 90
     assert seen_indices == [1]
+
+
+@pytest.mark.parametrize(
+    "device_env_var",
+    ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"],
+)
+def test_get_device_total_memory_uses_mig_uuid_handle(monkeypatch, device_env_var):
+    import vllm.platforms.interface as platform_interface
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    mig_uuid = "MIG-be6b2880-0e33-5698-a7c1-3972ccc1f981"
+    mig_handle = object()
+    total_memory = 33280 * 2**20
+
+    monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", None)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("NVIDIA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv(device_env_var, mig_uuid)
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetHandleByUUID",
+        lambda device_uuid: mig_handle if device_uuid == mig_uuid else None,
+    )
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetHandleByIndex",
+        lambda _index: pytest.fail("queried the parent GPU handle"),
+    )
+    monkeypatch.setattr(
+        pynvml,
+        "nvmlDeviceGetMemoryInfo",
+        lambda handle: SimpleNamespace(total=total_memory)
+        if handle is mig_handle
+        else pytest.fail("queried memory for the wrong device"),
+    )
+
+    assert NvmlCudaPlatform.get_device_total_memory() == total_memory
 
 
 if __name__ == "__main__":
