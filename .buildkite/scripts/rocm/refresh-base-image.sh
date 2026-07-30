@@ -7,6 +7,10 @@
 
 set -euo pipefail
 
+ROCM_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "${ROCM_SCRIPT_DIR}/cache-utils.sh"
+source "${ROCM_SCRIPT_DIR}/buildx-history-logs.sh"
+
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CI_IMAGE_REPO="${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}"
@@ -25,75 +29,11 @@ metadata_set() {
     fi
 }
 
-hash_content_file() {
-    local file="$1"
-    local mode="644"
-    local raw_mode=""
-
-    if [[ -L "${file}" ]]; then
-        printf 'symlink:%s\n' "${file}"
-        printf 'target:%s\n' "$(readlink "${file}")"
-        return 0
-    fi
-
-    raw_mode=$(stat -c '%a' "${file}")
-    if (((8#${raw_mode} & 0111) != 0)); then
-        mode="755"
-    fi
-    printf 'file:%s\n' "${file}"
-    printf 'mode:%s\n' "${mode}"
-    sha256sum "${file}"
-}
-
-compute_content_hash() {
-    local path=""
-
-    for path in "$@"; do
-        if [[ -L "${path}" ]]; then
-            hash_content_file "${path}" || return $?
-        elif [[ -d "${path}" ]]; then
-            hash_content_directory "${path}" || return $?
-        elif [[ -f "${path}" ]]; then
-            hash_content_file "${path}" || return $?
-        else
-            printf 'missing:%s\n' "${path}"
-        fi
-    done | sha256sum | cut -d' ' -f1
-}
-
 list_content_files() {
     local path="$1"
 
     find "${path}" \( -type f -o -type l \) -print0 \
         | LC_ALL=C sort -z
-}
-
-hash_content_directory() {
-    local path="$1"
-    local file=""
-    local hash_status=0
-    local list_fd=""
-    local list_pid=""
-    local list_status=0
-
-    exec {list_fd}< <(list_content_files "${path}")
-    list_pid=$!
-    while IFS= read -r -d '' -u "${list_fd}" file; do
-        if ((hash_status == 0)); then
-            hash_content_file "${file}" || hash_status=$?
-        fi
-    done
-    exec {list_fd}<&-
-
-    wait "${list_pid}" || list_status=$?
-    if ((list_status != 0)); then
-        echo "Error: failed to enumerate content files under ${path}" >&2
-        return "${list_status}"
-    fi
-    if ((hash_status != 0)); then
-        echo "Error: failed to hash a content file under ${path}" >&2
-        return "${hash_status}"
-    fi
 }
 
 clean_docker_tag() {
@@ -113,83 +53,6 @@ extract_arg_default() {
 
     sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${DOCKERFILE}" | head -1
-}
-
-resolve_image_digest() {
-    local image_ref="$1"
-    local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
-    local initial_delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
-    local max_delay_secs="${ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY:-8}"
-    local attempt=0
-    local delay_secs=0
-    local digest=""
-    local inspect_output=""
-    local inspect_status=0
-
-    if [[ "${image_ref}" =~ @(sha256:[0-9a-f]{64})$ ]]; then
-        printf '%s\n' "${BASH_REMATCH[1]}"
-        return 0
-    fi
-
-    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Error: ROCM_IMAGE_DIGEST_ATTEMPTS must be a positive integer" >&2
-        return 1
-    fi
-    if [[ ! "${initial_delay_secs}" =~ ^[0-9]+$ ]]; then
-        echo "Error: ROCM_IMAGE_DIGEST_RETRY_DELAY must be a non-negative integer" >&2
-        return 1
-    fi
-    if [[ ! "${max_delay_secs}" =~ ^[0-9]+$ ]]; then
-        echo "Error: ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY must be a non-negative integer" >&2
-        return 1
-    fi
-
-    delay_secs="${initial_delay_secs}"
-    if ((delay_secs > max_delay_secs)); then
-        delay_secs="${max_delay_secs}"
-    fi
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        inspect_output=""
-        inspect_status=0
-        if inspect_output=$(docker buildx imagetools inspect "${image_ref}" 2>&1); then
-            inspect_status=0
-        else
-            inspect_status=$?
-        fi
-        digest=$(
-            sed -n -E 's/^Digest:[[:space:]]+//p' <<< "${inspect_output}" \
-                | head -1 || true
-        )
-        if ((inspect_status == 0)) \
-            && [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            printf '%s\n' "${digest}"
-            return 0
-        fi
-
-        if ((attempt < attempts)); then
-            printf \
-                'Warning: image digest lookup for %s failed (attempt %d/%d, exit status %d); retrying in %ss\n' \
-                "${image_ref}" "${attempt}" "${attempts}" \
-                "${inspect_status}" "${delay_secs}" >&2
-            sleep "${delay_secs}"
-            delay_secs=$((delay_secs * 2))
-            if ((delay_secs > max_delay_secs)); then
-                delay_secs="${max_delay_secs}"
-            fi
-        fi
-    done
-
-    printf \
-        'Error: failed to resolve image digest for %s after %d attempts (last exit status %d)\n' \
-        "${image_ref}" "${attempts}" "${inspect_status}" >&2
-    if [[ -n "${inspect_output}" ]]; then
-        echo "Last docker buildx imagetools inspect output:" >&2
-        printf '%s\n' "${inspect_output}" >&2
-    else
-        echo "docker buildx imagetools inspect produced no output" >&2
-    fi
-    return 1
 }
 
 resolve_rocm_base_arg_value() {
@@ -321,7 +184,7 @@ log_rocm_base_rebuild_reason() {
     changed_files="$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null || true)"
     echo "Changed files:"
     if [[ -n "${changed_files}" ]]; then
-        sed 's/^/  - /' <<<"${changed_files}"
+        printf '  - %s\n' "${changed_files//$'\n'/$'\n  - '}"
     else
         echo "  - ${DOCKERFILE}"
     fi
@@ -487,10 +350,13 @@ build_base_image() {
     local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
+    local build_metadata_file=""
+    local build_rc=0
     local -a tags=()
     local -a no_cache_args=()
     local -a sccache_args=()
     local -a content_paths=()
+    local -a build_metadata_args=()
 
     if [[ ! -f "${DOCKERFILE}" ]]; then
         echo "Error: ROCm base Dockerfile not found: ${DOCKERFILE}" >&2
@@ -568,10 +434,15 @@ build_base_image() {
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
 
+    if build_metadata_file=$(buildx_history_metadata_file "refresh-rocm-base"); then
+        build_metadata_args=(--metadata-file "${build_metadata_file}")
+        snapshot_buildx_history_refs "${build_metadata_file}" || true
+    fi
     docker buildx build \
         "${no_cache_args[@]}" \
         --pull \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
+        "${build_metadata_args[@]}" \
         --file "${DOCKERFILE}" \
         --build-arg "BASE_IMAGE=${base_image_pinned}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
@@ -604,7 +475,15 @@ build_base_image() {
         --label "vllm.rocm_base.pytorch_rocm_arch=${pytorch_rocm_arch_arg}" \
         "${tags[@]}" \
         --push \
-        .
+        . || build_rc=$?
+
+    if [[ -n "${build_metadata_file}" ]]; then
+        capture_buildx_history_logs \
+            "${build_metadata_file}" "refresh-rocm-base" "${build_rc}" || true
+    fi
+    if ((build_rc != 0)); then
+        return "${build_rc}"
+    fi
 
     docker buildx imagetools inspect "${descriptive_tag}" >/dev/null
 

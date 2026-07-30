@@ -20,6 +20,10 @@ use_ci_base_if_present() {
     if [[ -z "${ci_base_image}" ]]; then
         return 1
     fi
+    if [[ ! "${ci_base_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+        echo "ROCm ci_base handoff is not digest-pinned: ${ci_base_image}" >&2
+        return 1
+    fi
 
     export CI_BASE_IMAGE="${ci_base_image}"
     echo "Using ROCm ci_base image selected by the preceding build step: ${CI_BASE_IMAGE}"
@@ -50,7 +54,13 @@ use_refreshed_base_if_present() {
 main() {
     local base_refreshed=0
 
-    use_ci_base_if_present || true
+    if ! use_ci_base_if_present; then
+        if [[ "${BUILDKITE:-false}" == "true" ]]; then
+            echo "Required ROCm ci_base handoff metadata is missing" >&2
+            return 1
+        fi
+        echo "No ROCm ci_base handoff metadata found; using the local default"
+    fi
 
     if use_refreshed_base_if_present; then
         base_refreshed=1
