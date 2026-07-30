@@ -623,10 +623,12 @@ def test_run_cutlass_moe_fp8(
 # --- run_cutlass_moe_w4a8_fp8 tests ---
 GROUP_SIZE_W4A8 = 128
 
-IS_W4A8_SUPPORTED = (
-    current_platform.is_cuda()
-    and current_platform.get_device_capability() is not None
-    and current_platform.get_device_capability()[0] >= 9
+# CMakeLists.txt builds the W4A8 grouped-MoE kernel for "9.0a" only, and
+# w4a8_grouped_mm_entry.cu pins ArchTag = cutlass::arch::Sm90. A >= 9 predicate
+# would claim support on Blackwell and fail in unified_encode_int4b instead of
+# skipping.
+IS_W4A8_SUPPORTED = current_platform.is_cuda() and (
+    current_platform.is_device_capability_family(90)
 )
 
 
