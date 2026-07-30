@@ -340,42 +340,34 @@ class HiSparseKVCacheController:
             if pending is not None:
                 pending.copy_enqueued = True
 
-        request_ids = {
-            pending.plan.request_id
-            for pending in self.pending_spills.values()
-            if pending.copy_enqueued
-        }
-        for request_id in request_ids:
-            ready = [
-                pending
-                for pending in self.pending_spills.values()
-                if pending.copy_enqueued and pending.plan.request_id == request_id
-            ]
+        ready_by_request: dict[str, list[_PendingSpill]] = {}
+        for pending in self.pending_spills.values():
+            if pending.copy_enqueued:
+                ready_by_request.setdefault(pending.plan.request_id, []).append(pending)
+
+        for request_id, ready in ready_by_request.items():
             transition_target = self.transition_target_pages.get(request_id)
-            release_ready = [pending for pending in ready if pending.release_after]
-            if transition_target is not None and len(release_ready) < transition_target:
+            if transition_target is None:
+                for pending in ready:
+                    self._finalize_spill(pending, release=pending.release_after)
+                continue
+
+            if sum(pending.release_after for pending in ready) < transition_target:
                 for pending in ready:
                     if not pending.release_after:
                         self._finalize_spill(pending, release=False)
                 continue
 
-            if transition_target is not None:
-                for pending in release_ready:
-                    self._finalize_spill(pending, release=True)
-                for pending in ready:
-                    if not pending.release_after:
-                        self._finalize_spill(pending, release=False)
-                self.transition_target_pages.pop(request_id, None)
-                if any(
-                    request_id in manager.req_to_blocks
-                    for _, manager, _ in release_ready[0].resident_entries
-                ):
-                    for manager in self.hot_managers:
-                        manager.activate_hot(request_id)
-                    self.block_table_updates.add(request_id)
-            else:
-                for pending in ready:
-                    self._finalize_spill(pending, release=pending.release_after)
+            for pending in ready:
+                self._finalize_spill(pending, release=pending.release_after)
+            del self.transition_target_pages[request_id]
+            if any(
+                request_id in manager.req_to_blocks
+                for _, manager in self.resident_entries
+            ):
+                for manager in self.hot_managers:
+                    manager.activate_hot(request_id)
+                self.block_table_updates.add(request_id)
 
     def _finalize_spill(self, pending: _PendingSpill, *, release: bool) -> None:
         plan = pending.plan
