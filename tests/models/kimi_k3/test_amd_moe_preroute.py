@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
-    reason="Kimi-K3 BF16 pre-route fusion requires ROCm",
+    reason="Kimi-K3 pre-route fusion requires ROCm",
 )
 
 
@@ -162,3 +162,114 @@ def test_amd_moe_preroute_bf16_matches_reference() -> None:
         atol=0,
         rtol=0,
     )
+
+
+def test_fp8_factory_rejects_incomplete_model_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.kimi_k3.amd.ops.moe_preroute import (
+        KimiK3PrerouteFp8Weights,
+    )
+
+    monkeypatch.setattr(
+        KimiK3PrerouteFp8Weights,
+        "is_backend_available",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        KimiK3PrerouteFp8Weights,
+        "supports_weights",
+        staticmethod(lambda *_: True),
+    )
+    source_weights = (torch.empty(1), torch.empty(1), torch.empty(1))
+    unsupported = (
+        {"use_latent_moe": False},
+        {"tensor_parallel_size": 4},
+        {"source_weights": None},
+        {"situ_beta": None},
+        {"situ_linear_beta": None},
+        {"lora_enabled": True},
+    )
+    base = {
+        "use_latent_moe": True,
+        "tensor_parallel_size": 8,
+        "source_weights": source_weights,
+        "situ_beta": 4.0,
+        "situ_linear_beta": 25.0,
+        "lora_enabled": False,
+    }
+    for override in unsupported:
+        assert KimiK3PrerouteFp8Weights.create_if_supported(**(base | override)) is None
+
+
+def test_amd_moe_preroute_fp8_matches_weight_quantized_reference() -> None:
+    from aiter.jit.utils.chip_info import get_gfx_runtime
+    from aiter.ops.flydsl.utils import is_flydsl_available
+
+    from vllm.models.kimi_k3.amd.ops.moe_preroute import (
+        KimiK3PrerouteFp8Weights,
+    )
+
+    if not is_flydsl_available() or get_gfx_runtime() != "gfx950":
+        pytest.skip("requires FlyDSL on gfx950")
+
+    torch.manual_seed(20260729)
+    hidden = torch.randn((1, 7168), device="cuda", dtype=torch.bfloat16)
+    routed_weight = torch.randn(
+        (3584, 7168),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    shared_gate_up_weight = torch.randn(
+        (1536, 7168),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    shared_down_weight = torch.randn(
+        (7168, 768),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    original_hidden = hidden.clone()
+
+    weights = KimiK3PrerouteFp8Weights(
+        routed_weight,
+        shared_gate_up_weight,
+        shared_down_weight,
+    )
+    assert weights.supports_input(hidden)
+    assert not weights.supports_input(hidden.expand(8, -1))
+
+    routed, shared = weights(
+        hidden,
+        situ_beta=4.0,
+        situ_linear_beta=25.0,
+    )
+
+    routed_dequant = weights.routed_weight.float() * weights.routed_scale[:, None]
+    shared_gate_up_dequant = (
+        weights.shared_gate_up_weight.float() * weights.shared_gate_up_scale[:, None]
+    )
+    shared_down_dequant = (
+        weights.shared_down_weight.float() * weights.shared_down_scale[:, None]
+    )
+    routed_reference = F.linear(hidden.float(), routed_dequant)
+    gate_up_reference = F.linear(hidden.float(), shared_gate_up_dequant)
+    gate, up = gate_up_reference.to(torch.bfloat16).float().chunk(2, dim=-1)
+    activated = (
+        (
+            4.0
+            * torch.tanh(gate / 4.0)
+            * torch.sigmoid(gate)
+            * 25.0
+            * torch.tanh(up / 25.0)
+        )
+        .to(torch.bfloat16)
+        .float()
+    )
+    shared_reference = F.linear(activated, shared_down_dequant)
+
+    assert _relative_rmse(routed, routed_reference) < 0.035
+    assert _relative_rmse(shared, shared_reference) < 0.06
+    assert F.cosine_similarity(shared.float(), shared_reference.float()).item() > 0.998
+    torch.testing.assert_close(hidden, original_hidden, atol=0, rtol=0)
