@@ -991,6 +991,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
+        # warming up processor cache
+        self.info.get_hf_processor()
+
     def __call__(
         self,
         prompt: str,
