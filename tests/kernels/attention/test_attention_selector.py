@@ -48,7 +48,7 @@ def _hisparse_selector_config(backend=None):
     )
 
 
-def test_hisparse_selects_flashmla_sparse():
+def test_hisparse_uses_normal_backend_selection():
     sentinel = object()
     with (
         patch(
@@ -69,10 +69,7 @@ def test_hisparse_selects_flashmla_sparse():
         )
 
     assert result is sentinel
-    assert (
-        select_backend.call_args.kwargs["backend"]
-        == AttentionBackendEnum.FLASHMLA_SPARSE
-    )
+    assert select_backend.call_args.kwargs["backend"] is None
 
 
 def test_hisparse_preserves_explicit_sparse_mla_backend():
