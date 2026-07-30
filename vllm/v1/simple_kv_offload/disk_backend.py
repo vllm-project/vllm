@@ -69,6 +69,7 @@ class DiskBackend:
         self._load_thread: threading.Thread | None = None
         self._shutdown: bool = False
         self._fd: int = -1
+        self._disk_path: str = ""
         self._total_block_bytes: int = 0
         self._store_buffer_caches: dict[str, torch.Tensor] = {}
         self._load_buffer_caches: dict[str, torch.Tensor] = {}
@@ -155,6 +156,7 @@ class DiskBackend:
         if not use_page_cache:
             flags |= O_DIRECT
         self._fd = os.open(disk_path, flags, 0o600)
+        self._disk_path = disk_path
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
@@ -205,6 +207,13 @@ class DiskBackend:
             self._load_thread.join(timeout=10.0)
         if self._fd < 0:
             return
+        # Slot contents can encode user prompts, so drop the name now rather
+        # than leaving them readable until the next run overwrites the file.
+        # Unlinking only removes the directory entry: any thread still holding
+        # the fd keeps writing to the (now anonymous) inode, which the kernel
+        # frees once the last fd goes away.
+        with contextlib.suppress(OSError):
+            os.unlink(self._disk_path)
         # Closing under a still-running IO thread would let the fd number be
         # reused by an unrelated open(), turning its next pwritev into a write
         # into that file. Leaking one fd for the remaining process lifetime is
