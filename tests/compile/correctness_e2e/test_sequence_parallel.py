@@ -135,6 +135,7 @@ def _build_sp_args(
     enable_prompt_embeds: bool,
     *,
     is_multimodal: bool,
+    custom_ops: list[str] | None = None,
 ) -> tuple[list[str], list[str]] | None:
     (
         tp_size,
@@ -224,6 +225,8 @@ def _build_sp_args(
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
+    if custom_ops is not None:
+        compilation_config["custom_ops"] = custom_ops
     if not use_inductor_graph_partition:
         compilation_config["splitting_ops"] = []
 
@@ -371,6 +374,36 @@ def test_tp_sp_generation_prompt_embeds(
                 comparisons.append(comparison)
 
     _compare_sp_settings(model_id, comparisons, method="generate")
+
+
+@create_new_process_for_each_test()
+def test_tp_sp_pp_generation_native_rms_norm(num_gpus_available):
+    model_id = "hmellor/tiny-random-LlamaForCausalLM"
+    comparison = _build_sp_args(
+        model_id,
+        ParallelSetup(
+            tp_size=2,
+            pp_size=2,
+            fuse_norm_quant=False,
+            fuse_act_quant=False,
+            eager_mode=False,
+        ),
+        distributed_backend="mp",
+        runner="auto",
+        test_options=SPTestOptions(multi_node_only=False, load_format=None),
+        num_gpus_available=num_gpus_available,
+        use_inductor_graph_partition=False,
+        fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
+        is_multimodal=False,
+        custom_ops=["-rms_norm"],
+    )
+
+    _compare_sp_settings(
+        model_id,
+        [] if comparison is None else [comparison],
+        method="generate",
+    )
 
 
 @create_new_process_for_each_test()
