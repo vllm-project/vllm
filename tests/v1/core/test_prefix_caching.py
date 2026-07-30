@@ -4311,3 +4311,225 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def _mamba_align_manager(block_size: int = 16, num_blocks: int = 60):
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, num_blocks, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    mamba = manager.coordinator.single_type_managers[1]
+    assert mamba.mamba_cache_mode == "align"
+    return manager, mamba
+
+
+def _hashed_mamba_blocks(mamba, request) -> list[int]:
+    return [
+        index
+        for index, block in enumerate(mamba.req_to_blocks[request.request_id])
+        if not block.is_null and block.block_hash is not None
+    ]
+
+
+def test_mamba_align_records_where_the_forward_leaves_the_state():
+    """`allocate_new_blocks` is where the write position becomes knowable.
+
+    In align mode it already computes `num_tokens_main_model`, which counts the
+    unverified draft tokens the target runs over and is therefore exactly the
+    position the state write covers.
+    """
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+    prompt = [i for i in range(2) for _ in range(block_size)]
+    request = make_request("record", prompt, block_size, sha256)
+
+    manager.allocate_slots(request, len(prompt), 0, None)
+
+    assert mamba._state_write_tokens[request.request_id] == len(prompt)
+
+
+def test_mamba_align_admits_a_state_block_written_at_its_own_boundary():
+    """A prefill chunk is clipped onto a boundary, so its block is cacheable.
+
+    This is the other half of the rule and it has to be asserted alongside the
+    withholding case: a mask that degenerated to all-False would withhold these
+    too, take mamba hits to zero, and look like a stricter version of the same
+    fix rather than a broken one.
+    """
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+    prompt = [i for i in range(2) for _ in range(block_size)]
+    request = make_request("prefill", prompt, block_size, sha256)
+
+    manager.allocate_slots(request, len(prompt), 0, None)
+
+    assert _hashed_mamba_blocks(mamba, request), (
+        "a write that landed exactly on a block boundary, over committed "
+        "tokens only, is the case the cache is allowed to keep"
+    )
+
+
+def test_mamba_align_ands_a_caller_mask_into_its_own():
+    """`MambaManager` computes a boundary mask internally, but it still has to
+    honour one handed in by a caller.
+
+    Every sibling manager takes `extra_block_mask`, and the coordinator already
+    calls `cache_blocks` polymorphically for `retention_interval`. Dropping the
+    parameter here would make the one manager this feature exists for the only
+    one that raises `TypeError` on that call, and would silently ignore a
+    caller that is trying to withhold a block.
+    """
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+    prompt = [i for i in range(2) for _ in range(block_size)]
+    request = make_request("masked", prompt, block_size, sha256)
+
+    manager.allocate_slots(request, len(prompt), 0, None, delay_cache_blocks=True)
+    mamba.cache_blocks(request, len(prompt), extra_block_mask=[False, False])
+
+    assert _hashed_mamba_blocks(mamba, request) == [], (
+        "an all-False caller mask has to withhold every block, even the one "
+        "the boundary rule would have admitted on its own"
+    )
+
+
+def _decode(manager, mamba, request_id, block_size, prompt_blocks, step, num_steps):
+    """Prefill a whole number of blocks, then take uniform decode steps.
+
+    Returns one ``(state write position, admitted mamba blocks)`` pair per
+    decode step.
+    """
+    prompt = [i for i in range(prompt_blocks) for _ in range(block_size)]
+    request = make_request(request_id, prompt, block_size, sha256)
+    manager.allocate_slots(request, len(prompt), 0, None)
+    request.num_computed_tokens = len(prompt)
+
+    steps = []
+    for _ in range(num_steps):
+        request.append_output_token_ids([7] * step)
+        manager.allocate_slots(request, step, 0, None)
+        request.num_computed_tokens += step
+        steps.append(
+            (
+                mamba._state_write_tokens[request.request_id],
+                tuple(_hashed_mamba_blocks(mamba, request)),
+            )
+        )
+    return steps
+
+
+def test_mamba_align_withholds_blocks_a_decode_step_stepped_over():
+    """A decode step is not clipped onto a boundary, so with a step size that
+    does not divide the block size it steps over every boundary it passes.
+
+    Without the rule each of those crossings enters another block into the hash
+    map keyed to a prefix the state it holds does not correspond to.
+    """
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+
+    # 17 tokens per step: one committed token plus a fully accepted draft of
+    # 16. Starting from 32, the writes land at 49, 66, 83 -- never on a
+    # multiple of 16.
+    steps = _decode(manager, mamba, "crossed", block_size, 2, 17, 3)
+
+    assert [write for write, _ in steps] == [49, 66, 83]
+    admitted = {block for _, blocks in steps for block in blocks}
+    assert admitted == {1}, (
+        "only the prefill block, whose chunk was clipped onto the 32-token "
+        f"boundary, may be cached; got {sorted(admitted)}"
+    )
+
+
+def test_mamba_align_keeps_admissions_when_decode_lands_on_boundaries():
+    """The rule is targeted, not merely strict: a decode step whose write does
+    land on a boundary over committed tokens is still admitted.
+
+    Without this the fix could pass its withholding tests while degenerating to
+    withholding everything, which would take mamba prefix hits to zero.
+    """
+    block_size = 16
+    manager, mamba = _mamba_align_manager(block_size)
+
+    # A step equal to the block size lands on a boundary every time.
+    steps = _decode(manager, mamba, "aligned", block_size, 2, block_size, 4)
+
+    assert [write for write, _ in steps] == [48, 64, 80, 96]
+    assert [blocks for _, blocks in steps] == [(1, 2), (2, 3), (3, 4), (4, 5)]
+
+
+def test_mamba_align_withholds_a_boundary_write_still_holding_drafts():
+    """Landing on the boundary is not sufficient; the tokens must be committed.
+
+    Under speculation the forward runs over draft tokens that may be rejected,
+    so a write can land exactly on a boundary and still carry contributions
+    that are undone on the next step.
+    """
+    block_size = 16
+    _, mamba = _mamba_align_manager(block_size)
+    request = make_request("drafts", [1] * 32, block_size, sha256)
+    request.append_output_token_ids([7] * 16)
+    assert request.num_tokens == 48
+
+    # A write to the 64-token boundary while only 48 tokens are committed.
+    mamba._state_write_tokens[request.request_id] = 64
+
+    assert mamba._boundary_state_block_mask(request, 0, 4) == [False] * 4
+
+
+def test_mamba_align_withholds_when_no_write_was_recorded():
+    """Callers outside `allocate_slots` -- async output processing, connector
+    load completion -- can reach `cache_blocks` for a request this manager has
+    not sized a step for. Fail closed rather than admitting on no evidence."""
+    block_size = 16
+    _, mamba = _mamba_align_manager(block_size)
+    request = make_request("unknown", [1] * 32, block_size, sha256)
+
+    assert mamba._boundary_state_block_mask(request, 0, 2) == [False, False]
+
+
+def test_mamba_non_align_caching_is_untouched():
+    """Outside align the recurrent state is not block-snapshotted, so dense
+    caching is correct and the rule must not constrain it."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 60, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    mamba = manager.coordinator.single_type_managers[1]
+    assert mamba.mamba_cache_mode != "align"
+    request = make_request("dense", [1] * 32, block_size, sha256)
+
+    assert mamba._boundary_state_block_mask(request, 0, 2) is None
+
+
+def test_extra_block_mask_can_only_withhold_never_admit():
+    """The mask is ANDed into whatever the manager already computed, so it can
+    take a block out of the admitted set but never put one in."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 60, ["full"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    full = manager.coordinator.single_type_managers[0]
+    prompt = [i for i in range(2) for _ in range(block_size)]
+
+    def hashes_with(extra_block_mask, request_id):
+        request = make_request(request_id, prompt, block_size, sha256)
+        # Full attention caches densely, so without an extra mask both blocks
+        # are admitted; that is the control the mask has to be able to override.
+        manager.allocate_slots(request, len(prompt), 0, None, delay_cache_blocks=True)
+        full.cache_blocks(request, len(prompt), extra_block_mask=extra_block_mask)
+        return [
+            block.block_hash is not None
+            for block in full.req_to_blocks[request.request_id]
+        ]
+
+    assert hashes_with(None, "dense") == [True, True]
+    assert hashes_with([False, False], "withheld") == [False, False]

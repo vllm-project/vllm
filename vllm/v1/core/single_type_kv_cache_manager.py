@@ -440,6 +440,7 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -452,6 +453,12 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
+            extra_block_mask: Optional mask aligned with
+                ``blocks[num_cached_blocks:num_full_blocks]``, ANDed with this
+                manager's own ``reachable_block_mask``. A manager whose blocks
+                only sometimes hold the content the hash they would be keyed
+                under describes uses this to withhold the ones that do not. It
+                can only remove admissions, never add them.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -475,6 +482,16 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
         )
+        if extra_block_mask is not None:
+            assert len(extra_block_mask) == num_full_blocks - num_cached_blocks
+            block_mask = (
+                extra_block_mask
+                if block_mask is None
+                else [
+                    reachable and admitted
+                    for reachable, admitted in zip(block_mask, extra_block_mask)
+                ]
+            )
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -793,8 +810,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            extra_block_mask=extra_block_mask,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -1297,6 +1320,12 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
+            # Mapping from request ID to the token count the most recently
+            # scheduled forward leaves the recurrent state at. This is the
+            # position the state written into `last_state_block_idx + 1`
+            # describes, and it is what decides whether that block may be
+            # keyed under a block-boundary hash.
+            self._state_write_tokens: dict[str, int] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1570,6 +1599,11 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
+            # Where this step's forward leaves the recurrent state. It counts
+            # the unverified draft tokens the target model runs over, which is
+            # exactly what the state write covers, and is recorded before the
+            # early return below so every scheduled step is represented.
+            self._state_write_tokens[request_id] = num_tokens
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
@@ -1677,6 +1711,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._state_write_tokens.pop(request_id, None)
             # A hand-off whose request died in this same scheduling pass must
             # not reach the connector: its unpin hook (free) has already run.
             self._pending_partial_tail_offloads = [
@@ -1699,9 +1734,27 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        boundary_mask = self._boundary_state_block_mask(
+            request,
+            start_block=num_cached_blocks_before,
+            end_block=num_tokens // self.block_size,
+        )
+        if extra_block_mask is not None:
+            boundary_mask = [
+                caller and boundary
+                for caller, boundary in zip(
+                    extra_block_mask, boundary_mask, strict=True
+                )
+            ]
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            extra_block_mask=boundary_mask,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1718,6 +1771,48 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
+
+    def _boundary_state_block_mask(
+        self,
+        request: Request,
+        start_block: int,
+        end_block: int,
+    ) -> list[bool] | None:
+        """Admit only a state block that holds the state at its own boundary.
+
+        A cached block ``j`` is keyed under the hash of the prefix ending at
+        ``(j + 1) * block_size`` and registered with that many hash tokens, so
+        a request restoring from it resumes as if exactly that many tokens had
+        been consumed. In "align" mode the recurrent state saved in block ``j``
+        is instead whatever the forward left after the tokens that step
+        scheduled, which only coincides with the boundary when the step happens
+        to end on it. Prefill chunks are clipped to end on one; decode steps are
+        not, and a step that speculates also runs over draft tokens that may be
+        rejected afterwards.
+
+        Admit the single block that this step's write lands on, and only when
+        that landing is both exactly on the boundary and entirely made of
+        committed tokens. Everything else is withheld, including blocks written
+        by an earlier step: those were offered under this same rule when they
+        were written, so a second look can only re-offer a state the rule has
+        already rejected.
+
+        Returns ``None`` in non-align mode, where the state block is not
+        snapshotted per block and dense caching is correct.
+        """
+        if self.mamba_cache_mode != "align":
+            return None
+        num_state_tokens = self._state_write_tokens.get(request.request_id)
+        # `request.num_tokens` counts committed tokens only, so a write that
+        # ran past it covers draft tokens that are not decided yet.
+        if (
+            num_state_tokens is None
+            or num_state_tokens % self.block_size != 0
+            or num_state_tokens > request.num_tokens
+        ):
+            return [False] * max(end_block - start_block, 0)
+        boundary_block = num_state_tokens // self.block_size - 1
+        return [block == boundary_block for block in range(start_block, end_block)]
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
@@ -1794,6 +1889,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        extra_block_mask: list[bool] | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
