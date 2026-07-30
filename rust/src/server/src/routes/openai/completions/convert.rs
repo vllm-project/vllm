@@ -147,6 +147,7 @@ pub(super) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        trace_headers: ctx.trace_headers,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
@@ -198,6 +199,8 @@ fn completion_echo_text(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
@@ -603,5 +606,58 @@ mod tests {
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);
+    }
+
+    #[test]
+    fn prepare_completion_request_threads_trace_headers() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".parse().unwrap(),
+        );
+        headers.insert("tracestate", "congo=t61rcWkgMzE".parse().unwrap());
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.text_request.trace_headers,
+            Some(BTreeMap::from([
+                (
+                    "traceparent".to_string(),
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                ),
+                ("tracestate".to_string(), "congo=t61rcWkgMzE".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn prepare_completion_request_leaves_trace_headers_none_when_absent() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.trace_headers, None);
     }
 }

@@ -177,6 +177,7 @@ pub(super) fn prepare_chat_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        trace_headers: ctx.trace_headers,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -409,7 +410,7 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     use axum::http::HeaderMap;
@@ -1250,6 +1251,43 @@ mod tests {
         )
         .expect("request is valid");
         assert_eq!(prepared.chat_request.data_parallel_rank, None);
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_trace_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".parse().unwrap(),
+        );
+        headers.insert("tracestate", "congo=t61rcWkgMzE".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.trace_headers,
+            Some(BTreeMap::from([
+                (
+                    "traceparent".to_string(),
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                ),
+                ("tracestate".to_string(), "congo=t61rcWkgMzE".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_leaves_trace_headers_none_when_absent() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.trace_headers, None);
     }
 
     #[test]

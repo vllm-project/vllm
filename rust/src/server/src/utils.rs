@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderMap;
@@ -15,7 +15,12 @@ use crate::error::ApiError;
 pub struct ResolvedRequestContext {
     pub request_id: String,
     pub data_parallel_rank: Option<u32>,
+    pub trace_headers: Option<BTreeMap<String, String>>,
 }
+
+/// W3C trace-context headers propagated to engine-core, mirroring Python
+/// vLLM's `TRACE_HEADERS` in `vllm/tracing/utils.py`.
+const TRACE_HEADERS: [&str; 2] = ["traceparent", "tracestate"];
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
 pub fn unix_timestamp() -> u64 {
@@ -91,8 +96,9 @@ pub fn convert_logit_bias(
         .transpose()
 }
 
-/// Extract common request metadata from HTTP headers: the external request ID
-/// and the optional data-parallel rank used for engine routing.
+/// Extract common request metadata from HTTP headers: the external request ID,
+/// the optional data-parallel rank used for engine routing, and the W3C
+/// trace-context headers forwarded to engine-core.
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
@@ -107,9 +113,25 @@ pub fn resolve_request_context(
     let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
 
+    // Unlike Python vLLM, extraction is not gated on the engine having tracing
+    // enabled: the Rust server emits no spans itself, so `trace_headers` is
+    // pure propagation and is populated whenever the headers are present.
+    // Non-UTF-8 header values are skipped silently.
+    let trace_headers: BTreeMap<String, String> = TRACE_HEADERS
+        .into_iter()
+        .filter_map(|name| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    let trace_headers = (!trace_headers.is_empty()).then_some(trace_headers);
+
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
+        trace_headers,
     }
 }
 
@@ -124,4 +146,70 @@ pub fn resolve_base_request_id(
         id.truncate(8);
         id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use axum::http::HeaderMap;
+
+    use super::resolve_request_context;
+
+    #[test]
+    fn resolve_request_context_extracts_trace_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".parse().unwrap(),
+        );
+        headers.insert("tracestate", "congo=t61rcWkgMzE".parse().unwrap());
+
+        let ctx = resolve_request_context(&headers, None);
+        assert_eq!(
+            ctx.trace_headers,
+            Some(BTreeMap::from([
+                (
+                    "traceparent".to_string(),
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                ),
+                ("tracestate".to_string(), "congo=t61rcWkgMzE".to_string()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn resolve_request_context_extracts_traceparent_alone() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".parse().unwrap(),
+        );
+
+        let ctx = resolve_request_context(&headers, None);
+        assert_eq!(
+            ctx.trace_headers,
+            Some(BTreeMap::from([(
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            )]))
+        );
+    }
+
+    #[test]
+    fn resolve_request_context_leaves_trace_headers_none_when_absent() {
+        let ctx = resolve_request_context(&HeaderMap::new(), None);
+        assert_eq!(ctx.trace_headers, None);
+    }
+
+    #[test]
+    fn resolve_request_context_ignores_non_trace_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Request-Id", "req-1".parse().unwrap());
+        headers.insert("baggage", "key=value".parse().unwrap());
+
+        let ctx = resolve_request_context(&headers, None);
+        assert_eq!(ctx.trace_headers, None);
+        assert_eq!(ctx.request_id, "req-1");
+    }
 }
