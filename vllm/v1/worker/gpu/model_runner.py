@@ -884,6 +884,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.cudagraph_manager.captured_token_counts()
                 ):
                     self._dummy_run(**batch)
+                self.step_timing.flush()
                 self.adaptive_verification.set_initial_cost_curves()
 
         end_time = time.perf_counter()

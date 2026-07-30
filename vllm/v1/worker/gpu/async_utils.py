@@ -43,25 +43,28 @@ class StepTimingCollector:
 
     Only enabled alongside a drafter, so every step it times has one. Record
     calls no-op unless ``start`` armed the collector, so callers need no guards.
+    Each step gets its own events, so the timed steps queue back-to-back and
+    ``flush`` resolves them all behind a single sync.
     """
 
     def __init__(self, enabled: bool):
-        self._events = (
+        self._enabled = enabled
+        self._armed: StepTimingEvents | None = None
+        self._batch = (False, 0, 0)
+        self._pending: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
+        self.consumer: Callable[[StepTimingSample], None] | None = None
+
+    def start(self, enabled: bool) -> None:
+        self._armed = (
             StepTimingEvents(
                 *(
                     torch.cuda.Event(enable_timing=True)
                     for _ in StepTimingEvents._fields
                 )
             )
-            if enabled
+            if enabled and self._enabled
             else None
         )
-        self._armed: StepTimingEvents | None = None
-        self._batch = (False, 0, 0)
-        self.consumer: Callable[[StepTimingSample], None] | None = None
-
-    def start(self, enabled: bool) -> None:
-        self._armed = self._events if enabled else None
 
     def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
         """Costs from different execution modes must not share a cost curve."""
@@ -85,19 +88,29 @@ class StepTimingCollector:
 
     def finish(self) -> None:
         events, self._armed = self._armed, None
-        if events is None:
+        if events is not None:
+            self._pending.append((events, self._batch))
+
+    def flush(self) -> None:
+        """Hand every timed step to the consumer.
+
+        Timed steps are recorded in issue order on one stream, so waiting on
+        the last drafter event leaves all the earlier ones ready to read.
+        """
+        pending, self._pending = self._pending, []
+        if not pending or self.consumer is None:
             return
-        events.drafter_end.synchronize()
-        full_cudagraph, num_target_tokens, num_reqs = self._batch
-        sample = StepTimingSample(
-            events.forward_start.elapsed_time(events.forward_end),
-            events.drafter_start.elapsed_time(events.drafter_end),
-            num_target_tokens,
-            num_reqs,
-            full_cudagraph,
-        )
-        if self.consumer is not None:
-            self.consumer(sample)
+        pending[-1][0].drafter_end.synchronize()
+        for events, (full_cudagraph, num_target_tokens, num_reqs) in pending:
+            self.consumer(
+                StepTimingSample(
+                    events.forward_start.elapsed_time(events.forward_end),
+                    events.drafter_start.elapsed_time(events.drafter_end),
+                    num_target_tokens,
+                    num_reqs,
+                    full_cudagraph,
+                )
+            )
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
