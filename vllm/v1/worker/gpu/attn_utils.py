@@ -226,7 +226,6 @@ def _kv_cache_num_segments_by_layer(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: list[int],
     cache_dtype: str,
-    has_mamba: bool,
 ) -> dict[str, int]:
     """Number of equal contiguous segments of each layer's KV cache buffer
     under its physical layout -- the product of the physical dims preceding
@@ -239,7 +238,7 @@ def _kv_cache_num_segments_by_layer(
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
         kv_cache_spec = group.kv_cache_spec
-        if isinstance(kv_cache_spec, AttentionSpec) and not has_mamba:
+        if isinstance(kv_cache_spec, AttentionSpec):
             if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
                 kernel_block_size = kv_cache_spec.storage_block_size
             else:
@@ -273,9 +272,7 @@ def _kv_cache_num_segments_by_layer(
                 for dim in stride_order[: stride_order.index(block_dim)]
             )
         else:
-            # Mamba states are packed per block (block-major), and
-            # `_update_hybrid_attention_layout` re-strides attention caches of
-            # hybrid models to a block-major interleaved layout.
+            # Mamba layers use a single block-major page view per layer.
             num_segments = 1
         for layer_name in group.layer_names:
             num_segments_by_layer[layer_name] = num_segments
@@ -332,9 +329,8 @@ def narrow_kv_caches_to_num_blocks(
                     block_dim, 0, num_blocks * num_blocks_per_kv_block
                 )
             elif isinstance(kv_cache_spec, MambaSpec):
-                narrowed[layer_name] = [
-                    state.narrow(0, 0, num_blocks) for state in kv_cache
-                ]
+                # A single block-major [num_blocks, 1, 1, page_size] view.
+                narrowed[layer_name] = kv_cache.narrow(0, 0, num_blocks)
 
     _bound_packed_kv_cache_storages(narrowed, kv_cache_config, num_blocks)
     return narrowed
@@ -411,7 +407,6 @@ def _allocate_extensible_kv_cache(
         attn_groups,
         kernel_block_sizes,
         cache_dtype,
-        kv_cache_config.has_mamba_layers,
     )
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     buffers: list[tuple[ExtensibleTensor, int]] = []
