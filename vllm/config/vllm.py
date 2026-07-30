@@ -953,6 +953,19 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
+        if self.parallel_config.all2all_backend == "shared_ep":
+            max_tokens = self.scheduler_config.max_num_batched_tokens
+            if max_tokens is None or max_tokens > 32:
+                raise ValueError(
+                    "shared_ep supports at most 32 scheduled tokens per rank; "
+                    "set --max-num-batched-tokens 32 or lower."
+                )
+            if not self.scheduler_config.enable_chunked_prefill:
+                raise ValueError(
+                    "shared_ep requires chunked prefill so prompts are split "
+                    "within its 32-token capacity."
+                )
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)

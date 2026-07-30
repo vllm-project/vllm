@@ -45,6 +45,7 @@ All2AllBackend = Literal[
     "deepep_high_throughput",
     "deepep_low_latency",
     "deepep_v2",
+    "shared_ep",
     "mori_high_throughput",
     "mori_low_latency",
     "nixl_ep",
@@ -191,6 +192,7 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
+    - "shared_ep": Directly consume owner-resident decode activations
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
@@ -471,6 +473,43 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if self.all2all_backend == "shared_ep":
+            if not self.enable_expert_parallel:
+                raise ValueError("shared_ep requires enable_expert_parallel=True.")
+            if self.data_parallel_size <= 1:
+                raise ValueError("shared_ep requires data_parallel_size > 1.")
+            offline_same_host_dp = (
+                self.data_parallel_size_local == 1
+                and self.data_parallel_size == envs.VLLM_DP_SIZE
+                and envs.VLLM_DP_MASTER_IP in ("127.0.0.1", "localhost", "::1")
+            )
+            if (
+                self.data_parallel_size_local != self.data_parallel_size
+                and not offline_same_host_dp
+            ):
+                raise ValueError(
+                    "shared_ep requires every DP/EP rank to be local; "
+                    "use local DP or offline DP with a loopback master."
+                )
+            if self.tensor_parallel_size != 1:
+                raise ValueError("shared_ep currently requires tensor_parallel_size=1.")
+            if self.prefill_context_parallel_size != 1:
+                raise ValueError(
+                    "shared_ep currently requires prefill_context_parallel_size=1."
+                )
+            if self.nnodes != 1:
+                raise ValueError("shared_ep currently requires a single node.")
+            if self.use_ubatching:
+                raise ValueError(
+                    "shared_ep does not support dual-batch overlap or ubatching."
+                )
+            if self.enable_eplb:
+                raise ValueError("shared_ep does not support EPLB.")
+            if self.enable_elastic_ep:
+                raise ValueError("shared_ep does not support elastic EP.")
+            if self.enable_fault_tolerance:
+                raise ValueError("shared_ep does not support fault tolerance.")
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(

@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -307,6 +308,26 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_nvfp4_direct_output() -> bool:
+    """Return whether CuTeDSL MoE can store W2 rows into owner VMM slots."""
+    if not has_flashinfer_cutedsl_moe_nvfp4():
+        return False
+    mod = _get_submodule("flashinfer")
+    impl = getattr(mod, "cute_dsl_fused_moe_nvfp4", None) if mod else None
+    if impl is None:
+        return False
+    try:
+        parameters = inspect.signature(impl).parameters
+    except (TypeError, ValueError):
+        return False
+    return {
+        "direct_output",
+        "output_rows_per_owner",
+        "output_physical_rows_per_owner",
+    }.issubset(parameters)
 
 
 @functools.cache
@@ -1044,6 +1065,7 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_cutedsl_moe_nvfp4_direct_output",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",

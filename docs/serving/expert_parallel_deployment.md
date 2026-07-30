@@ -28,6 +28,18 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+| `shared_ep` | Single-node SM100 decode | Setup-time CUDA VMM mappings and direct peer access | Native FP4 decode with at most 32 scheduled tokens per rank |
+
+The `shared_ep` backend requires one SM100 NVLink domain with peer access and
+native peer atomics, `TP=1`, expert parallelism, chunked prefill, and
+`--max-num-batched-tokens 32` or lower. It does not support DBO, EPLB, elastic
+EP, fault tolerance, or multi-node execution.
+
+For native NVFP4, `shared_ep` requires FlashInfer CuTeDSL direct-output
+support. W2 writes expanded token/top-k contributions directly into canonical
+owner VMM rows, and each owner reduces its local top-k rows. vLLM rejects an
+older FlashInfer build instead of falling back to rank-partial output
+materialization.
 
 ## Single Node Deployment
 

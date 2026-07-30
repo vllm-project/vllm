@@ -166,9 +166,42 @@ def maybe_make_prepare_finalize(
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = get_ep_all2all_manager(eep_stage)
-
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
+
+    # SharedEP owns a setup-time CUDA VMM object and does not use an all-to-all
+    # manager. Constructing the configured default manager here is unnecessary
+    # and may allocate transport resources that SharedEP never touches.
+    if moe.use_shared_ep_kernels:
+        assert quant_config is not None
+        from .prepare_finalize.shared_ep import SharedEPPrepareAndFinalize
+
+        quant_dtype = quant_config.quant_dtype
+        if quant_dtype not in ("nvfp4", "mxfp8"):
+            raise ValueError(
+                "shared_ep requires native NVFP4 or native MXFP8 activations"
+            )
+        if quant_dtype == "nvfp4":
+            from vllm.utils.flashinfer import (
+                has_flashinfer_cutedsl_moe_nvfp4_direct_output,
+            )
+
+            if not has_flashinfer_cutedsl_moe_nvfp4_direct_output():
+                raise RuntimeError(
+                    "Native NVFP4 SharedEP requires FlashInfer CuTeDSL "
+                    "direct-output support; refusing to use a materializing "
+                    "rank-partial output path"
+                )
+        assert isinstance(quant_dtype, str)
+        ep_group = get_ep_group()
+        return SharedEPPrepareAndFinalize(
+            hidden_size=moe.hidden_dim,
+            top_k=moe.experts_per_token,
+            quant_dtype=quant_dtype,
+            group=ep_group.cpu_group,
+            device=torch.device(ep_group.device),
+        )
+
+    all2all_manager = get_ep_all2all_manager(eep_stage)
 
     if moe.use_deepep_ht_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
