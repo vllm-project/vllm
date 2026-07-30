@@ -785,9 +785,7 @@ class GigaChat35DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         if self.layer_type == "linear_attention":
-            attn_output = torch.empty_like(hidden_states)
-            self.self_attn(hidden_states=hidden_states, output=attn_output)
-            hidden_states = attn_output
+            hidden_states = self.self_attn(hidden_states=hidden_states)
         else:
             hidden_states = self.self_attn(
                 positions=positions,
