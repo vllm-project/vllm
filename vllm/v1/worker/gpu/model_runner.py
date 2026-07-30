@@ -133,7 +133,11 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.utils import (
+    KVBlockZeroer,
+    copy_kv_cache_blocks_inplace,
+    get_uniform_decode_token_count,
+)
 
 logger = init_logger(__name__)
 
@@ -1250,6 +1254,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
 
+    def _get_uniform_token_count(
+        self,
+        scheduler_output: SchedulerOutput,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+        dummy_run: bool,
+    ) -> int | None:
+        """Per-request token count of a uniform decode batch, or None.
+
+        Dummy batches (DP padding, memory profiling, warmup) are uniform by
+        construction and have no request state to consult, so they are
+        classified by shape alone. This mirrors `InputBatch.make_dummy`, which
+        marks every dummy request as not prefilling.
+        """
+        if dummy_run:
+            return get_uniform_token_count(num_reqs, num_tokens, max_query_len)
+        idx_mapping_np = np.fromiter(
+            map(
+                self.req_states.req_id_to_index.__getitem__,
+                scheduler_output.num_scheduled_tokens,
+            ),
+            dtype=np.intp,
+            count=num_reqs,
+        )
+        return get_uniform_decode_token_count(
+            num_reqs,
+            num_tokens,
+            max_query_len,
+            self.req_states.num_computed_prefill_tokens[idx_mapping_np],
+            self.req_states.prefill_len.np[idx_mapping_np],
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1276,7 +1313,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
-        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+        uniform_tok_count = self._get_uniform_token_count(
+            scheduler_output, num_reqs, num_toks, max_query_len, dummy_run
+        )
 
         num_active_loras = 0
         if self.lora_config:
