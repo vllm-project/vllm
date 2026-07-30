@@ -230,6 +230,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/qwen3_dspark.py
     - vllm/model_executor/models/gemma4_dspark.py
     - tests/v1/e2e/spec_decode/
   commands:
