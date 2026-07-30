@@ -121,9 +121,7 @@ class TestOptionalCohereImport:
     below exists to pin down that ordering — the flag-off short-circuits
     """
 
-    def test_flag_off_and_sdk_missing_stays_silent_about_sdk(
-        self, monkeypatch, caplog
-    ):
+    def test_flag_off_and_sdk_missing_stays_silent_about_sdk(self, monkeypatch, caplog):
         """Flag off doesn't do SDK-missing check.
 
         When the operator hasn't opted in, ``attach_router`` must not
@@ -208,7 +206,9 @@ class TestEnvVarGate:
             for rec in caplog.records
             if "VLLM_ENABLE_COHERE_API is not set" in rec.message
         ]
-        assert debug_flag_records, "expected a DEBUG message that the cohere flag is off"
+        assert debug_flag_records, (
+            "expected a DEBUG message that the cohere flag is off"
+        )
         assert all(rec.levelname == "DEBUG" for rec in debug_flag_records)
 
     def test_attach_router_noop_when_flag_zero(self, monkeypatch):
@@ -219,6 +219,7 @@ class TestEnvVarGate:
 
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat" not in paths
+
 
 # ----------------------------------------------------------------------
 # Endpoint behavior
