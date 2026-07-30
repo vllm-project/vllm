@@ -1033,13 +1033,14 @@ class FlashAttentionImpl(AttentionImpl):
                 # PCP+DCP decode batches (rows replicated across ranks, so the
                 # topology helpers make the Q gather a no-op and the combine an
                 # all-reduce); only a PCP+DCP prefill/mixed step -- where
-                # DualChunkSwap partitions the queries -- needs the row plan.
-                pcp_prefill_step = False
-                if self.use_pcp:
-                    pcp_prefill_step, _ = get_forward_context().additional_kwargs.get(
-                        "pcp_global_flags", (True, False)
-                    )
-                if pcp_prefill_step:
+                # DualChunkSwap partitions the queries and the manager builds
+                # a row plan -- goes to _forward_pcp_dcp.
+                plan = (
+                    get_forward_context().additional_kwargs.get("pcp_row_plan")
+                    if self.use_pcp
+                    else None
+                )
+                if plan is not None:
                     # MRv2 PCP+DCP prefill (dcp == pcp): every row is a
                     # (cached prefix, new-token span) pair -- the suffix
                     # attends the write-gathered new K/V, the prefix attends
@@ -1053,6 +1054,7 @@ class FlashAttentionImpl(AttentionImpl):
                         output[:num_actual_tokens],
                         attn_metadata,
                         layer,
+                        plan,
                         q_descale=q_descale,
                         k_descale=k_descale,
                         v_descale=v_descale,
@@ -1252,8 +1254,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Rank-invariant gather decision: per-rank num_decode_tokens can differ
             # under DualChunkSwap and desync the all-gather, so if the global batch
             # has any prefill every rank gathers the whole batch.
-            gflags = get_forward_context().additional_kwargs.get("pcp_global_flags")
-            if gflags is not None and gflags[0]:
+            if get_forward_context().additional_kwargs.get("pcp_has_prefill"):
                 num_decode_tokens = 0
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
@@ -1335,6 +1336,7 @@ class FlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
+        plan: "PCPRowPlan",
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
@@ -1353,8 +1355,8 @@ class FlashAttentionImpl(AttentionImpl):
             sliced back to this rank's rows;
           - merge_attn_states folds the two.
 
-        Pure-decode batches do not reach here: their rows are replicated
-        across ranks, so forward() routes them to _forward_with_dcp.
+        Pure-decode batches do not reach here: no prefill means no row plan,
+        and forward() routes those steps to _forward_with_dcp.
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -1362,24 +1364,6 @@ class FlashAttentionImpl(AttentionImpl):
         fc = get_forward_context()
         query = query.contiguous()
         fa_kw = self._fa_common_kwargs(q_descale, k_descale, v_descale)
-
-        plan: PCPRowPlan | None = fc.additional_kwargs.get("pcp_row_plan")
-        if plan is None:
-            # Warmup/dummy: no PCP partition -> local causal (shape-correct only).
-            flash_attn_varlen_func(
-                q=query,
-                k=key,
-                v=value,
-                out=output,
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                cu_seqlens_k=attn_metadata.query_start_loc,
-                max_seqlen_k=attn_metadata.max_query_len,
-                causal=attn_metadata.causal,
-                num_splits=attn_metadata.max_num_splits,
-                **fa_kw,
-            )
-            return output
 
         n = query.shape[0]
         suffix_lse = None
@@ -1408,13 +1392,14 @@ class FlashAttentionImpl(AttentionImpl):
                 num_splits=attn_metadata.max_num_splits,
                 **fa_kw,
             )
-        if not plan.has_prefix:
+        prefix = plan.prefix
+        if prefix is None:
             return output
 
         # Prefix: gather the prefix-row queries (extend chunks + decode rows)
         # so every rank evaluates the same rows against its DCP cache shard,
         # then LSE all-reduce the partials.
-        num_prefix_rows = plan.prefix_cu_q.shape[0] - 1
+        num_prefix_rows = prefix.cu_q.shape[0] - 1
         pfx_descale_shape = (num_prefix_rows, self.num_kv_heads)
         pfx_fa_kw = self._fa_common_kwargs(
             layer._q_scale.expand(pfx_descale_shape)
@@ -1424,23 +1409,23 @@ class FlashAttentionImpl(AttentionImpl):
             layer._v_scale.expand(pfx_descale_shape),
         )
         if n > 0:
-            q_local = query[plan.prefix_q_local_idx]
+            q_local = query[prefix.q_local_idx]
         else:
             # This rank holds no rows; still must join the collectives.
             q_local = query.new_zeros(
-                (plan.padded_num_prefix_tokens, self.num_heads, self.head_size)
+                (prefix.padded_num_tokens, self.num_heads, self.head_size)
             )
-        q_g = get_pcp_group().all_gather(q_local, dim=0)[plan.prefix_q_restore_idx]
+        q_g = get_pcp_group().all_gather(q_local, dim=0)[prefix.q_restore_idx]
         ctx_out, ctx_lse = flash_attn_varlen_func(
             q=q_g,
             k=key_cache,
             v=value_cache,
-            cu_seqlens_q=plan.prefix_cu_q,
-            max_seqlen_q=plan.prefix_max_q,
-            seqused_k=plan.prefix_dcp_ctx_lens,
-            max_seqlen_k=plan.prefix_max_ctx,
+            cu_seqlens_q=prefix.cu_q,
+            max_seqlen_q=prefix.max_q,
+            seqused_k=prefix.dcp_ctx_lens,
+            max_seqlen_k=prefix.max_ctx,
             causal=False,
-            block_table=plan.prefix_block_table,
+            block_table=prefix.block_table,
             return_softmax_lse=True,
             num_splits=attn_metadata.max_num_splits,
             **pfx_fa_kw,
@@ -1454,10 +1439,8 @@ class FlashAttentionImpl(AttentionImpl):
         ctx_lse_cor = ctx_lse_cor.transpose(0, 1).contiguous()
         pfx_out = output.new_zeros((n, self.num_heads, self.head_size))
         pfx_lse = suffix_lse.new_full((suffix_lse.shape[0], n), float("-inf"))
-        pfx_out[plan.prefix_local_token_idx] = ctx_out_cor[plan.prefix_local_out_idx]
-        pfx_lse[:, plan.prefix_local_token_idx] = ctx_lse_cor[
-            :, plan.prefix_local_out_idx
-        ]
+        pfx_out[prefix.local_token_idx] = ctx_out_cor[prefix.local_out_idx]
+        pfx_lse[:, prefix.local_token_idx] = ctx_lse_cor[:, prefix.local_out_idx]
         # Rows without a prefix row keep their suffix output (lse -inf -> 0 weight).
         merge_attn_states(output, pfx_out, pfx_lse, output, suffix_lse)
         return output

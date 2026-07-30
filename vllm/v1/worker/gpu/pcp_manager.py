@@ -36,34 +36,43 @@ class RankSegment:
         return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
+class PCPPrefixPlan(NamedTuple):
+    """Prefix (cached-context) attention plan for one PCP+DCP prefill step.
+
+    Every rank gathers the same prefix-row queries (extend chunks + decode
+    rows), attends its DCP shard of the cached prefix, and LSE-combines
+    (all-reduce) across the group; the combine requires the same queries on
+    every rank. Index tensors are views into one packed buffer uploaded with
+    a single H2D copy per step.
+    """
+
+    padded_num_tokens: int  # all-gather slab size (rank-invariant)
+    q_local_idx: torch.Tensor  # [padded_num_tokens] int64, local token coords
+    q_restore_idx: torch.Tensor  # [total_global_prefix_tokens] int64
+    cu_q: torch.Tensor  # [num_global_prefix_rows + 1] int32
+    max_q: int
+    dcp_ctx_lens: torch.Tensor  # [num_global_prefix_rows] int32, this DCP rank
+    max_ctx: int
+    block_table: torch.Tensor  # [num_global_prefix_rows, max_num_blocks]
+    local_token_idx: torch.Tensor  # [num_local_prefix_tokens] int64
+    local_out_idx: torch.Tensor  # [num_local_prefix_tokens] int64
+
+
 class PCPRowPlan(NamedTuple):
-    """Per-step row-level attention plan for the sharded PCP+DCP path.
+    """Per-step row plan for the sharded PCP+DCP prefill path.
 
     Every rank-local row is a (cached prefix, new-token span) pair. The suffix
     (new tokens) attends the write-gathered K/V -- the same all-gather the
-    cache write already performs -- so it needs no collective. The prefix
-    (cached context) attends this rank's DCP cache shard with the
-    PCP-gathered prefix-row queries and LSE-combines (all-reduce) across the
-    group, which requires every rank to hold the same prefix-row queries.
+    cache write already performs -- so it needs no collective. ``prefix`` is
+    None when no global row has a cached context this step (pure
+    fresh-prefill batch), letting the prefix attention and its query gather
+    be skipped on every rank.
     """
 
-    # Suffix attention (rank-local rows vs the stashed write-gathered K/V).
     suffix_kv_idx: torch.Tensor  # [total_suffix_k] int64, into stashed K/V
     suffix_cu_k: torch.Tensor  # [num_local_rows + 1] int32
     suffix_max_k: int
-    # Prefix attention (gathered rows vs the local DCP cache shard).
-    has_prefix: bool  # rank-invariant: some global row has cached context
-    num_local_prefix_tokens: int
-    padded_num_prefix_tokens: int  # all-gather slab size (rank-invariant)
-    prefix_q_local_idx: torch.Tensor  # [padded_num_prefix_tokens] int64
-    prefix_q_restore_idx: torch.Tensor  # [total_global_prefix_tokens] int64
-    prefix_cu_q: torch.Tensor  # [num_global_prefix_rows + 1] int32
-    prefix_max_q: int
-    prefix_dcp_ctx_lens: torch.Tensor  # [num_global_prefix_rows] int32
-    prefix_max_ctx: int
-    prefix_block_table: torch.Tensor  # [num_global_prefix_rows, max_num_blocks]
-    prefix_local_token_idx: torch.Tensor  # [num_local_prefix_tokens] int64
-    prefix_local_out_idx: torch.Tensor  # [num_local_prefix_tokens] int64
+    prefix: PCPPrefixPlan | None
 
 
 class PCPManager:
@@ -102,12 +111,11 @@ class PCPManager:
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
         # GLOBAL batch composition (rank-invariant: every PCP rank sees the same
-        # global batch, so these are identical across ranks). Used for
-        # rank-consistent mixed-batch detection in the sharded attention path --
-        # per-rank is_prefilling can differ (DualChunkSwap leaves some ranks with
-        # zero prefill chunks), which would desync NCCL collectives.
+        # global batch, so this is identical across ranks). Gates the
+        # cache-write all-gather and the row-plan build -- per-rank
+        # is_prefilling can differ (DualChunkSwap leaves some ranks with zero
+        # prefill chunks), which would desync NCCL collectives.
         self._global_has_prefill: bool = False
-        self._global_has_decode: bool = False
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
         # Per-step row-plan state for the sharded PCP+DCP attention path.
@@ -404,7 +412,6 @@ class PCPManager:
         is_prefilling = global_batch.is_prefilling_np
         # Rank-invariant global composition (see __init__ comment).
         self._global_has_prefill = bool(is_prefilling.any())
-        self._global_has_decode = bool((~is_prefilling).any())
 
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
@@ -686,25 +693,19 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
-    def global_batch_flags(self) -> tuple[bool, bool]:
-        """Return (has_prefill, has_decode) for the global (pre-partition) batch.
-
-        Rank-invariant across PCP ranks (identical global batch). Used for
-        rank-consistent mixed-batch detection in the sharded attention path.
-        """
-        return self._global_has_prefill, self._global_has_decode
-
     def populate_forward_context(self) -> None:
-        """Stash all PCP metadata the attention forward / kv-cache update need.
+        """Stash the PCP metadata the attention forward / kv-cache update need.
 
         Centralized here so the model runner stays a single call. Populates:
-          - ``pcp_global_flags``: rank-invariant (has_prefill, has_decode) for
-            consistent mixed-batch routing and cache-write gather decisions.
+          - ``pcp_has_prefill``: rank-invariant bool gating the cache-write
+            all-gather (when the global batch has any prefill, every rank
+            gathers the whole batch; otherwise writes stay local).
           - ``pcp_row_plan``: per-step :class:`PCPRowPlan` for the sharded
-            PCP+DCP attention path (None for warmup or pure-decode steps).
+            PCP+DCP prefill path (None for warmup or pure-decode steps, which
+            is also how forward() tells the two paths apart).
         """
         kwargs = get_forward_context().additional_kwargs
-        kwargs["pcp_global_flags"] = self.global_batch_flags()
+        kwargs["pcp_has_prefill"] = self._global_has_prefill
         kwargs["pcp_row_plan"] = self.build_cp_row_plan()
 
     def build_cp_row_plan(self) -> "PCPRowPlan | None":
@@ -876,37 +877,68 @@ class PCPManager:
         prefix_q_local_np = np.zeros(padded_num_prefix, dtype=np.int64)
         prefix_q_local_np[:num_local_prefix] = prefix_local_token_np
 
-        row_req_gpu = async_copy_to_gpu(row_req_np, device=self.device)
+        # Pack the index arrays into one int64 and one int32 buffer -- one
+        # H2D copy each; a pin_memory() per small tensor is the dominant cost
+        # here. The plan hands out views into the packed buffers.
         num_prefix_rows = len(global_prefix_rows)
-        prefix_block_table = self._block_tables.gather_block_tables(
-            torch.index_select(gb.idx_mapping, 0, row_req_gpu),
-            num_prefix_rows,
-            out=self._prefix_block_tables,
-            out_ptrs=self._prefix_block_table_ptrs,
-        )[0]
+        blob_a = async_copy_to_gpu(
+            np.concatenate(
+                (
+                    suffix_kv_idx_np,
+                    prefix_q_local_np,
+                    prefix_q_restore_np,
+                    prefix_local_token_np,
+                    prefix_local_out_np,
+                    row_req_np,
+                )
+            ),
+            device=self.device,
+        )
+        blob_b = async_copy_to_gpu(
+            np.concatenate((suffix_cu_np, prefix_cu_np, dcp_ctx_np)),
+            device=self.device,
+        )
+        n_sfx = len(suffix_kv_idx_np)
+        n_restore = len(prefix_q_restore_np)
+        suffix_kv_idx = blob_a[:n_sfx]
+        prefix_q_local_idx = blob_a[n_sfx : n_sfx + padded_num_prefix]
+        q_restore_off = n_sfx + padded_num_prefix
+        prefix_q_restore_idx = blob_a[q_restore_off : q_restore_off + n_restore]
+        loc_tok_off = q_restore_off + n_restore
+        prefix_local_token_idx = blob_a[loc_tok_off : loc_tok_off + num_local_prefix]
+        loc_out_off = loc_tok_off + num_local_prefix
+        prefix_local_out_idx = blob_a[loc_out_off : loc_out_off + num_local_prefix]
+        row_req_gpu = blob_a[loc_out_off + num_local_prefix :]
+        n_cu_k = len(suffix_cu_np)
+        suffix_cu_k = blob_b[:n_cu_k]
+        prefix_cu_q = blob_b[n_cu_k : n_cu_k + num_prefix_rows + 1]
+        prefix_dcp_ctx_lens = blob_b[n_cu_k + num_prefix_rows + 1 :]
 
+        prefix_plan = None
+        if has_prefix:
+            prefix_block_table = self._block_tables.gather_block_tables(
+                torch.index_select(gb.idx_mapping, 0, row_req_gpu),
+                num_prefix_rows,
+                out=self._prefix_block_tables,
+                out_ptrs=self._prefix_block_table_ptrs,
+            )[0]
+            prefix_plan = PCPPrefixPlan(
+                padded_num_tokens=padded_num_prefix,
+                q_local_idx=prefix_q_local_idx,
+                q_restore_idx=prefix_q_restore_idx,
+                cu_q=prefix_cu_q,
+                max_q=prefix_max_q,
+                dcp_ctx_lens=prefix_dcp_ctx_lens,
+                max_ctx=prefix_max_ctx,
+                block_table=prefix_block_table,
+                local_token_idx=prefix_local_token_idx,
+                local_out_idx=prefix_local_out_idx,
+            )
         return PCPRowPlan(
-            suffix_kv_idx=async_copy_to_gpu(suffix_kv_idx_np, device=self.device),
-            suffix_cu_k=async_copy_to_gpu(suffix_cu_np, device=self.device),
+            suffix_kv_idx=suffix_kv_idx,
+            suffix_cu_k=suffix_cu_k,
             suffix_max_k=suffix_max_k,
-            has_prefix=has_prefix,
-            num_local_prefix_tokens=num_local_prefix,
-            padded_num_prefix_tokens=padded_num_prefix,
-            prefix_q_local_idx=async_copy_to_gpu(prefix_q_local_np, device=self.device),
-            prefix_q_restore_idx=async_copy_to_gpu(
-                prefix_q_restore_np, device=self.device
-            ),
-            prefix_cu_q=async_copy_to_gpu(prefix_cu_np, device=self.device),
-            prefix_max_q=prefix_max_q,
-            prefix_dcp_ctx_lens=async_copy_to_gpu(dcp_ctx_np, device=self.device),
-            prefix_max_ctx=prefix_max_ctx,
-            prefix_block_table=prefix_block_table,
-            prefix_local_token_idx=async_copy_to_gpu(
-                prefix_local_token_np, device=self.device
-            ),
-            prefix_local_out_idx=async_copy_to_gpu(
-                prefix_local_out_np, device=self.device
-            ),
+            prefix=prefix_plan,
         )
 
     def restore_for_sampling(
