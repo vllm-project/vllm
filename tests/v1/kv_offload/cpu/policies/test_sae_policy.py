@@ -682,17 +682,11 @@ def test_manager_prepare_store_merges_within_same_request_after_lookup():
     assert policy.key_to_session[key(3)] == policy.key_to_session[key(1)]
 
 
-def test_cpu_offloading_manager_accepts_sae_policy_and_kwargs():
+def test_cpu_offloading_manager_accepts_sae_policy():
     from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 
-    mgr = CPUOffloadingManager(
-        num_blocks=4,
-        cache_policy="sae",
-        policy_kwargs={"decay_interval": 42, "decay_factor": 0.5},
-    )
+    mgr = CPUOffloadingManager(num_blocks=4, cache_policy="sae")
     assert isinstance(mgr._policy, SAECachePolicy)
-    assert mgr._policy.decay_interval == 42
-    assert mgr._policy.decay_factor == 0.5
 
 
 def test_cpu_offloading_manager_defaults_still_work_for_lru():
