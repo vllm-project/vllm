@@ -32,6 +32,32 @@ logger = init_logger(__name__)
 
 
 @functools.lru_cache(maxsize=1)
+def _get_mla_gluon():
+    """Load the small-head Gluon MLA entry point."""
+    unified_module = "aiter.ops.triton.gluon.mla_gluon"
+    try:
+        from aiter.ops.triton.gluon.mla_gluon import mla_gluon
+
+        return mla_gluon
+    except ModuleNotFoundError as unified_import_error:
+        if not unified_module.startswith(unified_import_error.name or ""):
+            raise
+        legacy_module = "aiter.ops.triton.gluon.mla_decode_gluon"
+        try:
+            from aiter.ops.triton.gluon.mla_decode_gluon import mla_decode_gluon
+
+            return mla_decode_gluon
+        except ModuleNotFoundError as legacy_import_error:
+            if not legacy_module.startswith(legacy_import_error.name or ""):
+                raise
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires an AITER build with the small-head "
+                "Gluon MLA kernel (mla_gluon or mla_decode_gluon) when decode "
+                "heads are fewer than 16."
+            ) from unified_import_error
+
+
+@functools.lru_cache(maxsize=1)
 def _fp8_mla_prefill_supported() -> bool:
     """Auto-detect FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
 
@@ -102,6 +128,10 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     attn_out_dtype: torch.dtype = torch.bfloat16
     # The max query output length: int
     max_qo_len: int | None = None
+    # Minimum KV length used by Gluon to choose a safe split count.
+    min_kv_seq_len: int = 1
+    # Small-head decode uses Gluon (avoids padding to 16).
+    use_gluon_decode: bool = False
     # Whether persistent MLA metadata was computed (only for qseqlen=1)
     has_persistent_metadata: bool = False
 
@@ -196,9 +226,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
+            q_dtype = dtypes.fp8
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+        # Persist for get_mla_metadata_v1 (decode build): omitting these causes
+        # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
+        self._mla_q_dtype = q_dtype
+        self._mla_kv_dtype = kv_dtype
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -236,7 +271,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads.
+        self._fp8_prefill_enabled = (
+            _fp8_mla_prefill_supported() and self.num_heads % 16 == 0
+        )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
                 vllm_config.model_config.max_model_len,
@@ -464,6 +502,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         qo_len = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_qo_len = qo_len.max().item()
+        use_gluon_decode = AiterMLAHelper.use_gluon_decode(
+            self.num_heads, int(max_qo_len)
+        )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indices.fill_(-1)
@@ -513,7 +554,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # so forward_mqa can skip passing it (falling back to the kernel
         # computing its own metadata internally, like v0.18.0).
         has_persistent_metadata = False
-        if max_qo_len == 1:
+        if max_qo_len == 1 and not use_gluon_decode:
             from aiter import get_mla_metadata_v1
 
             get_mla_metadata_v1(
@@ -534,6 +575,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_seqlen_qo=max_qo_len,
                 uni_seqlen_qo=max_qo_len,
                 fast_mode=True,
+                dtype_q=self._mla_q_dtype,
+                dtype_kv=self._mla_kv_dtype,
             )
             has_persistent_metadata = True
 
@@ -546,6 +589,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             max_qo_len=max_qo_len,
+            use_gluon_decode=use_gluon_decode,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
         )
@@ -639,17 +683,16 @@ class AiterMLAHelper:
     @staticmethod
     def check_num_heads_validity(num_heads: int):
         assert AiterMLAHelper.is_valid_num_heads(num_heads), (
-            f"Aiter MLA requires that num_heads be multiples or divisors of 16, "
-            f"but provided {num_heads} number of heads.\n"
+            "ROCM AITER MLA requires 1-15 heads for Gluon decode or a multiple "
+            f"of 16 heads for persistent decode, but got {num_heads}.\n"
             f"Try adjusting tensor_parallel_size value."
         )
 
     @staticmethod
     def is_valid_num_heads(num_heads: int) -> bool:
-        return (
-            num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0
+        return num_heads > 0 and (
+            num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+            or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
         )
 
     @staticmethod
@@ -673,6 +716,10 @@ class AiterMLAHelper:
             if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
             else o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
         )
+
+    @staticmethod
+    def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
+        return num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS and max_qo_len == 1
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -719,7 +766,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels.
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads.
+        self._fp8_prefill_enabled = (
+            _fp8_mla_prefill_supported() and self.num_heads % 16 == 0
+        )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
 
@@ -828,6 +878,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.fp8_prefill_reduce_final_map,
             attn_metadata.fp8_prefill_reduce_partial_map,
             tile_q,
+            # num_kv_splits added by ROCm/aiter#3391; 0 selects the kernel
+            # default max(cu_num, 0) == cu_num, matching pre-#3391 behavior.
+            0,
             out_3d,
             final_lse,
         )
@@ -841,6 +894,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         """Dispatch prefill to the FP8 ASM kernel when available.
 
@@ -866,6 +920,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 output,
+                output_scale,
             )
 
         assert attn_metadata.prefill is not None
@@ -881,7 +936,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 output,
+                output_scale,
             )
+
+        assert output_scale is None, (
+            "fused FP8 output not supported by the AITER FP8 MLA prefill path"
+        )
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
@@ -900,7 +960,106 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
-        assert attn_metadata.decode.max_qo_len is not None
+
+        decode = attn_metadata.decode
+        assert decode.max_qo_len is not None
+        assert decode.paged_kv_indptr is not None
+        assert decode.paged_kv_indices is not None
+        if decode.use_gluon_decode:
+            if type(q) is tuple:
+                q_nope, q_pe = q
+            else:
+                q_nope, q_pe = torch.split(
+                    q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                )
+            B, num_q_heads, _ = q_nope.shape
+            o = torch.empty(
+                B,
+                num_q_heads,
+                self.kv_lora_rank,
+                dtype=decode.attn_out_dtype,
+                device=q_nope.device,
+            )
+            kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
+            mla_gluon = _get_mla_gluon()
+            mla_gluon(
+                q_nope=q_nope,
+                q_pe=q_pe,
+                kv_c=kv_buffer,
+                o=o,
+                page_table=decode.paged_kv_indices,
+                seq_info=decode.paged_kv_indptr,
+                sm_scale=self.scale,
+                k_pe=None,
+                kv_pe_offset=self.kv_lora_rank,
+                use_2d_view=False,
+                kv_scale=1.0,
+                min_kv_seq_len=decode.min_kv_seq_len,
+            )
+            return o, None
+
+        # 12-head (<16) non-causal multi-token verify (DSpark): the asm path has
+        # no gqa<16, qseqlen>1 kernel. Flatten each verify token to a qseqlen=1
+        # gluon decode over the same committed prefix (non-causal), mirroring the
+        # TRITON_MLA / sparse-backend flatten but on the fast gluon kernel. Each
+        # request's KV metadata is repeated max_qo_len times.
+        if (
+            self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+            and int(decode.max_qo_len) > 1
+        ):
+            qlen = int(decode.max_qo_len)
+            if type(q) is tuple:
+                q_nope, q_pe = q
+            else:
+                q_nope, q_pe = torch.split(
+                    q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                )
+            B, num_q_heads, _ = q_nope.shape
+            o = torch.empty(
+                B,
+                num_q_heads,
+                self.kv_lora_rank,
+                dtype=decode.attn_out_dtype,
+                device=q_nope.device,
+            )
+            kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
+            # Expand per-request paged-KV to per-verify-token: each request's KV
+            # block is repeated qlen times (row r*qlen+t attends request r's
+            # committed prefix). Fully vectorized (no host loop).
+            old_indptr = decode.paged_kv_indptr
+            per_req_len = old_indptr[1:] - old_indptr[:-1]
+            dev = q_nope.device
+            row_req = torch.arange(per_req_len.shape[0], device=dev).repeat_interleave(
+                qlen
+            )
+            row_len = per_req_len[row_req]
+            new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
+                torch.int32
+            )
+            total = int(new_indptr[-1].item())
+            within = torch.arange(total, device=dev, dtype=torch.int64) - new_indptr[
+                :-1
+            ].to(torch.int64).repeat_interleave(row_len)
+            src = (
+                old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
+            )
+            new_indices = decode.paged_kv_indices[src]
+            mla_gluon = _get_mla_gluon()
+            mla_gluon(
+                q_nope=q_nope,
+                q_pe=q_pe,
+                kv_c=kv_buffer,
+                o=o,
+                page_table=new_indices,
+                seq_info=new_indptr,
+                sm_scale=self.scale,
+                k_pe=None,
+                kv_pe_offset=self.kv_lora_rank,
+                use_2d_view=False,
+                kv_scale=1.0,
+                min_kv_seq_len=int(per_req_len.min()),
+            )
+            return o, None
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
@@ -943,11 +1102,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_buffer,
             o,
             self.scale,
-            attn_metadata.decode.qo_indptr,
-            attn_metadata.decode.max_qo_len,
-            attn_metadata.decode.paged_kv_indptr,
-            attn_metadata.decode.paged_kv_indices,
-            attn_metadata.decode.paged_kv_last_page_len,
+            decode.qo_indptr,
+            decode.max_qo_len,
+            decode.paged_kv_indptr,
+            decode.paged_kv_indices,
+            decode.paged_kv_last_page_len,
             **mla_kwargs,
         )
 

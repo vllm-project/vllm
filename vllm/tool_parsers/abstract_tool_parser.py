@@ -6,6 +6,7 @@ import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -13,8 +14,8 @@ from openai.types.responses import (
 )
 from openai.types.responses.function_tool import FunctionTool
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -25,7 +26,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
-from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
@@ -57,6 +57,18 @@ class ToolParser:
     # extract_tool_calls / extract_tool_calls_streaming methods for
     # required/named tool_choice, treating them the same as "auto".
     supports_required_and_named: bool = True
+    # xgrammar builtin structural tag model key. Subclasses set this when
+    # their parsed tool-call syntax matches a builtin xgrammar format.
+    structural_tag_model: str | None = None
+    engine_based_streaming: bool = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if (
+            cls.structural_tag_model is not None
+            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+        ):
+            cls.supports_required_and_named = False
 
     def __init__(
         self,
@@ -100,7 +112,7 @@ class ToolParser:
 
     @cached_property
     def vocab(self) -> dict[str, int]:
-        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # NOTE: Only TokenizersBackend is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
@@ -112,32 +124,16 @@ class ToolParser:
         if not request.tools:
             return request
 
-        # Step 1 (highest priority for ChatCompletionRequest): apply
-        # vLLM-owned structural tag support for model-specific tool formats.
+        # Set structured output params when tool constraints are derived from
+        # the tool schema. Unified parsers handle model-specific structural
+        # tags before calling into the tool parser.
+        structured_outputs = getattr(request, "structured_outputs", None)
         if (
-            isinstance(request, ChatCompletionRequest)
-            and VLLM_ENFORCE_STRICT_TOOL_CALLING
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
         ):
-            need_tool_calling = (
-                request.tool_choice == "auto"
-                or request.tool_choice == "required"
-                or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-            )
-            if need_tool_calling:
-                structure_tag = self.get_structural_tag(request)
-                if structure_tag is not None:
-                    if request.structured_outputs is None:
-                        request.structured_outputs = StructuredOutputsParams(
-                            structural_tag=json.dumps(structure_tag.model_dump()),
-                        )
-                    else:
-                        request.structured_outputs.structural_tag = json.dumps(
-                            structure_tag.model_dump()
-                        )
-                    return request
+            return request
 
-        # Step 2: set structured output params when tool constraints are
-        # derived from the tool schema.
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
@@ -169,8 +165,24 @@ class ToolParser:
 
         return request
 
-    def get_structural_tag(self, request: ChatCompletionRequest):
-        return None
+    def get_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
+    ):
+        if self.structural_tag_model is None:
+            return None
+        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+            return None
+        from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+
+        return get_model_structural_tag(
+            model=self.structural_tag_model,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=reasoning,
+        )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
