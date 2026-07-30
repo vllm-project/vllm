@@ -112,12 +112,39 @@ class BlockRemoved(KVCacheEvent):
         )
 
 
+class BlockInactive(KVCacheEvent):
+    """Emitted when a block's ref_cnt drops to zero.
+
+    Distinct from BlockRemoved:
+    - BlockRemoved: the block is evicted/removed from GPU memory.
+    - BlockInactive: the block still exists in GPU memory but has zero active
+      references (all requests referencing it have completed).
+
+    This event is only emitted for GPU blocks (medium=MEDIUM_GPU).
+    """
+
+    block_hashes: list[ExternalBlockHash]
+    medium: str | None
+    group_idx: int | None = None
+    locality: str | None = None
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                tuple(self.block_hashes),
+                self.medium,
+                self.group_idx,
+                self.locality,
+            )
+        )
+
+
 class AllBlocksCleared(KVCacheEvent):
     pass
 
 
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[BlockStored | BlockRemoved | BlockInactive | AllBlocksCleared]
 
 
 class KVEventAggregator:
