@@ -62,7 +62,7 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
         hisparse_spills=None,
         hisparse_fully_resident=True,
     )
-    runtime.coordinators = []
+    runtime.coordinators = [SimpleNamespace(fully_resident_batch=False)]
     calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         worker_hisparse,
@@ -81,7 +81,7 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
         ("invalidate", [2, 3, 4], 64),
         ("restore", scheduler_output),
     ]
-    assert runtime.fully_resident_batch
+    assert runtime.coordinators[0].fully_resident_batch
     assert runtime._post_forward_spills == []
 
 
@@ -90,7 +90,6 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime.kernel_block_size = 4
     runtime.blocks_per_kv_block = 2
     runtime.spill_row_capacity = 8
-    runtime.spill_staging_count = 1
     runtime.spill_src_cpu = torch.empty((1, 2, 8), dtype=torch.int64)
     runtime.spill_dst_cpu = torch.empty((1, 8), dtype=torch.int64)
     runtime.spill_src_gpu = torch.empty((2, 8), dtype=torch.int64)

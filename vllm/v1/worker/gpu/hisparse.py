@@ -73,7 +73,6 @@ class HiSparseRuntime:
         self.hot_backing = hot_backing
         self._post_forward_spills: list[HiSparseSpill] = []
         self._enqueued_spill_ids: list[int] = []
-        self.fully_resident_batch = False
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
     def _init_backup_plan(
@@ -129,10 +128,10 @@ class HiSparseRuntime:
         for coordinator in self.coordinators:
             coordinator._host_write_event = self.host_write_event
         self.spill_row_capacity = max_model_len
-        self.spill_staging_count = max_concurrent_batches + 1
+        spill_staging_count = max_concurrent_batches + 1
         self.spill_src_cpu = torch.empty(
             (
-                self.spill_staging_count,
+                spill_staging_count,
                 len(self.coordinators),
                 self.spill_row_capacity,
             ),
@@ -140,7 +139,7 @@ class HiSparseRuntime:
             pin_memory=True,
         )
         self.spill_dst_cpu = torch.empty(
-            (self.spill_staging_count, self.spill_row_capacity),
+            (spill_staging_count, self.spill_row_capacity),
             dtype=torch.int64,
             pin_memory=True,
         )
@@ -160,7 +159,7 @@ class HiSparseRuntime:
         self._spill_staging_index = 0
         self._spill_staging_events: list[torch.Event | None] = [
             None
-        ] * self.spill_staging_count
+        ] * spill_staging_count
 
     def pre_step(self, scheduler_output: SchedulerOutput) -> None:
         self.set_fully_resident_batch(scheduler_output.hisparse_fully_resident)
@@ -180,7 +179,6 @@ class HiSparseRuntime:
         self.restore_prefix(scheduler_output)
 
     def set_fully_resident_batch(self, fully_resident: bool) -> None:
-        self.fully_resident_batch = fully_resident
         for coordinator in self.coordinators:
             coordinator.fully_resident_batch = fully_resident
 
@@ -226,7 +224,7 @@ class HiSparseRuntime:
         staging_event = torch.Event()
         staging_event.record(torch.accelerator.current_stream(self.hot_backing.device))
         self._spill_staging_events[staging_idx] = staging_event
-        self._spill_staging_index = (staging_idx + 1) % self.spill_staging_count
+        self._spill_staging_index = (staging_idx + 1) % len(self._spill_staging_events)
         torch.ops._C_cache_ops.hisparse_backup_layers(
             self.hot_backing,
             self.backup_layer_offsets,

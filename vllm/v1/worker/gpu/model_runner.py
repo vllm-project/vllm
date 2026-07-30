@@ -1301,7 +1301,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             graph_variant=(
                 _HISPARSE_HYBRID_GRAPH_VARIANT
                 if self.hisparse_runtime is not None
-                and not self.hisparse_runtime.fully_resident_batch
+                and not self.hisparse_runtime.coordinators[0].fully_resident_batch
                 else _HISPARSE_RESIDENT_GRAPH_VARIANT
             ),
         )
