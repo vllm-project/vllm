@@ -12,6 +12,15 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 # Upper bound on the topk kernel's per-iteration gather width.
 _MAX_TOPK_BLOCK = 1024
 
+def _topk_log_softmax_torch(
+    logprobs: torch.Tensor,
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> None:
+    logits_f = logits.to(torch.float32)
+    lse = torch.logsumexp(logits_f, dim=1, keepdim=True)  # [batch, 1]
+    gathered = torch.gather(logits_f, 1, token_ids.to(torch.int64))
+    logprobs.copy_((gathered - lse).to(logprobs.dtype))
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -56,6 +65,14 @@ def _topk_log_softmax_kernel(
         o = logits - max_val - lse
         tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
+def _ranks_torch(
+    token_ranks: torch.Tensor,
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> None:
+    x = torch.gather(logits, 1, token_ids.view(-1, 1).to(torch.int64))  # [batch, 1]
+    ranks = (logits >= x).sum(dim=1)  # [batch]
+    token_ranks.copy_(ranks.to(token_ranks.dtype))
 
 @triton.jit
 def _ranks_kernel(
@@ -93,16 +110,17 @@ def compute_token_logprobs(
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
-    _topk_log_softmax_kernel[(batch_size,)](
-        logprobs,
-        logits,
-        logits.stride(0),
-        token_ids,
-        num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
-        TOPK_BLOCK_SIZE=topk_block_size,
-    )
+    # _topk_log_softmax_kernel[(batch_size,)](
+    #     logprobs,
+    #     logits,
+    #     logits.stride(0),
+    #     token_ids,
+    #     num_logprobs,
+    #     vocab_size,
+    #     BLOCK_SIZE=1024,  # type: ignore
+    #     TOPK_BLOCK_SIZE=topk_block_size,
+    # )
+    _topk_log_softmax_torch(logprobs, logits, token_ids)
     return logprobs
 
 
@@ -169,14 +187,15 @@ def compute_topk_scores(
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
-    _ranks_kernel[(batch_size,)](
-        token_ranks,
-        logits,
-        logits.stride(0),
-        sampled_token_ids,
-        vocab_size,
-        BLOCK_SIZE=8192,  # type: ignore
-    )
+    # _ranks_kernel[(batch_size,)](
+    #     token_ranks,
+    #     logits,
+    #     logits.stride(0),
+    #     sampled_token_ids,
+    #     vocab_size,
+    #     BLOCK_SIZE=8192,  # type: ignore
+    # )
+    _ranks_torch(token_ranks, logits, sampled_token_ids)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
         logprobs=scores,

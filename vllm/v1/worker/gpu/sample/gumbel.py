@@ -13,6 +13,17 @@ from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
 _TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
 
+def _temperature_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+) -> None:
+    temps = temperature[expanded_idx_mapping.long()].to(torch.float32)  # [num_tokens]
+    apply = (temps != 0.0) & (temps != 1.0)
+    if not bool(apply.any()):
+        return
+    divisor = torch.where(apply, temps, torch.ones_like(temps))
+    logits.div_(divisor.unsqueeze(1).to(logits.dtype))
 
 @triton.jit
 def _temperature_kernel(
@@ -48,14 +59,15 @@ def apply_temperature(
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _temperature_kernel[(num_tokens, num_blocks)](
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+    # _temperature_kernel[(num_tokens, num_blocks)](
+    #     logits,
+    #     logits.stride(0),
+    #     expanded_idx_mapping,
+    #     temperature,
+    #     vocab_size,
+    #     BLOCK_SIZE=BLOCK_SIZE,
+    # )
+    _temperature_torch(logits, expanded_idx_mapping, temperature)
 
 
 @triton.jit
@@ -211,54 +223,87 @@ def _gumbel_sample_kernel(
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
-
 def gumbel_sample(
-    logits: torch.Tensor,  # [num_tokens, vocab_size]
-    expanded_idx_mapping: torch.Tensor,  # [num_tokens]
-    temperature: torch.Tensor,  # [max_num_reqs]
-    seed: torch.Tensor,  # [max_num_reqs]
-    pos: torch.Tensor,  # [num_tokens]
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
     apply_temperature: bool,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> torch.Tensor:
-    # Enforce contiguity on non-strided input tensors
-    expanded_idx_mapping = expanded_idx_mapping.contiguous()
-    pos = pos.contiguous()
+    if apply_temperature:
+        if temperature.numel() == 1:
+            scaled_logits = logits / temperature.item()
+        else:
+            scaled_logits = logits / temperature.view(-1, 1)
+    else:
+        scaled_logits = logits
+
+    dtype = torch.float64 if use_fp64 else torch.float32
+    U = torch.rand_like(scaled_logits, dtype=dtype)
+    eps = 1e-8
+    gumbel_noise = -torch.log(-torch.log(U + eps) + eps)
+    noisy_logits = scaled_logits + gumbel_noise
+
+    sampled = noisy_logits.argmax(dim=-1)
+
+    if output_processed_logits is not None:
+        output_processed_logits.copy_(scaled_logits)
     if output_processed_logits_col is not None:
-        output_processed_logits_col = output_processed_logits_col.contiguous()
-    num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max_dtype = torch.float64 if use_fp64 else torch.float32
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
-    per_token_col = (
-        output_processed_logits_col is not None
-        and output_processed_logits_col.dim() > 0
-    )
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        seed,
-        pos,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_TEMPERATURE=apply_temperature,
-        USE_FP64=use_fp64,
-        PER_TOKEN_COL=per_token_col,
-    )
-    # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+        pass
+
     return sampled
+
+# def gumbel_sample(
+#     logits: torch.Tensor,  # [num_tokens, vocab_size]
+#     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
+#     temperature: torch.Tensor,  # [max_num_reqs]
+#     seed: torch.Tensor,  # [max_num_reqs]
+#     pos: torch.Tensor,  # [num_tokens]
+#     apply_temperature: bool,
+#     output_processed_logits: torch.Tensor | None = None,
+#     output_processed_logits_col: torch.Tensor | None = None,
+#     use_fp64: bool = False,
+# ) -> torch.Tensor:
+#     # Enforce contiguity on non-strided input tensors
+#     expanded_idx_mapping = expanded_idx_mapping.contiguous()
+#     pos = pos.contiguous()
+#     if output_processed_logits_col is not None:
+#         output_processed_logits_col = output_processed_logits_col.contiguous()
+#     num_tokens, vocab_size = logits.shape
+#     BLOCK_SIZE = 1024
+#     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+#     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+#     local_max_dtype = torch.float64 if use_fp64 else torch.float32
+#     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
+#     per_token_col = (
+#         output_processed_logits_col is not None
+#         and output_processed_logits_col.dim() > 0
+#     )
+#     _gumbel_sample_kernel[(num_tokens, num_blocks)](
+#         local_argmax,
+#         local_argmax.stride(0),
+#         local_max,
+#         local_max.stride(0),
+#         output_processed_logits,
+#         output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+#         output_processed_logits_col,
+#         logits,
+#         logits.stride(0),
+#         expanded_idx_mapping,
+#         seed,
+#         pos,
+#         temperature,
+#         vocab_size,
+#         BLOCK_SIZE=BLOCK_SIZE,
+#         APPLY_TEMPERATURE=apply_temperature,
+#         USE_FP64=use_fp64,
+#         PER_TOKEN_COL=per_token_col,
+#     )
+#     # NOTE(woosuk): Use int64 for later indexing.
+#     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
+#     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+#     return sampled

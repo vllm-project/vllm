@@ -102,6 +102,62 @@ class PenaltiesState:
             self.output_bin_counts,
         )
 
+def _penalties_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    repetition_penalty: torch.Tensor,
+    frequency_penalty: torch.Tensor,
+    presence_penalty: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    num_tokens, vocab_size = logits.shape
+    device = logits.device
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        rep = float(repetition_penalty[req])
+        freq = float(frequency_penalty[req])
+        pres = float(presence_penalty[req])
+
+        use_rep = rep != 1.0
+        use_freq = freq != 0.0
+        use_pres = pres != 0.0
+        if not (use_rep or use_freq or use_pres):
+            # Early return to avoid touching logits.
+            continue
+
+        counts = output_bin_counts[req].clone().to(torch.int32)
+        pos = int(expanded_local_pos[token_idx])
+        start_idx = token_idx - pos
+        for prev_pos in range(pos):
+            prev_token = int(token_ids[start_idx + prev_pos + 1])
+            counts[prev_token] += 1
+        output_bin_mask = counts > 0
+
+        logits_f = logits[token_idx].to(torch.float32)
+
+        # Apply repetition penalties.
+        if use_rep:
+            packed = prompt_bin_mask[req]  # [num_words]
+            bits = (packed.unsqueeze(-1) >> shifts) & 1  # [num_words, 32]
+            prompt_mask = bits.reshape(-1)[:vocab_size].to(torch.bool)
+            scale = torch.where(
+                prompt_mask | output_bin_mask,
+                torch.full_like(logits_f, rep),
+                torch.ones_like(logits_f),
+            )
+            logits_f = logits_f * torch.where(logits_f > 0, 1.0 / scale, scale)
+
+        # Apply frequency penalties.
+        logits_f = logits_f - freq * counts.to(torch.float32)
+        # Apply presence penalties.
+        logits_f = logits_f - pres * output_bin_mask.to(torch.float32)
+
+        logits[token_idx].copy_(logits_f.to(logits.dtype))
 
 @triton.jit
 def _penalties_kernel(
@@ -197,9 +253,24 @@ def apply_penalties(
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _penalties_kernel[(num_tokens, num_blocks)](
+    # _penalties_kernel[(num_tokens, num_blocks)](
+    #     logits,
+    #     logits.stride(0),
+    #     expanded_idx_mapping,
+    #     token_ids,
+    #     expanded_local_pos,
+    #     repetition_penalty,
+    #     frequency_penalty,
+    #     presence_penalty,
+    #     prompt_bin_mask,
+    #     prompt_bin_mask.stride(0),
+    #     output_bin_counts,
+    #     output_bin_counts.stride(0),
+    #     vocab_size,
+    #     BLOCK_SIZE=BLOCK_SIZE,
+    # )
+    _penalties_torch(
         logits,
-        logits.stride(0),
         expanded_idx_mapping,
         token_ids,
         expanded_local_pos,
@@ -207,13 +278,43 @@ def apply_penalties(
         frequency_penalty,
         presence_penalty,
         prompt_bin_mask,
-        prompt_bin_mask.stride(0),
         output_bin_counts,
-        output_bin_counts.stride(0),
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
+def _bincount_torch(
+    expanded_idx_mapping: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    prefill_len: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    device = output_bin_counts.device
+    vocab_size = output_bin_counts.shape[1]
+    num_words = prompt_bin_mask.shape[1]
+    padded = num_words * 32
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    num_tokens = expanded_idx_mapping.shape[0]
+    for token_idx in range(num_tokens):
+        req_state_idx = int(expanded_idx_mapping[token_idx])
+        p_len = int(prompt_len[req_state_idx])
+        pf_len = int(prefill_len[req_state_idx])
+        row = all_token_ids[req_state_idx]
+
+        if p_len > 0:
+            prompt_tokens = row[:p_len].long()
+            present = torch.zeros(padded, dtype=torch.int32, device=device)
+            present[prompt_tokens] = 1
+            words = (present.view(num_words, 32) << shifts).sum(dim=1).to(torch.int32)
+            prompt_bin_mask[req_state_idx] |= words
+
+        if pf_len > p_len:
+            output_tokens = row[p_len:pf_len].long()
+            counts = torch.bincount(output_tokens, minlength=vocab_size).to(
+                torch.int32
+            )
+            output_bin_counts[req_state_idx] += counts
 
 @triton.jit
 def _bincount_kernel(
@@ -283,17 +384,25 @@ def bincount(
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
-    _bincount_kernel[(num_tokens, num_blocks)](
+    # _bincount_kernel[(num_tokens, num_blocks)](
+    #     expanded_idx_mapping,
+    #     all_token_ids,
+    #     all_token_ids.stride(0),
+    #     prompt_len,
+    #     prefill_len,
+    #     prompt_bin_mask,
+    #     prompt_bin_mask.stride(0),
+    #     output_bin_counts,
+    #     output_bin_counts.stride(0),
+    #     BLOCK_SIZE=BLOCK_SIZE,
+    # )
+    _bincount_torch(
         expanded_idx_mapping,
         all_token_ids,
-        all_token_ids.stride(0),
         prompt_len,
         prefill_len,
         prompt_bin_mask,
-        prompt_bin_mask.stride(0),
         output_bin_counts,
-        output_bin_counts.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
 

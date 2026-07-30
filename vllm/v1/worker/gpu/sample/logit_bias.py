@@ -143,6 +143,41 @@ class LogitBiasState:
             self.stop_token_ids.gpu,
         )
 
+def _bias_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    pos: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    num_logit_bias: torch.Tensor,
+    logit_bias_token_ids: torch.Tensor,
+    logit_bias: torch.Tensor,
+    min_lens: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+) -> None:
+    neg_inf = -float("inf")
+    num_tokens = logits.shape[0]
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        row = logits[token_idx]
+
+        n_allowed = int(num_allowed_token_ids[req])
+        if n_allowed > 0:
+            ids = allowed_token_ids[req][:n_allowed].long()
+            saved = row[ids].clone()
+            row.fill_(neg_inf)
+            row[ids] = saved
+
+        n_bias = int(num_logit_bias[req])
+        if n_bias > 0:
+            ids = logit_bias_token_ids[req][:n_bias].long()
+            row[ids] += logit_bias[req][:n_bias]
+
+        n_stop = int(num_stop_token_ids[req])
+        if n_stop > 0 and int(pos[token_idx]) + 1 < int(min_lens[req]):
+            ids = stop_token_ids[req][:n_stop].long()
+            row[ids] = neg_inf
 
 @triton.jit
 def _bias_kernel(
@@ -261,24 +296,37 @@ def apply_logit_bias(
         )
     )
     LOGITS_BLOCK_SIZE = 8192
-    _bias_kernel[(num_tokens,)](
+    # _bias_kernel[(num_tokens,)](
+    #     logits,
+    #     logits.stride(0),
+    #     vocab_size,
+    #     expanded_idx_mapping,
+    #     num_allowed_token_ids,
+    #     allowed_token_ids,
+    #     allowed_token_ids.stride(0),
+    #     num_logit_bias,
+    #     logit_bias_token_ids,
+    #     logit_bias_token_ids.stride(0),
+    #     logit_bias,
+    #     logit_bias.stride(0),
+    #     pos,
+    #     min_lens,
+    #     num_stop_token_ids,
+    #     stop_token_ids,
+    #     stop_token_ids.stride(0),
+    #     BLOCK_SIZE=BLOCK_SIZE,
+    #     LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
+    # )
+    _bias_torch(
         logits,
-        logits.stride(0),
-        vocab_size,
         expanded_idx_mapping,
+        pos,
         num_allowed_token_ids,
         allowed_token_ids,
-        allowed_token_ids.stride(0),
         num_logit_bias,
         logit_bias_token_ids,
-        logit_bias_token_ids.stride(0),
         logit_bias,
-        logit_bias.stride(0),
-        pos,
         min_lens,
         num_stop_token_ids,
         stop_token_ids,
-        stop_token_ids.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
-        LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
     )

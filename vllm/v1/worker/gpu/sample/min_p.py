@@ -44,17 +44,32 @@ def _min_p_kernel(
         logits = tl.where(logits < threshold, float("-inf"), logits)
         tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
+def _min_p_torch(
+    logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
+) -> None:
+    mp = min_p[expanded_idx_mapping.long()].to(torch.float32)  # [num_tokens]
+    apply = mp != 0.0
+    if not bool(apply.any()):
+        return
+
+    logits_f = logits.to(torch.float32)
+    max_val = logits_f.max(dim=1, keepdim=True).values  # [num_tokens, 1]
+    threshold = max_val + torch.log(mp).unsqueeze(1)  # [num_tokens, 1]
+
+    drop = (logits_f < threshold) & apply.unsqueeze(1)
+    logits[drop] = -float("inf")
 
 def apply_min_p(
     logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
-    _min_p_kernel[(num_tokens,)](
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        min_p,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+    # _min_p_kernel[(num_tokens,)](
+    #     logits,
+    #     logits.stride(0),
+    #     expanded_idx_mapping,
+    #     min_p,
+    #     vocab_size,
+    #     BLOCK_SIZE=BLOCK_SIZE,
+    # )
+    _min_p_torch(logits, expanded_idx_mapping, min_p)
