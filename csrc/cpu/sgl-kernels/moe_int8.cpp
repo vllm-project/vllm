@@ -53,16 +53,14 @@ inline void silu_and_mul(
     vc1[col] = _mm512_mul_ps(_mm512_mul_ps(vc1[col], vas), vbs1[col]);
   };
 
-  using bVec = at::vec::Vectorized<scalar_t>;
-  using fVec = at::vec::Vectorized<float>;
-  const fVec one = fVec(1.f);
   auto silu_and_mul = [&](auto col) {
-    fVec x = fVec(vc0[col]);
-    fVec y = fVec(vc1[col]);
-    x = x / (one + x.neg().exp_u20());
-    vc0[col] = x * y;
+    __m512 x = vc0[col];
+    __m512 y = vc1[col];
+    vc0[col] = _mm512_mul_ps(_mm512_rcp14_silu_ps(x), y);
   };
 
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
   auto storec = [&](auto col, int64_t m) {
     if constexpr (col % 2 == 0) {
       fVec x0 = fVec(vc0[col + 0]);
@@ -229,23 +227,17 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
     };
     Unroll<ROWS * COLS>{}(scalec);
 
-    using Vec = at::vec::Vectorized<float>;
-    const Vec one = Vec(1.f);
     auto storec = [&](auto i) {
       constexpr int row = i / COLS;
       constexpr int col = i % COLS;
       // for COLS = 2, 4 use 512bit store
       if constexpr (col % 2 == 0) {
-        Vec x0 = _mm512_castsi512_ps(vc0[row * COLS + col + 0]);
-        Vec x1 = _mm512_castsi512_ps(vc0[row * COLS + col + 1]);
-        Vec y0 = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
-        Vec y1 = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
-        // silu
-        x0 = x0 / (one + x0.neg().exp_u20());
-        x1 = x1 / (one + x1.neg().exp_u20());
-        // mul
-        x0 = x0 * y0;
-        x1 = x1 * y1;
+        __m512 x0 = _mm512_castsi512_ps(vc0[row * COLS + col + 0]);
+        __m512 x1 = _mm512_castsi512_ps(vc0[row * COLS + col + 1]);
+        __m512 y0 = _mm512_castsi512_ps(vc1[row * COLS + col + 0]);
+        __m512 y1 = _mm512_castsi512_ps(vc1[row * COLS + col + 1]);
+        x0 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x0), y0);
+        x1 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x1), y1);
 
         _mm512_storeu_si512(
             reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
