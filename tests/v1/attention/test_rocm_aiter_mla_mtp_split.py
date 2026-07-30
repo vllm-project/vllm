@@ -63,9 +63,11 @@ def _builder(
     has_full_cudagraphs: bool = False,
     kernel_block_size: int = 1,
     max_decode_rows: int = 32,
+    num_heads: int = 16,
 ):
     return SimpleNamespace(
         device=torch.device("cpu"),
+        num_heads=num_heads,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
         paged_kv_indptr=torch.empty(max_decode_rows + 1, dtype=torch.int32),
@@ -350,23 +352,26 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "mtp_decode_qlen, qo_len, expect_persistent",
+    "mtp_decode_qlen, qo_len, num_heads, expect_persistent",
     [
-        (1, 1, True),  # non-MTP decode
-        (4, 2, True),  # MTP deployment, in-range step
-        (4, 4, True),  # MTP deployment, full-qlen verification step
-        (2, 4, False),  # step demand exceeds provisioned K -> fallback
+        (1, 1, 16, True),  # non-MTP decode
+        (4, 2, 16, True),  # MTP deployment, in-range step
+        (4, 4, 16, True),  # MTP deployment, full-qlen verification step
+        (2, 4, 16, False),  # step demand exceeds provisioned K -> fallback
+        (1, 1, 8, False),  # small head count -> Gluon decode owns qlen==1
+        (4, 4, 8, False),  # small head count -> Gluon flatten owns qlen>1
     ],
 )
 def test_persistent_metadata_gate(
-    monkeypatch, mtp_decode_qlen, qo_len, expect_persistent
+    monkeypatch, mtp_decode_qlen, qo_len, num_heads, expect_persistent
 ):
-    """Persistent metadata is passed iff 1 <= max_qo_len <= K.
+    """Persistent metadata is passed iff num_heads >= 16 and 1 <= max_qo_len <= K.
 
     K = _mtp_decode_qlen sizes the metadata buffers at init; a decode step gets
     the pre-built schedule only when its qlen fits those buffers, otherwise it
     falls back to the kernel computing its own. qlen==1 (non-MTP) must stay
-    in-range -- dropping it is the regression this guards.
+    in-range -- dropping it is the regression this guards. Fewer than 16 heads
+    is served by the Gluon decode paths, which never read this schedule.
     """
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
@@ -385,7 +390,7 @@ def test_persistent_metadata_gate(
         0, (num_reqs + 1) * qo_len, step=qo_len, dtype=torch.int32
     )
     metadata = AiterMLAMetadataBuilder._build_decode(
-        _builder(mtp_decode_qlen=mtp_decode_qlen),
+        _builder(mtp_decode_qlen=mtp_decode_qlen, num_heads=num_heads),
         block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
         seq_lens_device=torch.tensor([8, 8], dtype=torch.int32),
         max_seq_len=8,
