@@ -4,8 +4,6 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
 
 from ..inc_linear import INCLinearMethod
@@ -46,7 +44,7 @@ class INCWna16Scheme(INCScheme):
                 is_ark_available, ark_error, _, _ = get_ark_state()
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
-                elif layer_config.bits == 2:
+                if layer_config.bits == 2:
                     raise NotImplementedError(
                         "INC int2 on XPU requires the ARK backend. "
                         f"Layer: {prefix}. "
@@ -95,102 +93,46 @@ class INCWna16Scheme(INCScheme):
         prefix: str,
         layer_config: "INCLayerConfig",
     ):
-        del config, prefix
-        # CPU does not support quantized MoE yet.
-        if current_platform.is_cpu():
-            from vllm.model_executor.layers.fused_moe import (
-                UnquantizedFusedMoEMethod,
+        del config
+
+        if (
+            current_platform.is_xpu()
+            and layer_config.is_gptq
+            and layer_config.bits == 4
+            and layer_config.sym
+        ):
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config,
             )
 
-            return UnquantizedFusedMoEMethod(layer.moe_config)
-        if layer_config.is_gptq:
-            return _resolve_gptq_moe(layer, layer_config)
-        if layer_config.is_awq:
-            return _resolve_awq_moe(layer, layer_config)
-        raise NotImplementedError(f"WNA16 MoE does not support config {layer_config}")
+            from .inc_ark_ops import get_ark_state
+            from .inc_wna16_moe import (
+                INCARKWNA16MoEMethod,
+                INCWNA16MoEScheme,
+            )
 
+            is_ark_available, ark_error, _, _ = get_ark_state()
+            if is_ark_available:
+                moe_config = MoeWNA16Config.from_config(
+                    {
+                        "quant_method": "gptq",
+                        "bits": layer_config.bits,
+                        "group_size": layer_config.group_size,
+                        "sym": layer_config.sym,
+                        "lm_head": False,
+                    }
+                )
+                return INCARKWNA16MoEMethod(moe_config, layer.moe_config)
 
-def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.auto_gptq import (
-        AutoGPTQMoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.moe_wna16 import (
-        MoeWNA16Config,
-        MoeWNA16Method,
-    )
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_moe_marlin_supports_layer,
-    )
+            logger.info(
+                "ARK backend is unavailable for MoE layer %s; "
+                "falling back to the default WNA16 MoE path. Error: %s",
+                prefix,
+                ark_error or "unknown error",
+            )
 
-    # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
-    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
-    # check like compressed-tensors does; the capability-based
-    # check_marlin_supported is skipped so the XPU path is reachable.
-    use_marlin = (layer_config.bits, layer_config.sym) in {
-        (4, True),
-        (8, True),
-    } and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+            return INCWNA16MoEScheme(layer_config).get_method(layer)
 
-    if use_marlin:
-        return AutoGPTQMoEMethod(
-            AutoGPTQConfig(
-                weight_bits=layer_config.bits,
-                group_size=layer_config.group_size,
-                desc_act=False,
-                is_sym=layer_config.sym,
-                lm_head_quantized=False,
-                dynamic={},
-                full_config={},
-            ),
-            layer.moe_config,
-        )
+        from .inc_wna16_moe import INCWNA16MoEScheme
 
-    moe_config = MoeWNA16Config.from_config(
-        {
-            "quant_method": "gptq",
-            "bits": layer_config.bits,
-            "group_size": layer_config.group_size,
-            "sym": layer_config.sym,
-            "lm_head": False,
-        }
-    )
-    return MoeWNA16Method(moe_config, layer.moe_config)
-
-
-def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQMoEMethod
-    from vllm.model_executor.layers.quantization.moe_wna16 import (
-        MoeWNA16Config,
-        MoeWNA16Method,
-    )
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_moe_marlin_supports_layer,
-    )
-
-    use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
-        layer, layer_config.group_size
-    )
-
-    if use_marlin:
-        return AutoAWQMoEMethod(
-            AutoAWQConfig(
-                weight_bits=layer_config.bits,
-                group_size=layer_config.group_size,
-                zero_point=not layer_config.sym,
-                lm_head_quantized=False,
-                modules_to_not_convert=[],
-                full_config={},
-            ),
-            layer.moe_config,
-        )
-
-    moe_config = MoeWNA16Config.from_config(
-        {
-            "quant_method": "awq",
-            "bits": layer_config.bits,
-            "group_size": layer_config.group_size,
-            "zero_point": not layer_config.sym,
-            "lm_head": False,
-        }
-    )
-    return MoeWNA16Method(moe_config, layer.moe_config)
+        return INCWNA16MoEScheme(layer_config).get_method(layer)
