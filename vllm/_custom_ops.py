@@ -2391,17 +2391,6 @@ def topk_softmax(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2447,21 +2436,6 @@ def topk_hash_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softplus_sqrt(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-        )
-        return
-
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -2733,6 +2707,52 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     )
 
 
+def fused_kda_decode(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor | None = None,
+    lower_bound: float | None = None,
+    output_gate: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-5,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty(
+            1,
+            x.shape[0],
+            raw_g.shape[2],
+            raw_g.shape[3],
+            dtype=x.dtype,
+            device=x.device,
+        )
+    torch.ops._C.fused_kda_decode(
+        x,
+        weight,
+        bias,
+        conv_state,
+        raw_g,
+        raw_beta,
+        A_log,
+        dt_bias,
+        state_indices,
+        state,
+        out,
+        lower_bound,
+        output_gate,
+        norm_weight,
+        norm_eps,
+    )
+    return out
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
@@ -2744,6 +2764,53 @@ def concat_and_cache_mla(
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
+
+
+def concat_and_cache_mla_grouped(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache_ptrs: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    block_stride: int,
+    entry_stride: int,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla_grouped(
+        kv_c,
+        k_pe,
+        kv_cache_ptrs,
+        slot_mapping,
+        block_size,
+        block_stride,
+        entry_stride,
+    )
+
+
+def kimi_k3_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor,
+    num_blocks: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    output = torch.empty_like(prefix)
+    torch.ops._C.kimi_k3_attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        output,
+        num_blocks,
+        eps,
+        output_norm_eps,
+    )
+    return output
 
 
 def concat_and_cache_mla_rope_fused(
@@ -3013,6 +3080,63 @@ def all_reduce(
     torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer, reg_buffer_sz_bytes)
 
 
+def custom_all_gather(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.custom_all_gather(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
+
+
+def mnnvl_lamport_all_gather(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    multicast_buffer: int,
+    epoch_buffer: int,
+    stage_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_lamport_all_gather(
+        fa,
+        inp,
+        out,
+        local_buffer,
+        multicast_buffer,
+        epoch_buffer,
+        stage_sz_bytes,
+    )
+
+
+def custom_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.custom_reduce_scatter(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
+
+
+def mnnvl_lamport_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    epoch_buffer: int,
+    stage_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_lamport_reduce_scatter(
+        fa, inp, out, local_buffer, epoch_buffer, stage_sz_bytes
+    )
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 
@@ -3117,18 +3241,18 @@ def dsv3_fused_a_gemm(
     output: torch.Tensor,
     mat_a: torch.Tensor,
     mat_b: torch.Tensor,
+    enable_pdl: bool = False,
 ) -> None:
-    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+    """Low-latency fused-A-style GEMM (SM 9.0+, BF16, 1-16 tokens).
 
-    Computes output = mat_a @ mat_b.T where:
-      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
-      mat_b: [7168, 2112] column-major bf16 (weight transposed)
-      output: [num_tokens, 2112] row-major bf16
+    Computes ``output = mat_a @ mat_b`` for the compiled Kimi K3 and
+    DeepSeek V3 projection shapes. ``mat_a`` and ``output`` are row-major;
+    ``mat_b`` is the column-major transposed weight. ``enable_pdl`` permits
+    programmatic dependent launch for callers that have validated it.
 
-    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
-    Requires SM 9.0+ (Hopper).
+    Requires SM 9.0+.
     """
-    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):
@@ -3505,6 +3629,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3512,7 +3637,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3663,6 +3788,7 @@ def cpu_attn_get_scheduler_metadata(
     isa: str,
     enable_kv_split: bool,
     dynamic_causal: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     scheduler_metadata = torch.ops._C.get_scheduler_metadata(
         num_reqs,
@@ -3677,6 +3803,7 @@ def cpu_attn_get_scheduler_metadata(
         isa,
         enable_kv_split,
         dynamic_causal,
+        kv_cache_dtype,
     )
     return scheduler_metadata
 
@@ -3787,6 +3914,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3805,6 +3941,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
@@ -3924,9 +4093,40 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNvAbsMax(
-        a, b, xh_e2m1, xh_e4m3, global_scale
-    )
+    safeFusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return xh_e2m1, xh_e4m3
+
+
+@torch.library.custom_op(
+    "vllm::safeFusedQuantizeNv", mutates_args=("xh_e2m1", "xh_e4m3")
+)
+def safeFusedQuantizeNv(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    xh_e2m1: torch.Tensor,
+    xh_e4m3: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> None:
+    """
+    Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
+    rather than returning them, to prevent torch 2.12+ errors that outputs of custom
+    operators may not alias any inputs to the custom operator.
+    """
+    torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+
+    @register_fake("vllm::safeFusedQuantizeNv")
+    def _fake_fused_quantize_nv(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        xh_e2m1: torch.Tensor,
+        xh_e4m3: torch.Tensor,
+        global_scale: torch.Tensor,
+    ) -> None:
+        return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
