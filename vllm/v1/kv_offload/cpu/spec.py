@@ -142,14 +142,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def _uses_shared_region(self) -> bool:
-        """Whether this deployment backs the worker CPU buffer with the shared
-        mmap region rather than a per-rank private pinned tensor.
-
-        Single source of truth for both the replicated-layout sizing gate and
-        the ``create_worker`` allocation path: deduplication (single MLA copy +
-        rank-0 writer gate) is only safe where a shared medium actually exists,
-        so non-CUDA-alike platforms (private-tensor path) must never enable it.
-        """
+        """Whether the worker CPU buffer is the shared mmap region (vs a private
+        per-rank tensor); replicated-layout dedup is gated on this being True."""
         return current_platform.is_cuda_alike()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
