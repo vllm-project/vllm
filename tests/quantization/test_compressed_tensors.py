@@ -700,6 +700,47 @@ def test_get_quant_method_honors_ignore_under_model_root_prefix():
     assert isinstance(method, UnquantizedLinearMethod)
 
 
+def test_get_quant_method_selects_per_group_scheme_under_model_root_prefix():
+    """Mixed config_groups must keep per-layer scheme selection under the root.
+
+    The #49893 checkpoint quantizes different layer ranges at different
+    bit-widths. Each layer must receive the scheme of the group whose
+    checkpoint-relative target names it, not just any matching scheme.
+    """
+
+    def group(num_bits: int) -> dict:
+        return {
+            "weights": QuantizationArgs(
+                num_bits=num_bits,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                group_size=128,
+                symmetric=True,
+                dynamic=False,
+            ),
+            "input_activations": None,
+            "format": "pack-quantized",
+        }
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "model.layers.0.mlp.down_proj": group(4),
+            "model.layers.1.mlp.down_proj": group(8),
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.model_root_prefix = "draft_model"
+
+    for layer_idx, num_bits in ((0, 4), (1, 8)):
+        layer = _make_draft_linear()
+        method = config.get_quant_method(
+            layer, prefix=f"draft_model.model.layers.{layer_idx}.mlp.down_proj"
+        )
+        assert isinstance(method, CompressedTensorsLinearMethod)
+        assert layer.scheme.quant_type.size_bits == num_bits
+
+
 def test_find_matched_target_returns_none_on_no_match():
     result = find_matched_target(
         layer_name="model.layers.0.self_attn.qkv_proj",
