@@ -393,8 +393,13 @@ class ECCPUScheduler:
         for feature in request.mm_features:
             mm_hash = feature.identifier
             entry = self._cache.get(mm_hash)
-            if entry is None or not entry.ready:
+            if entry is None:
                 continue
+            # Announce even if the save's GPU->mmap copy hasn't been
+            # confirmed complete yet: a not-ready entry can't be evicted, so
+            # it will still be here by the time a consumer's XferReq arrives.
+            # pin_if_ready NACKs (NACK_MISSING) if it's still not ready then,
+            # and the consumer falls back to local recompute.
             size_bytes = (
                 feature.mm_position.length * self._hidden_dim * self._element_size
             )
