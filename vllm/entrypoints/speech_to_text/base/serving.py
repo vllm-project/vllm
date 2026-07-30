@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable, Set
+from collections.abc import AsyncGenerator, Callable, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
@@ -32,6 +32,7 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
+from vllm.model_executor.models.interfaces import VerboseTranscriptionToken
 from vllm.multimodal.audio import get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
@@ -307,7 +308,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if (
+                request.response_format == "verbose_json"
+                and not self.model_cls.supports_textual_segment_timestamps
+            ):
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -422,6 +426,48 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob = 0
             else:
                 avg_logprob += log_probs[idx - 1][token].logprob
+        return segments
+
+    def _get_textual_verbose_segments(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        log_probs: FlatLogprobs | list[dict[int, Logprob]],
+        request: SpeechToTextRequest,
+        segment_class: type[SpeechToTextSegment],
+        start_time: float = 0,
+    ) -> list[SpeechToTextSegment]:
+        if token_ids and token_ids[-1] == self.tokenizer.eos_token_id:
+            token_ids = token_ids[:-1]
+        tokens = tuple(
+            VerboseTranscriptionToken(
+                token_id=token_id,
+                text=log_probs[index][token_id].decoded_token or "",
+                logprob=log_probs[index][token_id].logprob,
+            )
+            for index, token_id in enumerate(token_ids)
+        )
+        parsed_segments = self.model_cls.parse_verbose_transcript(text, tokens)
+        segments: list[SpeechToTextSegment] = []
+        for index, segment in enumerate(parsed_segments):
+            text_bytes = segment.text.encode("utf-8")
+            segments.append(
+                cast(
+                    SpeechToTextSegment,
+                    segment_class(
+                        id=index,
+                        seek=int(start_time),
+                        start=segment.start,
+                        end=segment.end,
+                        temperature=request.temperature,
+                        text=segment.text,
+                        compression_ratio=len(text_bytes)
+                        / len(zlib.compress(text_bytes)),
+                        tokens=list(segment.token_ids),
+                        avg_logprob=segment.avg_logprob,
+                    ),
+                )
+            )
         return segments
 
     async def _create_speech_to_text(
@@ -624,13 +670,28 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
-                    segments: list[SpeechToTextSegment] = self._get_verbose_segments(
-                        tokens=tuple(op.outputs[0].token_ids),
-                        segment_class=segment_class,
-                        request=request,
-                        start_time=start_time,
-                        log_probs=op.outputs[0].logprobs,
-                    )
+                    if self.model_cls.supports_textual_segment_timestamps:
+                        segments = self._get_textual_verbose_segments(
+                            op.outputs[0].text,
+                            op.outputs[0].token_ids,
+                            op.outputs[0].logprobs,
+                            request,
+                            segment_class,
+                            start_time,
+                        )
+                        if not segments:
+                            return self.create_error_response(
+                                "Model output did not contain a valid "
+                                "verbose transcript"
+                            )
+                    else:
+                        segments = self._get_verbose_segments(
+                            tokens=tuple(op.outputs[0].token_ids),
+                            segment_class=segment_class,
+                            request=request,
+                            start_time=start_time,
+                            log_probs=op.outputs[0].logprobs,
+                        )
 
                     chunk_segment_parts[idx].extend(segments)
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
@@ -689,7 +750,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         V,
                         TranscriptionResponseVerbose(
                             text=text,
-                            language=request.language,
+                            language=request.language or "unknown",
                             duration=duration_s,
                             segments=total_segments,
                         ),
@@ -703,7 +764,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         V,
                         TranslationResponseVerbose(
                             text=text,
-                            language=request.language,
+                            language=request.language or "unknown",
                             duration=duration_s,
                             segments=total_segments,
                         ),

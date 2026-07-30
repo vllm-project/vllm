@@ -15,6 +15,7 @@ from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
@@ -28,13 +29,22 @@ from vllm.entrypoints.speech_to_text.base.serving import (
     SpeechToTextBaseServing,
     asr_inter_chunk_separator,
 )
-from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionSegment,
+)
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
+from vllm.logprobs import Logprob
 from vllm.model_executor.models.interfaces import (
     StreamingTranscriptionPostProcessor,
     SupportsTranscription,
+    VerboseTranscriptionSegment,
+    VerboseTranscriptionToken,
+)
+from vllm.model_executor.models.moss_transcribe_diarize import (
+    MossTranscribeDiarizeForConditionalGeneration,
 )
 from vllm.model_executor.models.qwen3_asr import Qwen3ASRForConditionalGeneration
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -119,6 +129,78 @@ def test_qwen3_asr_stream_processor_stops_buffering_prefix_with_newline():
     assert post_processor.process_delta(text, False) == text
 
 
+def test_textual_verbose_segments_preserve_moss_generated_tokens():
+    serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
+    serving.model_cls = MossTranscribeDiarizeForConditionalGeneration
+    serving.tokenizer = SimpleNamespace(eos_token_id=99)
+    text = "[0][S01]First[1][1][S02]Second[2]"
+    log_probs = [
+        {10: Logprob(logprob=-0.1, decoded_token="[0][S01]First[1][")},
+        {11: Logprob(logprob=-0.3, decoded_token="1][S02]Second[2]")},
+        {99: Logprob(logprob=-0.2, decoded_token="<|im_end|>")},
+    ]
+
+    segments = serving._get_textual_verbose_segments(
+        text,
+        (10, 11, 99),
+        log_probs,
+        SimpleNamespace(temperature=0.0),
+        TranscriptionSegment,
+    )
+
+    assert [
+        (segment.start, segment.end, segment.text, segment.tokens, segment.avg_logprob)
+        for segment in segments
+    ] == [
+        (0.0, 1.0, "[S01]First", [10], -0.1),
+        (1.0, 2.0, "[S02]Second", [11], -0.3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_textual_verbose_prompt_uses_moss_decoder_only_prompt():
+    serving = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
+    serving.asr_config = SpeechToTextConfig(
+        sample_rate=16_000,
+        max_audio_clip_s=None,
+    )
+    serving.max_audio_filesize_mb = 100.0
+    serving.model_cls = MossTranscribeDiarizeForConditionalGeneration
+    serving.model_config = MagicMock()
+    serving.task_type = "transcribe"
+    serving.renderer = MagicMock()
+    serving.renderer.render_cmpl_async = AsyncMock(return_value=[MagicMock()])
+    serving._decode_and_chunk_speech_async = AsyncMock(
+        return_value=([np.zeros(16_000, dtype=np.float32)], 1.0)
+    )
+    request = SimpleNamespace(
+        language="en",
+        to_language=None,
+        response_format="verbose_json",
+        build_stt_params=MagicMock(
+            return_value=SimpleNamespace(
+                audio=np.zeros(16_000, dtype=np.float32),
+                stt_config=serving.asr_config,
+                request_prompt=None,
+            )
+        ),
+    )
+
+    with (
+        patch(
+            "vllm.entrypoints.speech_to_text.base.serving.parse_enc_dec_prompt",
+            side_effect=AssertionError("MOSS does not use an encoder-decoder prompt"),
+        ),
+        patch(
+            "vllm.entrypoints.speech_to_text.base.serving.parse_model_prompt",
+            return_value=MagicMock(),
+        ) as parse_model_prompt,
+    ):
+        await serving._preprocess_speech_to_text(request, b"\x00", "test")
+
+    parse_model_prompt.assert_called_once()
+
+
 def test_joined_chunks_english_has_space_between():
     sep = asr_inter_chunk_separator("en", SupportsTranscription.no_space_languages)
     assert sep.join(["hello", "world"]) == "hello world"
@@ -156,6 +238,27 @@ class _StubTranscriptionModel:
         cls,
     ) -> type[StreamingTranscriptionPostProcessor]:
         return StreamingTranscriptionPostProcessor
+
+
+class _TextualVerboseStub(_StubTranscriptionModel):
+    supports_segment_timestamp = True
+    supports_textual_segment_timestamps = True
+
+    @classmethod
+    def parse_verbose_transcript(
+        cls,
+        text: str,
+        tokens: tuple[VerboseTranscriptionToken, ...],
+    ) -> list[VerboseTranscriptionSegment]:
+        return [
+            VerboseTranscriptionSegment(
+                start=0.0,
+                end=1.0,
+                text=text,
+                token_ids=tuple(token.token_id for token in tokens),
+                avg_logprob=0.0,
+            )
+        ]
 
 
 def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOutput:
@@ -390,3 +493,63 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
         )
         assert not isinstance(out_zh, ErrorResponse)
         assert out_zh.text == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_verbose_uses_unknown_without_language():
+    async def gen_transcript() -> AsyncGenerator[RequestOutput, None]:
+        yield RequestOutput(
+            request_id="rid",
+            prompt=None,
+            prompt_token_ids=None,
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello",
+                    token_ids=(10,),
+                    cumulative_logprob=None,
+                    logprobs=[{10: Logprob(logprob=-0.1, decoded_token="Hello")}],
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    engine_client = MagicMock()
+    engine_client.model_config = MagicMock()
+    engine_client.model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config.max_model_len = 8192
+    engine_client.errored = False
+    engine_client.generate.return_value = gen_transcript()
+    models = MagicMock(spec=OpenAIServingModels)
+    models.lora_requests = {}
+    models.is_base_model.return_value = True
+
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model_cls",
+            return_value=_TextualVerboseStub,
+        ),
+        patch(
+            "vllm.entrypoints.speech_to_text.base.serving.get_tokenizer",
+            return_value=SimpleNamespace(eos_token_id=99),
+        ),
+        patch.object(
+            SpeechToTextBaseServing,
+            "_preprocess_speech_to_text",
+            AsyncMock(return_value=([MagicMock()], 1.0, [0.0])),
+        ),
+    ):
+        serving = OpenAIServingTranscription(engine_client, models, request_logger=None)
+        request = TranscriptionRequest.model_construct(
+            file=MagicMock(),
+            model="stub-model",
+            language=None,
+            stream=False,
+            response_format="verbose_json",
+        )
+        response = await serving.create_transcription(b"\x00\x00", request, None)
+
+    assert not isinstance(response, ErrorResponse)
+    assert response.language == "unknown"
