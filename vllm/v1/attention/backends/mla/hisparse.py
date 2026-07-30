@@ -30,7 +30,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -48,9 +48,6 @@ class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
     host_pool_gib: float
-
-    def num_hot_blocks(self, block_size: int) -> int:
-        return cdiv(self.device_buffer_size, block_size)
 
     @classmethod
     def from_vllm_config(

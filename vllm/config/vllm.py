@@ -548,10 +548,7 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if (
-            self.attention_config is not None
-            and self.attention_config.hisparse_config is not None
-        ):
+        if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError(
                     "HiSparse requires Model Runner V2; remove "
@@ -1284,10 +1281,7 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
-        if (
-            self.attention_config is not None
-            and self.attention_config.hisparse_config is not None
-        ):
+        if self.attention_config.hisparse_config is not None:
             # PD-decode instances (KV arrives via a consumer connector) are
             # the intended fast path. Local prefill also works — rows are
             # written to the host pool and prefill attention stages the
