@@ -469,7 +469,19 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
 
                         # content
-                        if delta.content is not None:
+                        #
+                        # A single delta can carry BOTH content and tool_calls
+                        # in the same chunk. This happens with the
+                        # iquest_coder_v2 tool parser, which emits a completed
+                        # tool call in one delta together with any leading text
+                        # (e.g. a stray "\n" between </think> and the call), and
+                        # is made frequent by MTP speculative decoding bundling
+                        # those tokens into one decode step. So handle content
+                        # here WITHOUT ``continue``/``elif`` and fall through to
+                        # the tool-call handling below; otherwise the tool call
+                        # is silently dropped and the client sees a
+                        # ``stop_reason: tool_use`` with no tool_use block.
+                        if delta.content:
                             if content_block_started and current_block_type != "text":
                                 stop_chunk = AnthropicStreamEvent(
                                     index=content_block_index,
@@ -493,8 +505,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 content_block_started = True
                                 current_block_type = "text"
 
-                            if delta.content == "":
-                                continue
                             chunk = AnthropicStreamEvent(
                                 index=content_block_index,
                                 type="content_block_delta",
@@ -505,10 +515,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "content_block_delta")
-                            continue
 
                         # tool calls
-                        elif len(delta.tool_calls) > 0:
+                        if len(delta.tool_calls) > 0:
                             tool_call = delta.tool_calls[0]
                             if tool_call.id is not None:
                                 if content_block_started:
