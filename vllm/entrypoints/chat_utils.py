@@ -945,15 +945,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
-
-        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
-            envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=tracker.media_io_kwargs,
-            allowed_local_media_path=tracker.allowed_local_media_path,
-            allowed_media_domains=tracker.allowed_media_domains,
-        )
-
         self._mm_processor_kwargs = mm_processor_kwargs
+
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        # Connector setup may probe VLLM_MEDIA_CACHE. Defer it until a request
+        # actually contains media so text-only parsing never blocks on that I/O.
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=self._tracker.media_io_kwargs,
+            allowed_local_media_path=self._tracker.allowed_local_media_path,
+            allowed_media_domains=self._tracker.allowed_media_domains,
+        )
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1097,13 +1100,18 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
-        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
-            envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=tracker.media_io_kwargs,
-            allowed_local_media_path=tracker.allowed_local_media_path,
-            allowed_media_domains=tracker.allowed_media_domains,
-        )
         self._mm_processor_kwargs: dict[str, Any] | None = mm_processor_kwargs
+
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        # Connector setup may probe VLLM_MEDIA_CACHE. Defer it until a request
+        # actually contains media so text-only parsing never blocks on that I/O.
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=self._tracker.media_io_kwargs,
+            allowed_local_media_path=self._tracker.allowed_local_media_path,
+            allowed_media_domains=self._tracker.allowed_media_domains,
+        )
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1162,21 +1170,30 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 parameter="image_embeds",
             )
 
-        if isinstance(image_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_image_embedding(v)
-                for k, v in image_embeds.items()
-            }
-        elif isinstance(image_embeds, str):
-            embedding = self._connector.fetch_image_embedding(image_embeds)
-            embeds = embedding
-        else:
-            embeds = None
-
         placeholder = self._tracker.add(
-            "image_embeds", partial(self._item_with_uuid_async, embeds, uuid)
+            "image_embeds",
+            partial(self._image_embeds_with_uuid_async, image_embeds, uuid),
         )
         self._add_placeholder("image", placeholder)
+
+    async def _image_embeds_with_uuid_async(
+        self,
+        image_embeds: str | dict[str, str] | None,
+        uuid: str | None,
+    ):
+        if isinstance(image_embeds, dict):
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_image_embedding_async(v)
+                    for v in image_embeds.values()
+                )
+            )
+            embeds = dict(zip(image_embeds, tensors))
+        elif isinstance(image_embeds, str):
+            embeds = await self._connector.fetch_image_embedding_async(image_embeds)
+        else:
+            embeds = None
+        return embeds, uuid
 
     def parse_audio_embeds(
         self,
@@ -1190,21 +1207,30 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 parameter="audio_embeds",
             )
 
-        if isinstance(audio_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_audio_embedding(v)
-                for k, v in audio_embeds.items()
-            }
-        elif isinstance(audio_embeds, str):
-            embedding = self._connector.fetch_audio_embedding(audio_embeds)
-            embeds = embedding
-        else:
-            embeds = None
-
         placeholder = self._tracker.add(
-            "audio_embeds", partial(self._item_with_uuid_async, embeds, uuid)
+            "audio_embeds",
+            partial(self._audio_embeds_with_uuid_async, audio_embeds, uuid),
         )
         self._add_placeholder("audio", placeholder)
+
+    async def _audio_embeds_with_uuid_async(
+        self,
+        audio_embeds: str | dict[str, str] | None,
+        uuid: str | None,
+    ):
+        if isinstance(audio_embeds, dict):
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_audio_embedding_async(v)
+                    for v in audio_embeds.values()
+                )
+            )
+            embeds = dict(zip(audio_embeds, tensors))
+        elif isinstance(audio_embeds, str):
+            embeds = await self._connector.fetch_audio_embedding_async(audio_embeds)
+        else:
+            embeds = None
+        return embeds, uuid
 
     def parse_image_pil(
         self,
@@ -2006,13 +2032,19 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
     return idx
 
 
-_KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25")
+_KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25", "kimi_k3")
 
 
 def get_tool_call_id_type(model_config: ModelConfig) -> str:
     """Return the tool-call ID type for a given model configuration."""
     hf_overrides = getattr(model_config, "hf_overrides", None)
-    if model_config.hf_text_config.model_type in _KIMI_MODEL_TYPES or (
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_types = (
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+    )
+    if any(model_type in _KIMI_MODEL_TYPES for model_type in model_types) or (
         isinstance(hf_overrides, dict)
         and hf_overrides.get("model_type") in _KIMI_MODEL_TYPES
     ):
