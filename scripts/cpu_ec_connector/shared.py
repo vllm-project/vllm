@@ -236,6 +236,21 @@ def reset_mm_cache(port: int) -> None:
     r.raise_for_status()
 
 
+def reset_encoder_cache(port: int) -> None:
+    """Evict cached encoder outputs (the scheduler's EncoderCacheManager and
+    the GPU model runner's encoder_cache dict).
+
+    reset_mm_cache alone does NOT clear this — it only clears the
+    multimodal-input-side cache. Without this, a later request for the same
+    mm_hash gets a free local cache hit and never reaches the EC connector's
+    has_cache_item/NIXL-fetch path at all.
+    """
+    r = requests.post(
+        f"http://127.0.0.1:{port}/reset_encoder_cache", timeout=REQUEST_TIMEOUT_S
+    )
+    r.raise_for_status()
+
+
 def reset_prefix_cache(port: int) -> None:
     r = requests.post(
         f"http://127.0.0.1:{port}/reset_prefix_cache", timeout=REQUEST_TIMEOUT_S
@@ -294,6 +309,8 @@ def test_baseline(h, image: Path, prompt: str) -> None:
     )
 
     reset_mm_cache(h.consumer.http_port)
+
+    reset_encoder_cache(h.consumer.http_port)
     reset_prefix_cache(h.consumer.http_port)
 
     ec_params, prod_sl = _producer_encode(h, rendered)
@@ -341,6 +358,7 @@ def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
     )
     target_hash = rendered["features"]["mm_hashes"]["image"][0]
     reset_mm_cache(h.consumer.http_port)
+    reset_encoder_cache(h.consumer.http_port)
     reset_prefix_cache(h.consumer.http_port)
     ec_params, _ = _producer_encode(h, rendered)
     if target_hash not in ec_params:
@@ -348,6 +366,13 @@ def test_cache_reuse(h, prompt: str, n_repeat: int = 5) -> None:
 
     pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
     for i in range(n_repeat):
+        # Evict the GPU-resident encoder cache each iteration too, not just
+        # the KV prefix cache. Otherwise EncoderCacheManager keeps serving
+        # this mm_hash's already-loaded GPU tensor directly (nothing else
+        # competes for its slot), short-circuiting past has_cache_item /
+        # start_load_caches on every repeat after the first — the CPU-side
+        # cache reuse this test exists to exercise never gets touched again.
+        reset_encoder_cache(h.consumer.http_port)
         reset_prefix_cache(h.consumer.http_port)
         resp = generate(
             h.consumer.http_port, rendered, max_tokens=8, ec_transfer_params=ec_params
@@ -392,6 +417,7 @@ def test_multi_image(h, prompt: str, n_images: int = 3) -> None:
         raise AssertionError(f"expected {n_images} mm_hashes, got {len(hashes)}")
     print(f"  mm_hashes: {hashes}")
     reset_mm_cache(h.consumer.http_port)
+    reset_encoder_cache(h.consumer.http_port)
     reset_prefix_cache(h.consumer.http_port)
 
     ec_params, prod_sl = _producer_encode(h, rendered)
@@ -424,6 +450,9 @@ def test_multi_image(h, prompt: str, n_images: int = 3) -> None:
             f"consumer read ok mm_hash={hh}",
             where="consumer.log [multi-image ec]",
         )
+    assert_in_log(
+        csl, "consumer load mm_hashes=", where="consumer.log [multi-image ec]"
+    )
     assert_not_in_log(
         csl, "consumer ENCODER FORWARD", where="consumer.log [multi-image ec]"
     )
@@ -444,6 +473,8 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
     print(f"  pre-encoded {k} images on producer")
 
     reset_mm_cache(h.consumer.http_port)
+
+    reset_encoder_cache(h.consumer.http_port)
     reset_prefix_cache(h.consumer.http_port)
 
     pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
@@ -480,6 +511,7 @@ def test_concurrent_ec(h, prompt: str, k: int = 4) -> None:
             f"consumer read ok mm_hash={hh}",
             where="consumer.log [concurrent]",
         )
+    assert_in_log(csl, "consumer load mm_hashes=", where="consumer.log [concurrent]")
     assert_not_in_log(
         csl, "consumer ENCODER FORWARD", where="consumer.log [concurrent]"
     )
@@ -520,7 +552,14 @@ def test_pool_exhaustion(
                 f"could not parse n_blocks from producer save log; slice={sl_a!r}"
             )
         per_image_blocks = int(m.group(1))
-        n_extra = (pool_size // max(per_image_blocks, 1)) * 2 + 1
+        # `pool_size` is a byte budget but `per_image_blocks` is a block
+        # count; converting one to the other needs the server's internal
+        # block_size_bytes, which isn't exposed to this test. A fixed small
+        # count is fast and, for the tiny synthetic images used here, always
+        # exceeds the tiny pool_size above — the assertion below still fails
+        # loudly (with a "try lowering pool_size or raising n_extra" hint) if
+        # that ever stops being true for a given model/image size.
+        n_extra = 20
         print(
             f"  per_image_blocks={per_image_blocks}, pool={pool_size}, "
             f"encoding {n_extra} more images to force eviction"
@@ -535,6 +574,8 @@ def test_pool_exhaustion(
             _producer_encode(h, rendered)
 
         reset_mm_cache(h.consumer.http_port)
+
+        reset_encoder_cache(h.consumer.http_port)
         reset_prefix_cache(h.consumer.http_port)
         pmark, cmark = log_size(h.producer.log_path), log_size(h.consumer.log_path)
         resp = generate(
@@ -587,6 +628,7 @@ def test_producer_restart(
         )
         hash_a = rendered_a["features"]["mm_hashes"]["image"][0]
         reset_mm_cache(h.consumer.http_port)
+        reset_encoder_cache(h.consumer.http_port)
         reset_prefix_cache(h.consumer.http_port)
         ec_params_a, _ = _producer_encode(h, rendered_a)
         if hash_a not in ec_params_a:
@@ -608,6 +650,7 @@ def test_producer_restart(
         )
         hash_b = rendered_b["features"]["mm_hashes"]["image"][0]
         reset_mm_cache(h.consumer.http_port)
+        reset_encoder_cache(h.consumer.http_port)
         reset_prefix_cache(h.consumer.http_port)
         ec_params_b, _ = _producer_encode(h, rendered_b)
         if hash_b not in ec_params_b:
@@ -626,11 +669,14 @@ def test_producer_restart(
         # The consumer's oc logs -f stream may die briefly during the
         # peer eviction triggered by the producer restart.  Use wait_for_in_log
         # so the watchdog (1s interval) has time to restart the stream and
-        # replay the pod log before we assert.
+        # replay the pod log before we assert. Wait for "consumer load" (the
+        # later of the two events) rather than "consumer read ok": its
+        # presence guarantees "read ok" already landed too, so one poll loop
+        # covers both assertions below without racing the log stream.
         csl = wait_for_in_log(
             h.consumer.log_path,
             cmark,
-            f"consumer read ok mm_hash={hash_b}",
+            "consumer load mm_hashes=",
             timeout_s=12.0,
         )
         assert_in_log(
@@ -647,6 +693,9 @@ def test_producer_restart(
             csl,
             f"consumer read ok mm_hash={hash_b}",
             where="consumer.log [post-restart ec]",
+        )
+        assert_in_log(
+            csl, "consumer load mm_hashes=", where="consumer.log [post-restart ec]"
         )
         # After restart the old peer may have been evicted by poll_dead_peers
         # before the EC request fires (logs "ADD") or still be present when the
