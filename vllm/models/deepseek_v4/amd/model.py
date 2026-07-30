@@ -201,7 +201,19 @@ def _pad_and_expand_native_fp8_shared_expert(
             return scale.contiguous().view(torch.uint8)
         if scale.dtype == torch.uint8:
             return scale.contiguous()
-        raise ValueError("Heterogeneous shared-expert scales must be E8M0 bytes.")
+        if scale.dtype == torch.float32:
+            scale_bits = scale.contiguous().view(torch.int32)
+            exponent_bytes = (scale_bits >> 23).to(torch.uint8)
+            if not torch.equal(scale_bits, exponent_bytes.to(torch.int32) << 23):
+                raise ValueError(
+                    "Heterogeneous shared-expert FP32 scales must be exact "
+                    "E8M0 upcasts."
+                )
+            return exponent_bytes
+        raise ValueError(
+            "Heterogeneous shared-expert scales must be E8M0 bytes or exact "
+            "FP32 E8M0 upcasts."
+        )
 
     w13_scale_bytes = scale_bytes(w13_scale)
     w2_scale_bytes = scale_bytes(w2_scale)

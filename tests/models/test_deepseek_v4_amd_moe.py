@@ -23,6 +23,9 @@ from vllm._aiter_ops import (
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_fused_experts,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4HeterogeneousSharedRoutedExperts,
     _make_deepseek_v4_weights_mapper,
@@ -321,6 +324,38 @@ def test_native_fp8_padding_preserves_bytes_and_expands_e8m0_losslessly():
     assert torch.all(w13_scale_bytes[384:] == 0x7F)
     assert torch.equal(w2_scale_bytes[:, :4], expected_w2)
     assert torch.all(w2_scale_bytes[:, 4:] == 0x7F)
+
+
+def test_native_fp8_padding_recovers_aiter_fp32_scale_upcasts():
+    w13, w2, w13_scale, w2_scale = _native_shared_tensors()
+    expected = _pad_and_expand_native_fp8_shared_expert(
+        w13, w2, w13_scale, w2_scale, padded_intermediate_size=256
+    )
+
+    actual = _pad_and_expand_native_fp8_shared_expert(
+        w13,
+        w2,
+        _upcast_e8m0_to_fp32(w13_scale),
+        _upcast_e8m0_to_fp32(w2_scale),
+        padded_intermediate_size=256,
+    )
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        assert torch.equal(
+            actual_tensor.view(torch.uint8), expected_tensor.view(torch.uint8)
+        )
+
+
+@pytest.mark.parametrize("invalid_scale", [-1.0, 1.5])
+def test_native_fp8_padding_rejects_non_e8m0_fp32_scales(invalid_scale):
+    w13, w2, w13_scale, w2_scale = _native_shared_tensors()
+    w13_scale = _upcast_e8m0_to_fp32(w13_scale)
+    w13_scale[0, 0] = invalid_scale
+
+    with pytest.raises(ValueError, match="must be exact E8M0 upcasts"):
+        _pad_and_expand_native_fp8_shared_expert(
+            w13, w2, w13_scale, w2_scale, padded_intermediate_size=256
+        )
 
 
 class _NativeSharedExpert(nn.Module):
