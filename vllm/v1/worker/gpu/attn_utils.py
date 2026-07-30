@@ -189,16 +189,14 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-    vllm_config: VllmConfig,
 ):
-    use_hisparse = vllm_config.attention_config.hisparse_config is not None
-    if use_hisparse:
-        host_bytes = sum(
-            tensor.size
-            for tensor in kv_cache_config.kv_cache_tensors
-            if tensor.host_resident
-        )
-        check_hisparse_host_memory(vllm_config, host_bytes)
+    host_bytes = sum(
+        tensor.size
+        for tensor in kv_cache_config.kv_cache_tensors
+        if tensor.host_resident
+    )
+    if host_bytes:
+        check_hisparse_host_memory(host_bytes)
 
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backings: dict[int, torch.Tensor] = {}
@@ -486,7 +484,7 @@ def init_kv_cache(
 ) -> tuple[dict[str, Any], "HiSparseRuntime | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device, vllm_config
+        kv_cache_config, shared_kv_cache_layers, device
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(

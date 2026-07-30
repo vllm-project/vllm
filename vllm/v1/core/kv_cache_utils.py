@@ -1478,7 +1478,6 @@ def _get_hisparse_hma_config(
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_RESIDENT,
             )
         )
         hot_groups.append(
@@ -1492,7 +1491,6 @@ def _get_hisparse_hma_config(
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_HOT,
             )
         )
 

@@ -990,8 +990,6 @@ class KVCacheGroupRole(str, Enum):
     DEFAULT = "default"
     HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"
-    HISPARSE_RESIDENT = "hisparse_resident"
-    HISPARSE_HOT = "hisparse_hot"
 
 
 @dataclass

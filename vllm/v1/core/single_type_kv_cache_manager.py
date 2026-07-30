@@ -961,18 +961,13 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend(new_blocks)
         return new_blocks
 
-    def reclaimable_pages(
-        self, *, host_valid: bool | None = None
-    ) -> set[tuple[str, int]]:
-        """Return sealed resident pages with the requested host state."""
+    def reclaimable_pages(self) -> set[tuple[str, int]]:
+        """Return sealed resident pages."""
         pages: set[tuple[str, int]] = set()
         for request_id, blocks in self.req_to_blocks.items():
             # Retain the active page and one predecessor for overlapping steps.
             for block_idx, block in enumerate(blocks[:-2]):
-                if not block.is_null and (
-                    host_valid is None
-                    or (block_idx in self.host_valid_pages[request_id]) == host_valid
-                ):
+                if not block.is_null:
                     pages.add((request_id, block_idx))
         return pages
 

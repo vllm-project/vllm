@@ -134,7 +134,7 @@ def take_hisparse_stats() -> HiSparseStats | None:
     return delta
 
 
-def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None:
+def check_hisparse_host_memory(rank_bytes: int) -> None:
     """Fail fast when this rank's pinned host pool cannot fit in RAM."""
     mem = psutil.virtual_memory()
     if rank_bytes > mem.available * 0.95:
