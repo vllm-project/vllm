@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -14,8 +14,12 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
+    ChatCompletionStreamResponse,
 )
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
@@ -252,21 +256,16 @@ class GenerateResponse(BaseModel):
     )
 
 
-####### Derender (postprocessing) #######
-
-
 class DerenderChatRequest(BaseModel):
     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
-    Wraps a complete GenerateResponse and caller-supplied metadata needed to
-    produce a fully-formed ChatCompletionResponse without a GPU.
-
-    Streaming derender would require a separate endpoint design with
-    incremental token delivery, ``OutputProcessor``-based detokenization,
-    and ``parser.parse_delta()`` instead of ``parser.parse()``.
+    Wraps a complete GenerateResponse and caller supplied metadata needed to
+    produce a fully formed ChatCompletionResponse without a GPU.
     """
 
     # --8<-- [start:derender-chat-request]
+    stream: Literal[False] = False
+
     model: str
     """Served model name."""
 
@@ -299,6 +298,8 @@ class DerenderCompletionRequest(BaseModel):
     """
 
     # --8<-- [start:derender-completion-request]
+    stream: Literal[False] = False
+
     model: str
     """Served model name."""
 
@@ -330,3 +331,156 @@ class DerenderCompletionRequest(BaseModel):
                 f"generate_responses length ({len(self.generate_responses)})"
             )
         return self
+
+
+class DerenderStreamState(BaseModel):
+    """Per sequence state for stateless streaming derender.
+
+    The client carries this between successive per chunk HTTP calls to the
+    streaming derender endpoint. All fields are plain JSON serializable data.
+    No opaque tokenizer or parser internals are stored here.
+
+    The detokenization strategy carries the incremental decode offsets
+    directly rather than re-sending the whole token history each chunk.
+    ``detokenize_incrementally`` only ever reads the trailing token window
+    ``prev_tokens[prefix_offset:]``, so we carry just that tail plus the two
+    offsets. Each chunk resumes exactly where the last one stopped, including
+    any partially processed multi-byte character (tracked by ``read_offset``),
+    then trims and rebases the window so it never grows with generation length.
+
+    Performance:
+    - Compute per chunk is O(delta). One ``detokenize_incrementally`` call per
+      new token, independent of how many tokens preceded it.
+    - Transport per chunk is O(window). The carried tail is bounded by the
+      incremental detokenization offset, so cumulative bytes over the wire are
+      O(n) rather than the O(n^2) a full history round trip would incur.
+    """
+
+    prev_tokens: list[str] = Field(default_factory=list)
+    """Trailing decode window. Token strings from ``prefix_offset`` onward.
+
+    Bounded, trimmed and rebased each chunk to the tail
+    ``detokenize_incrementally`` still reads, so it does not grow with the
+    number of chunks.
+    """
+
+    prefix_offset: int = Field(default=0, ge=0)
+    """Prefix offset into ``prev_tokens`` for incremental detokenization."""
+
+    read_offset: int = Field(default=0, ge=0)
+    """Read offset into ``prev_tokens`` for incremental detokenization."""
+
+    @field_validator("prev_tokens")
+    @classmethod
+    def _bound_prev_tokens(cls, v: list[str]) -> list[str]:
+        # INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET is small (5) and the trimmed
+        # window is O(offset). A generous limit rejects unusually large or malformed
+        # payloads without restricting legitimate multi-byte sequences.
+        limit = 1024
+        if len(v) > limit:
+            raise ValueError(f"prev_tokens length ({len(v)}) exceeds maximum ({limit})")
+        return v
+
+    role_sent: bool = False
+    """True once the initial ``role: "assistant"`` delta has been emitted.
+
+    Prevents re-emitting the role on subsequent chunks even when the detok
+    window is transiently empty (e.g. usage only final chunk).
+    """
+
+    # TODO: Properties used in follow on PR for tool call parsing
+    last_content: str | None = None
+    """Last emitted cumulative assistant content text."""
+
+    last_reasoning: str | None = None
+    """Last emitted cumulative reasoning text."""
+
+    last_tool_call_ids: list[str] = Field(default_factory=list)
+    """Stable tool-call IDs, assigned once when each call first appears.
+
+    Prevents ID regeneration across re-parsing.
+    """
+
+
+class DerenderChatStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/chat/completions/derender.
+
+    The client sends one request per SSE chunk received from
+    ``/inference/v1/generate``.  Each request carries the generate chunk
+    plus the ``stream_state`` returned by the previous call (``None`` on the
+    first call).  The response contains the derendered chunk and the updated
+    state to be passed to the next call.
+
+    This implements stateless no server side session. All mutable state lives in
+    the client carried ``stream_state``.
+    """
+
+    stream: Literal[True]
+
+    model: str
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate`` (``stream=True``)."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client carried detok state from the previous call. ``None`` on first."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage. Forwarded from the render step."""
+
+    chat_request: ChatCompletionRequest | None = None
+    """The original (post adjust_request) ChatCompletionRequest from /render."""
+
+
+class DerenderCompletionStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/completions/derender.
+
+    Parallel to ``DerenderChatStreamRequest`` for the completions endpoint.
+    Each call processes one SSE chunk (one output sequence's delta) and
+    returns the derendered chunk plus updated state.
+    """
+
+    stream: Literal[True]
+
+    model: str
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate``."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client-carried detok state. ``None`` on the first call."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage."""
+
+    completion_request: CompletionRequest | None = None
+    """The original (post adjust_request) CompletionRequest from /render."""
+
+
+class DerenderChatStreamResponse(BaseModel):
+    """Response for one streaming chat derender chunk.
+
+    Pairs the derendered SSE chunk with the updated client carried state to
+    pass to the next call.
+    """
+
+    chunk: ChatCompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+class DerenderCompletionStreamResponse(BaseModel):
+    """Response for one streaming completions derender chunk.
+
+    Parallel to ``DerenderChatStreamResponse`` for the completions endpoint.
+    """
+
+    chunk: CompletionStreamResponse
+    stream_state: DerenderStreamState
+
+
+# Determines the type by checking the ``stream`` field's literal value. A body without
+# ``stream`` validates as the non-streaming member
+# (``stream`` defaults to ``False`` there), so FastAPI can validate and dispatch both
+# shapes on a single path.
+DerenderChatRequestUnion: TypeAlias = DerenderChatRequest | DerenderChatStreamRequest
+DerenderCompletionRequestUnion: TypeAlias = (
+    DerenderCompletionRequest | DerenderCompletionStreamRequest
+)
