@@ -15,8 +15,10 @@ from vllm.model_executor.models.bert import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -150,6 +152,36 @@ def test_pooling_runner_stores_only_required_token_ids() -> None:
 
     assert 1 not in runner.prompt_token_ids
     torch.testing.assert_close(runner.prompt_token_ids[2], torch.tensor([101, 11, 102]))
+
+
+def test_pooling_runner_releases_aborted_late_interaction_doc() -> None:
+    runner = PoolingRunner.__new__(PoolingRunner)
+    runner.late_interaction_runner = LateInteractionRunner()
+
+    query_key = "query-abort"
+    late_interaction_runner = runner.late_interaction_runner
+    late_interaction_runner._query_cache[query_key] = torch.ones(2, 4)
+    late_interaction_runner._query_uses[query_key] = 1
+    late_interaction_runner._doc_query_keys["doc-req"] = query_key
+
+    runner.on_requests_finished({"doc-req"})
+
+    assert not late_interaction_runner._query_cache
+    assert not late_interaction_runner._query_uses
+    assert not late_interaction_runner._doc_query_keys
+
+
+def test_model_runner_cache_resets_clear_late_interaction_state() -> None:
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.encoder_cache = MagicMock()
+    runner.pooling_runner = MagicMock()
+
+    runner.reset_mm_cache()
+    runner.reset_encoder_cache()
+
+    runner.encoder_cache.reset_mm_cache.assert_called_once_with()
+    runner.encoder_cache.reset_encoder_cache.assert_called_once_with()
+    assert runner.pooling_runner.clear.call_count == 2
 
 
 def test_pooling_runner_rejects_unsupported_selected_task() -> None:

@@ -104,6 +104,9 @@ class PoolingRunner:
     def on_requests_finished(self, req_ids: set[str]) -> None:
         self.late_interaction_runner.on_requests_finished(req_ids)
 
+    def clear(self) -> None:
+        self.late_interaction_runner.clear()
+
     def _get_pooling_metadata(
         self,
         input_batch: InputBatch,

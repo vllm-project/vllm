@@ -738,10 +738,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
+        if self.pooling_runner is not None:
+            self.pooling_runner.clear()
 
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_encoder_cache()
+        if self.pooling_runner is not None:
+            self.pooling_runner.clear()
 
     def profile_cudagraph_memory(self) -> int:
         # NOTE(woosuk): It is TBD whether we keep this API or not.
@@ -813,6 +817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
         if self.pooling_runner is not None:
+            # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
