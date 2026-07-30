@@ -129,6 +129,9 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
+        # Whether a preempted request's in-flight output must be dropped; see
+        # KVConnectorBase_V1.requires_kv_delivery.
+        self.requires_kv_delivery = False
         kv_transfer_config = self.vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
@@ -151,6 +154,8 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
+
+            self.requires_kv_delivery = self.connector.requires_kv_delivery
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -602,7 +607,11 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self._preempt_request(
+                        preempted_req,
+                        scheduled_timestamp,
+                        drop_stale_output=self.requires_kv_delivery,
+                    )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -1265,7 +1274,8 @@ class Scheduler(SchedulerInterface):
 
         drop_stale_output: drop (rather than deliver) any in-flight output; used
         by reset_prefix_cache, whose same-step resume would otherwise deliver
-        tokens out of order.
+        tokens out of order, and for connectors with a pending KV hand-off,
+        which the preemption's block free would leave without valid KV.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"

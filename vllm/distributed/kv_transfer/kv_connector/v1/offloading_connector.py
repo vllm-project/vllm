@@ -51,6 +51,12 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def prefer_cross_layer_blocks(self) -> bool:
         return True
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        # Runs as kv_both, but is a best-effort cache: a dropped save is just a
+        # future cache miss, so opt out of the producer-role default.
+        return False
+
     def __init__(
         self,
         vllm_config: VllmConfig,

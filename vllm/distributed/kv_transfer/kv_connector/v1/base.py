@@ -181,6 +181,18 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        """Whether this connector hands off KV that must be reliably delivered.
+
+        If True, a request preempted while its hand-off is still pending is
+        recomputed rather than allowed to finish and hand off blocks that the
+        preemption already freed. Defaults to the producer role, since only a
+        producer hands KV off when a request completes. Best-effort caches
+        return False, as a dropped save is just a future cache miss.
+        """
+        return self._kv_transfer_config.is_kv_producer
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
