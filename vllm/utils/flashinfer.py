@@ -379,9 +379,8 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     """Return whether TRTLLM attention is available on the current platform
     for the given attention phase.
 
-    SM90 (Hopper) and SM12x (consumer Blackwell) support the XQA decode kernel
-    but not TRTLLM prefill. SM100 family supports TRTLLM (trtllm-gen) for both
-    phases. All others are unsupported.
+    SM90 (Hopper) and SM12x support the XQA decode kernel but not TRTLLM
+    prefill. SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
@@ -391,8 +390,7 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     if not has_nvidia_artifactory():
         return False
 
-    # SM90 (Hopper) and SM12x (consumer Blackwell) have XQA decode only;
-    # trtllm-gen prefill is SM100-only.
+    # SM90 and SM12x have XQA decode only.
     if current_platform.is_device_capability(
         90
     ) or current_platform.is_device_capability_family(120):
@@ -502,8 +500,7 @@ def use_trtllm_attention(
             current_platform.is_device_capability(90)
             or current_platform.is_device_capability_family(120)
         ) and kv_cache_dtype.startswith("fp8"):
-            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel. XQA does
-            # not support NVFP4 KV (that is an SM100 trtllm-gen path only).
+            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel.
             use_trtllm = True
         else:
             # Decode auto-detection

@@ -777,7 +777,7 @@ def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
 
     device = torch.device("cpu")
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
-    builder.use_xqa = True
+    builder.use_dedicated_xqa = True
     qo_indptr = torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32, device=device)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
@@ -801,7 +801,7 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
-    builder.use_xqa = True
+    builder.use_dedicated_xqa = True
     qo_indptr = torch.tensor([0, 3, 3, 3], dtype=torch.int32)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
@@ -849,12 +849,10 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     reason="FlashInfer is not available.",
 )
 def test_flashinfer_native_prefill_with_sinks():
-    supported = current_platform.is_cuda() and (
-        current_platform.is_device_capability(90)
-        or current_platform.is_device_capability_family(120)
-    )
-    if not supported:
-        pytest.skip("Native FlashInfer prefill with sinks requires SM90 or SM12x.")
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
+        pytest.skip("Native FlashInfer prefill with sinks requires SM12x.")
 
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
@@ -885,7 +883,7 @@ def test_flashinfer_native_prefill_with_sinks():
     reason="FlashInfer is not available.",
 )
 def test_flashinfer_xqa_decode_correctness(default_vllm_config):
-    """FlashInfer should route SM90/SM12x decode through XQA and match SDPA."""
+    """FlashInfer should route supported decode through XQA and match SDPA."""
     supported = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(120)
@@ -956,11 +954,16 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
             )
             attn_metadata = builder.build(0, common_attn_metadata)
 
+    expected_cg_support = (
+        AttentionCGSupport.UNIFORM_BATCH
+        if current_platform.is_device_capability_family(120)
+        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
     assert (
         flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
             vllm_config, kv_cache_spec
         )
-        == AttentionCGSupport.UNIFORM_BATCH
+        == expected_cg_support
     )
     assert isinstance(
         attn_metadata.decode,
