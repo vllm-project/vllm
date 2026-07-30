@@ -29,10 +29,7 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
-    try:
-        import triton_kernels.matmul_details.opt_flags as opt_flags
-    except ImportError:
-        import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
     from triton_kernels.numerics import InFlexData
     from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
     from triton_kernels.tensor_details import layout
@@ -54,23 +51,20 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        # triton 3.7+: StridedLayout requires an instance with major_dim.
-        # major_dim=-2 preserves column-major (w.stride(-2)==1) required by
-        # AITER kernel after the .transpose(-2,-1) call above.
-        value_layout = StridedLayout(major_dim=-2)
+        value_layout = StridedLayout
         if should_use_cdna4_mx_scale_swizzle():
             try:
                 # triton < 3.6
                 from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
 
-                scale_layout = GFX950MXScaleLayout()
+                scale_layout = GFX950MXScaleLayout
             except ImportError:
                 # triton >= 3.6
                 from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
 
-                scale_layout = CDNA4MXScaleLayout()
+                scale_layout = CDNA4MXScaleLayout
         else:
-            scale_layout = StridedLayout(major_dim=-2)
+            scale_layout = StridedLayout
     else:
         value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
             mx_axis=1
