@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    VLLM_KIMI_ROW_PARALLEL_LATENT_UP_PROJ: int = 0
     AITER_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -1226,6 +1227,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #       see PR #39177 for benchmarks)
     "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
         os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
+    ),
+    # Min batch tokens for evaluating a latent-MoE up projection row-parallel
+    # over TP ranks instead of replicating it; 0 disables. A value above the
+    # decode batch size confines it to prefill.
+    "VLLM_KIMI_ROW_PARALLEL_LATENT_UP_PROJ": lambda: max(
+        0, int(os.getenv("VLLM_KIMI_ROW_PARALLEL_LATENT_UP_PROJ", "0"))
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (

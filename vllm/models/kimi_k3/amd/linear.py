@@ -119,6 +119,9 @@ class KimiMLP(nn.Module):
 
 
 class KimiRoutedOutputTransform(nn.Module):
+    # Opts into MoERunner's row-parallel evaluation of the up projection.
+    supports_k_shard = True
+
     def __init__(
         self,
         norm: RMSNorm | None,
@@ -128,11 +131,23 @@ class KimiRoutedOutputTransform(nn.Module):
         self.norm = norm
         self.up_proj = up_proj
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        k_shard: tuple[int, int] | None = None,
+    ) -> torch.Tensor:
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-        hidden_states, _ = self.up_proj(hidden_states)
-        return hidden_states
+        if k_shard is None:
+            hidden_states, _ = self.up_proj(hidden_states)
+            return hidden_states
+        # The norm is non-linear so it stays on the full latent; the projection
+        # after it is linear, so this rank contracts only its own slice and the
+        # caller sums the partials.
+        lo, hi = k_shard
+        return torch.matmul(
+            hidden_states[..., lo:hi], self.up_proj.weight[:, lo:hi].t()
+        )
 
 
 def _apply_attn_res(

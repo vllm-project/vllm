@@ -7,11 +7,14 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -265,6 +268,9 @@ class MoERunner(MoERunnerInterface):
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
+        self._row_parallel_up_proj_min_tokens = (
+            envs.VLLM_KIMI_ROW_PARALLEL_LATENT_UP_PROJ
+        )
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
@@ -373,18 +379,61 @@ class MoERunner(MoERunnerInterface):
             hidden_states if self._shared_experts is not None else None,
         )
 
+    def latent_up_proj_k_shard(self, num_tokens: int) -> tuple[int, int] | None:
+        """The latent slice this rank owns, or None to stay replicated.
+
+        Sharding is only sound if the partial it yields is summed by an
+        all-reduce that happens anyway, hence the shared-expert output to fold
+        into and a final all-reduce that is not suppressed.
+        """
+        min_tokens = self._row_parallel_up_proj_min_tokens
+        if min_tokens == 0 or num_tokens < min_tokens:
+            return None
+
+        transform = self.routed_output_transform
+        if transform is None or not getattr(transform, "supports_k_shard", False):
+            return None
+        up_proj = transform.up_proj
+        if up_proj.bias is not None:
+            # A replicated bias would be summed tp_size times.
+            return None
+
+        if (
+            self._shared_experts is None
+            or self.moe_config.is_sequence_parallel
+            or self.moe_config.skip_final_all_reduce
+        ):
+            return None
+
+        tp_size = get_tensor_model_parallel_world_size()
+        latent_dim = up_proj.weight.shape[1]
+        if tp_size <= 1 or latent_dim % tp_size:
+            return None
+
+        shard = latent_dim // tp_size
+        lo = get_tensor_model_parallel_rank() * shard
+        return lo, lo + shard
+
     def apply_routed_output_transform(
         self,
         fused_output: torch.Tensor,
+        k_shard: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """Apply transform to routed expert output (e.g., latent to full dim).
 
         Used by latent MoE models (e.g., NemotronH) where routed experts
         operate in a compressed latent space and need projection back to
         the full hidden dimension before combining with shared expert output.
+
+        With ``k_shard`` the transform returns this rank's partial contribution
+        rather than the full result.
         """
         if self.routed_output_transform is not None:
-            r = self.routed_output_transform(fused_output)
+            r = (
+                self.routed_output_transform(fused_output, k_shard)
+                if k_shard is not None
+                else self.routed_output_transform(fused_output)
+            )
             fused_output = r[0] if isinstance(r, tuple) else r
         return fused_output
 
@@ -755,10 +804,15 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
+        # A sharded transform yields a partial, so the shared output must stay
+        # un-reduced and the sum is all-reduced once at the end instead.
+        k_shard = self.latent_up_proj_k_shard(fused_output.shape[0])
+        combined_is_reduced = fused_output_is_reduced and k_shard is None
+
         # If routed output is already reduced, reduce shared to match.
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(
-            shared_output, fused_output_is_reduced
+            shared_output, combined_is_reduced
         )
 
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
@@ -766,7 +820,7 @@ class MoERunner(MoERunnerInterface):
         )
 
         # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
+        fused_output = self.apply_routed_output_transform(fused_output, k_shard)
 
         if shared_output is not None:
             result = shared_output + fused_output
@@ -774,7 +828,7 @@ class MoERunner(MoERunnerInterface):
             result = fused_output
 
         result = self._maybe_reduce_final_output(
-            result, og_hidden_dim_post_xform, fused_output_is_reduced
+            result, og_hidden_dim_post_xform, combined_is_reduced
         )
 
         return self._maybe_add_zero_expert_output(result)
