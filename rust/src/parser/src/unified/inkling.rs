@@ -414,6 +414,10 @@ mod tests {
             Ok(text.chars().map(u32::from).collect())
         }
 
+        fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+            self.encode(text, false)
+        }
+
         fn decode(
             &self,
             token_ids: &[u32],
@@ -731,6 +735,10 @@ mod tests {
                 _add_special_tokens: bool,
             ) -> vllm_tokenizer::Result<Vec<u32>> {
                 Ok(vec![])
+            }
+
+            fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+                self.encode(text, false)
             }
 
             fn decode(
