@@ -450,7 +450,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks = (
                     max_num_blocks if self.cache_config.enable_prefix_caching else 1
                 ) + spec.num_speculative_blocks
-            max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
+                max_num_blocks = get_block_table_width(
+                    max_num_blocks, spec.block_size, token_alignment=None
+                )
+            else:
+                max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
