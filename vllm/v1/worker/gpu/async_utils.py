@@ -12,6 +12,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
     SamplingMaskLists,
+    SamplingMaskTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -32,7 +33,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_stream = copy_stream
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -50,12 +50,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.sampling_mask_keep: torch.Tensor | None = None
-            self.sampling_mask_counts: np.ndarray | None = None
+            self.sampling_mask_tensors: SamplingMaskTensors | None = None
             if sampler_output.sampling_mask_tensors is not None:
-                self.sampling_mask_keep = sampler_output.sampling_mask_tensors.keep
-                self.sampling_mask_counts = async_copy_to_np(
-                    sampler_output.sampling_mask_tensors.counts
+                self.sampling_mask_tensors = (
+                    sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
                 )
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
@@ -79,19 +77,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
-        if self.sampling_mask_keep is not None:
-            assert self.sampling_mask_counts is not None
-            with torch.cuda.stream(self.copy_stream):
-                token_ids = _flatten_kept_token_ids(
-                    self.sampling_mask_keep, self.num_sampled_tokens
-                )
-                token_ids_cpu = async_copy_to_np(token_ids)
-                self.copy_event.record(self.copy_stream)
-            self.copy_event.synchronize()
-
+        if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = _build_sampling_mask_lists(
-                token_ids_cpu,
-                self.sampling_mask_counts,
+                self.sampling_mask_tensors.token_ids.numpy(),
+                self.sampling_mask_tensors.counts.numpy(),
                 self.num_sampled_tokens_np,
             )
 
@@ -161,14 +150,6 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True).numpy()
-
-
-def _flatten_kept_token_ids(
-    keep: torch.Tensor, num_sampled_tokens: torch.Tensor
-) -> torch.Tensor:
-    keep = keep[num_sampled_tokens.bool()]
-    token_ids = keep.flatten().nonzero(as_tuple=True)[0]
-    return token_ids.remainder(keep.shape[1]).to(torch.int32)
 
 
 def _build_sampling_mask_lists(

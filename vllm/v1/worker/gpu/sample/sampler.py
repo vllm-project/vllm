@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import SamplingMaskTensors
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -24,7 +25,6 @@ from vllm.v1.worker.gpu.sample.logprob import (
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
-from vllm.v1.worker.gpu.sample.sampling_mask import compact_sampling_mask
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -108,10 +108,6 @@ class Sampler:
             expanded_local_pos,
             return_logprobs=return_logprobs,
         )
-        sampling_mask_tensors = None
-        if self.enable_return_sampling_mask:
-            sampling_mask_tensors = compact_sampling_mask(processed_logits)
-
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
@@ -141,6 +137,15 @@ class Sampler:
             input_batch.idx_mapping,
             self.req_states.prefill_len.gpu,
         )
+
+        sampling_mask_tensors = None
+        if self.enable_return_sampling_mask:
+            keep = torch.isfinite(processed_logits)
+            counts = keep.sum(dim=-1, dtype=torch.int32)
+            keep = keep[num_sampled.bool()]
+            token_ids = keep.flatten().nonzero(as_tuple=True)[0]
+            token_ids = token_ids.remainder(keep.shape[1]).to(torch.int32)
+            sampling_mask_tensors = SamplingMaskTensors(token_ids, counts)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
