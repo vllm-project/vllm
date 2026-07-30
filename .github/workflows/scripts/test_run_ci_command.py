@@ -503,7 +503,7 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(github.comments, [])
 
-    def test_ci_retry_uses_latest_current_sha_build(self) -> None:
+    def test_ci_retry_retries_failed_jobs_while_build_is_running(self) -> None:
         github = FakeGitHub(
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
@@ -513,10 +513,9 @@ class RunCiCommandTest(unittest.TestCase):
                 [
                     {
                         "created_at": "2026-07-28T01:00:00Z",
-                        "finished_at": "2026-07-28T02:00:00Z",
                         "number": 123,
                         "pull_request": {"id": 42},
-                        "state": "failed",
+                        "state": "failing",
                         "web_url": "https://buildkite.example/builds/123",
                     }
                 ]

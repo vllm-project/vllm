@@ -635,8 +635,6 @@ def handle_retry_failed(
         metadata = build.get("meta_data") or {}
         if str(metadata.get("github-comment-id")) == str(comment_id):
             return f"CI was already requested by this comment: {build['web_url']}"
-        if not build.get("finished_at") or is_active_build(build):
-            return f"CI is still running for this commit: {build['web_url']}"
 
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
