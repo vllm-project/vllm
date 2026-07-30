@@ -61,6 +61,23 @@ class CPUOffloadingSpec(OffloadingSpec):
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
             ),
+            CPUOffloadingMetrics.CPU_BLOCK_LOOKUP: OffloadingCounterMetadata(
+                documentation=(
+                    "Total CPU KV cache lookup calls. Sum of hits and misses "
+                    "(HIT_PENDING counts as a hit; RETRY is not counted)."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_BLOCK_HIT: OffloadingCounterMetadata(
+                documentation=(
+                    "Total CPU KV cache lookup hits. HIT_PENDING counts as a hit."
+                ),
+            ),
+            CPUOffloadingMetrics.CPU_BLOCK_MISS: OffloadingCounterMetadata(
+                documentation="Total CPU KV cache lookup misses.",
+            ),
+            CPUOffloadingMetrics.BLOCK_EVICTION: OffloadingCounterMetadata(
+                documentation="Total CPU KV cache blocks evicted.",
+            ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:
