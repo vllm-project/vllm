@@ -56,11 +56,6 @@ class DSparkMarkovHead(nn.Module):
     ) -> None:
         super().__init__()
         self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
-        # markov_w2 carries the drafter quant_config so W4A16 heads (which ship
-        # a quantized markov_w2 with weight_scale_2) load correctly. When the
-        # prefix is not in the quantized_layers map (unquantized drafter, or a
-        # mixed-precision config that leaves markov_w2 in bf16) the quant method
-        # resolves to an unquantized linear, so this is a no-op in those cases.
         self.markov_w2 = ParallelLMHead(
             draft_vocab_size,
             markov_rank,
