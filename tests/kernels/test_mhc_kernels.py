@@ -6,11 +6,8 @@ import pytest
 import torch
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
-from vllm.model_executor.kernels.mhc.tilelang import (
-    _hc_prenorm_gemm,
-    _tilelang_hc_prenorm_gemm,
-    _torch_hc_prenorm_gemm,
-)
+from vllm.model_executor.kernels.mhc.prenorm_gemm import _tilelang_hc_prenorm_gemm
+from vllm.model_executor.kernels.mhc.tilelang import _torch_hc_prenorm_gemm
 from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
@@ -213,11 +210,11 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
     ],
 )
 def test_hc_prenorm_gemm_cutedsl(num_tokens, k, n_splits):
+    from vllm.model_executor.kernels.mhc.cutedsl import run_hc_prenorm_gemm
+
     set_random_seed(0)
 
-    hc_mult = 4
     hc_mult3 = 24
-    hidden_size = k // hc_mult
 
     x = torch.randn((num_tokens, k), dtype=torch.bfloat16, device=DEVICE)
     fn = torch.randn((hc_mult3, k), dtype=torch.float32, device=DEVICE) * 1e-4
@@ -238,15 +235,7 @@ def test_hc_prenorm_gemm_cutedsl(num_tokens, k, n_splits):
     )
 
     _torch_hc_prenorm_gemm(x, fn, out_ref, sqrsum_ref)
-    _hc_prenorm_gemm(
-        x,
-        fn,
-        out,
-        sqrsum,
-        hidden_size,
-        hc_mult,
-        n_splits=n_splits,
-    )
+    run_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
 
     torch.testing.assert_close(out.sum(0), out_ref[0], atol=2e-5, rtol=1e-4)
     torch.testing.assert_close(sqrsum.sum(0), sqrsum_ref[0], atol=8.0, rtol=5e-4)

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_cutedsl
+from vllm.model_executor.kernels.mhc.prenorm_gemm import HCPrenormGemm
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -18,147 +17,6 @@ def _torch_hc_prenorm_gemm(
     x_float = x.float()
     out[0].copy_(x_float @ fn.t())
     sqrsum[0].copy_(x_float.square().sum(dim=-1))
-
-
-def _can_use_cutedsl_hc_prenorm_gemm(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    n_splits: int,
-) -> bool:
-    if not (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-        and has_cutedsl()
-    ):
-        return False
-
-    from vllm.model_executor.kernels.mhc.cutedsl import can_use_hc_prenorm_gemm
-
-    return can_use_hc_prenorm_gemm(x, fn, n_splits)
-
-
-def _select_hc_prenorm_gemm_backend(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    preferred_n_splits: int,
-) -> tuple[bool, bool, int]:
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-    if is_deep_gemm_supported():
-        return False, True, preferred_n_splits
-
-    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, preferred_n_splits):
-        return True, False, preferred_n_splits
-
-    return False, False, 1
-
-
-def _run_cutedsl_hc_prenorm_gemm(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
-    n_splits: int,
-) -> None:
-    from vllm.model_executor.kernels.mhc.cutedsl import run_hc_prenorm_gemm
-
-    run_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
-
-
-def _tilelang_hc_prenorm_gemm(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
-    hidden_size: int,
-    hc_mult: int,
-    tile_n: int = 12,
-    n_thr: int = 512,
-    n_splits: int = 1,
-) -> None:
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        hc_prenorm_gemm_block_m_tilelang,
-        hc_prenorm_gemm_tilelang,
-    )
-
-    assert out.shape[0] == n_splits
-    assert sqrsum.shape[0] == n_splits
-    assert x.shape[1] == hc_mult * hidden_size
-    assert x.shape[1] % n_splits == 0
-    assert (x.shape[1] // n_splits) % n_thr == 0
-    use_default_config = tile_n == 12 and n_thr == 512
-    if n_splits == 1 and use_default_config and x.shape[0] >= 1024:
-        hc_prenorm_gemm_block_m_tilelang(
-            x,
-            fn,
-            out,
-            sqrsum,
-            hidden_size,
-            hc_mult,
-            fn.shape[0],
-            n_thr,
-            tile_n,
-            2,
-        )
-        return
-    if (
-        n_splits == 1
-        and use_default_config
-        and x.shape[0] < 128
-        and x.shape[1] % 1024 == 0
-    ):
-        hc_prenorm_gemm_tilelang(
-            x,
-            fn,
-            out,
-            sqrsum,
-            hidden_size,
-            hc_mult,
-            fn.shape[0],
-            1024,
-            4,
-            n_splits,
-        )
-        return
-    hc_prenorm_gemm_tilelang(
-        x,
-        fn,
-        out,
-        sqrsum,
-        hidden_size,
-        hc_mult,
-        fn.shape[0],
-        n_thr,
-        tile_n,
-        n_splits,
-    )
-
-
-def _hc_prenorm_gemm(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
-    hidden_size: int,
-    hc_mult: int,
-    tile_n: int = 12,
-    n_thr: int = 512,
-    n_splits: int = 1,
-) -> None:
-    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, n_splits):
-        _run_cutedsl_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
-    else:
-        _tilelang_hc_prenorm_gemm(
-            x,
-            fn,
-            out,
-            sqrsum,
-            hidden_size,
-            hc_mult,
-            tile_n,
-            n_thr,
-            n_splits,
-        )
 
 
 def mhc_pre_tilelang(
@@ -257,9 +115,8 @@ def mhc_pre_tilelang(
     preferred_n_splits = compute_num_split(
         block_k, hc_hidden_size, cdiv(num_tokens, block_m)
     )
-    use_cutedsl, use_deep_gemm, n_splits = _select_hc_prenorm_gemm_backend(
-        residual_2d, fn, preferred_n_splits
-    )
+    gemm = HCPrenormGemm(residual_2d, fn, hidden_size, hc_mult, preferred_n_splits)
+    n_splits = gemm.n_splits
 
     gemm_out_mul = torch.empty(
         n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
@@ -268,34 +125,7 @@ def mhc_pre_tilelang(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
 
-    if use_cutedsl:
-        _run_cutedsl_hc_prenorm_gemm(
-            residual_2d,
-            fn,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            n_splits,
-        )
-    elif use_deep_gemm:
-        from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-
-        tf32_hc_prenorm_gemm(
-            residual_2d,
-            fn,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            n_splits,
-        )
-    else:
-        _tilelang_hc_prenorm_gemm(
-            residual_2d,
-            fn,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hidden_size,
-            hc_mult,
-            n_splits=n_splits,
-        )
+    gemm(residual_2d, fn, gemm_out_mul, gemm_out_sqrsum)
 
     if norm_weight is None:
         mhc_pre_big_fuse_tilelang(
@@ -600,7 +430,6 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    use_cutedsl = use_deep_gemm = False
     use_small_fma = num_tokens <= 16
     if use_small_fma:
         # TODO(gnovack): investigate autotuning these heuristics
@@ -613,9 +442,8 @@ def mhc_fused_post_pre_tilelang(
         preferred_n_splits = compute_num_split(
             block_k, hc_hidden_size, cdiv(num_tokens, block_m)
         )
-        use_cutedsl, use_deep_gemm, n_splits = _select_hc_prenorm_gemm_backend(
-            residual_2d, fn, preferred_n_splits
-        )
+        gemm = HCPrenormGemm(residual_2d, fn, hidden_size, hc_mult, preferred_n_splits)
+        n_splits = gemm.n_splits
 
     gemm_out_mul = torch.empty(
         n_splits,
@@ -678,34 +506,7 @@ def mhc_fused_post_pre_tilelang(
         )
 
         residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
-        if use_cutedsl:
-            _run_cutedsl_hc_prenorm_gemm(
-                residual_cur_2d,
-                fn,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                n_splits,
-            )
-        elif use_deep_gemm:
-            from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-
-            tf32_hc_prenorm_gemm(
-                residual_cur_2d,
-                fn,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                n_splits,
-            )
-        else:
-            _tilelang_hc_prenorm_gemm(
-                residual_cur_2d,
-                fn,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                hidden_size,
-                hc_mult,
-                n_splits=n_splits,
-            )
+        gemm(residual_cur_2d, fn, gemm_out_mul, gemm_out_sqrsum)
 
     if norm_weight is None:
         mhc_pre_big_fuse_tilelang(
