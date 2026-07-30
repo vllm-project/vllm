@@ -1385,6 +1385,11 @@ class Scheduler(SchedulerInterface):
         # independently).
         if not self._realtime_reset_context:
             session.prompt_token_ids.extend(kept_output_tokens)
+        else:
+            # Reset context: replace old prompt with fresh one so
+            # single-turn models don't accumulate multi-turn history.
+            session.prompt_token_ids = []
+            session.mm_features = []
 
         if update.mm_features:
             base = session.num_tokens
