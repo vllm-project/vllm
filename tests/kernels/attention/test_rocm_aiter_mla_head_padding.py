@@ -93,9 +93,11 @@ def test_existing_divisor_head_mapping_is_unchanged():
     torch.testing.assert_close(unpadded_o, q)
 
 
-def test_h12_is_the_only_non_divisor_below_h16_supported():
+def test_h12_uses_persistent_decode_while_other_small_heads_use_gluon():
     assert AiterMLAHelper.is_valid_num_heads(12)
-    assert not AiterMLAHelper.is_valid_num_heads(10)
+    assert AiterMLAHelper.is_valid_num_heads(10)
+    assert not AiterMLAHelper.use_gluon_decode(12, 1)
+    assert AiterMLAHelper.use_gluon_decode(10, 1)
 
 
 @pytest.mark.skipif(
