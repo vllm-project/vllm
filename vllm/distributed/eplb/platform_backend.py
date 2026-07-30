@@ -8,7 +8,7 @@ import functools
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 import torch
 
@@ -74,10 +74,22 @@ EplbMapAndRecord = Callable[
     ],
     torch.Tensor,
 ]
+EplbMapToPhysical = Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ],
+    torch.Tensor,
+]
+EplbRoutingCallable = EplbMapAndRecord | EplbMapToPhysical
+EplbLoadRecordingMode = Literal["router", "post_moe"]
 
 
 class EplbPlatformBackend(ABC):
     """Hardware-specific operations used by the upstream EPLB state machine."""
+
+    load_recording_mode: ClassVar[EplbLoadRecordingMode]
 
     @classmethod
     @abstractmethod
@@ -89,7 +101,6 @@ class EplbPlatformBackend(ABC):
     def validate_config(cls, parallel_config: ParallelConfig) -> None:
         pass
 
-    @abstractmethod
     def map_and_record(
         self,
         topk_ids: torch.Tensor,
@@ -99,7 +110,15 @@ class EplbPlatformBackend(ABC):
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
-        pass
+        raise NotImplementedError
+
+    def map_to_physical(
+        self,
+        topk_ids: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
 
     @abstractmethod
     def create_communicator(
@@ -138,6 +157,23 @@ def _resolve_eplb_backend_cls(
         raise TypeError(
             f"EPLB backend {qualname!r} for Platform {platform_name!r} must "
             "subclass EplbPlatformBackend."
+        )
+    recording_mode = getattr(backend_cls, "load_recording_mode", None)
+    if recording_mode not in ("router", "post_moe"):
+        raise TypeError(
+            f"EPLB backend {qualname!r} for Platform {platform_name!r} must "
+            "set load_recording_mode to 'router' or 'post_moe'."
+        )
+    routing_method = (
+        "map_and_record" if recording_mode == "router" else "map_to_physical"
+    )
+    if getattr(backend_cls, routing_method) is getattr(
+        EplbPlatformBackend, routing_method
+    ):
+        raise TypeError(
+            f"EPLB backend {qualname!r} for Platform {platform_name!r} must "
+            f"implement {routing_method}() for load_recording_mode="
+            f"{recording_mode!r}."
         )
     return backend_cls
 

@@ -1356,7 +1356,8 @@ def _test_body_eplb(
             device=device,
         ),
     )
-    eplb_moe_layer.router.eplb_state.map_and_record = eplb_map_to_physical_and_record
+    eplb_moe_layer.router.eplb_state.load_recording_mode = "router"
+    eplb_moe_layer.router.eplb_state.routing_callable = eplb_map_to_physical_and_record
 
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device

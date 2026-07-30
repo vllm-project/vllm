@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import cast
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.platform_backend import (
+    EplbMapAndRecord,
+    EplbMapToPhysical,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -46,36 +51,50 @@ class BaseRouter(FusedMoERouter):
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
         if self.eplb_state is not None:
             eplb_state = self.eplb_state
-            if eplb_state.expert_load_view is None:
-                raise ValueError("EPLB requires expert_load_view != None")
             if eplb_state.logical_to_physical_map is None:
                 raise ValueError("EPLB requires logical_to_physical_map != None")
             if eplb_state.logical_replica_count is None:
                 raise ValueError("EPLB requires logical_replica_count != None")
-            if eplb_state.should_record_tensor is None:
-                raise ValueError("EPLB requires should_record_tensor != None")
-            if eplb_state.num_unpadded_tokens_tensors is None:
-                raise ValueError("EPLB requires num_unpadded_tokens_tensors != None")
-            if eplb_state.map_and_record is None:
-                raise ValueError("EPLB requires map_and_record != None")
+            if eplb_state.load_recording_mode not in ("router", "post_moe"):
+                raise ValueError("EPLB requires a valid load_recording_mode")
+            if eplb_state.routing_callable is None:
+                raise ValueError("EPLB requires routing_callable != None")
+            if eplb_state.load_recording_mode == "router":
+                if eplb_state.expert_load_view is None:
+                    raise ValueError("EPLB requires expert_load_view != None")
+                if eplb_state.should_record_tensor is None:
+                    raise ValueError("EPLB requires should_record_tensor != None")
+                if eplb_state.num_unpadded_tokens_tensors is None:
+                    raise ValueError(
+                        "EPLB requires num_unpadded_tokens_tensors != None"
+                    )
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.eplb_state is not None:
             eplb_state = self.eplb_state
-            assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_to_physical_map is not None
             assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            assert eplb_state.num_unpadded_tokens_tensors is not None
-            assert eplb_state.map_and_record is not None
-            return eplb_state.map_and_record(
+            assert eplb_state.routing_callable is not None
+            if eplb_state.load_recording_mode == "router":
+                assert eplb_state.expert_load_view is not None
+                assert eplb_state.should_record_tensor is not None
+                assert eplb_state.num_unpadded_tokens_tensors is not None
+                map_and_record = cast(EplbMapAndRecord, eplb_state.routing_callable)
+                return map_and_record(
+                    topk_ids,
+                    eplb_state.logical_to_physical_map,
+                    eplb_state.logical_replica_count,
+                    eplb_state.expert_load_view,
+                    eplb_state.should_record_tensor,
+                    eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
+                )
+            assert eplb_state.load_recording_mode == "post_moe"
+            map_to_physical = cast(EplbMapToPhysical, eplb_state.routing_callable)
+            return map_to_physical(
                 topk_ids,
                 eplb_state.logical_to_physical_map,
                 eplb_state.logical_replica_count,
-                eplb_state.expert_load_view,
-                eplb_state.should_record_tensor,
-                eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
             )
         return topk_ids
 

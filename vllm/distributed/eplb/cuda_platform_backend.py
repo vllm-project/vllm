@@ -175,6 +175,8 @@ class CudaEplbDeviceRuntime(EplbDeviceRuntime):
 class CudaEplbPlatformBackend(EplbPlatformBackend):
     """Built-in EPLB operations shared by CUDA and ROCm."""
 
+    load_recording_mode = "router"
+
     def __init__(self) -> None:
         self._device_runtime = CudaEplbDeviceRuntime()
 

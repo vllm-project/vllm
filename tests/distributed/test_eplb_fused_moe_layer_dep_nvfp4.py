@@ -228,7 +228,8 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 logical_to_physical_map,
                 logical_replica_count,
             )
-            fml.router.eplb_state.map_and_record = eplb_map_to_physical_and_record
+            fml.router.eplb_state.load_recording_mode = "router"
+            fml.router.eplb_state.routing_callable = eplb_map_to_physical_and_record
             fml.router.eplb_state.should_record_tensor = torch.ones(
                 (), dtype=torch.bool, device=device
             )

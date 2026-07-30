@@ -185,7 +185,8 @@ def setup_eplb_state(
         logical_replica_count=logical_replica_count,
         should_record_tensor=should_record_tensor,
         num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
-        map_and_record=eplb_map_to_physical_and_record,
+        load_recording_mode="router",
+        routing_callable=eplb_map_to_physical_and_record,
     )
 
 

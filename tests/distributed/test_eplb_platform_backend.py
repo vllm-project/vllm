@@ -13,12 +13,14 @@ import torch
 
 import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_communicator as communicator_module
+import vllm.distributed.eplb.eplb_state as eplb_state_module
 import vllm.distributed.eplb.platform_backend as platform_backend_module
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
     create_eplb_communicator,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.distributed.eplb.eplb_utils import CrossThreadDeviceEvent
 from vllm.distributed.eplb.platform_backend import (
     EplbDeviceEvent,
@@ -37,6 +39,8 @@ from vllm.distributed.eplb.weight_utils import (
     get_eplb_expert_tensor,
     validate_eplb_weight,
 )
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.platforms.interface import Platform, PlatformEnum
 
 
@@ -111,6 +115,7 @@ class FakeCommunicator(EplbCommunicator):
 
 
 class FakeEplbBackend(EplbPlatformBackend):
+    load_recording_mode = "router"
     instance_count = 0
     communicator_count = 0
 
@@ -164,6 +169,26 @@ class FakeEplbBackend(EplbPlatformBackend):
         return self._runtime
 
 
+class FakePostMoeEplbBackend(FakeEplbBackend):
+    load_recording_mode = "post_moe"
+
+    def map_to_physical(
+        self,
+        topk_ids: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> torch.Tensor:
+        del logical_replica_count
+        valid = topk_ids >= 0
+        safe_ids = topk_ids.clamp(min=0)
+        mapped = logical_to_physical_map[safe_ids, 0]
+        return torch.where(valid, mapped, -1)
+
+
+class MissingPostMoeMappingBackend(FakeEplbBackend):
+    load_recording_mode = "post_moe"
+
+
 class FakePlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name = "fake"
@@ -172,6 +197,34 @@ class FakePlatform(Platform):
     @classmethod
     def get_eplb_backend_cls(cls) -> str | None:
         return f"{__name__}.FakeEplbBackend"
+
+
+class FakePostMoePlatform(FakePlatform):
+    @classmethod
+    def get_eplb_backend_cls(cls) -> str:
+        return f"{__name__}.FakePostMoeEplbBackend"
+
+
+class MissingPostMoeMappingPlatform(FakePlatform):
+    @classmethod
+    def get_eplb_backend_cls(cls) -> str:
+        return f"{__name__}.MissingPostMoeMappingBackend"
+
+
+class FakeRouter(BaseRouter):
+    @property
+    def routing_method_type(self) -> RoutingMethodType:
+        return RoutingMethodType.Default
+
+    def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
 
 
 class NoEplbPlatform(FakePlatform):
@@ -274,6 +327,15 @@ def test_backend_resolution_rejects_invalid_type(monkeypatch: pytest.MonkeyPatch
         resolve_eplb_platform_backend_cls()
 
 
+def test_backend_resolution_requires_mode_routing_method(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    patch_platform(monkeypatch, MissingPostMoeMappingPlatform())
+
+    with pytest.raises(TypeError, match="must implement map_to_physical"):
+        resolve_eplb_platform_backend_cls()
+
+
 def test_backend_resolution_preserves_import_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -343,6 +405,99 @@ def test_fake_backend_maps_and_records_load():
 
     torch.testing.assert_close(mapped, torch.tensor([[2, 0], [1, -1]]))
     torch.testing.assert_close(load, torch.ones(3, dtype=torch.int32))
+
+
+def test_post_moe_router_maps_without_load_recording_state():
+    backend = FakePostMoeEplbBackend()
+    layer_state = EplbLayerState(
+        logical_to_physical_map=torch.tensor([[2], [0], [1]]),
+        logical_replica_count=torch.ones(3, dtype=torch.long),
+        load_recording_mode="post_moe",
+        routing_callable=backend.map_to_physical,
+    )
+    router = FakeRouter(top_k=2, global_num_experts=3, eplb_state=layer_state)
+
+    router._validate_eplb_state()
+    mapped = router._apply_eplb_mapping(torch.tensor([[0, 1], [2, -1]]))
+
+    torch.testing.assert_close(mapped, torch.tensor([[2, 0], [1, -1]]))
+
+
+def test_post_moe_mode_binds_callable_and_local_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    patch_platform(monkeypatch, FakePostMoePlatform())
+    monkeypatch.setattr(
+        eplb_state_module,
+        "get_ep_group",
+        lambda: SimpleNamespace(rank_in_group=1),
+    )
+    config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(use_async=False),
+        distributed_executor_backend="mp",
+    )
+    eplb_state = EplbState(config, torch.device("cpu"))
+    layer_state = EplbLayerState(expert_load_view=torch.zeros(6, dtype=torch.int32))
+    model = SimpleNamespace(
+        moe_layers=[SimpleNamespace(eplb_state=layer_state)],
+        num_local_physical_experts=2,
+        num_physical_experts=6,
+    )
+    num_unpadded_tokens = [torch.tensor(0, dtype=torch.int32)]
+
+    eplb_state._propagate_shared_tensors(model, num_unpadded_tokens)
+
+    assert layer_state.load_recording_mode == "post_moe"
+    assert layer_state.routing_callable == eplb_state.platform_backend.map_to_physical
+    assert layer_state.local_physical_expert_start == 2
+    assert layer_state.local_physical_expert_end == 4
+    assert layer_state.should_record_tensor is eplb_state.should_record_tensor
+    assert layer_state.num_unpadded_tokens_tensors is num_unpadded_tokens
+
+
+def test_post_moe_load_submission_uses_bound_range_and_recording_gate():
+    expert_load_view = torch.zeros(6, dtype=torch.int32)
+    should_record = torch.tensor(True)
+    layer_state = EplbLayerState(
+        expert_load_view=expert_load_view,
+        should_record_tensor=should_record,
+        load_recording_mode="post_moe",
+        local_physical_expert_start=2,
+        local_physical_expert_end=4,
+    )
+
+    layer_state.record_local_expert_load(torch.tensor([3, 5], dtype=torch.int32))
+    should_record.fill_(False)
+    layer_state.record_local_expert_load(torch.tensor([7, 11], dtype=torch.int32))
+
+    torch.testing.assert_close(
+        expert_load_view,
+        torch.tensor([0, 0, 3, 5, 0, 0], dtype=torch.int32),
+    )
+
+
+@pytest.mark.parametrize(
+    "local_load,error",
+    [
+        (torch.ones(1, 2, dtype=torch.int32), "one-dimensional"),
+        (torch.ones(3, dtype=torch.int32), "unexpected length"),
+        (torch.ones(2, dtype=torch.int64), "cannot be safely accumulated"),
+    ],
+)
+def test_post_moe_load_submission_rejects_invalid_input(local_load, error):
+    layer_state = EplbLayerState(
+        expert_load_view=torch.zeros(4, dtype=torch.int32),
+        should_record_tensor=torch.tensor(True),
+        load_recording_mode="post_moe",
+        local_physical_expert_start=1,
+        local_physical_expert_end=3,
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        layer_state.record_local_expert_load(local_load)
 
 
 @pytest.mark.parametrize("as_sequence", [False, True])
