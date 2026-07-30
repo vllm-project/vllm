@@ -532,12 +532,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata, decode_threshold=self.decode_threshold
             )
         )
-        if num_prefills > 0:
-            # split_decodes_and_prefills counts trailing cudagraph request padding as
-            # prefills. Those rows have no tokens, so drop them here rather than let
-            # them size prefill metadata and the chunk plan.
-            query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-            num_prefills = int(torch.count_nonzero(query_lens_cpu[num_decodes:]))
 
         # NOTE: Ensure all metadata tensors maintain fixed memory addresses
         # for CUDA graph compatibility.
@@ -744,9 +738,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
-            result["prefill_seq_lens_cpu"] = seq_lens_cpu[
-                num_decodes : num_decodes + num_prefills
-            ]
+            result["prefill_seq_lens_cpu"] = seq_lens_cpu[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
             result["prefill_query_lens_cpu"] = (
                 query_start_loc_cpu[num_decodes + 1 : num_decodes + num_prefills + 1]
