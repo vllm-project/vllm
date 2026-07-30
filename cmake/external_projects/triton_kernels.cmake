@@ -10,9 +10,7 @@ if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
   )
 
 else()
-  if (VLLM_TARGET_DEVICE STREQUAL "rocm" AND
-      ROCM_VERSION_DEV_MAJOR EQUAL 7 AND
-      ROCM_VERSION_DEV_MINOR EQUAL 14)
+  if (VLLM_TARGET_DEVICE STREQUAL "rocm")
     set(TRITON_GIT "https://github.com/ROCm/triton.git")
     set(TRITON_KERNELS_TAG "release/internal/3.6.x")
   else()
