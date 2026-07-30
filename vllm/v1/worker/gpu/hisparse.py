@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -28,6 +28,8 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     HiSparseSpill,
     KVCacheConfig,
+    KVCacheGroupRole,
+    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.metrics.stats import HiSparseStats
@@ -339,32 +341,54 @@ def init_hisparse_runtime(
         for tensor_config in kv_cache_config.kv_cache_tensors
         for name in tensor_config.shared_by
     }
-    group_specs = {
-        name: (group.kv_cache_spec, group_id)
+    group_ids = {
+        name: group_id
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         for name in group.layer_names
     }
+    source_group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+    ]
+    indexer_group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+    ]
+    if len(source_group_ids) != 1 or len(indexer_group_ids) != 1:
+        raise ValueError(
+            "HiSparse requires exactly one source and one indexer cache group; "
+            f"found source={source_group_ids}, indexer={indexer_group_ids}."
+        )
+    source_group_id = source_group_ids[0]
+    indexer_group_id = indexer_group_ids[0]
+    assert kv_cache_config.num_blocks_by_pool is not None
+    num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
     hot_backing: torch.Tensor | None = None
     coordinators: list[HiSparseCoordinator] = []
     seen_coordinators: set[int] = set()
-    resident_bindings: dict[str, tuple[torch.Tensor, Any, int]] = {}
+    resident_bindings: dict[
+        str, tuple[torch.Tensor, KVCacheTensor, HiSparseResidentSpec, int]
+    ] = {}
     for cache_name, raw_tensor in raw_tensors.items():
+        group_id = group_ids[cache_name]
+        group_spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+        tensor_config = tensor_configs[cache_name]
         if cache_name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX):
             layer_name = cache_name[: -len(HISPARSE_INDEXER_SOURCE_SUFFIX)]
-            source_group_spec, _ = group_specs[cache_name]
-            assert isinstance(source_group_spec, UniformTypeKVCacheSpecs)
+            source_group_spec = cast(UniformTypeKVCacheSpecs, group_spec)
             source_spec = source_group_spec.kv_cache_specs[cache_name]
             assert isinstance(source_spec, AttentionSpec)
-            assert kv_cache_config.num_blocks_by_pool is not None
-            indexer_spec, _ = group_specs[layer_name]
-            assert isinstance(indexer_spec, UniformTypeKVCacheSpecs)
+            indexer_spec = cast(
+                UniformTypeKVCacheSpecs,
+                kv_cache_config.kv_cache_groups[indexer_group_id].kv_cache_spec,
+            )
             kernel_block_size = indexer_spec.kv_cache_specs[layer_name].block_size
             assert source_spec.block_size % kernel_block_size == 0
             blocks_per_kv_block = source_spec.block_size // kernel_block_size
-            tensor_config = tensor_configs[cache_name]
             source_cache = raw_tensor.view(source_spec.dtype).view(
-                kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id]
-                * blocks_per_kv_block,
+                num_blocks_by_pool[tensor_config.block_pool_id] * blocks_per_kv_block,
                 kernel_block_size,
                 source_spec.head_size,
             )
@@ -373,12 +397,13 @@ def init_hisparse_runtime(
             continue
         if cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            resident_spec, resident_group_id = group_specs[cache_name]
+            resident_spec = group_spec
             assert isinstance(resident_spec, HiSparseResidentSpec)
             resident_bindings[layer_name] = (
                 raw_tensor,
-                tensor_configs[cache_name],
-                resident_group_id,
+                tensor_config,
+                resident_spec,
+                group_id,
             )
             continue
         if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
@@ -391,19 +416,17 @@ def init_hisparse_runtime(
             raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
         layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
         coordinator = forward_context[layer_name].impl.hisparse_coordinator
-        tensor_config = tensor_configs[cache_name]
-        hot_spec, hot_group_id = group_specs[cache_name]
+        hot_spec = group_spec
         assert isinstance(hot_spec, HiSparseHotSpec)
-        assert kv_cache_config.num_blocks_by_pool is not None
         coordinator.bind_hot_cache(
             raw_tensor,
             byte_offset=tensor_config.offset,
             block_stride=tensor_config.block_stride,
-            num_blocks=kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id],
+            num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
             block_size=hot_spec.block_size,
-            hot_group_id=hot_group_id,
+            hot_group_id=group_id,
         )
-        coordinator.bind_hot_block_table(block_tables.input_block_tables[hot_group_id])
+        coordinator.bind_hot_block_table(block_tables.input_block_tables[group_id])
         if id(coordinator) not in seen_coordinators:
             coordinator.bind_source_cache(kv_caches[layer_name])
             coordinators.append(coordinator)
@@ -412,43 +435,22 @@ def init_hisparse_runtime(
     for layer_name, (
         raw_tensor,
         tensor_config,
+        resident_spec,
         resident_group_id,
     ) in resident_bindings.items():
         coordinator = forward_context[layer_name].impl.hisparse_coordinator
-        resident_spec, _ = group_specs[f"{layer_name}{HISPARSE_RESIDENT_SUFFIX}"]
-        assert isinstance(resident_spec, HiSparseResidentSpec)
-        assert kv_cache_config.num_blocks_by_pool is not None
         coordinator.bind_resident_cache(
             raw_tensor,
             byte_offset=tensor_config.offset,
             block_stride=tensor_config.block_stride,
-            num_blocks=kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id],
+            num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
             block_size=resident_spec.block_size,
             block_table=block_tables.input_block_tables[resident_group_id],
             slot_mapping=block_tables.slot_mappings[resident_group_id],
             group_id=resident_group_id,
         )
 
-    source_group_ids = [
-        group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if any(
-            name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX) for name in group.layer_names
-        )
-    ]
-    indexer_group_ids = [
-        group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if group.layer_names
-        and all(get_indexer_source(name) is not None for name in group.layer_names)
-    ]
-    if len(source_group_ids) != 1 or len(indexer_group_ids) != 1:
-        raise RuntimeError(
-            "HiSparse requires exactly one source group and one indexer group; "
-            f"found source={source_group_ids}, indexer={indexer_group_ids}."
-        )
-    source_group_id = source_group_ids[0]
-    indexer_group = kv_cache_config.kv_cache_groups[indexer_group_ids[0]]
+    indexer_group = kv_cache_config.kv_cache_groups[indexer_group_id]
     cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
     for layer_name in indexer_group.layer_names:
         source = get_indexer_source(layer_name)

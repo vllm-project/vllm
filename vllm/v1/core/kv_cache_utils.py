@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
@@ -1411,13 +1412,19 @@ def _get_hisparse_hma_config(
     }
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
     assert host_group_spec is not None and indexer_group_spec is not None
-    host_group = KVCacheGroupSpec(list(source_specs), host_group_spec, block_pool_id=0)
+    host_group = KVCacheGroupSpec(
+        list(source_specs),
+        host_group_spec,
+        block_pool_id=0,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
         block_pool_id=1,
         enable_prefix_caching=False,
         enable_kv_transfer=False,
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
     indexer_page = sum(spec.page_size_bytes for spec in gpu_indexer_specs.values())
@@ -1469,6 +1476,7 @@ def _get_hisparse_hma_config(
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_RESIDENT,
             )
         )
         hot_groups.append(
@@ -1482,6 +1490,7 @@ def _get_hisparse_hma_config(
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_HOT,
             )
         )
 

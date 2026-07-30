@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -247,13 +248,19 @@ def test_prefix_cache_source_rebuilds_ephemeral_groups():
         num_blocks_by_pool=[10, 20],
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["source"], full, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=0,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
             KVCacheGroupSpec(
                 ["indexer"],
                 full,
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
             ),
             KVCacheGroupSpec(
                 ["hot"],
@@ -319,13 +326,19 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
         num_blocks_by_pool=[18, 18],
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["source"], full, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=0,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
             KVCacheGroupSpec(
                 ["indexer"],
                 full,
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
             ),
             KVCacheGroupSpec(
                 ["resident"],
@@ -401,13 +414,19 @@ def test_hisparse_reclamation_caps_each_worker_spill_batch():
         num_blocks_by_pool=[34, 34],
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["source"], full, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=0,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
             KVCacheGroupSpec(
                 ["indexer"],
                 full,
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
             ),
             KVCacheGroupSpec(
                 ["resident"],
@@ -465,13 +484,19 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
         num_blocks_by_pool=[16, 32],
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["source"], full, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=0,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
             KVCacheGroupSpec(
                 ["indexer"],
                 full,
                 block_pool_id=1,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
             ),
             KVCacheGroupSpec(
                 ["resident"],

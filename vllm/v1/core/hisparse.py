@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseResidentSpec,
     HiSparseSpill,
     KVCacheConfig,
+    KVCacheGroupRole,
 )
 
 
@@ -72,7 +73,19 @@ class HiSparseKVCacheController:
             for entries in self.resident_entries_by_pool.values()
             for entry in entries
         )
-        self.host_manager = managers[0] if self.resident_entries else None
+        self.host_manager = None
+        if self.resident_entries:
+            host_group_ids = [
+                group_id
+                for group_id, group in enumerate(self.groups)
+                if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+            ]
+            if len(host_group_ids) != 1:
+                raise ValueError(
+                    "HiSparse requires exactly one host-source cache group; "
+                    f"found {host_group_ids}."
+                )
+            self.host_manager = managers[host_group_ids[0]]
         self.hot_managers_by_pool = {
             pool_id: tuple(managers)
             for pool_id, managers in hot_managers_by_pool.items()

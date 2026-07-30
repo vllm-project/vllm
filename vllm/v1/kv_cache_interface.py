@@ -986,6 +986,14 @@ class KVCacheTensor:
     block_pool_id: int = 0
 
 
+class KVCacheGroupRole(str, Enum):
+    DEFAULT = "default"
+    HISPARSE_SOURCE = "hisparse_source"
+    HISPARSE_INDEXER = "hisparse_indexer"
+    HISPARSE_RESIDENT = "hisparse_resident"
+    HISPARSE_HOT = "hisparse_hot"
+
+
 @dataclass
 class KVCacheGroupSpec:
     """
@@ -1011,6 +1019,7 @@ class KVCacheGroupSpec:
     # Ephemeral accelerator-side replicas are rebuilt from their transferable
     # source group after a connector load.
     enable_kv_transfer: bool = True
+    role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
 
 
 @dataclass
