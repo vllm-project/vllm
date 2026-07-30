@@ -1398,6 +1398,53 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     assert stats_after_reset is None
 
 
+def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist_init):
+    """reqs_to_send deadlines are stamped with the scheduler process's
+    perf_counter, whose epoch differs across processes and (by boot-time
+    deltas) across nodes. Without rebasing, a P worker on a node whose
+    monotonic clock is ahead of the scheduler's by more than the TTL
+    expires the lease on arrival and reports done_sending before D has
+    read the blocks — the freed blocks can then be reallocated and the
+    remote read pulls another request's data (silent accuracy corruption).
+    The worker must anchor the remaining TTL to its own clock.
+    """
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+
+    req_id = "req-lease-clock"
+    ttl = 480.0
+    # Simulate a scheduler whose monotonic clock is 10,000 s behind this
+    # worker's (e.g. its node booted much later): the raw deadline is
+    # then already far in the past in this worker's clock domain.
+    scheduler_clock = time.perf_counter() - 10_000.0
+
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {req_id}
+    metadata.reqs_to_send = {req_id: scheduler_clock + ttl}
+    metadata.scheduler_clock = scheduler_clock
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    remaining = worker._reqs_to_send[req_id] - time.perf_counter()
+    assert ttl - 5.0 < remaining <= ttl + 5.0
+
+    # The expiry sweep must not release the request.
+    done_sending, _ = worker.get_finished()
+    assert req_id not in done_sending
+    assert req_id in worker._reqs_to_process
+
+
 def test_kv_connector_stats_aggregation():
     """
     Test KV transfer stats aggregation across TP ranks using
