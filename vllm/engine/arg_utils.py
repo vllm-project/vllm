@@ -420,21 +420,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-def _resolve_dcp_q_replicate(
-    requested: bool | None,
-    model_config: ModelConfig,
-    decode_context_parallel_size: int,
-    prefill_context_parallel_size: int,
-) -> bool:
-    if requested is not None:
-        return requested
-    return (
-        decode_context_parallel_size > 1
-        and prefill_context_parallel_size <= 1
-        and getattr(model_config.hf_text_config, "model_type", None) == "glm_moe_dsa"
-    )
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -496,8 +481,8 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
-    dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
-    dcp_q_replicate: bool | None = None
+    dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
+    dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -2274,13 +2259,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        dcp_q_replicate = _resolve_dcp_q_replicate(
-            self.dcp_q_replicate,
-            model_config,
-            self.decode_context_parallel_size,
-            self.prefill_context_parallel_size,
-        )
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -2322,7 +2300,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
-            dcp_q_replicate=dcp_q_replicate,
+            dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
