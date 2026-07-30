@@ -71,11 +71,11 @@ class EngineCoreRequest(
     priority: int = 0
     trace_headers: dict[str, str] | None = None
     resumable: bool = False
-    session_id: str | None = None
     external_req_id: str | None = None
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
+    session_id: str | None = None
 
 
 class EngineCoreOutput(

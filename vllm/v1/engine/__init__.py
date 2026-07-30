@@ -129,7 +129,6 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
-    session_id: str | None = None
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
@@ -145,6 +144,8 @@ class EngineCoreRequest(
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
+
+    session_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
