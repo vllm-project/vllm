@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 
 from tests.utils import large_gpu_mark, single_gpu_only
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
+from vllm.config import CompilationConfig
 
 from ..utils import evaluate_llm_for_gsm8k, get_test_prompts
 
@@ -26,6 +25,7 @@ def test_speculators_model_integration(
     sampling_config: SamplingParams,
     model_path: str,
     expected_accuracy_threshold: float,
+    vllm_runner,
 ):
     """
     Test that speculators models work with the simplified integration.
@@ -48,41 +48,48 @@ def test_speculators_model_integration(
     test_prompts = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
-    spec_llm = LLM(model=model_path, max_model_len=4096, gpu_memory_utilization=0.92)
-    evaluate_llm_for_gsm8k(
-        spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
-    )
-    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    with vllm_runner(
+        model_path,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        max_model_len=4096,
+        gpu_memory_utilization=0.92,
+    ) as spec_runner:
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm, expected_accuracy_threshold=expected_accuracy_threshold
+        )
+        spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
-    # Verify speculative config was auto-detected
-    assert spec_llm.llm_engine.vllm_config.speculative_config is not None, (
-        f"Speculative config should be auto-detected for {model_path}"
-    )
+        # Verify speculative config was auto-detected
+        assert spec_runner.llm.llm_engine.vllm_config.speculative_config is not None, (
+            f"Speculative config should be auto-detected for {model_path}"
+        )
 
-    spec_config = spec_llm.llm_engine.vllm_config.speculative_config
-    assert spec_config.num_speculative_tokens > 0, (
-        f"Expected positive speculative tokens, "
-        f"got {spec_config.num_speculative_tokens}"
-    )
+        spec_config = spec_runner.llm.llm_engine.vllm_config.speculative_config
+        assert spec_config.num_speculative_tokens > 0, (
+            f"Expected positive speculative tokens, "
+            f"got {spec_config.num_speculative_tokens}"
+        )
 
-    # Verify draft model is set to the speculator model
-    assert spec_config.model == model_path, (
-        f"Draft model should be {model_path}, got {spec_config.model}"
-    )
+        # Verify draft model is set to the speculator model
+        assert spec_config.model == model_path, (
+            f"Draft model should be {model_path}, got {spec_config.model}"
+        )
 
-    # Extract verifier model for reference run
-    verifier_model = spec_llm.llm_engine.vllm_config.model_config.model
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        # Extract verifier model for reference run
+        verifier_model = spec_runner.llm.llm_engine.vllm_config.model_config.model
 
     # Second run: Reference without speculative decoding
-    ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.92)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+    with vllm_runner(
+        verifier_model,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        max_model_len=4096,
+        gpu_memory_utilization=0.92,
+    ) as ref_runner:
+        ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
     # Compare outputs
     matches = sum(
