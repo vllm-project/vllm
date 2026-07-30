@@ -784,21 +784,44 @@ def test_del_invokes_shutdown_and_closes_store():
     worker.close.assert_called_once_with()
 
 
-def test_shutdown_scheduler_role_is_noop():
+def _make_scheduler_role_connector():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
 
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
+    with set_current_vllm_config(vllm_config):
+        return mooncake_store_connector.MooncakeStoreConnector(
             vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
         )
 
-    # Scheduler role holds no store handle, so shutdown must be a safe no-op.
+
+def test_shutdown_scheduler_role_closes_lookup_client():
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "connector.MooncakeStoreScheduler"
+    ) as mock_scheduler_cls:
+        connector = _make_scheduler_role_connector()
+
+    # Scheduler role holds no store handle, but it owns the LookupKeyClient's
+    # ZMQ socket and lookup executor, which leak unless shutdown closes them.
     assert connector.connector_worker is None
+    client = MagicMock()
+    mock_scheduler_cls.return_value.client = client
+
+    connector.shutdown()
+
+    client.close.assert_called_once_with()
+
+
+def test_shutdown_scheduler_role_swallows_client_errors():
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "connector.MooncakeStoreScheduler"
+    ) as mock_scheduler_cls:
+        connector = _make_scheduler_role_connector()
+
+    client = MagicMock()
+    client.close.side_effect = RuntimeError("boom")
+    mock_scheduler_cls.return_value.client = client
+
+    # A failure tearing down the client must not propagate out of shutdown().
     connector.shutdown()
