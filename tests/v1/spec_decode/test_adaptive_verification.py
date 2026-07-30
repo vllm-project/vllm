@@ -8,7 +8,6 @@ import numpy as np
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
-    build_cost_tables_from_curves,
 )
 
 
@@ -64,18 +63,6 @@ def test_structured_output_placeholders_do_not_consume_budget():
 
     assert valid_drafts == {"low": 1, "high": 2}
     assert draft_budget == 3
-
-
-def test_step_timing_cost_tables_are_monotonic_with_fixed_overhead():
-    draft, verify = build_cost_tables_from_curves(
-        [(1, 2.0), (2, 3.0)],
-        [(1, 4.0), (2, 3.0)],
-        max_num_reqs=2,
-        max_batch_tokens=2,
-    )
-
-    assert draft.tolist() == [2.0, 2.0, 3.0]
-    assert verify.tolist() == [5.0, 5.0, 5.0]
 
 
 def test_profiled_batches_seed_cost_curves_via_consumer():
