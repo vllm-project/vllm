@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import huggingface_hub
 import torch
-from huggingface_hub.file_download import REGEX_COMMIT_HASH
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 import vllm.envs as envs
@@ -88,24 +87,20 @@ def _resolve_hf_revision(
 
     Resolving commit hash once prevent multiple HTTP calls downstream
     while avoid concurrency issues while loading models.
+
+    `resolve_revision` returns a `ResolvedRevision`: a `str` equal to the
+    requested revision that also carries the commit hash, so downstream error
+    messages stay readable and offline loads reuse the cached `refs/` entry.
     """
-    if (
-        Path(repo_id).exists()
-        or envs.VLLM_USE_MODELSCOPE
-        or huggingface_hub.constants.HF_HUB_OFFLINE
-        or (revision is not None and REGEX_COMMIT_HASH.match(revision))
-    ):
+    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
         return revision
 
     try:
-        resolved_revision = (
-            hf_api()
-            .model_info(
-                repo_id,
-                revision=revision,
-                token=token,
-            )
-            .sha
+        return hf_api().resolve_revision(
+            repo_id,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            token=token,
         )
     except Exception:
         logger.debug(
@@ -115,8 +110,6 @@ def _resolve_hf_revision(
             exc_info=True,
         )
         return revision
-
-    return resolved_revision or revision
 
 
 # Process-local record of which (arch, target) model-class overrides have been
