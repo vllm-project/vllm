@@ -115,50 +115,57 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
                                            int rope_elem_base = 0) {
   uint4 const v = *reinterpret_cast<const uint4*>(src);
   if constexpr (FP8 || APPLY_ROPE) {
-    using Converter = vllm::_typeConvert<scalar_t>;
-    auto const* p =
-        reinterpret_cast<typename Converter::packed_hip_type const*>(&v);
-    float f[kVecElems];
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-      float2 x = Converter::convert(p[i]);
-      f[2 * i] = x.x;
-      f[2 * i + 1] = x.y;
-    }
-    if constexpr (APPLY_ROPE) {
-#pragma unroll
-      for (int i = 0; i < kVecElems / 2; i++) {
-        int const pair_idx = rope_elem_base / 2 + i;
-        float const cos = static_cast<float>(cos_sin[pair_idx]);
-        float const sin =
-            static_cast<float>(cos_sin[pair_idx + kQkRopeHeadDim / 2]);
-        float const x = f[2 * i];
-        float const y = f[2 * i + 1];
-        f[2 * i] = x * cos - y * sin;
-        f[2 * i + 1] = x * sin + y * cos;
-      }
-    }
-    if constexpr (!FP8) {
-      uint4 out;
-      auto* o = reinterpret_cast<typename Converter::packed_hip_type*>(&out);
-#pragma unroll
-      for (int i = 0; i < kVecElems / 2; i++) {
-        o[i] = Converter::convert(make_float2(f[2 * i], f[2 * i + 1]));
-      }
-      *reinterpret_cast<uint4*>(dst) = out;
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+    // _typeConvert<BFloat16> is unavailable on pre-Ampere. Kimi K3 uses
+    // bf16 inputs, so discard unsupported conversion paths in those builds.
+    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
       return;
-    }
+    } else {
+#endif
+      using Converter = vllm::_typeConvert<scalar_t>;
+      auto const* p =
+          reinterpret_cast<typename Converter::packed_hip_type const*>(&v);
+      float f[kVecElems];
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float2 x = Converter::convert(p[i]);
+        f[2 * i] = x.x;
+        f[2 * i + 1] = x.y;
+      }
+      if constexpr (APPLY_ROPE) {
+#pragma unroll
+        for (int i = 0; i < kVecElems / 2; i++) {
+          int const pair_idx = rope_elem_base / 2 + i;
+          float const cos = static_cast<float>(cos_sin[pair_idx]);
+          float const sin =
+              static_cast<float>(cos_sin[pair_idx + kQkRopeHeadDim / 2]);
+          float const x = f[2 * i];
+          float const y = f[2 * i + 1];
+          f[2 * i] = x * cos - y * sin;
+          f[2 * i + 1] = x * sin + y * cos;
+        }
+      }
+      if constexpr (!FP8) {
+        uint4 out;
+        auto* o = reinterpret_cast<typename Converter::packed_hip_type*>(&out);
+#pragma unroll
+        for (int i = 0; i < kVecElems / 2; i++) {
+          o[i] = Converter::convert(make_float2(f[2 * i], f[2 * i + 1]));
+        }
+        *reinterpret_cast<uint4*>(dst) = out;
+        return;
+      }
 #ifndef USE_ROCM
-    uint2 out;
-    auto* o2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&out);
+      uint2 out;
+      auto* o2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&out);
   #pragma unroll
-    for (int i = 0; i < 4; i++) {
-      float2 s = make_float2(f[2 * i] * scale_inv, f[2 * i + 1] * scale_inv);
-      s.x = fminf(fmaxf(s.x, -kFp8Max), kFp8Max);
-      s.y = fminf(fmaxf(s.y, -kFp8Max), kFp8Max);
-      o2[i] = __nv_cvt_float2_to_fp8x2(s, __NV_SATFINITE, __NV_E4M3);
-    }
-    *reinterpret_cast<uint2*>(dst) = out;
+      for (int i = 0; i < 4; i++) {
+        float2 s = make_float2(f[2 * i] * scale_inv, f[2 * i + 1] * scale_inv);
+        s.x = fminf(fmaxf(s.x, -kFp8Max), kFp8Max);
+        s.y = fminf(fmaxf(s.y, -kFp8Max), kFp8Max);
+        o2[i] = __nv_cvt_float2_to_fp8x2(s, __NV_SATFINITE, __NV_E4M3);
+      }
+      *reinterpret_cast<uint2*>(dst) = out;
 #else
     uint8_t out[kVecElems];
   #pragma unroll
@@ -167,6 +174,9 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
       out[i] = rocm_cvt_float_to_fp8_e4m3(s);
     }
     *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<uint2 const*>(out);
+#endif
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+    }
 #endif
   } else {
     *reinterpret_cast<uint4*>(dst) = v;
@@ -280,14 +290,23 @@ __device__ __forceinline__ void writeDsMlaCache(
   scalar_t* row16 = reinterpret_cast<scalar_t*>(row);
   scalar_t* rope_dst = row16 + kKvLoraRank / 2 + 8 + laneId * 2;
   if constexpr (APPLY_ROPE) {
-    using Converter = vllm::_typeConvert<scalar_t>;
-    using packed_t = typename Converter::packed_hip_type;
-    packed_t const src = *reinterpret_cast<packed_t const*>(pe + laneId * 2);
-    float2 const xy = Converter::convert(src);
-    float const cos = static_cast<float>(cos_sin[laneId]);
-    float const sin = static_cast<float>(cos_sin[laneId + kQkRopeHeadDim / 2]);
-    *reinterpret_cast<packed_t*>(rope_dst) = Converter::convert(
-        make_float2(xy.x * cos - xy.y * sin, xy.x * sin + xy.y * cos));
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+      return;
+    } else {
+#endif
+      using Converter = vllm::_typeConvert<scalar_t>;
+      using packed_t = typename Converter::packed_hip_type;
+      packed_t const src = *reinterpret_cast<packed_t const*>(pe + laneId * 2);
+      float2 const xy = Converter::convert(src);
+      float const cos = static_cast<float>(cos_sin[laneId]);
+      float const sin =
+          static_cast<float>(cos_sin[laneId + kQkRopeHeadDim / 2]);
+      *reinterpret_cast<packed_t*>(rope_dst) = Converter::convert(
+          make_float2(xy.x * cos - xy.y * sin, xy.x * sin + xy.y * cos));
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+    }
+#endif
   } else {
     *reinterpret_cast<int32_t*>(rope_dst) =
         *reinterpret_cast<const int32_t*>(pe + laneId * 2);
@@ -662,6 +681,21 @@ static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
 #endif
 }
 
+void checkBfloat16Support(torch::headeronly::ScalarType dtype) {
+#ifndef USE_ROCM
+  if (dtype == torch::headeronly::ScalarType::BFloat16) {
+    static int const sm_version = getSMVersion();
+    STD_TORCH_CHECK(
+        sm_version >= 80,
+        "Kimi K3 fused MLA operations require sm_80+ (Ampere or newer); got "
+        "sm_",
+        sm_version);
+  }
+#else
+  (void)dtype;
+#endif
+}
+
 }  // namespace kimi_k3_fused_ops
 }  // namespace vllm
 
@@ -735,6 +769,7 @@ void fused_kimi_k3_mla_key_concat_kv_cache_insert(
                       kv_c_normed.scalar_type() == dt &&
                       k_out.scalar_type() == dt && k_cache.scalar_type() == dt,
                   "all tensors must share k_nope's (bf16/fp16) dtype");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -827,6 +862,7 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
   STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
                       slot_mapping.scalar_type() == ScalarType::Long,
                   "slot_mapping must be int64 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -940,6 +976,7 @@ void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
   check_scale(k_scale_inv, "k_scale_inv must be scalar float32 CUDA");
   check_scale(v_scale_inv, "v_scale_inv must be scalar float32 CUDA");
   check_scale(cache_scale_inv, "cache_scale_inv must be scalar float32 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -1053,6 +1090,7 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
                       k_cache.size(1) == cache_block_size &&
                       k_cache.size(2) == 576 && k_cache.stride(2) == 1,
                   "k_cache shape [nblk, block_size, 576] contiguous");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
@@ -1127,6 +1165,7 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
   };
   check_scale(q_scale_inv, "q_scale_inv must be scalar float32 CUDA");
   check_scale(cache_scale_inv, "cache_scale_inv must be scalar float32 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
@@ -1192,6 +1231,7 @@ void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
           k_cache.dim() == 3 && k_cache.size(1) == cache_block_size &&
           k_cache.size(2) == 656 && k_cache.stride(2) == 1,
       "k_cache shape [nblk, block_size, 656] uint8 contiguous");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
