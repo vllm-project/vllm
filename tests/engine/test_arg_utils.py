@@ -4,7 +4,8 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
-from typing import Annotated, Literal
+from types import SimpleNamespace
+from typing import Annotated, Literal, cast
 
 import pytest
 from pydantic import Field
@@ -13,6 +14,7 @@ from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
+    _resolve_dcp_q_replicate,
     contains_type,
     get_kwargs,
     get_type,
@@ -212,6 +214,56 @@ def test_jit_monitor_verbose_arg():
 
     assert args.jit_monitor_verbose
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [
+        ([], None),
+        (["--dcp-q-replicate"], True),
+        (["--no-dcp-q-replicate"], False),
+    ],
+)
+def test_dcp_q_replicate_arg(cli_args: list[str], expected: bool | None):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(cli_args)
+
+    assert EngineArgs.from_cli_args(args).dcp_q_replicate is expected
+
+
+@pytest.mark.parametrize(
+    (
+        "requested",
+        "model_type",
+        "dcp_size",
+        "pcp_size",
+        "expected",
+    ),
+    [
+        (None, "glm_moe_dsa", 4, 1, True),
+        (None, "glm_moe_dsa", 1, 1, False),
+        (None, "glm_moe_dsa", 4, 2, False),
+        (None, "deepseek_v3", 4, 1, False),
+        (False, "glm_moe_dsa", 4, 1, False),
+        (True, "deepseek_v3", 4, 1, True),
+    ],
+)
+def test_resolve_dcp_q_replicate(
+    requested: bool | None,
+    model_type: str,
+    dcp_size: int,
+    pcp_size: int,
+    expected: bool,
+):
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+    )
+
+    assert (
+        _resolve_dcp_q_replicate(requested, model_config, dcp_size, pcp_size)
+        is expected
+    )
 
 
 @pytest.mark.parametrize("mode", ["warn", "error"])

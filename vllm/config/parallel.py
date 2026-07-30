@@ -359,6 +359,22 @@ class ParallelConfig:
       per layer for MLA models.
     """
 
+    dcp_q_replicate: bool | None = None
+    """Replicate the MLA query projection within each DCP group so decode can
+    skip the query all-gather.
+
+    With DCP the KV cache is sharded across the group, so the standard MLA
+    decode path all-gathers the query every step. Replicating the (small)
+    query projection at load time lets each rank materialize the full
+    group-local head set and skip that collective, at the cost of computing
+    the projection redundantly on every rank in the group.
+
+    ``None`` selects the model default when constructed through ``EngineArgs``.
+    Query replication is enabled automatically for GLM sparse-attention models
+    with decode DCP. Supersedes the VLLM_DCP_Q_REPLICATE environment variable,
+    which still overrides this when explicitly set.
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
