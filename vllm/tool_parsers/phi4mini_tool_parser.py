@@ -47,7 +47,6 @@ class Phi4MiniJsonToolParser(ToolParser):
         # streaming mode
         self.prev_tool_call_arr: list[dict[str, Any]] = []
         self.current_tool_id: int = -1
-        self.current_tool_name_sent: bool = False
         self.streamed_args_for_tool: list[
             str
         ] = []  # map what has been streamed for each tool so far to a list

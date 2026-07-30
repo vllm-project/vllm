@@ -7,9 +7,10 @@ from typing import Any
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
-from vllm.tasks import PoolingTask
+from vllm.tasks import PoolingTask, check_removed_pooling_task
 
 logger = init_logger(__name__)
 
@@ -87,13 +88,6 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
-        if self.task == "score":
-            logger.warning_once(
-                "`score` task is deprecated and will be removed in v0.20. "
-                "Please use `classify` instead."
-            )
-            self.task = "classify"
-
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
@@ -117,7 +111,8 @@ class PoolingParams(
         if pooler_config is None:
             return
 
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before merging parameters")
         valid_parameters = self.valid_parameters[self.task]
 
         for k in valid_parameters:
@@ -151,7 +146,7 @@ class PoolingParams(
                     invalid_parameters.append(k)
 
             if invalid_parameters:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Task {self.task} only supports {valid_parameters} "
                     f"parameters, does not support "
                     f"{invalid_parameters} parameters"
@@ -170,24 +165,30 @@ class PoolingParams(
                 self.use_activation = True
 
             if self.dimensions is not None:
+                dimensions = self.dimensions
+                model_name = model_config.served_model_name
+                embedding_size = model_config.embedding_size
+                valid_range = f"[1, {embedding_size}]"
+                dimensions_in_range = 1 <= dimensions <= embedding_size
                 if not model_config.is_matryoshka:
-                    raise ValueError(
-                        f'Model "{model_config.served_model_name}" does not '
-                        f"support matryoshka representation, "
-                        f"changing output dimensions will lead to poor results."
+                    raise VLLMValidationError(
+                        f"Model {model_name!r} does not support Matryoshka "
+                        f"embeddings; dimensions must be unset "
+                        f"(received dimensions={dimensions})."
+                    )
+
+                if not dimensions_in_range:
+                    raise VLLMValidationError(
+                        f"Model {model_name!r} only supports dimensions in "
+                        f"range {valid_range}, got {dimensions}."
                     )
 
                 mds = model_config.matryoshka_dimensions
-                if mds is not None:
-                    if self.dimensions not in mds:
-                        raise ValueError(
-                            f"Model {model_config.served_model_name!r} "
-                            f"only supports {str(mds)} matryoshka dimensions, "
-                            f"use other output dimensions will "
-                            f"lead to poor results."
-                        )
-                elif self.dimensions < 1:
-                    raise ValueError("Dimensions must be greater than 0")
+                if mds is not None and dimensions not in mds:
+                    raise VLLMValidationError(
+                        f"Model {model_name!r} only supports Matryoshka "
+                        f"dimensions {str(mds)}, got {dimensions}."
+                    )
 
         elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:
@@ -196,7 +197,8 @@ class PoolingParams(
             raise ValueError(f"Unknown pooling task: {self.task!r}")
 
     def _verify_valid_parameters(self):
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before verifying parameters")
         valid_parameters = self.valid_parameters[self.task]
         invalid_parameters = []
         for k in self.all_parameters:
@@ -207,7 +209,7 @@ class PoolingParams(
                 invalid_parameters.append(k)
 
         if invalid_parameters:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Task {self.task!r} only supports {valid_parameters} "
                 f"parameters, does not support "
                 f"{invalid_parameters} parameters"
@@ -228,6 +230,9 @@ class PoolingParams(
         )
 
     def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
-            "For pooling output_kind has to be FINAL_ONLY"
-        )
+        check_removed_pooling_task(self.task)
+        if self.output_kind != RequestOutputKind.FINAL_ONLY:
+            raise VLLMValidationError(
+                "For pooling output_kind has to be FINAL_ONLY, "
+                f"got {self.output_kind!r}"
+            )

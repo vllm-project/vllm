@@ -21,8 +21,16 @@ import lm_eval
 import pytest
 from packaging import version
 
-from vllm.platforms.rocm import on_gfx950
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -40,7 +48,7 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and versio
 
 def has_huggingface_access(repo):
     try:
-        huggingface_hub.list_repo_refs(repo)
+        hf_api().list_repo_refs(repo)
         return True
     except huggingface_hub.errors.RepositoryNotFoundError:
         return False
@@ -89,7 +97,7 @@ def test_gpt_oss_attention_quantization(
     expected_accuracy: float,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if tp_size > cuda_device_count_stateless():
+    if tp_size > current_platform.device_count():
         pytest.skip("Not enough GPUs to run this test case")
 
     if "amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8" in model_name and on_gfx950():

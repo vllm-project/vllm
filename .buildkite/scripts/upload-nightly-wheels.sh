@@ -2,14 +2,24 @@
 
 set -ex
 
-# Upload a single wheel to S3 (rename linux -> manylinux).
+# Upload a single wheel to S3, after detecting and applying the appropriate
+# manylinux platform tag with auditwheel.
 # Index generation is handled separately by generate-and-upload-nightly-index.sh.
+
+# auditwheel is Linux-only; macOS wheels already carry a valid tag, so skip the
+# manylinux retag for them.
+WHEEL_PLATFORM="${VLLM_WHEEL_PLATFORM:-linux}"
+
+if [[ "$WHEEL_PLATFORM" == "linux" ]]; then
+  # shellcheck source=lib/manylinux.sh
+  source .buildkite/scripts/lib/manylinux.sh
+fi
 
 BUCKET="vllm-wheels"
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
-# ========= collect, rename & upload the wheel ==========
+# ========= locate the wheel ==========
 
 # Assume wheels are in artifacts/dist/*.whl
 wheel_files=(artifacts/dist/*.whl)
@@ -21,20 +31,12 @@ if [[ ${#wheel_files[@]} -ne 1 ]]; then
 fi
 wheel="${wheel_files[0]}"
 
-# default build image uses ubuntu 20.04, which corresponds to manylinux_2_31
-# we also accept params as manylinux tag
-# refer to https://github.com/mayeut/pep600_compliance?tab=readme-ov-file#acceptable-distros-to-build-wheels
-manylinux_version="${1:-manylinux_2_31}"
+# ========= detect manylinux tag and rename ==========
 
-# Rename 'linux' to the appropriate manylinux version in the wheel filename
-if [[ "$wheel" != *"linux"* ]]; then
-  echo "Error: Wheel filename does not contain 'linux': $wheel"
-  exit 1
+if [[ "$WHEEL_PLATFORM" == "linux" ]]; then
+  wheel="$(apply_manylinux_tag "$wheel")"
+  echo "Renamed wheel to: $wheel"
 fi
-new_wheel="${wheel/linux/$manylinux_version}"
-mv -- "$wheel" "$new_wheel"
-wheel="$new_wheel"
-echo "Renamed wheel to: $wheel"
 
 # Extract the version from the wheel
 version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)

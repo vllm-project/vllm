@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
     PromptType,
@@ -49,6 +50,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -89,7 +91,7 @@ class InputProcessor:
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]
             if not supported_generation_tasks:
-                raise ValueError("This model does not support generation")
+                raise VLLMValidationError("This model does not support generation")
 
             params.verify(
                 self.model_config,
@@ -98,21 +100,28 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if (
-                params.thinking_token_budget is not None
-                and self.vllm_config.reasoning_config is None
-            ):
-                raise ValueError(
-                    "thinking_token_budget is set but reasoning_config is "
-                    "not configured. Please set --reasoning-config to use "
-                    "thinking_token_budget."
-                )
+            if params.thinking_token_budget is not None:
+                if (
+                    self.vllm_config.reasoning_config is None
+                    or not self.vllm_config.reasoning_config.enabled
+                ):
+                    raise VLLMValidationError(
+                        "thinking_token_budget is set but reasoning_config is "
+                        "not configured. Please set --reasoning-parser "
+                        "and/or --reasoning-config to use thinking_token_budget."
+                    )
+                if self.use_v2_model_runner:
+                    raise VLLMValidationError(
+                        "thinking_token_budget is not yet supported by the V2 "
+                        "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
+                        "to use thinking_token_budget."
+                    )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
             ]
             if not supported_pooling_tasks:
-                raise ValueError("This model does not support pooling")
+                raise VLLMValidationError("This model does not support pooling")
 
             if params.task is None:
                 if "token_embed" in supported_pooling_tasks:
@@ -123,7 +132,7 @@ class InputProcessor:
                     params.task = "plugin"
 
             if params.task not in supported_pooling_tasks:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Unsupported task: {params.task!r} "
                     f"Supported tasks: {supported_pooling_tasks}"
                 )
@@ -141,7 +150,7 @@ class InputProcessor:
 
         # LoRA request passed in while LoRA is not enabled
         if not self.lora_config:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
 
@@ -171,6 +180,45 @@ class InputProcessor:
         ):
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
+
+    def inject_into_mm_cache(
+        self,
+        mm_hashes: dict[str, list[str]],
+        mm_kwargs: dict[str, list],
+    ) -> None:
+        """Inject pre-processed mm_kwargs into the processor cache.
+
+        Call this when mm_kwargs have already been through the HF processor
+        externally (e.g. by a frontend that transfers pre-processed tensors
+        to the backend).  This ensures MM cache hit rate metrics are reported
+        accurately and avoids redundant processing on subsequent requests
+        with the same images.
+
+        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        since token expansion has already been handled externally.
+        """
+        cache = self.renderer.mm_processor_cache
+        if cache is None:
+            return
+        try:
+            for modality, hashes in mm_hashes.items():
+                items = mm_kwargs.get(modality, [])
+                for i, mm_hash in enumerate(hashes):
+                    if i < len(items) and items[i] is not None:
+                        # Insert into cache via get_and_update_item.
+                        # Use the returned item (may be an address for SHM
+                        # cache or the original item for LRU cache).
+                        items[i], _ = cache.get_and_update_item(
+                            (items[i], []),
+                            mm_hash,
+                        )
+            # Update cache stats to reflect the externally processed items
+            self.renderer.update_mm_cache_stats()
+        except Exception:
+            logger.warning(
+                "Failed to inject mm_kwargs into processor cache",
+                exc_info=True,
+            )
 
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
@@ -214,7 +262,7 @@ class InputProcessor:
         dp_local_size = parallel_config.data_parallel_size_local
         num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"data_parallel_rank {data_parallel_rank} "
                 f"is out of range [0, {num_ranks})."
             )
@@ -253,11 +301,13 @@ class InputProcessor:
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_inputs["type"] == "embeds":
-            prompt_token_ids = None
             prompt_embeds = decoder_inputs["prompt_embeds"]
+            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
         else:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
+            prompt_is_token_ids = None
 
         sampling_params = None
         pooling_params = None
@@ -322,6 +372,7 @@ class InputProcessor:
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
@@ -343,7 +394,7 @@ class InputProcessor:
             return
 
         if prompt_len == 0 and prompt_type == "decoder":
-            raise ValueError(f"The {prompt_type} prompt cannot be empty")
+            raise VLLMValidationError(f"The {prompt_type} prompt cannot be empty")
 
         model_config = self.model_config
         max_prompt_len = (
@@ -365,7 +416,7 @@ class InputProcessor:
                     "number of text tokens."
                 )
 
-            raise ValueError(
+            raise VLLMValidationError(
                 f"The {prompt_type} prompt (length {prompt_len}) is "
                 f"longer than the maximum model length of {max_prompt_len}. "
                 f"{suggestion}"
@@ -375,7 +426,7 @@ class InputProcessor:
                 "Make sure that `max_model_len` is no smaller than the "
                 "number of text tokens (prompt + requested output tokens)."
             )
-            raise ValueError(
+            raise VLLMValidationError(
                 f"The {prompt_type} prompt (length {prompt_len}) plus the number of "
                 f"requested output tokens (at least 1) is longer than the maximum "
                 f"model length of {max_prompt_len}. {suggestion}"
@@ -405,11 +456,11 @@ class InputProcessor:
             decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds()
-                    if embed_length > self.mm_encoder_cache_size:
-                        raise ValueError(
+                    num_embeds = mm_position.get_num_embeds()
+                    if num_embeds > self.mm_encoder_cache_size:
+                        raise VLLMValidationError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with length {embed_length}, which exceeds the "
+                            f"with {num_embeds} embedding tokens, which exceeds the "
                             f"pre-allocated encoder cache size "
                             f"{self.mm_encoder_cache_size}. Please reduce the input "
                             f"size or increase the encoder cache size "
@@ -431,7 +482,9 @@ class InputProcessor:
             # truly out-of-vocabulary.
             model_vocab_size = model_config.get_vocab_size()
             if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
-                raise ValueError(f"Token id {max_input_id} is out of vocabulary")
+                raise VLLMValidationError(
+                    f"Token id {max_input_id} is out of vocabulary"
+                )
 
     def _validate_model_inputs(
         self,

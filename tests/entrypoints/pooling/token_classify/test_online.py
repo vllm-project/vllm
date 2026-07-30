@@ -63,8 +63,12 @@ async def test_pooling_not_supported(
             "task": task,
         },
     )
+    assert response.json()["error"]["type"] == "BadRequestError"
 
-    if task != "classify":
-        assert response.json()["error"]["type"] == "BadRequestError"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "classify":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
         err_msg = f"Unsupported task: {task!r}"
-        assert response.json()["error"]["message"].startswith(err_msg)
+    assert response.json()["error"]["message"].startswith(err_msg)

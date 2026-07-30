@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from typing import Any
 
 import pytest
 import torch
+from tqdm import tqdm
 
 from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
 from tests.utils import (
@@ -15,18 +17,26 @@ from tests.utils import (
     multi_gpu_marks,
     multi_gpu_only,
     single_gpu_only,
+    wait_for_rocm_memory_to_settle,
 )
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.benchmarks.datasets import InstructCoderDataset
-from vllm.config import VllmConfig, replace
+from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Metric
 
 MTP_SIMILARITY_RATE = 0.8
+
+
+class AsyncSchedulingNotEnabledError(AssertionError):
+    """Raised when async_scheduling is expected to be True for draft_model
+    spec decode but is False. Tracked in:
+    https://github.com/vllm-project/vllm/issues/38929
+    """
 
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
@@ -150,6 +160,12 @@ def reset_torch_dynamo():
     torch._dynamo.reset()
 
 
+@pytest.fixture
+def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
+    if current_platform.is_rocm():
+        request.getfixturevalue("disable_vllm_compile_cache")
+
+
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -165,21 +181,26 @@ def reset_torch_dynamo():
         },
     ],
 )
+@pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     model_name: str,
+    vllm_runner,
 ):
-    spec_llm = LLM(
-        model=model_name,
+    with vllm_runner(
+        model_name,
+        # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
         speculative_config=speculative_config,
         max_model_len=4096,
-    )
-    evaluate_llm_for_gsm8k(spec_llm)
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        # Preserve LLM's default compilation/cudagraph configuration. Without
+        # this, VllmRunner injects its reduced test-only capture sizes.
+        compilation_config=CompilationConfig(),
+    ) as runner:
+        evaluate_llm_for_gsm8k(runner.llm)
 
 
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
@@ -204,6 +225,11 @@ def test_ngram_gpu_default_with_async_scheduling(
         },
         max_model_len=4096,
         async_scheduling=async_scheduling,
+    )
+    # Assert the resolved async_scheduling config matches what was requested.
+    assert (
+        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        == async_scheduling
     )
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
@@ -271,6 +297,73 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.slow_test
+@large_gpu_mark(min_gb=80)
+def test_gemma4_dspark_correctness_and_acceptance_rate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to exercise
+    the probabilistic draft-sampling/rejection-sampling path (not just greedy).
+
+    Uses google/gemma-4-12B-it as target with the dspark_gemma4_12b_block7 draft
+    model. Exercises the full Gemma4 DSpark path (draft build over the reused
+    base classes DFlashQwen3Model / Qwen3DSparkForCausalLM / Gemma4MTP* /
+    DSparkMarkovHead, the fused context-KV precompute, the Markov head, and
+    rejection sampling), so it fails if any base class drifts out of sync.
+
+    gemma-4-12B is instruct-tuned, so GSM8K is run through the chat template
+    (use_chat_completions=True; raw few-shot completion collapses to a few
+    percent). Reference: measured over 5 runs of 200 GSM8K questions at
+    temperature=1.0 (prefix caching disabled):
+      accuracy:        min=0.900 max=0.955 mean=0.937
+      acceptance_rate: min=0.578 max=0.595 mean=0.588
+      acceptance_len:  min=5.044 max=5.167 mean=5.116
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    spec_llm = LLM(
+        model="google/gemma-4-12B-it",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_gemma4_12b_block7",
+            "num_speculative_tokens": 7,
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=8192,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+    )
+    try:
+        results = evaluate_gsm8k_offline(
+            spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
+        )
+        gsm8k_accuracy = results["accuracy"]
+
+        metrics = spec_llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
+        print(
+            f"Gemma4 DSpark acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+
+        assert acceptance_rate >= 0.588 * 0.9
+        assert acceptance_len >= 5.116 * 0.9
+        assert gsm8k_accuracy >= 0.937 * 0.9
+    finally:
+        del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
     ["model_path", "expected_accuracy_threshold"],
     [
@@ -308,7 +401,7 @@ def test_speculators_model_integration(
     test_prompts = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
-    spec_llm = LLM(model=model_path, max_model_len=4096)
+    spec_llm = LLM(model=model_path, max_model_len=4096, gpu_memory_utilization=0.92)
     evaluate_llm_for_gsm8k(
         spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
     )
@@ -338,7 +431,7 @@ def test_speculators_model_integration(
     cleanup_dist_env_and_memory()
 
     # Second run: Reference without speculative decoding
-    ref_llm = LLM(model=verifier_model, max_model_len=4096)
+    ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.92)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     torch.accelerator.empty_cache()
@@ -372,11 +465,6 @@ def _run_eagle_correctness(
     Compare the outputs of an original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding.
     """
-    if attn_backend == "TREE_ATTN":
-        pytest.skip(
-            "TREE_ATTN is flaky in the test disable for now until it can be "
-            "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
-        )
     if model_impl == "transformers":
         import transformers
         from packaging.version import Version
@@ -416,7 +504,7 @@ def _run_eagle_correctness(
             if "deepseek" in model_setup[1].lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
-                attention_config = {"backend": "TRITON_MLA"}
+                attention_config = {"backend": "ROCM_AITER_MLA"}
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -439,6 +527,9 @@ def _run_eagle_correctness(
         del ref_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the spec engine started right after
+        # does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
         spec_llm = LLM(
             model=model_name,
@@ -456,6 +547,8 @@ def _run_eagle_correctness(
             model_impl=model_impl,
             attention_config=attention_config,
         )
+        # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -474,9 +567,16 @@ def _run_eagle_correctness(
         del spec_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
+        # not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
 
 @single_gpu_only
+@pytest.mark.skipif(
+    current_platform.is_device_capability_family(100),
+    reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
+)
 @pytest.mark.parametrize(
     [
         "model_setup",
@@ -542,12 +642,16 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        (
+        pytest.param(
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
             0.8,
+            # TODO(hmellor): figure out why memory usage is so high
+            marks=pytest.mark.skip(
+                reason="Feature is experimental and uses too much memory in CI",
+            ),
         ),
         pytest.param(
             (
@@ -699,20 +803,79 @@ def test_eagle_correctness_heavy(
     )
 
 
+@large_gpu_mark(min_gb=24)
+def test_medusa_acceptance_rate(
+    sampling_config: SamplingParams,
+):
+    """Verify a trained Medusa checkpoint achieves nonzero acceptance rate.
+
+    Uses the canonical FasterDecoding vicuna-7b checkpoint to confirm the
+    speculation path actually accepts tokens — unlike test_medusa_correctness,
+    which uses a random head and only validates output correctness.
+    """
+    target_model = "lmsys/vicuna-7b-v1.3"
+    medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
+    prompts = _build_gsm8k_prompts(num_questions=10, num_shots=1)[0]
+
+    spec_llm = LLM(
+        model=target_model,
+        speculative_config={
+            "method": "medusa",
+            "model": medusa_model,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+    spec_llm.generate(prompts, sampling_config)
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    min_acceptance_rate = 0.198
+    print(f"Medusa acceptance rate: {acceptance_rate:.4f} (min {min_acceptance_rate})")
+
+    # Regression guard at 90% of the measured baseline.
+    assert acceptance_rate >= min_acceptance_rate, (
+        f"Medusa acceptance rate {acceptance_rate:.4f} below min {min_acceptance_rate}"
+    )
+
+
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
-        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        pytest.param(
+            ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1),
+            False,
+            0.0,
+            marks=pytest.mark.skipif(
+                current_platform.is_device_capability_family(100),
+                reason="DeepSeek MTP: TRTLLM MoE top_k check fails on Blackwell",
+            ),
+        ),  # dummy model
+        (
+            ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1),
+            False,
+            0.20,
+        ),  # hybrid + MTP, ref: ~34%-35%
+        (
+            ("mtp", "google/gemma-4-E4B-it", 1, "google/gemma-4-E4B-it-assistant"),
+            False,
+            0.50,
+        ),  # gemma4 MTP with assistant model, ref: ~62%
     ],
-    ids=["mimo", "deepseek"],
+    ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
-    model_setup: tuple[str, str, int],
+    model_setup: tuple[str, str, int] | tuple[str, str, int, str],
     mm_enabled: bool,
     expected_accuracy_threshold: float,
 ):
@@ -728,16 +891,45 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
 
-        method, model_name, tp_size = model_setup
+        if len(model_setup) == 4:
+            method, model_name, tp_size, draft_model = model_setup
+        else:
+            method, model_name, tp_size = model_setup
+            draft_model = None
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
+        if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
+            pytest.skip(
+                "Model Runner V2 does not yet support hybrid models "
+                "(Qwen3.5 mixes Mamba-style GDN with attention layers)."
+            )
+
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
+        # Skip multimodal profiling for models that don't need it in this test.
+        extra_kwargs: dict[str, Any] = {}
+        if "Qwen3.5" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+        elif "gemma-4" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
+
+        if draft_model is not None and "gemma-4" in draft_model:
+            import transformers
+            from packaging.version import Version
+
+            if Version(transformers.__version__) < Version("5.8.0"):
+                pytest.skip(
+                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
+                    f"got {transformers.__version__}"
+                )
+
         ref_llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
@@ -747,18 +939,26 @@ def test_mtp_correctness(
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
+        speculative_config: dict[str, Any] = {
+            "method": method,
+            "num_speculative_tokens": 1,
+            "max_model_len": 2048,
+        }
+        if draft_model is not None:
+            speculative_config["model"] = draft_model
+            speculative_config["num_speculative_tokens"] = 2
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
-            },
+            speculative_config=speculative_config,
             max_model_len=2048,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
+        # MTP supports async scheduling; assert it is active by default.
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -828,12 +1028,22 @@ cases = [
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
+# TODO: Fix async_scheduling & engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args)
 
 
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_realistic_example():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -849,6 +1059,11 @@ def test_draft_model_realistic_example():
 
 
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_parallel_drafting():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -875,6 +1090,11 @@ def test_draft_model_parallel_drafting():
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
     tgt_model, draft_model = models
     sd_case = ArgsTest(
@@ -887,6 +1107,11 @@ def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
 
 
 @multi_gpu_only(num_gpus=2)
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
 def test_draft_model_tensor_parallelism():
     """Ensure spec decode works when running with TP > 1."""
     _skip_if_insufficient_gpus_for_tp(2)
@@ -1061,6 +1286,7 @@ def assert_draft_model_correctness(args: ArgsTest):
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
+
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
     metrics = spec_llm.get_metrics()
@@ -1072,10 +1298,6 @@ def assert_draft_model_correctness(args: ArgsTest):
         spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
     )
 
-    del spec_llm  # CLEANUP
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
     print(
         f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
         f"temperature={args.sampling_config.temperature:.2f}, "
@@ -1085,6 +1307,20 @@ def assert_draft_model_correctness(args: ArgsTest):
 
     assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
+    # draft_model supports async scheduling; assert it is active by default.
+    # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
+    # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
+    # specific failure — leaving all other assertion failures (e.g. correctness or
+    # acceptance-rate checks above) visible as real test failures.
+    has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+    del spec_llm  # CLEANUP
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+    if not has_async:
+        raise AsyncSchedulingNotEnabledError(
+            "Expected async_scheduling=True for draft_model spec decode, got False."
+            " See https://github.com/vllm-project/vllm/issues/38929"
+        )
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
@@ -1105,19 +1341,331 @@ def some_high_acceptance_metrics() -> dict:
     }
 
 
-def compute_acceptance_rate(metrics: list[Metric]) -> float:
+def compute_acceptance_rate(
+    metrics: list[Metric], prev_metrics: list[Metric] | None = None
+) -> float:
     name2metric = {metric.name: metric for metric in metrics}
-    n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value  # type: ignore
+    n_draft_toks = name2metric["vllm:spec_decode_num_draft_tokens"].value
     if n_draft_toks == 0:
         return float("nan")
-    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value
+    if prev_metrics is not None:
+        prev_name2metric = {metric.name: metric for metric in prev_metrics}
+        n_draft_toks -= prev_name2metric["vllm:spec_decode_num_draft_tokens"].value
+        n_accepted_toks -= prev_name2metric[
+            "vllm:spec_decode_num_accepted_tokens"
+        ].value
+        if n_draft_toks <= 0:
+            return float("nan")
     return n_accepted_toks / n_draft_toks
 
 
-def compute_acceptance_len(metrics: list[Metric]) -> float:
+def compute_acceptance_len(
+    metrics: list[Metric], prev_metrics: list[Metric] | None = None
+) -> float:
     name2metric = {metric.name: metric for metric in metrics}
-    n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
-    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    n_drafts = name2metric["vllm:spec_decode_num_drafts"].value
+    n_accepted_toks = name2metric["vllm:spec_decode_num_accepted_tokens"].value
     if n_drafts == 0:
         return 1
+    if prev_metrics is not None:
+        prev_name2metric = {metric.name: metric for metric in prev_metrics}
+        n_drafts -= prev_name2metric["vllm:spec_decode_num_drafts"].value
+        n_accepted_toks -= prev_name2metric[
+            "vllm:spec_decode_num_accepted_tokens"
+        ].value
+        if n_drafts <= 0:
+            return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+# Datasets in the format used in DFlash validations
+def load_and_process_dataset(data_name: str):
+    from datasets import load_dataset
+
+    if data_name == "gsm8k":
+        dataset = load_dataset("openai/gsm8k", "main", split="test")
+        prompt_fmt = (
+            "{question}\nPlease reason step by step,"
+            " and put your final answer within \\boxed{{}}."
+        )
+        dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
+    elif data_name == "mt-bench":
+        dataset = load_dataset("HuggingFaceH4/mt_bench_prompts", split="train")
+        dataset = dataset.map(lambda x: {"turns": x["prompt"]})
+    elif data_name == "humaneval":
+        dataset = load_dataset("openai/openai_humaneval", split="test")
+        prompt_fmt = (
+            "Write a solution to the following problem and make sure"
+            " that it passes the tests:\n```python\n{prompt}\n```"
+        )
+        dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
+
+    return dataset
+
+
+@pytest.mark.parametrize(
+    ["spec_config", "expected_acceptance_lengths", "chat_template_kwargs"],
+    [
+        pytest.param(
+            dict(
+                model="Qwen/Qwen3-8B",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "dflash",
+                    "model": "z-lab/Qwen3-8B-DFlash-b16",
+                    "num_speculative_tokens": 16,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                max_num_seqs=128,
+                gpu_memory_utilization=0.85,
+                enforce_eager=False,
+                disable_log_stats=False,
+            ),
+            # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
+            {
+                "mt-bench": 4.24,
+                "humaneval": 6.50,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 6.54 * 0.975,
+            },
+            {"enable_thinking": False},
+            id="dflash",
+        ),
+        pytest.param(
+            dict(
+                model="google/gemma-4-E4B-it",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "mtp",
+                    "model": "google/gemma-4-E4B-it-assistant",
+                    "num_speculative_tokens": 2,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                # Skip multimodal profiling; this is a text-only eval.
+                limit_mm_per_prompt={"image": 0, "audio": 0},
+                disable_log_stats=False,
+            ),
+            {
+                "mt-bench": 2.28,
+                "humaneval": 2.68,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 2.67 * 0.975,
+            },
+            {},
+            id="gemma4",
+        ),
+    ],
+)
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_acceptance_rates(
+    monkeypatch: pytest.MonkeyPatch,
+    spec_config: dict[str, Any],
+    expected_acceptance_lengths: dict[str, float],
+    chat_template_kwargs: dict[str, Any],
+    use_mrv2: bool,
+):
+    """
+    E2E acceptance-rate validation for speculative decoding.
+
+    Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
+    through the spec decode engine and asserts the mean acceptance length
+    stays within tolerance of the reference figure for each dataset.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+    spec_llm = LLM(**spec_config)
+
+    max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
+
+    tokenizer = spec_llm.get_tokenizer()
+    for dataset_name, expected_len in expected_acceptance_lengths.items():
+        dataset = load_and_process_dataset(dataset_name)
+        prev_metrics = None
+        acceptance_lengths = []
+        for i in tqdm(
+            range(min(max_prompts_per_dataset, len(dataset))),
+            desc=f"Processing {dataset_name}",
+        ):
+            user_content = dataset[i]["turns"][0]
+            prompt_text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": user_content}],
+                tokenize=False,
+                add_generation_prompt=True,
+                **chat_template_kwargs,
+            )
+
+            # Greedy (temp=0) so acceptance length is deterministic and comparable
+            # across runs.
+            spec_llm.generate(
+                [prompt_text],
+                SamplingParams(temperature=0, max_tokens=2048),
+                use_tqdm=False,
+            )
+            current_metrics = spec_llm.get_metrics()
+            acceptance_len = compute_acceptance_len(current_metrics, prev_metrics)
+            prev_metrics = current_metrics
+            acceptance_lengths.append(acceptance_len)
+
+        mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
+        # Fairly tight tolerance of 95% against the reference figures,
+        # watching for regressions. Can be relaxed if test is flaky but be sure to
+        # check for genuine issues such as #40727.
+        expected_len = expected_len * 0.95
+        print(
+            f"acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
+            f" (expected at least {expected_len:.2f})"
+        )
+
+        assert mean_acceptance_length >= expected_len, (
+            f"acceptance_len for {dataset_name} is below expected threshold: "
+            f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
+        )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def dspark_config():
+    target_model = "Qwen/Qwen3-4B-FP8"
+    draft_model = "deepseek-ai/dspark_qwen3_4b_block7"
+
+    return dict(
+        model=target_model,
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": draft_model,
+            "num_speculative_tokens": 7,
+            "attention_backend": "FLASH_ATTN",
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=4096,
+        disable_log_stats=False,
+    )
+
+
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+def test_dspark_correctness_and_acceptance_rate(dspark_config):
+    """
+    E2E test for DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to
+    exercise the probabilistic draft-sampling/rejection-sampling path
+    (not just greedy).
+
+    Uses Qwen/Qwen3-4B-FP8 as target with the dspark_qwen3_4b_block7 draft
+    model. Reference: measured over 12 runs of the full GSM8K set at
+    temperature=1.0 (prefix caching disabled to avoid cross-run reuse):
+      accuracy:        min=0.782 max=0.814 mean=0.801
+      acceptance_rate: min=0.418 max=0.434 mean=0.428
+      acceptance_len:  min=3.928 max=4.037 mean=3.994
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    spec_llm = LLM(**dspark_config)
+
+    results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
+    gsm8k_accuracy = results["accuracy"]
+
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"DSpark acceptance_rate={acceptance_rate:.2f}, "
+        f"acceptance_len={acceptance_len:.2f}, "
+        f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+    )
+
+    assert acceptance_rate >= 0.428 * 0.9
+    assert acceptance_len >= 3.994 * 0.9
+    assert gsm8k_accuracy >= 0.801 * 0.9
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@single_gpu_only
+def test_synthetic_acceptance_rate():
+    """Verify that synthetic rejection sampling produces an acceptance
+    length close to the requested mean acceptance length."""
+    num_spec_tokens = 3
+    expected_acceptance_len = 1.875
+    tolerance = 0.15
+
+    spec_llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+            "num_speculative_tokens": num_spec_tokens,
+            "max_model_len": 2048,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_length": expected_acceptance_len,
+        },
+        max_model_len=2048,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=50)
+    spec_llm.chat(
+        test_prompts,
+        SamplingParams(temperature=0, max_tokens=64, ignore_eos=True),
+    )
+
+    metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"Synthetic acceptance length: {acceptance_len:.3f}"
+        f" (expected={expected_acceptance_len:.3f},"
+        f" tolerance=±{tolerance})"
+    )
+    assert abs(acceptance_len - expected_acceptance_len) <= tolerance, (
+        f"Synthetic acceptance length {acceptance_len:.3f} is not within"
+        f" ±{tolerance} of expected {expected_acceptance_len:.3f}"
+    )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_dflash_correctness(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+):
+    """
+    E2E test for DFlash (block diffusion) speculative decoding.
+    Ensures output correctness on GSM8k, with cudagraphs and batching on.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
+    spec_llm = LLM(**dflash_config)
+
+    # Evaluate GSM8k accuracy (Qwen3-8B ref: ~87-92% on GSM8k)
+    evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
+
+    current_metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(current_metrics)
+
+    # AR is thoroughly validated in test_dflash_acceptance_rates, in a manner consistent
+    # with the DFlash paper. However, that test measures AL per-request and thus runs
+    # with a batch size of 1. To ensure that AL does not collapse with large batch sizes
+    # we enforce a baseline on the AL over the full lm-eval-style GSM8k test.
+    expected_len = 3.5  # Measured is 3.9 to 4.0
+    print(f"DFlash GSM8k correctness test got AL {acceptance_len}")
+    assert acceptance_len >= expected_len, (
+        "DFlash correctness check failed with"
+        f" {acceptance_len=}, expected at least {expected_len}"
+    )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()

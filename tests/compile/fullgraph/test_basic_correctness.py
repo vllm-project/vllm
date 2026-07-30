@@ -6,7 +6,6 @@ import pytest
 
 from vllm.config import CompilationMode
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ...utils import compare_all_settings
 
@@ -65,6 +64,8 @@ class TestSetting:
                 "bfloat16",
                 "--max-model-len",
                 "2048",
+                "--gpu-memory-utilization",
+                "0.98",
             ],
             pp_size=1,
             tp_size=1,
@@ -109,10 +110,10 @@ def test_compile_correctness(
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    if cuda_device_count_stateless() < pp_size * tp_size:
+    if current_platform.device_count() < pp_size * tp_size:
         pytest.skip(
             f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
-            f"{cuda_device_count_stateless()}"
+            f"{current_platform.device_count()}"
         )
 
     final_args = [
@@ -146,6 +147,7 @@ def test_compile_correctness(
             all_args,
             all_envs,
             method=method if method != "generate" else "generate_close",
+            force_v1_runner=True,
         )
         all_envs.clear()
         all_args.clear()
@@ -159,4 +161,4 @@ def test_compile_correctness(
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
 
-    compare_all_settings(model, all_args, all_envs, method=method)
+    compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)

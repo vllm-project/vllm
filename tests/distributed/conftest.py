@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import random
 
 import msgspec
@@ -96,11 +97,12 @@ class MockSubscriber:
         for endpoint in pub_endpoints:
             self.sub.connect(endpoint)
 
-        # Set up replay sockets if provided
+        # Set up replay sockets if provided.
+        # DEALER allows receiving multiple replies per request.
         self.replay_sockets = []
         if replay_endpoints:
             for replay_endpoint in replay_endpoints:
-                replay = self.ctx.socket(zmq.REQ)
+                replay = self.ctx.socket(zmq.DEALER)
                 replay.connect(replay_endpoint)
                 self.replay_sockets.append(replay)
 
@@ -131,7 +133,9 @@ class MockSubscriber:
         if socket_idx >= len(self.replay_sockets):
             raise ValueError(f"Invalid socket index {socket_idx}")
 
-        self.replay_sockets[socket_idx].send(start_seq.to_bytes(8, "big"))
+        self.replay_sockets[socket_idx].send_multipart(
+            [b"", start_seq.to_bytes(8, "big")]
+        )
 
     def receive_replay(self, socket_idx: int = 0) -> list[tuple[int, SampleBatch]]:
         """Receive replayed messages from a specific replay socket"""
@@ -147,12 +151,16 @@ class MockSubscriber:
                 if not replay_socket.poll(1000):
                     break
 
+                # DEALER receives [empty_delim, topic, seq, payload]
                 frames = replay_socket.recv_multipart()
-                if not frames or not frames[-1]:
+                if frames and frames[0] == b"":
+                    frames = frames[1:]
+                if len(frames) != 3 or not frames[-1]:
                     # End of replay marker
                     break
 
-                seq_bytes, payload = frames
+                topic, seq_bytes, payload = frames
+                assert topic == self.topic_bytes
                 seq = int.from_bytes(seq_bytes, "big")
                 data = self.decoder.decode(payload)
                 replayed.append((seq, data))
@@ -166,3 +174,31 @@ class MockSubscriber:
         self.sub.close()
         for replay in self.replay_sockets:
             replay.close()
+
+
+@pytest.fixture
+def enable_ray_v2_backend():
+    """Set env vars for the Ray V2 executor backend and shut down Ray
+    between tests."""
+    import ray
+
+    saved = {
+        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": os.environ.get(
+            "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
+        ),
+        "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
+            "VLLM_ENABLE_V1_MULTIPROCESSING"
+        ),
+    }
+    os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    if ray.is_initialized():
+        ray.shutdown()
+    try:
+        yield
+    finally:
+        if ray.is_initialized():
+            ray.shutdown()
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
+        for key in (k for k, v in saved.items() if v is None):
+            os.environ.pop(key, None)
