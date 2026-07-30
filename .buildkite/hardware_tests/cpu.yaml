@@ -110,6 +110,40 @@ steps:
       unset VLLM_CPU_CI_ENV
       pytest -x -v -s tests/v1/e2e/test_cpu_spec_decode.py"
 
+- label: CPU-DP/EP Unit Tests
+  key: cpu-dp-ep-unit-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - csrc/cpu/sgl-kernels/moe.cpp
+  - csrc/cpu/shm.cpp
+  - csrc/cpu/torch_bindings.cpp
+  - vllm/_custom_ops.py
+  - vllm/v1/worker/cpu_worker.py
+  - vllm/platforms/cpu.py
+  - vllm/distributed/device_communicators/cpu_communicator.py
+  - vllm/distributed/device_communicators/base_device_communicator.py
+  - vllm/distributed/device_communicators/all2all.py
+  - vllm/distributed/parallel_state.py
+  - vllm/forward_context.py
+  - vllm/model_executor/layers/fused_moe/modular_kernel.py
+  - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/naive_dp_ep.py
+  - tests/v1/worker/test_cpu_worker.py
+  - tests/platforms/test_cpu.py
+  - tests/distributed/cpu_test_utils.py
+  - tests/distributed/test_cpu_communicator.py
+  - tests/distributed/test_cpu_moe_ep.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 10m "
+      OMP_NUM_THREADS=1 pytest -x -v -s \
+        tests/v1/worker/test_cpu_worker.py \
+        tests/platforms/test_cpu.py \
+        tests/distributed/test_cpu_communicator.py \
+        tests/distributed/test_cpu_moe_ep.py"
+
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
 #   depends_on: []
