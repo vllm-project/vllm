@@ -68,6 +68,7 @@ def _make_fusion_config():
 @pytest.mark.parametrize(
     "guard",
     [
+        "fusion_env",
         "aiter_moe",
         "heterogeneous_kernel",
         "gfx950",
@@ -94,6 +95,11 @@ def _make_fusion_config():
 )
 def test_deepseek_v4_shared_expert_fusion_guards(monkeypatch, guard):
     config = _make_fusion_config()
+    monkeypatch.setattr(
+        amd_model.envs,
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        guard != "fusion_env",
+    )
     monkeypatch.setattr(
         amd_model.rocm_aiter_ops,
         "is_fusion_moe_shared_experts_enabled",
@@ -152,6 +158,11 @@ def test_deepseek_v4_shared_expert_fusion_policy_accepts_supported_config(
     monkeypatch,
 ):
     config = _make_fusion_config()
+    monkeypatch.setattr(
+        amd_model.envs,
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        True,
+    )
     monkeypatch.setattr(
         amd_model.rocm_aiter_ops,
         "is_fusion_moe_shared_experts_enabled",

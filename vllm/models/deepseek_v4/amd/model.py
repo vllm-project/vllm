@@ -71,6 +71,26 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
+def _shared_expert_fusion_possible(config, parallel_config=None) -> bool:
+    """Preconditions common to every shared-expert fusion path.
+
+    These decide *whether* the shared expert may be folded into the routed
+    grouped GEMM at all. Which kernel then takes it depends on its precision:
+    ``_should_fuse_shared_expert`` for a native-FP8 shared expert (preferred,
+    heterogeneous AITER) and ``_fuse_shared_experts_enabled`` for a
+    same-precision MXFP4 one.
+    """
+    if not (
+        current_platform.is_rocm()
+        and getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    ):
+        return False
+    if parallel_config is None:
+        parallel_config = get_current_vllm_config().parallel_config
+    return not parallel_config.enable_expert_parallel
+
+
 def _should_fuse_shared_expert(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_config
     quant_config = vllm_config.quant_config
@@ -78,6 +98,11 @@ def _should_fuse_shared_expert(vllm_config: VllmConfig) -> bool:
     offload_config = getattr(vllm_config, "offload_config", None)
     reasons = []
 
+    if not _shared_expert_fusion_possible(config, parallel_config):
+        reasons.append(
+            "shared-expert fusion is off (needs ROCm, a shared expert, "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1, and no expert parallelism)"
+        )
     if not current_platform.is_rocm() or not on_gfx950():
         reasons.append("the device is not ROCm gfx950")
     if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
@@ -88,8 +113,6 @@ def _should_fuse_shared_expert(vllm_config: VllmConfig) -> bool:
         reasons.append("the MoE backend is not AITER")
     if getattr(parallel_config, "tensor_parallel_size", None) != 8:
         reasons.append("tensor parallelism is not the validated TP=8 layout")
-    if getattr(parallel_config, "enable_expert_parallel", False):
-        reasons.append("expert parallelism is enabled")
     if getattr(parallel_config, "enable_eplb", False):
         reasons.append("EPLB is enabled")
     if offload_config is not None and (
@@ -438,12 +461,7 @@ def _fuse_shared_experts_enabled(config, prefix: str = "") -> bool:
     routed experts. Some layers may carry a shared expert in a different quantization
     than the routed experts; when so, it runs as its own linear and must not be fused.
     """
-    if not (
-        current_platform.is_rocm()
-        and getattr(config, "n_shared_experts", None)
-        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        and not get_current_vllm_config().parallel_config.enable_expert_parallel
-    ):
+    if not _shared_expert_fusion_possible(config):
         return False
     return _shared_experts_are_fp4(
         config, extract_layer_index(prefix) if prefix else None
@@ -507,12 +525,18 @@ class DeepseekV4MoE(nn.Module):
 
         self.n_shared_experts = config.n_shared_experts
 
+        # The checkpoint picks the kernel. An MXFP4 shared expert matches the
+        # routed experts and folds into the normal fused MoE, which redirects its
+        # weights into a routed slot at load time. A native-FP8 shared expert
+        # alongside MXFP4 routed experts instead needs the heterogeneous AITER
+        # kernel, which keeps the shared MLP and absorbs it after loading.
         self.fuse_shared_experts = _fuse_shared_experts_enabled(config, prefix)
-        # The heterogeneous path absorbs a native-FP8 shared MLP after loading and
-        # so needs that module to stay materialized, which the same-precision MXFP4
-        # fusion below does not. The two never apply to the same checkpoint.
         self.fuse_heterogeneous_shared_expert = (
             fuse_heterogeneous_shared_expert and not self.fuse_shared_experts
+        )
+        # Either path appends the shared expert as a slot in the grouped GEMM.
+        fuse_shared_into_routed = (
+            self.fuse_shared_experts or self.fuse_heterogeneous_shared_expert
         )
 
         if config.n_shared_experts is None or self.fuse_shared_experts:
@@ -538,13 +562,9 @@ class DeepseekV4MoE(nn.Module):
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
         self.experts = FusedMoE(
-            shared_experts=(
-                None if self.fuse_heterogeneous_shared_expert else self.shared_experts
-            ),
+            shared_experts=None if fuse_shared_into_routed else self.shared_experts,
             n_shared_experts=(
-                config.n_shared_experts
-                if self.fuse_shared_experts or self.fuse_heterogeneous_shared_expert
-                else None
+                config.n_shared_experts if fuse_shared_into_routed else None
             ),
             gate=self.gate,
             num_experts=config.n_routed_experts,
