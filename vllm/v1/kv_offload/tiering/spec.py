@@ -105,10 +105,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of total blocking time spent querying secondary "
-                    "tiers for a request, accumulated from first lookup until "
-                    "the request is allocated or finishes, in seconds."
+                    "Histogram of blocking time spent in a per-block tier lookup "
+                    "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.00001,
                     0.00005,
@@ -127,10 +127,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a request's first deferred "
-                    "secondary-tier lookup until the request is allocated or "
-                    "finishes, in seconds."
+                    "Histogram of wall-clock time from a per-block tier lookup "
+                    "first returning retry until that same tier lookup resolves "
+                    "as a hit or miss, labeled by tier, in seconds."
                 ),
+                labelnames=("tier",),
                 buckets=(
                     0.0001,
                     0.0005,

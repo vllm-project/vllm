@@ -30,11 +30,9 @@ class _JobMetadataLike(Protocol):
 
 @dataclass(slots=True)
 class _RequestMetricsState:
-    observed_lookups: dict[TierLabel, set[OffloadKey]] | None = field(
+    observed_lookups: dict[TierLabel, dict[OffloadKey, float | None]] | None = field(
         default_factory=dict
     )
-    sync_lookup_delay: float = 0.0
-    secondary_lookup_start_time: float | None = None
 
 
 @dataclass
@@ -75,13 +73,9 @@ class TieringMetricsTracker:
         if state is None:
             return
         state.observed_lookups = None
-        self._flush_lookup_delays(state)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        state = self._request_states.pop(req_context.req_id, None)
-        if state is None:
-            return
-        self._flush_lookup_delays(state)
+        self._request_states.pop(req_context.req_id, None)
 
     def on_lookup(
         self,
@@ -91,31 +85,28 @@ class TieringMetricsTracker:
         result: LookupResult,
         elapsed: float,
         *,
-        starts_async_delay: bool = False,
+        async_delay_start_time: float | None = None,
     ) -> None:
         state = self._request_states.get(req_context.req_id)
         assert state is not None
-        state.sync_lookup_delay += elapsed
 
         if state.observed_lookups is not None and result in (
             LookupResult.HIT,
             LookupResult.MISS,
         ):
-            observed = state.observed_lookups.setdefault(tier_label, set())
-            if key not in observed:
-                observed.add(key)
-                self._stats.increase_counter(
-                    TieringOffloadingMetrics.BLOCK_QUERIES,
-                    labelvalues=tier_label,
+            observed = state.observed_lookups.setdefault(tier_label, {})
+            start_time = observed.get(key)
+            if key not in observed or start_time is not None:
+                observed[key] = None
+                self._observe_resolved_lookup(
+                    tier_label,
+                    result,
+                    elapsed,
+                    start_time,
                 )
-                if result is LookupResult.HIT:
-                    self._stats.increase_counter(
-                        TieringOffloadingMetrics.BLOCK_HITS,
-                        labelvalues=tier_label,
-                    )
-
-        if starts_async_delay and state.secondary_lookup_start_time is None:
-            state.secondary_lookup_start_time = time.monotonic()
+        elif async_delay_start_time is not None and state.observed_lookups is not None:
+            observed = state.observed_lookups.setdefault(tier_label, {})
+            observed.setdefault(key, async_delay_start_time)
 
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
@@ -245,19 +236,30 @@ class TieringMetricsTracker:
                 labelvalues,
             )
 
-    def _flush_lookup_delays(self, state: _RequestMetricsState) -> None:
-        sync_delay = state.sync_lookup_delay
-        if sync_delay != 0:
-            state.sync_lookup_delay = 0.0
-            self._stats.observe_histogram(
-                TieringOffloadingMetrics.LOOKUP_SYNC_DELAY,
-                sync_delay,
+    def _observe_resolved_lookup(
+        self,
+        tier_label: TierLabel,
+        result: LookupResult,
+        elapsed: float,
+        async_start_time: float | None,
+    ) -> None:
+        self._stats.increase_counter(
+            TieringOffloadingMetrics.BLOCK_QUERIES,
+            labelvalues=tier_label,
+        )
+        if result is LookupResult.HIT:
+            self._stats.increase_counter(
+                TieringOffloadingMetrics.BLOCK_HITS,
+                labelvalues=tier_label,
             )
-
-        async_start = state.secondary_lookup_start_time
-        if async_start is not None:
-            state.secondary_lookup_start_time = None
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.LOOKUP_SYNC_DELAY,
+            elapsed,
+            tier_label,
+        )
+        if async_start_time is not None:
             self._stats.observe_histogram(
                 TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY,
-                time.monotonic() - async_start,
+                time.monotonic() - async_start_time,
+                tier_label,
             )
