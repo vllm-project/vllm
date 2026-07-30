@@ -4,10 +4,11 @@
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
@@ -40,6 +41,15 @@ class ApiError(RuntimeError):
 
 
 class HttpTransport:
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 3,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.max_attempts = max_attempts
+        self.sleep = sleep
+
     def request(
         self,
         url: str,
@@ -55,18 +65,31 @@ class HttpTransport:
             headers=dict(headers or {}),
             method=method,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                response_body = response.read().decode()
-        except urllib.error.HTTPError as error:
-            response_body = error.read().decode()
-            message = self._error_message(response_body, error.reason)
-            raise ApiError(
-                error.code,
-                f"API returned {error.code}: {message}",
-            ) from error
-        except urllib.error.URLError as error:
-            raise ApiError(None, f"API request failed: {error.reason}") from error
+        for attempt in range(self.max_attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    response_body = response.read().decode()
+                break
+            except urllib.error.HTTPError as error:
+                response_body = error.read().decode()
+                if error.code == 429 and attempt + 1 < self.max_attempts:
+                    delay = self._rate_limit_delay(error, response_body)
+                    print(
+                        f"API rate limit reached; retrying in {delay:g} seconds.",
+                        file=sys.stderr,
+                    )
+                    self.sleep(delay)
+                    continue
+                message = self._error_message(response_body, error.reason)
+                raise ApiError(
+                    error.code,
+                    f"API returned {error.code}: {message}",
+                ) from error
+            except urllib.error.URLError as error:
+                raise ApiError(
+                    None,
+                    f"API request failed: {error.reason}",
+                ) from error
 
         if not response_body:
             return None
@@ -82,6 +105,34 @@ class HttpTransport:
         except json.JSONDecodeError:
             return fallback
         return str(parsed.get("message", fallback))
+
+    @staticmethod
+    def _rate_limit_delay(
+        error: urllib.error.HTTPError,
+        response_body: str,
+    ) -> float:
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        scope = parsed.get("scope")
+        reset_header = (
+            "RateLimit-User-Reset" if scope == "rest_user" else "RateLimit-Reset"
+        )
+        candidates = [
+            error.headers.get("Retry-After"),
+            error.headers.get(reset_header),
+            parsed.get("reset"),
+        ]
+        for candidate in candidates:
+            try:
+                delay = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if delay >= 0:
+                return delay + 1
+        return 60
 
 
 class GitHubClient:
