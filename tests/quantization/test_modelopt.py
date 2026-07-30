@@ -14,9 +14,11 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
+    ModelOptFp8MoEMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
@@ -248,6 +250,26 @@ def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
     VocabParallelEmbedding.weight_loader(holder, scale, loaded_scale)
 
     assert torch.equal(scale, loaded_scale.reshape(1))
+
+
+def test_modelopt_fp8_moe_forwards_swiglu_params():
+    quant_method = object.__new__(ModelOptFp8MoEMethod)
+    quant_method.fp8_backend = Fp8MoeBackend.TRITON
+
+    layer = Mock()
+    layer.w13_weight_scale = torch.ones(2)
+    layer.w2_weight_scale = torch.ones(2)
+    layer.w13_input_scale = torch.ones(2)
+    layer.w2_input_scale = torch.ones(2)
+    layer.swiglu_alpha = 1.702
+    layer.swiglu_beta = 1.0
+    layer.swiglu_limit = 7.0
+
+    quant_config = quant_method.get_fused_moe_quant_config(layer)
+
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
 
 
 @pytest.mark.skipif(
