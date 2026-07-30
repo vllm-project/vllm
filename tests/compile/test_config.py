@@ -541,9 +541,10 @@ def _mock_config_for_cudagraph_sizes(
         (64, 16, 1088),
         # Widest decode batch off the capture stride, above the ceiling.
         (33, 16, 561),
-        # ... and off the stride while below it, where the ceiling stands but
-        # the generated sizes would otherwise stop at 400.
-        (24, 16, 512),
+        # ... and off the stride while below the ceiling. Coverage stops at the
+        # widest decode batch rather than at the ceiling, since no decode step
+        # between 408 and 512 tokens exists to capture a graph for.
+        (24, 16, 408),
     ],
 )
 def test_default_cudagraph_capture_size_covers_widest_uniform_decode(
@@ -665,7 +666,8 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 
     VllmConfig._set_cudagraph_sizes(config)
 
-    assert compilation_config.max_cudagraph_capture_size == 512
+    # 24 requests * 17 tokens, the widest decode batch inside the 512 budget.
+    assert compilation_config.max_cudagraph_capture_size == 408
     assert 544 not in compilation_config.cudagraph_capture_sizes
 
 
