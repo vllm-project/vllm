@@ -526,6 +526,24 @@ def test_extract_tool_calls_v11_without_args_skipped(mistral_tool_parser):
     )
 
 
+def test_extract_tool_calls_v11_ignores_trailing_text():
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_vocab.return_value = {"[TOOL_CALLS]": 1, "[ARGS]": 2}
+    parser = MistralToolParser(mock_tokenizer)
+
+    result = parser.extract_tool_calls(
+        '[TOOL_CALLS]get_weather{"city":"San Francisco"}Estimating the weather...',
+        request=_DUMMY_REQUEST,
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_weather"
+    assert result.tool_calls[0].function.arguments == json.dumps(
+        {"city": "San Francisco"}
+    )
+
+
 def _test_extract_tool_calls_streaming(
     tool_parser, tokenizer, model_output, tools, expected_tool_calls, expected_content
 ):
