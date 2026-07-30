@@ -4,181 +4,124 @@
 import gzip
 import os
 import subprocess
-from collections.abc import Mapping
 from pathlib import Path
 
 HELPER = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).parents[2]
     / ".buildkite"
     / "scripts"
     / "rocm"
     / "buildx-history-logs.sh"
 )
-
-
-def write_fake_docker(tmp_path: Path, body: str) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    docker = fake_bin / "docker"
-    docker.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
-    docker.chmod(0o755)
-    return fake_bin
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "buildx history ls" ]]; then
+    echo "builder/node/stale"
+    if [[ -f "${AFTER_SNAPSHOT}" ]]; then
+        echo "builder/node/new-a"
+        echo "builder/node/new-b"
+    fi
+elif [[ "$*" == *" history logs "*"failed-export" ]]; then
+    exit 41
+elif [[ "$*" == *" history logs "* ]]; then
+    echo "detailed log: $*"
+else
+    exit 42
+fi
+"""
 
 
 def run_helper(
-    command: str,
-    metadata_file: Path,
-    *,
-    fake_bin: Path,
-    log_root: Path,
-    env: Mapping[str, str] | None = None,
+    tmp_path: Path, metadata: str, command: str
 ) -> subprocess.CompletedProcess[str]:
-    helper_env = os.environ.copy()
-    helper_env.update(
-        {
-            "BUILDX_HISTORY_LOG_ROOT": str(log_root),
-            "PATH": f"{fake_bin}:{helper_env['PATH']}",
-            **(env or {}),
-        }
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text(FAKE_DOCKER)
+    (fake_bin / "docker").chmod(0o755)
+    (fake_bin / "buildkite-agent").write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$BUILDKITE_CALLS"\n'
     )
+    (fake_bin / "buildkite-agent").chmod(0o755)
+    metadata_file = tmp_path / "metadata.json"
+    metadata_file.write_text(metadata)
+    env = os.environ | {
+        "AFTER_SNAPSHOT": str(tmp_path / "after"),
+        "BUILDKITE_CALLS": str(tmp_path / "buildkite-calls"),
+        "BUILDX_HISTORY_LOG_ROOT": str(tmp_path / "logs"),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
     return subprocess.run(
         [
             "bash",
             "-c",
-            'set -uo pipefail\nsource "$1"\n' + command,
-            "buildx-history-test",
+            'set -uo pipefail; source "$1"; ' + command,
+            "test",
             str(HELPER),
             str(metadata_file),
+            str(tmp_path / "after"),
         ],
         check=False,
-        env=helper_env,
         capture_output=True,
+        env=env,
         text=True,
     )
 
 
-def compressed_logs(log_root: Path) -> list[str]:
+def logs(tmp_path: Path) -> list[str]:
     return [
         gzip.decompress(path.read_bytes()).decode()
-        for path in sorted(log_root.rglob("*.log.gz"))
+        for path in sorted((tmp_path / "logs").rglob("*.log.gz"))
     ]
 
 
-def test_nested_bake_metadata_exports_every_builder_record(
+def test_metadata_refs_are_deduplicated_and_step_path_is_safe(
     tmp_path: Path,
 ) -> None:
-    metadata_file = tmp_path / "metadata.json"
-    metadata_file.write_text(
-        """
-        {
-          "group": {
-            "first": {"buildx.build.ref": "builder-a/node-0/build-a"},
-            "nested": {
-              "second": {"buildx.build.ref": "builder-a/node-1/build-b"},
-              "duplicate": {"buildx.build.ref": "builder-a/node-0/build-a"}
-            }
-          }
-        }
-        """
-    )
-    call_log = tmp_path / "docker-calls"
-    fake_bin = write_fake_docker(
-        tmp_path,
-        """
-printf '%s\\n' "$*" >> "${FAKE_DOCKER_CALL_LOG}"
-if [[ "$*" == *" history logs "* ]]; then
-    printf 'detailed log: %s\\n' "$*"
-    exit 0
-fi
-exit 42
-""",
-    )
+    metadata = """{
+      "a": {"buildx.build.ref": "builder/node/build-a"},
+      "b": {"buildx.build.ref": "builder/node/build-b"},
+      "duplicate": {"buildx.build.ref": "builder/node/build-a"}
+    }"""
     result = run_helper(
-        'capture_buildx_history_logs "$2" "metadata" 0',
-        metadata_file,
-        fake_bin=fake_bin,
-        log_root=tmp_path / "logs",
-        env={"FAKE_DOCKER_CALL_LOG": str(call_log)},
+        tmp_path,
+        metadata,
+        'capture_buildx_history_logs "$2" "../metadata" 0',
     )
 
+    artifact_call = (tmp_path / "buildkite-calls").read_text()
     assert result.returncode == 0
-    logs = compressed_logs(tmp_path / "logs")
-    assert len(logs) == 2
-    expected_a = "--builder builder-a history logs --progress=plain build-a"
-    expected_b = "--builder builder-a history logs --progress=plain build-b"
-    assert any(expected_a in log for log in logs)
-    assert any(expected_b in log for log in logs)
-    assert len(call_log.read_text().splitlines()) == 2
+    assert len(logs(tmp_path)) == 2
+    assert len(list((tmp_path / "logs").iterdir())) == 1
+    assert "artifact upload" in artifact_call
+    assert "*.log.gz" in artifact_call
 
 
-def test_failed_bake_exports_all_new_records_but_not_stale_history(
+def test_failed_bake_exports_new_history_but_not_stale(
     tmp_path: Path,
 ) -> None:
-    metadata_file = tmp_path / "metadata.json"
-    metadata_file.touch()
-    state_file = tmp_path / "history-list-count"
-    fake_bin = write_fake_docker(
-        tmp_path,
-        """
-if [[ "$1 $2 $3" == "buildx history ls" ]]; then
-    count=0
-    [[ ! -f "${FAKE_HISTORY_STATE}" ]] || read -r count < "${FAKE_HISTORY_STATE}"
-    count=$((count + 1))
-    printf '%s\\n' "${count}" > "${FAKE_HISTORY_STATE}"
-    printf '%s\\n' "builder-b/node-0/stale"
-    if ((count > 1)); then
-        printf '%s\\n' "builder-b/node-0/new-a" "builder-b/node-1/new-b"
-    fi
-    exit 0
-fi
-if [[ "$*" == *" history logs "* ]]; then
-    printf 'detailed log: %s\\n' "$*"
-    exit 0
-fi
-exit 42
-""",
-    )
     result = run_helper(
+        tmp_path,
+        "",
         (
-            'snapshot_buildx_history_refs "$2" || exit $?\n'
-            'capture_buildx_history_logs "$2" "failed-bake" 37'
+            'snapshot_buildx_history_refs "$2"; touch "$3"; '
+            'capture_buildx_history_logs "$2" failed-bake 37'
         ),
-        metadata_file,
-        fake_bin=fake_bin,
-        log_root=tmp_path / "logs",
-        env={"FAKE_HISTORY_STATE": str(state_file)},
     )
 
     assert result.returncode == 37
-    logs = compressed_logs(tmp_path / "logs")
-    assert len(logs) == 2
-    assert all("stale" not in log for log in logs)
-    expected_a = "--builder builder-b history logs --progress=plain new-a"
-    expected_b = "--builder builder-b history logs --progress=plain new-b"
-    assert any(expected_a in log for log in logs)
-    assert any(expected_b in log for log in logs)
+    output = logs(tmp_path)
+    assert all("stale" not in log for log in output)
+    assert any("new-a" in log for log in output)
+    assert any("new-b" in log for log in output)
 
 
-def test_log_export_failure_preserves_the_build_status(tmp_path: Path) -> None:
-    metadata_file = tmp_path / "metadata.json"
-    metadata_file.write_text('{"buildx.build.ref": "builder-c/node-0/failed-export"}')
-    fake_bin = write_fake_docker(
-        tmp_path,
-        """
-if [[ "$*" == *" history logs "* ]]; then
-    echo "history export failed" >&2
-    exit 41
-fi
-exit 42
-""",
-    )
+def test_export_failure_does_not_mask_build_status(tmp_path: Path) -> None:
     result = run_helper(
-        'capture_buildx_history_logs "$2" "failed-export" 23',
-        metadata_file,
-        fake_bin=fake_bin,
-        log_root=tmp_path / "logs",
+        tmp_path,
+        '{"buildx.build.ref": "builder/node/failed-export"}',
+        'capture_buildx_history_logs "$2" failed-export 23',
     )
 
     assert result.returncode == 23
-    assert not compressed_logs(tmp_path / "logs")
+    assert logs(tmp_path) == []
     assert "could not export Buildx history log" in result.stderr

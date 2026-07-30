@@ -14,22 +14,15 @@
 set -euo pipefail
 
 CI_BAKE_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "${CI_BAKE_SCRIPT_DIR}/rocm/cache-utils.sh"
 source "${CI_BAKE_SCRIPT_DIR}/rocm/buildx-history-logs.sh"
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/cache-utils.sh .buildkite/scripts/rocm/build-ci-base.sh"
-# Local builds hash these inputs directly instead of their checkout coordinates.
-DEFAULT_CI_BASE_CONTENT_ARG_EXCLUDES="REMOTE_VLLM VLLM_REPO VLLM_BRANCH"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="2"
 IMAGE_EXISTED_BEFORE_BUILD=0
-BASE_IMAGE_DIGEST_CACHE_REF=""
-BASE_IMAGE_DIGEST_CACHE_VALUE=""
-BASE_IMAGE_DIGEST_CACHE_READY=0
-BASE_IMAGE_PINNED_REF=""
 
 TARGET=""
 CI_HCL_SOURCE="${CI_HCL_SOURCE:-}"
@@ -156,29 +149,47 @@ hash_string_short() {
 }
 
 list_content_files() {
-    local path="$1"
+    git ls-files -z -- "$1" | LC_ALL=C sort -z
+}
 
-    # Mirror generated artifacts excluded from the Docker build context. The
-    # .dockerignore file itself is hashed so changes to these rules invalidate
-    # the cache metadata even when the visible source files stay unchanged.
-    find "${path}" \
-        -type d \( \
-            -name __pycache__ -o -name .mypy_cache -o \
-            -name .venv -o -name build -o -name dist -o \
-            -name 'cmake-build-*' -o -name develop-eggs -o \
-            -name downloads -o -name eggs -o -name .eggs -o \
-            -name lib -o -name lib64 -o -name parts -o \
-            -name sdist -o -name var -o -name wheels -o \
-            -name python-wheels -o -name '*.egg-info' \
-            -o -path 'rust/target' -o -path '*/rust/target' \
-        \) -prune -o \
-        \( -type f -o -type l \) \
-        ! -name '*.py[cod]' ! -name "*\$py.class" \
-        ! -name .Python ! -name .installed.cfg \
-        ! -name '*.egg' ! -name MANIFEST \
-        ! -name CMakeUserPresets.json \
-        ! -path '*/vllm/*.so' ! -path '*/vllm/vllm-rs' -print0 \
-        | LC_ALL=C sort -z
+hash_content_file() {
+    local file="$1"
+    local mode="644"
+    local raw_mode=""
+
+    if [[ -L "${file}" ]]; then
+        printf 'symlink:%s\ntarget:%s\n' "${file}" "$(readlink "${file}")"
+        return
+    fi
+    raw_mode=$(stat -c '%a' "${file}")
+    if (((8#${raw_mode} & 0111) != 0)); then
+        mode="755"
+    fi
+    printf 'file:%s\nmode:%s\n' "${file}" "${mode}"
+    sha256sum "${file}"
+}
+
+hash_content_directory() {
+    if ! list_content_files "$1" | while IFS= read -r -d '' file; do
+        hash_content_file "${file}" || exit $?
+    done; then
+        echo "Error: failed to hash content under $1" >&2
+        return 1
+    fi
+}
+
+compute_content_hash() {
+    local path=""
+
+    for path in "$@"; do
+        if [[ -L "${path}" || -f "${path}" ]]; then
+            hash_content_file "${path}" || return $?
+        elif [[ -d "${path}" ]]; then
+            hash_content_directory "${path}" || return $?
+        else
+            printf 'missing:%s\n' "${path}"
+        fi
+    done | sha256sum | cut -d' ' -f1
 }
 
 compose_dependency_cache_key() {
@@ -302,27 +313,6 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
-get_ci_base_content_arg_names() {
-    local excludes=""
-
-    if [[ -v CI_BASE_CONTENT_ARG_EXCLUDES ]]; then
-        excludes="${CI_BASE_CONTENT_ARG_EXCLUDES}"
-    elif [[ "${REMOTE_VLLM:-0}" == "0" ]]; then
-        excludes="${DEFAULT_CI_BASE_CONTENT_ARG_EXCLUDES}"
-    fi
-
-    get_content_arg_names "$@" \
-        | awk -v excludes="${excludes}" '
-            BEGIN {
-                count = split(excludes, names, /[[:space:]]+/)
-                for (idx = 1; idx <= count; idx++) {
-                    excluded[names[idx]] = 1
-                }
-            }
-            NF && !excluded[$0]
-        '
-}
-
 compute_ci_base_content_hash_once() {
     local -a content_paths=()
     local -a content_args=()
@@ -332,8 +322,7 @@ compute_ci_base_content_hash_once() {
 
     read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
     mapfile -t content_args < <(
-        get_ci_base_content_arg_names \
-            "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
     )
     if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
         echo "Failed to hash ci_base content files" >&2
@@ -360,7 +349,7 @@ compute_ci_base_content_hash_once() {
 }
 
 compute_ci_base_content_hash() {
-    local attempts="${CI_BASE_HASH_ATTEMPTS:-1}"
+    local attempts="${CI_BASE_HASH_ATTEMPTS:-3}"
     local delay_secs="${CI_BASE_HASH_RETRY_DELAY:-5}"
     local attempt=0
     local hash=""
@@ -414,6 +403,46 @@ extract_dockerfile_arg_default() {
         "${dockerfile}" | head -1
 }
 
+resolve_image_digest() {
+    local image_ref="$1"
+    local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
+    local delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
+    local attempt=0
+    local digest=""
+    local output=""
+    local status=0
+
+    if [[ "${image_ref}" =~ @(sha256:[0-9a-f]{64})$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return
+    fi
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
+        || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid image digest retry configuration" >&2
+        return 1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        status=0
+        output=$(docker buildx imagetools inspect "${image_ref}" 2>&1) || status=$?
+        digest=$(awk '$1 == "Digest:" { print $2; exit }' <<< "${output}")
+        if ((status == 0)) && [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "${digest}"
+            return
+        fi
+        if ((attempt < attempts)); then
+            printf \
+                'Image digest lookup failed for %s (%d/%d, status %d); retrying\n' \
+                "${image_ref}" "${attempt}" "${attempts}" "${status}" >&2
+            sleep "${delay_secs}"
+        fi
+    done
+
+    printf 'Failed to resolve digest for %s (status %d)\n%s\n' \
+        "${image_ref}" "${status}" "${output:-<no output>}" >&2
+    return 1
+}
+
 resolve_dockerfile_arg_value() {
     local dockerfile="$1"
     local arg_name="$2"
@@ -450,38 +479,33 @@ hash_dockerfile_arg_values() {
     for arg_name in "$@"; do
         [[ -n "${arg_name}" ]] || continue
         arg_value=$(resolve_dockerfile_arg_value "${dockerfile}" "${arg_name}")
-        printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
         if [[ "${arg_name}" == "BASE_IMAGE" && -n "${arg_value}" ]]; then
             if ! digest=$(resolve_image_digest "${arg_value}"); then
                 echo "Failed to resolve digest for BASE_IMAGE=${arg_value}" >&2
                 return 1
             fi
             printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest}"
+        else
+            printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
         fi
     done
 }
 
-prime_base_image_digest_cache() {
+pin_base_image() {
     local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
     local base_image=""
+    local digest=""
 
     base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
     [[ -n "${base_image}" ]] || return 0
-
-    # Read by resolve_image_digest in the sourced cache helper.
-    # shellcheck disable=SC2034
-    BASE_IMAGE_DIGEST_CACHE_REF="${base_image}"
-    if ! BASE_IMAGE_DIGEST_CACHE_VALUE=$(resolve_image_digest "${base_image}"); then
+    if ! digest=$(resolve_image_digest "${base_image}"); then
         echo "Error: could not resolve base image digest for ${base_image}" >&2
         echo "Refusing to compute content-addressed cache keys from a mutable tag." >&2
         return 1
     fi
-    # Read by resolve_image_digest in the sourced cache helper.
-    # shellcheck disable=SC2034
-    BASE_IMAGE_DIGEST_CACHE_READY=1
-    BASE_IMAGE_PINNED_REF="${base_image%@*}@${BASE_IMAGE_DIGEST_CACHE_VALUE}"
-    echo "Resolved base image digest once for cache metadata: ${BASE_IMAGE_DIGEST_CACHE_VALUE}"
-    echo "Pinned base image for this build: ${BASE_IMAGE_PINNED_REF}"
+    BASE_IMAGE="${base_image%@*}@${digest}"
+    export BASE_IMAGE
+    echo "Pinned base image for this build: ${BASE_IMAGE}"
 }
 
 is_ci_base_target() {
@@ -513,22 +537,6 @@ set_buildkite_metadata() {
     [[ -n "${value}" ]] || return 0
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent meta-data set "${key}" "${value}" || true
-    fi
-}
-
-set_required_buildkite_metadata() {
-    local key="$1"
-    local value="$2"
-
-    if [[ -z "${value}" ]]; then
-        echo "Required Buildkite metadata ${key} is empty" >&2
-        return 1
-    fi
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent meta-data set "${key}" "${value}"
-    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
-        echo "buildkite-agent not found; cannot set required metadata ${key}" >&2
-        return 1
     fi
 }
 
@@ -800,8 +808,12 @@ compute_ci_base_hash_if_needed() {
     if [[ -z "${CI_BASE_CONTENT_FILES:-}" ]]; then
         return 0
     fi
+    if is_ci_base_target && [[ "${REMOTE_VLLM:-0}" != "0" ]]; then
+        echo "Error: content-addressed ci_base builds require REMOTE_VLLM=0" >&2
+        return 1
+    fi
 
-    prime_base_image_digest_cache
+    pin_base_image
     CI_BASE_CONTENT_HASH=$(compute_ci_base_content_hash)
     export CI_BASE_CONTENT_HASH
     echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}..."
@@ -833,7 +845,6 @@ configure_ci_base_image_refs() {
     local stable_tag="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
     local content_tag=""
     local commit_tag=""
-    local primary_tag=""
 
     CI_BASE_STABLE_CACHE_REF="${CI_BASE_STABLE_CACHE_REF:-${stable_tag}}"
     export CI_BASE_STABLE_CACHE_REF
@@ -855,46 +866,33 @@ configure_ci_base_image_refs() {
     fi
     CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
 
-    # The content-addressed tag is always primary. Commit and stable aliases are
-    # useful for discovery, but are mutable and must never be handed downstream.
-    # *_EXTRA is only passed to bake when an alias is not already primary.
-    primary_tag="${content_tag}"
+    # The content tag is canonical. Commit and stable tags are discovery aliases.
     if should_push_stable_ci_base_tag; then
         CI_BASE_IMAGE_TAG_STABLE="${stable_tag}"
     else
         CI_BASE_IMAGE_TAG_STABLE=""
     fi
-    CI_BASE_IMAGE_TAG="${primary_tag}"
-    if [[ "${primary_tag}" == "${content_tag}" ]]; then
-        CI_BASE_IMAGE_TAG_CONTENT_EXTRA=""
-    else
-        CI_BASE_IMAGE_TAG_CONTENT_EXTRA="${content_tag}"
-    fi
-    if [[ -n "${commit_tag}" && "${commit_tag}" != "${primary_tag}" ]]; then
+    CI_BASE_IMAGE_TAG="${content_tag}"
+    if [[ -n "${commit_tag}" && "${commit_tag}" != "${content_tag}" ]]; then
         CI_BASE_IMAGE_TAG_COMMIT_EXTRA="${commit_tag}"
     else
         CI_BASE_IMAGE_TAG_COMMIT_EXTRA=""
     fi
     export CI_BASE_IMAGE_TAG
     export CI_BASE_IMAGE_TAG_COMMIT_EXTRA
-    export CI_BASE_IMAGE_TAG_CONTENT_EXTRA
     export CI_BASE_IMAGE_TAG_CONTENT_REF
     export CI_BASE_IMAGE_TAG_COMMIT_REF
     export CI_BASE_IMAGE_TAG_STABLE
 
     if is_ci_base_target; then
-        IMAGE_TAG="${primary_tag}"
-        CI_BASE_IMAGE="${primary_tag}"
+        IMAGE_TAG="${content_tag}"
+        CI_BASE_IMAGE="${content_tag}"
         export CI_BASE_IMAGE
         export IMAGE_TAG
 
         echo "ci_base primary image tag: ${CI_BASE_IMAGE_TAG}"
         if [[ -n "${commit_tag}" ]]; then
-            if [[ "${commit_tag}" == "${primary_tag}" ]]; then
-                echo "ci_base commit image tag: ${commit_tag} (primary)"
-            else
-                echo "ci_base commit image tag: ${commit_tag}"
-            fi
+            echo "ci_base commit image tag: ${commit_tag}"
         fi
         echo "ci_base content image tag: ${content_tag}"
         echo "ci_base stable cache source: ${CI_BASE_STABLE_CACHE_REF}"
@@ -911,7 +909,7 @@ configure_ci_base_image_refs() {
     fi
 
     if [[ -z "${CI_BASE_IMAGE:-}" || "${CI_BASE_IMAGE}" == "${stable_tag}" ]]; then
-        CI_BASE_IMAGE="${primary_tag}"
+        CI_BASE_IMAGE="${content_tag}"
         export CI_BASE_IMAGE
         echo "Using ci_base image: ${CI_BASE_IMAGE}"
     else
@@ -924,7 +922,6 @@ publish_ci_base_handoff_ref() {
     local content_ref="${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
     local digest=""
     local handoff_ref=""
-    local remote_hash=""
 
     is_ci_base_target || return 0
     if [[ -z "${source_ref}" || -z "${content_ref}" ]]; then
@@ -937,28 +934,20 @@ publish_ci_base_handoff_ref() {
     fi
 
     handoff_ref="${content_ref%@*}@${digest}"
-    remote_hash=$(
-        get_remote_image_label_with_retry \
-            "${handoff_ref}" "vllm.ci_base.content_hash"
-    )
-    if [[ "${remote_hash}" != "${CI_BASE_CONTENT_HASH}" ]]; then
-        echo "Published ci_base image has unexpected content metadata: ${handoff_ref}" >&2
-        echo "  expected content hash: ${CI_BASE_CONTENT_HASH}" >&2
-        echo "  remote content hash:   ${remote_hash:-<missing>}" >&2
-        return 1
-    fi
-    if ! remote_ci_base_metadata_is_current_with_retry "${handoff_ref}"; then
-        echo "Published ci_base image has stale metadata: ${handoff_ref}" >&2
+    if ! confirm_remote_image_push "${handoff_ref}"; then
+        echo "Could not validate immutable ci_base handoff: ${handoff_ref}" >&2
         return 1
     fi
 
-    CI_BASE_IMAGE="${handoff_ref}"
-    export CI_BASE_IMAGE
-    if ! set_required_buildkite_metadata "rocm-ci-base-image" "${handoff_ref}"; then
-        echo "Could not publish required ci_base handoff metadata" >&2
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        if ! buildkite-agent meta-data set "rocm-ci-base-image" "${handoff_ref}"; then
+            echo "Could not publish required ci_base handoff metadata" >&2
+            return 1
+        fi
+    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
+        echo "buildkite-agent not found; cannot publish ci_base handoff" >&2
         return 1
     fi
-    set_buildkite_metadata "rocm-ci-base-image-digest" "${digest}"
     echo "Published immutable ci_base handoff: ${handoff_ref}"
 }
 
@@ -967,7 +956,6 @@ ci_base_output_refs() {
         "${IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}" \
-        "${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}" \
         "${CI_BASE_IMAGE_TAG_STABLE:-}" \
         | awk 'NF && !seen[$0]++'
 }
@@ -1274,8 +1262,7 @@ ci_base_metadata_pairs() {
         fi
     fi
     mapfile -t content_args < <(
-        get_ci_base_content_arg_names \
-            "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
     )
 
     base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
@@ -1295,7 +1282,7 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.ci_base.dockerfile" "${dockerfile}"
     metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
     metadata_pair "vllm.ci_base.image.primary" "${CI_BASE_IMAGE_TAG:-}"
-    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}}"
+    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
     metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}}"
     metadata_pair "vllm.ci_base.image.stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
     metadata_pair "vllm.ci_base.git_commit" "${BUILDKITE_COMMIT:-}"
@@ -1424,20 +1411,8 @@ uses_rocm_rust_cache() {
     esac
 }
 
-uses_rocm_dependency_cache() {
-    case "${TARGET}" in
-        ci-base-rocm-ci|ci-base-rocm-ci-with-deps|nixl-rocm-ci|rocshmem-rocm-ci|deepep-rocm-ci)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
 compute_rocm_csrc_content_hash() {
     local bake_dir=""
-    local content_files_hash=""
     local dockerfile_rocm=""
     local -a content_paths=(
         "requirements/common.txt"
@@ -1457,13 +1432,9 @@ compute_rocm_csrc_content_hash() {
     mapfile -t content_args < <(
         get_content_arg_names "${dockerfile_rocm}" "base csrc-build" "${ROCM_CSRC_CONTENT_ARGS:-}"
     )
-    if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-        echo "Failed to hash ROCm csrc content files" >&2
-        return 1
-    fi
 
     {
-        printf 'csrc-input-files-hash:%s\n' "${content_files_hash}"
+        printf 'csrc-input-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${dockerfile_rocm}"
         printf 'resolved-build-args:\n'
         hash_dockerfile_arg_values "${dockerfile_rocm}" "${content_args[@]}"
@@ -1492,7 +1463,6 @@ compute_rocm_csrc_content_hash_if_needed() {
 
 compute_rocm_rust_content_hash() {
     local bake_dir=""
-    local content_files_hash=""
     local dockerfile_rocm=""
     local -a content_paths=(
         "requirements/build/rust.txt"
@@ -1510,18 +1480,11 @@ compute_rocm_rust_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     mapfile -t content_args < <(
-        get_ci_base_content_arg_names \
-            "${dockerfile_rocm}" \
-            "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" \
-            "${ROCM_RUST_CONTENT_ARGS:-}"
+        get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
     )
-    if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-        echo "Failed to hash ROCm Rust content files" >&2
-        return 1
-    fi
 
     {
-        printf 'rust-input-files-hash:%s\n' "${content_files_hash}"
+        printf 'rust-input-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${dockerfile_rocm}"
         printf 'resolved-build-args:\n'
         hash_dockerfile_arg_values "${dockerfile_rocm}" "${content_args[@]}"
@@ -1617,9 +1580,6 @@ EOF
         for arg_name in "${arg_names[@]}"; do
             [[ -n "${arg_name}" ]] || continue
             arg_value=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "${arg_name}")
-            if [[ "${arg_name}" == "BASE_IMAGE" && -n "${BASE_IMAGE_PINNED_REF}" ]]; then
-                arg_value="${BASE_IMAGE_PINNED_REF}"
-            fi
             [[ -n "${arg_value}" ]] || continue
             printf '    %s = "%s"\n' "${arg_name}" "$(hcl_escape_string "${arg_value}")"
         done
@@ -2346,16 +2306,10 @@ main() {
     maybe_skip_existing_image
     setup_builder
     prepare_git_cache_metadata
-    if uses_rocm_dependency_cache; then
-        extract_dependency_pins
-    fi
+    extract_dependency_pins
     write_rocm_build_arg_override
-    if uses_rocm_dependency_cache; then
-        compute_dependency_cache_keys
-    fi
-    if is_ci_base_target; then
-        write_ci_base_label_override
-    fi
+    compute_dependency_cache_keys
+    write_ci_base_label_override
     compute_rocm_csrc_content_hash_if_needed
     compute_rocm_rust_content_hash_if_needed
     write_rocm_cache_override

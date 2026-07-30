@@ -56,7 +56,7 @@ main() {
 
     if ! use_ci_base_if_present; then
         if [[ "${BUILDKITE:-false}" == "true" ]]; then
-            echo "Required ROCm ci_base handoff metadata is missing" >&2
+            echo "Required ROCm ci_base handoff metadata is missing or invalid" >&2
             return 1
         fi
         echo "No ROCm ci_base handoff metadata found; using the local default"

@@ -360,10 +360,6 @@ variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
   default = ""
 }
 
-variable "CI_BASE_IMAGE_TAG_CONTENT_EXTRA" {
-  default = ""
-}
-
 variable "CI_BASE_IMAGE_TAG_STABLE" {
   default = ""
 }
@@ -415,7 +411,6 @@ target "ci-base-rocm-ci" {
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
       CI_BASE_IMAGE_TAG_COMMIT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT_EXTRA}" : "",
-      CI_BASE_IMAGE_TAG_CONTENT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT_EXTRA}" : "",
       CI_BASE_STABLE_CACHE_REF != "" ? "type=registry,ref=${CI_BASE_STABLE_CACHE_REF}" : "",
     ]),
     # Import upstream dependency caches so NIXL/ROCShmem/DeepEP stages
@@ -423,7 +418,7 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA, CI_BASE_IMAGE_TAG_CONTENT_EXTRA, CI_BASE_IMAGE_TAG_STABLE])
+  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA, CI_BASE_IMAGE_TAG_STABLE])
   output   = ["type=registry"]
 }
 

@@ -15,10 +15,7 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
-      BUILDKIT_TTY_LOG_LINES: "1"
       TERM: "xterm-256color"
-    artifact_paths:
-      - "build/buildkit-logs/**/*"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
@@ -44,13 +41,10 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
-      BUILDKIT_TTY_LOG_LINES: "1"
       TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       REMOTE_VLLM: "0"
-    artifact_paths:
-      - "build/buildkit-logs/**/*"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
@@ -73,15 +67,12 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
-      BUILDKIT_TTY_LOG_LINES: "1"
       TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
       REMOTE_VLLM: "1"
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
-    artifact_paths:
-      - "build/buildkit-logs/**/*"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure

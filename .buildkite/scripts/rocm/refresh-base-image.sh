@@ -8,7 +8,6 @@
 set -euo pipefail
 
 ROCM_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "${ROCM_SCRIPT_DIR}/cache-utils.sh"
 source "${ROCM_SCRIPT_DIR}/buildx-history-logs.sh"
 
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
@@ -29,11 +28,23 @@ metadata_set() {
     fi
 }
 
-list_content_files() {
-    local path="$1"
+compute_content_hash() {
+    local path=""
+    local file=""
 
-    find "${path}" \( -type f -o -type l \) -print0 \
-        | LC_ALL=C sort -z
+    for path in "$@"; do
+        if [[ -d "${path}" ]]; then
+            while IFS= read -r -d '' file; do
+                printf 'file:%s\n' "${file}"
+                sha256sum "${file}"
+            done < <(find "${path}" -type f -print0 | sort -z)
+        elif [[ -f "${path}" ]]; then
+            printf 'file:%s\n' "${path}"
+            sha256sum "${path}"
+        else
+            printf 'missing:%s\n' "${path}"
+        fi
+    done | sha256sum | cut -d' ' -f1
 }
 
 clean_docker_tag() {
@@ -53,6 +64,14 @@ extract_arg_default() {
 
     sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${DOCKERFILE}" | head -1
+}
+
+resolve_image_digest() {
+    local image_ref="$1"
+
+    docker buildx imagetools inspect "${image_ref}" 2>/dev/null \
+        | sed -n -E 's/^Digest:[[:space:]]+//p' \
+        | head -1 || true
 }
 
 resolve_rocm_base_arg_value() {
@@ -300,19 +319,14 @@ compute_base_content_hash() {
     local base_image_digest="$2"
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
     local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
-    local content_files_hash=""
     local -a content_paths=()
     local -a content_arg_names=()
 
     read -r -a content_paths <<< "${content_files}"
     read -r -a content_arg_names <<< "${content_args}"
-    if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-        echo "Failed to hash ROCm base content files" >&2
-        return 1
-    fi
 
     {
-        printf 'content-files-hash:%s\n' "${content_files_hash}"
+        printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
         printf 'resolved-build-args:\n'
         hash_rocm_base_arg_values \
@@ -327,7 +341,6 @@ build_base_image() {
     local build_suffix=""
     local base_image_arg=""
     local base_image_digest=""
-    local base_image_pinned=""
     local rocm_version=""
     local triton_arg=""
     local pytorch_arg=""
@@ -368,21 +381,10 @@ build_base_image() {
         build_suffix="_bk_${BUILDKITE_BUILD_NUMBER}"
     fi
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
-    if ! base_image_digest="$(resolve_image_digest "${base_image_arg}")"; then
-        echo "Error: could not resolve base image digest for ${base_image_arg}" >&2
-        echo "Refusing to publish cache metadata for a mutable base tag." >&2
-        return 1
-    fi
-    base_image_pinned="${base_image_arg%@*}@${base_image_digest}"
+    base_image_digest="$(resolve_image_digest "${base_image_arg}")"
     read -r -a content_paths <<< "${content_files}"
-    if ! content_files_hash="$(compute_content_hash "${content_paths[@]}")"; then
-        echo "Failed to hash ROCm base metadata content files" >&2
-        return 1
-    fi
-    if ! base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}"); then
-        echo "Failed to compute ROCm base content hash" >&2
-        return 1
-    fi
+    content_files_hash="$(compute_content_hash "${content_paths[@]}")"
+    base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
     rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
     triton_arg="$(extract_arg_default TRITON_BRANCH)"
     pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
@@ -430,7 +432,6 @@ build_base_image() {
     echo "Descriptive tag: ${descriptive_tag}"
     echo "Stable tag: ${stable_tag} ($(should_push_stable_tag && echo enabled || echo disabled))"
     echo "Content hash: ${base_hash}"
-    echo "Pinned upstream base image: ${base_image_pinned}"
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
 
@@ -444,7 +445,6 @@ build_base_image() {
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         "${build_metadata_args[@]}" \
         --file "${DOCKERFILE}" \
-        --build-arg "BASE_IMAGE=${base_image_pinned}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
         "${sccache_args[@]}" \
         --label "org.opencontainers.image.source=https://github.com/vllm-project/vllm" \
@@ -529,6 +529,4 @@ main() {
     build_base_image
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main "$@"
-fi
+main "$@"

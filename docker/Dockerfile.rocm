@@ -659,8 +659,42 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 FROM mori_base AS ci_base
 ARG COMMON_WORKDIR
 
-# FFmpeg dev libs needed by torchcodec.
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=${CARGO_HOME}/bin:${PATH}
+
+# Bake the Rust/protoc toolchain into ci_base so Rust build/test steps do not
+# need to fetch it on each per-commit image build.
+COPY --from=rust-toolchain /root/.cargo /root/.cargo
+COPY --from=rust-toolchain /root/.rustup /root/.rustup
+COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
+
+# Update rdma-core to support latest rocshmem.
+ARG DEEPEP_NIC
+RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
+    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+    cd /tmp/rdma-core && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
+    ninja && ninja install && ldconfig && rm -rf /tmp/rdma-core; \
+fi
+
+# Install NIXL + DeepEP wheels.
+RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
+    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
+    uv pip install --system /nixl_install/*.whl /deep_install/*.whl
+
+# Copy ROCShmem runtime libraries.
+COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
+
+# RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    util-linux \
     unzip \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
@@ -722,48 +756,6 @@ COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
-
-# Install communication dependencies after the shared Python environment.
-# Changes to NIXL, ROCShmem, or DeepEP can then reuse the expensive Python
-# dependency layers.
-ARG DEEPEP_NIC="cx7"
-ENV ROCSHMEM_DIR=/opt/rocshmem
-ENV LD_LIBRARY_PATH=${ROCSHMEM_DIR}/lib:${LD_LIBRARY_PATH}
-
-RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-    librdmacm1 \
-    libibverbs1 \
-    ibverbs-providers \
-    ibverbs-utils \
-    util-linux \
-    && rm -rf /var/lib/apt/lists/*
-
-# Update rdma-core to support latest rocshmem.
-RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
-    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
-    cd /tmp/rdma-core && \
-    mkdir -p build && cd build && \
-    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
-    ninja && ninja install && ldconfig && rm -rf /tmp/rdma-core; \
-fi
-
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
-
-RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
-    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /nixl_install/*.whl /deep_install/*.whl
-
-# Join the independently built Rust/protoc toolchain only after Python and
-# runtime dependencies are installed. Linked COPY layers remain reusable when
-# either side changes, and BuildKit can prepare the toolchain in parallel.
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH=${CARGO_HOME}/bin:${PATH}
-COPY --link --from=rust-toolchain /root/.cargo /root/.cargo
-COPY --link --from=rust-toolchain /root/.rustup /root/.rustup
-COPY --link --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
-COPY --link --from=rust-toolchain /usr/local/include/google /usr/local/include/google
 
 # -----------------------
 # Test vLLM image (Tier 2) - vLLM-only layer on top of ci_base.
