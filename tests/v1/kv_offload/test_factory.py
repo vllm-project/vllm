@@ -292,7 +292,7 @@ def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: in
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
-def test_cpu_spec_replicated_config_ignored_off_shared_region(
+def test_cpu_spec_replicated_disabled_without_shared_region(
     monkeypatch, world_size: int
 ):
     # Data-loss guard: non-CUDA-alike platforms keep a per-rank private pinned

@@ -157,11 +157,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         # num_blocks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_blocks > 0:
-            # Back each worker's CPU buffer with a slot in a single shared mmap
-            # region instead of a per-rank pinned tensor. Under replicated
-            # layout every rank maps slot 0 (a single MLA copy); otherwise fold
-            # the global physical device index into this replica's
-            # [0, world_size) slot range.
+            # Replicated layout puts all ranks on slot 0 (single MLA copy);
+            # otherwise each rank takes its own slot by physical device index.
             if self.replicated_layout:
                 rank = 0
             else:
