@@ -270,10 +270,8 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
-    VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
@@ -1902,11 +1900,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
-    # Enable the experimental Kimi K3 latent-MoE tail fusion.
-    # Currently supported only on SM100 with TP=8/16 and BF16.
-    "VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION", "0"))
-    ),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
@@ -1917,14 +1910,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
-    ),
-    # Token-count cutoff for overlapping the MoE router gate with the
-    # routed-expert down projection on a separate CUDA stream (latent MoE).
-    # At or below this many tokens the launch-bound decode path benefits from
-    # multi-stream overlap; above it the GEMMs saturate the device and the
-    # cross-stream sync is pure overhead, so it falls back to sequential.
-    "VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD", "256")
     ),
     # Token-count cutoff for multi-stream overlap of the attention input
     # GEMM with auxiliary GEMMs (e.g. fused_wqa_wkv overlapped with indexer
