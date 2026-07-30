@@ -280,6 +280,7 @@ class RunCiCommandTest(unittest.TestCase):
                 "pull_request_base_branch": "main",
                 "pull_request_repository": ("https://github.com/contributor/vllm.git"),
                 "pull_request_labels": ["ready", "v1"],
+                "ignore_pipeline_branch_filters": True,
                 "env": {
                     "VLLM_CI_GITHUB_COMMENT_ID": "99",
                     "VLLM_CI_TRIGGERED_BY": "reviewer",
