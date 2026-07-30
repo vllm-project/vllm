@@ -954,7 +954,6 @@ def get_max_concurrency_for_kv_cache_config(
     table. Requirements are summed within each allocator domain, then the
     tightest domain determines concurrency.
     """
-    assert kv_cache_config.num_blocks_by_pool is not None
     blocks_per_request = [0] * len(kv_cache_config.num_blocks_by_pool)
     for group in kv_cache_config.kv_cache_groups:
         blocks_per_request[group.block_pool_id] += cdiv(
@@ -2434,10 +2433,7 @@ def get_kv_cache_configs(
 
     # Change each physical pool's block count to the smallest among all ranks.
     # We also shrink tensor sizes proportionally to avoid unused memory.
-    block_counts_by_config: list[list[int]] = []
-    for config in kv_cache_configs:
-        assert config.num_blocks_by_pool is not None
-        block_counts_by_config.append(config.num_blocks_by_pool)
+    block_counts_by_config = [config.num_blocks_by_pool for config in kv_cache_configs]
     num_pools = len(block_counts_by_config[0])
     assert all(
         len(block_counts) == num_pools for block_counts in block_counts_by_config
@@ -2447,7 +2443,6 @@ def get_kv_cache_configs(
         for pool_id in range(num_pools)
     ]
     for kv_cache_config in kv_cache_configs:
-        assert kv_cache_config.num_blocks_by_pool is not None
         old_num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
         kv_cache_config.num_blocks_by_pool = min_num_blocks_by_pool.copy()
         kv_cache_config.num_blocks = min_num_blocks_by_pool[0]

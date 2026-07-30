@@ -943,7 +943,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            assert self.kv_cache_config.num_blocks_by_pool is not None
             for pool_id, num_blocks in enumerate(
                 self.kv_cache_config.num_blocks_by_pool
             ):

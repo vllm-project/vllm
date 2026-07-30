@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING
@@ -1038,16 +1038,16 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
-    num_blocks_by_pool: list[int] | None = None
+    num_blocks_by_pool: list[int] = field(default_factory=list)
     """Number of blocks in each physical block-pool domain.
 
-    ``None`` preserves the traditional single pool of ``num_blocks`` blocks.
+    An omitted list preserves the traditional single pool of ``num_blocks`` blocks.
     """
 
     def __post_init__(self) -> None:
-        if self.num_blocks_by_pool is None:
+        if not self.num_blocks_by_pool:
             self.num_blocks_by_pool = [self.num_blocks]
-        if not self.num_blocks_by_pool or any(n < 0 for n in self.num_blocks_by_pool):
+        if any(n < 0 for n in self.num_blocks_by_pool):
             raise ValueError("KV cache block-pool sizes must be non-negative.")
         if self.num_blocks != self.num_blocks_by_pool[0]:
             raise ValueError(

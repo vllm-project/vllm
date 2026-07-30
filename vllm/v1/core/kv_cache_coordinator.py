@@ -88,7 +88,6 @@ class KVCacheCoordinator(ABC):
         )
         self.scheduler_block_size = scheduler_block_size
 
-        assert kv_cache_config.num_blocks_by_pool is not None
         pool_enable_caching = [False] * len(kv_cache_config.num_blocks_by_pool)
         for group in kv_cache_config.kv_cache_groups:
             pool_enable_caching[group.block_pool_id] |= (

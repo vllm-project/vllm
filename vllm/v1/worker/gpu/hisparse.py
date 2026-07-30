@@ -374,7 +374,6 @@ def init_hisparse_runtime(
         )
     source_group_id = source_group_ids[0]
     indexer_group_id = indexer_group_ids[0]
-    assert kv_cache_config.num_blocks_by_pool is not None
     num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
     hot_backing: torch.Tensor | None = None
     coordinators: list[HiSparseCoordinator] = []
