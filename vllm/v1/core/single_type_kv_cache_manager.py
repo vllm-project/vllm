@@ -913,7 +913,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.host_valid_pages: defaultdict[str, set[int]] = defaultdict(set)
-        self.num_cpu_only_pages: defaultdict[str, int] = defaultdict(int)
 
     def get_num_blocks_to_allocate(
         self,
@@ -948,7 +947,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         )
         req_blocks.extend([self._null_block] * num_host_pages)
         self.host_valid_pages[request_id].update(range(num_host_pages))
-        self.num_cpu_only_pages[request_id] = num_host_pages
         self.num_cached_block[request_id] = 0
 
     def allocate_new_blocks(
@@ -991,7 +989,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
 
     def is_fully_resident(self, request_id: str) -> bool:
         blocks = self.req_to_blocks.get(request_id)
-        return bool(blocks) and self.num_cpu_only_pages.get(request_id, 0) == 0
+        return (
+            blocks is not None
+            and bool(blocks)
+            and all(not block.is_null for block in blocks)
+        )
 
     def release_resident_page(
         self,
@@ -1008,13 +1010,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         ):
             return None
         blocks[block_idx] = self._null_block
-        self.num_cpu_only_pages[request_id] += 1
         self.block_pool.free_blocks([block])
         return block
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.host_valid_pages.pop(request_id, None)
-        self.num_cpu_only_pages.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
 
 
