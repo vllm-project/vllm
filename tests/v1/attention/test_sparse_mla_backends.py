@@ -2530,11 +2530,11 @@ def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
     seq_lens = torch.tensor([2, 4, 3], dtype=torch.int32)
     stage_calls = []
 
-    def stage_host_cache(self, cache, table, lengths):
+    def stage_host_cache(cache, table, lengths):
         stage_calls.append((cache, table, lengths))
         return staged_cache, staged_block_table
 
-    impl._hisparse_host_prefill_cache = MethodType(stage_host_cache, impl)
+    impl.hisparse_coordinator = SimpleNamespace(stage_prefill_cache=stage_host_cache)
 
     gathered = {}
 

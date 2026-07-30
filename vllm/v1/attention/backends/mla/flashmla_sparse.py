@@ -785,8 +785,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
                 if host_resident:
                     assert chunk.seq_lens is not None
-                    gather_cache, gather_bt = self._hisparse_host_prefill_cache(
-                        kv_c_and_k_pe_cache, chunk.block_table, chunk.seq_lens
+                    assert self.hisparse_coordinator is not None
+                    gather_cache, gather_bt = (
+                        self.hisparse_coordinator.stage_prefill_cache(
+                            kv_c_and_k_pe_cache,
+                            chunk.block_table,
+                            chunk.seq_lens,
+                        )
                     )
                 else:
                     gather_cache, gather_bt = kv_c_and_k_pe_cache, chunk.block_table

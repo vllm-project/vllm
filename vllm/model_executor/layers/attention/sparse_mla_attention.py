@@ -507,17 +507,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             prefill_req_ids = prefill_req_ids - num_decodes
         return staged_cache, staged_bt, prefill_req_ids
 
-    def _hisparse_host_prefill_cache(
-        self,
-        kv_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.hisparse_coordinator is not None
-        return self.hisparse_coordinator.stage_prefill_cache(
-            kv_cache, block_table, seq_lens
-        )
-
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,
