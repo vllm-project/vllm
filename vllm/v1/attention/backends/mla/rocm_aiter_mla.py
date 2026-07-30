@@ -288,6 +288,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         q_dtype = (
             dtypes.fp8 if kv_cache_dtype_str == "fp8" else self.decode_attn_out_dtype
         )
+        if self.num_heads == 12:
+            from vllm.platforms.rocm import on_gfx950
+
+            if (
+                not on_gfx950()
+                or q_dtype != torch.bfloat16
+                or kv_dtype != dtypes.bf16
+            ):
+                raise NotImplementedError(
+                    "12-head AITER MLA decode requires gfx950 with BF16 query "
+                    "and KV cache"
+                )
         # Persist for get_mla_metadata_v1 (decode build): omitting these causes
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_q_dtype = q_dtype
@@ -781,8 +793,11 @@ def _expand_page_indices_kernel(
 
 class AiterMLAHelper:
     """
-    AITER MLA implementation requires num_heads >= 16. If num_heads < 16 and
-    16 % num_heads == 0, we can pad q to 16 heads; otherwise AITER has to fail.
+    Adapt low-head MLA tensors to AITER's minimum 16-head decode kernels.
+
+    Divisors of 16 keep the existing repeat/unrepeat mapping. The 12-head
+    Kimi K3 TP8 profile uses zero padding because its attention heads are
+    independent and 12 does not divide 16.
     """
 
     _AITER_MIN_MLA_HEADS: Final = 16
@@ -791,8 +806,8 @@ class AiterMLAHelper:
     @staticmethod
     def check_num_heads_validity(num_heads: int):
         assert AiterMLAHelper.is_valid_num_heads(num_heads), (
-            "ROCM AITER MLA requires 1-15 heads for Gluon decode or a multiple "
-            f"of 16 heads for persistent decode, but got {num_heads}.\n"
+            "ROCM AITER MLA requires 1-15 heads for small-head decode or a "
+            f"multiple of 16 heads, but got {num_heads}.\n"
             f"Try adjusting tensor_parallel_size value."
         )
 
@@ -809,6 +824,13 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
+        if num_heads == 12:
+            padding = q.new_zeros(
+                *q.shape[:-2],
+                AiterMLAHelper._AITER_MIN_MLA_HEADS - num_heads,
+                q.shape[-1],
+            )
+            return torch.cat((q, padding), dim=-2)
         return (
             q
             if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
@@ -819,6 +841,8 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
+        if num_heads == 12:
+            return o[..., :num_heads, :]
         return (
             o
             if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
@@ -827,7 +851,11 @@ class AiterMLAHelper:
 
     @staticmethod
     def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
-        return num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS and max_qo_len == 1
+        return (
+            num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+            and num_heads != 12
+            and max_qo_len == 1
+        )
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -1190,6 +1218,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+        if self.num_heads == 12:
+            if attn_metadata.decode.max_qo_len != 1:
+                raise NotImplementedError(
+                    "12-head zero-padded AITER MLA only supports single-token decode"
+                )
+            if q.dtype != torch.bfloat16:
+                raise NotImplementedError(
+                    "12-head zero-padded AITER MLA only supports BF16 query"
+                )
         B = q.shape[0]
 
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
