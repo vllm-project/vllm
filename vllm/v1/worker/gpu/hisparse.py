@@ -13,7 +13,6 @@ from vllm.v1.attention.backends.mla.hisparse import (
     invalidate_blocks,
     register_indexer_source,
     release_pinned_state,
-    take_hisparse_stats,
 )
 from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
@@ -34,6 +33,9 @@ from vllm.v1.metrics.stats import HiSparseStats
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.block_table import BlockTables
+
+
+_METRICS_INTERVAL = 2000
 
 
 def _expand_source_block_ids(
@@ -73,6 +75,8 @@ class HiSparseRuntime:
         self.hot_backing = hot_backing
         self._post_forward_spills: list[HiSparseSpill] = []
         self._enqueued_spill_ids: list[int] = []
+        self._metrics_calls = 0
+        self._metrics_last = HiSparseStats()
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
     def _init_backup_plan(
@@ -249,7 +253,28 @@ class HiSparseRuntime:
         self.host_write_event.record(current_stream)
 
     def post_step(self) -> HiSparseStats | None:
-        return take_hisparse_stats()
+        self._metrics_calls += 1
+        if self._metrics_calls % _METRICS_INTERVAL != 0:
+            return None
+
+        current = HiSparseStats()
+        for coordinator in self.coordinators:
+            hits, misses = coordinator._swap_stats.cpu().tolist()
+            current.cache_hits += hits
+            current.cache_misses += misses
+            current.host_to_device_bytes += misses * coordinator.stats_row_bytes
+
+        delta = HiSparseStats(
+            cache_hits=current.cache_hits - self._metrics_last.cache_hits,
+            cache_misses=current.cache_misses - self._metrics_last.cache_misses,
+            host_to_device_bytes=(
+                current.host_to_device_bytes - self._metrics_last.host_to_device_bytes
+            ),
+        )
+        self._metrics_last = current
+        if delta.cache_hits == 0 and delta.cache_misses == 0:
+            return None
+        return delta
 
     def take_spill_completions(self) -> list[int] | None:
         if not self._enqueued_spill_ids:

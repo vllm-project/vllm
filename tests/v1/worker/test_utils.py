@@ -176,12 +176,15 @@ def test_hisparse_runtime_post_forward_enqueues_deferred_spills(monkeypatch):
     assert recorded_streams == [current_stream]
 
 
-def test_hisparse_runtime_post_step_returns_stats(monkeypatch):
+def test_hisparse_runtime_post_step_returns_stats():
     runtime = object.__new__(HiSparseRuntime)
-    stats = HiSparseStats(7, 3, 48)
-    monkeypatch.setattr(worker_hisparse, "take_hisparse_stats", lambda: stats)
+    runtime._metrics_calls = worker_hisparse._METRICS_INTERVAL - 1
+    runtime._metrics_last = HiSparseStats()
+    runtime.coordinators = [
+        SimpleNamespace(_swap_stats=torch.tensor([7, 3]), stats_row_bytes=16)
+    ]
 
-    assert runtime.post_step() is stats
+    assert runtime.post_step() == HiSparseStats(7, 3, 48)
 
 
 def test_hisparse_runtime_reports_each_enqueued_spill_once():

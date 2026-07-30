@@ -34,7 +34,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
@@ -103,35 +102,6 @@ class ResolvedHiSparseConfig:
             device_buffer_size=device_buffer_size,
             host_pool_gib=config.host_pool_gib,
         )
-
-
-_METRICS_INTERVAL = 2000
-
-
-def take_hisparse_stats() -> HiSparseStats | None:
-    """Return counter deltas periodically, avoiding per-step synchronization."""
-    _STATE.metrics_calls += 1
-    if not _STATE.coordinators or _STATE.metrics_calls % _METRICS_INTERVAL != 0:
-        return None
-
-    current = HiSparseStats()
-    for coordinator in _STATE.coordinators:
-        hits, misses = coordinator._swap_stats.cpu().tolist()
-        current.cache_hits += hits
-        current.cache_misses += misses
-        current.host_to_device_bytes += misses * coordinator.stats_row_bytes
-
-    delta = HiSparseStats(
-        cache_hits=current.cache_hits - _STATE.metrics_last.cache_hits,
-        cache_misses=current.cache_misses - _STATE.metrics_last.cache_misses,
-        host_to_device_bytes=(
-            current.host_to_device_bytes - _STATE.metrics_last.host_to_device_bytes
-        ),
-    )
-    _STATE.metrics_last = current
-    if delta.cache_hits == 0 and delta.cache_misses == 0:
-        return None
-    return delta
 
 
 def check_hisparse_host_memory(rank_bytes: int) -> None:
@@ -221,8 +191,6 @@ def release_pinned_state() -> None:
             if coordinator._host_cache is not None:
                 coordinator._host_cache = None
     _STATE.coordinators.clear()
-    _STATE.metrics_calls = 0
-    _STATE.metrics_last = HiSparseStats()
     _STATE.group_plans.clear()
     _STATE.copy_streams.clear()
     _STATE.current_group_leader = None
@@ -377,8 +345,6 @@ class _GroupPlan:
 @dataclass
 class _HiSparseProcessState:
     coordinators: list[HiSparseCoordinator] = field(default_factory=list)
-    metrics_calls: int = 0
-    metrics_last: HiSparseStats = field(default_factory=HiSparseStats)
     current_group_leader: HiSparseCoordinator | None = None
     pinned_staging: torch.Tensor | None = None
     pinned_staging_event: torch.Event | None = None
