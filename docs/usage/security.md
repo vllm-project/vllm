@@ -155,8 +155,10 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
 - `/v1/chat/completions/render` - Render chat completion requests
+- `/v1/chat/completions/derender` - Derender chat completion requests
 - `/v1/completions` - Text completions
 - `/v1/completions/render` - Render completion requests
+- `/v1/completions/derender` - Derender completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
@@ -422,6 +424,104 @@ Hashing is the area where vLLM has explicit FIPS-aware code, but a FIPS-complian
 - **What is *not* a FIPS concern in vLLM.** Random number generation used for token sampling (Python/NumPy/PyTorch RNGs) is not a cryptographic use and is out of scope for FIPS. Pickled cache artifacts are a separate security concern covered under [Cache Directory Security](#cache-directory-security).
 
 In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
+
+## Ray Cluster Trust Model and Environment Variable Propagation
+
+### Trust Assumption
+
+vLLM treats the entire Ray cluster as a single trust domain. Any principal
+with the ability to execute code within the Ray cluster (e.g. submit actors
+or tasks) is considered to have the same level of trust as the driver/API
+server process. This means that vLLM does **not** attempt to isolate
+driver-side credentials from worker-side processes within the same Ray
+cluster.
+
+This assumption is consistent with
+[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+which states that any user who can connect to a Ray cluster can run arbitrary
+code on any node in that cluster. In other words, Ray cluster access already
+implies full code execution on worker nodes, so restricting environment
+variable propagation alone would not constitute a meaningful security
+boundary.
+
+### Driver-to-Worker Environment Variable Propagation
+
+When using `RayExecutorV2` in multi-node deployments, vLLM propagates
+environment variables from the driver process to remote Ray workers so that
+workers have the configuration they need to function correctly (e.g. vLLM
+settings, NCCL tuning, Hugging Face tokens for gated model downloads).
+
+The propagation uses a **copy-all-except-denylist** policy via
+`get_driver_env_vars()` in `vllm/v1/executor/ray_env_utils.py`: every
+environment variable present in the driver's `os.environ` is sent to
+workers, except for a small set of worker-specific variables and any
+names the operator has explicitly excluded.
+
+On the worker side, propagated variables are applied with `setdefault`
+semantics — they fill in missing variables but never overwrite values
+already present in the worker's environment.
+
+### When This Matters
+
+In deployments where operators intentionally scope credentials (such as
+`HF_TOKEN`, cloud storage keys, registry tokens, or internal service
+tokens) to the driver/API server alone — for example, when GPU workers
+run in a different node, pod, or trust domain — the default propagation
+behavior will copy those credentials into worker environments. A process
+running on a worker node under the same OS user may then be able to read
+those credentials (e.g. via `/proc/<pid>/environ` on Linux).
+
+If your deployment treats Ray workers as less trusted than the driver, be
+aware that environment-variable isolation is **not** enforced by default.
+
+### Hardening Recommendations
+
+Operators who want to limit which environment variables are propagated to
+Ray workers can use the following mechanisms:
+
+#### 1. Denylist via Configuration File
+
+Create a JSON file at `$VLLM_CONFIG_ROOT/ray_non_carry_over_env_vars.json`
+(default: `~/.config/vllm/ray_non_carry_over_env_vars.json`) containing an
+array of environment variable names to exclude from propagation:
+
+```json
+[
+  "HF_TOKEN",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_CLIENT_SECRET",
+  "REGISTRY_TOKEN",
+  "MY_INTERNAL_SERVICE_KEY"
+]
+```
+
+Any variable listed here will **not** be copied from the driver to workers.
+
+#### 2. Minimize Driver Environment
+
+Rather than setting credentials in the driver's shell environment, inject
+them through a secrets manager, a mounted file, or a short-lived
+subprocess so that they are not present in `os.environ` when vLLM starts.
+
+#### 3. Network and Process Isolation
+
+- Restrict `procfs` visibility on worker nodes (e.g. mount `/proc` with
+  `hidepid=2` or use a container runtime that isolates `/proc` between
+  pods) so that same-UID processes cannot read each other's
+  `/proc/<pid>/environ`.
+- Run the driver and workers under different OS users or in separate
+  containers with non-overlapping UIDs.
+
+#### 4. Limit Ray Cluster Access
+
+Because Ray cluster access is equivalent to arbitrary code execution,
+ensure that only trusted principals can submit work to the cluster:
+
+- Use Ray's TLS authentication to restrict cluster membership.
+- Place the Ray cluster on an isolated network segment.
+- Do not expose the Ray client port or dashboard to untrusted networks.
 
 ## Reporting Security Vulnerabilities
 

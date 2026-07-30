@@ -7,6 +7,7 @@ from typing import cast
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -286,6 +287,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         output, _ = self.wo_ud(flat)
         return output
 
+    @eager_break_during_capture
     def _attention(
         self,
         q: torch.Tensor,

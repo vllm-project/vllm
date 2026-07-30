@@ -209,6 +209,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             return False
         return all(c.prefer_cross_layer_blocks for c in self._connectors)
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return any(c.requires_kv_delivery for c in self._connectors)
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
