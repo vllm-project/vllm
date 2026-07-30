@@ -108,7 +108,7 @@ pub struct RenderArgs {
     /// Model identifier or local model directory containing tokenizer files.
     model: String,
     /// HTTP bind host.
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]

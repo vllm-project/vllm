@@ -85,14 +85,15 @@ async fn render_chat(
 ) -> Result<Json<GenerateRequest>, ApiError> {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
-    let parser_selection = ParserSelection::Auto;
+    let tool_call_parser = ParserSelection::Auto;
+    let reasoning_parser = ParserSelection::None;
     let (text_request, _) = state
         .chat
         .prepare(
             chat_request,
             NewChatOutputProcessorOptions {
-                tool_call_parser: &parser_selection,
-                reasoning_parser: &parser_selection,
+                tool_call_parser: &tool_call_parser,
+                reasoning_parser: &reasoning_parser,
             },
         )
         .await

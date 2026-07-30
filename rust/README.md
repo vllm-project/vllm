@@ -82,7 +82,8 @@ connecting to a Python inference engine:
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
-  render Qwen/Qwen2.5-0.5B-Instruct --max-model-len 32768
+  render Qwen/Qwen2.5-0.5B-Instruct \
+  --host 127.0.0.1 --max-model-len 32768
 ```
 
 It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
