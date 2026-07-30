@@ -23,7 +23,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.benchmarks.datasets import InstructCoderDataset
-from vllm.config import VllmConfig, replace
+from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -160,6 +160,12 @@ def reset_torch_dynamo():
     torch._dynamo.reset()
 
 
+@pytest.fixture
+def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
+    if current_platform.is_rocm():
+        request.getfixturevalue("disable_vllm_compile_cache")
+
+
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -175,21 +181,26 @@ def reset_torch_dynamo():
         },
     ],
 )
+@pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     model_name: str,
+    vllm_runner,
 ):
-    spec_llm = LLM(
-        model=model_name,
+    with vllm_runner(
+        model_name,
+        # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
         speculative_config=speculative_config,
         max_model_len=4096,
-    )
-    evaluate_llm_for_gsm8k(spec_llm)
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        # Preserve LLM's default compilation/cudagraph configuration. Without
+        # this, VllmRunner injects its reduced test-only capture sizes.
+        compilation_config=CompilationConfig(),
+    ) as runner:
+        evaluate_llm_for_gsm8k(runner.llm)
 
 
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
