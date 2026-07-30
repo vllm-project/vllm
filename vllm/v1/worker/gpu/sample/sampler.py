@@ -51,8 +51,10 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
-        self.use_flashinfer = flashinfer_sampler_supported()
         self.enable_return_sampling_mask = enable_return_sampling_mask
+        self.use_flashinfer = (
+            not enable_return_sampling_mask and flashinfer_sampler_supported()
+        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -252,12 +254,11 @@ class Sampler:
         use_flashinfer = self.use_flashinfer and not (
             # Don't use FI sampler if no requests use top_k/top_p, if there are
             # any greedy requests or per-request seeds, if post-processed
-            # logprobs are requested, or for sampling distribution replay.
+            # logprobs are requested.
             (top_k is None and top_p is None)
             or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
-            or self.enable_return_sampling_mask
         )
 
         # Sample the next token.
