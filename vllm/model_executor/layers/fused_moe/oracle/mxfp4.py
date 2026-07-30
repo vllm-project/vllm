@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 import torch
 
@@ -570,6 +570,16 @@ def select_deepseek_v4_mxfp4_moe_backend(
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
+    if config.moe_parallel_config.use_shared_ep_kernels:
+        backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+        logger.info_once(_make_log_backend(backend), scope="local")
+        return _return_or_raise(
+            backend,
+            config,
+            kMxfp4Static,
+            kMxfp8Dynamic,
+            activation_format,
+        )
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
@@ -1710,10 +1720,24 @@ def make_mxfp4_moe_kernel(
     )
     assert prepare_finalize is not None
 
+    extra_kwargs: dict[str, Any] = {}
+    if moe_config.moe_parallel_config.use_shared_ep_kernels:
+        if mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+            raise ValueError(
+                "Native MXFP4 SharedEP requires the FlashInfer TRTLLM MXFP8 backend"
+            )
+        from vllm.model_executor.layers.fused_moe.experts.shared_ep_mxfp4 import (
+            SharedEPMxfp4Experts,
+        )
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.shared_ep import (
+            SharedEPPrepareAndFinalize,
+        )
+
+        assert isinstance(prepare_finalize, SharedEPPrepareAndFinalize)
+        experts_cls = SharedEPMxfp4Experts
+        extra_kwargs["prepare_finalize"] = prepare_finalize
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     logger.info_once("Using %s", experts_cls.__name__)
-
-    extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs["layer"] = layer

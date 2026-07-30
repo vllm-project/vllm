@@ -179,7 +179,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
         self.check_ep_fault = False
-        if self.dp_size > 1 and self.model_config.is_moe:
+        if (
+            self.dp_size > 1
+            and self.model_config.is_moe
+            and self.parallel_config.all2all_backend != "shared_ep"
+        ):
             self.check_ep_fault = get_ep_all2all_manager().support_fault_tolerance
 
         # Decode context parallelism.

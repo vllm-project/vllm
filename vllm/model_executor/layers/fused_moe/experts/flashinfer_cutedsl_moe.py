@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -104,6 +106,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _extra_flashinfer_kwargs(self) -> dict[str, Any]:
+        """Backend-specific keyword arguments for the FlashInfer MoE call."""
+        return {}
+
     def workspace_shapes(
         self,
         M: int,
@@ -167,4 +173,5 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
             activation_type=activation_to_flashinfer_int(activation),
+            **self._extra_flashinfer_kwargs(),
         )

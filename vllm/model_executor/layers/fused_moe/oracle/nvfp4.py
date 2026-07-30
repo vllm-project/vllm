@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -186,6 +187,9 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+    if config.moe_parallel_config.use_shared_ep_kernels:
+        AVAILABLE_BACKENDS.remove(NvFp4MoeBackend.FLASHINFER_CUTEDSL)
+        AVAILABLE_BACKENDS.insert(0, NvFp4MoeBackend.FLASHINFER_CUTEDSL)
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -543,7 +547,22 @@ def make_nvfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
+    extra_kwargs: dict[str, Any] = {}
+    if moe_config.moe_parallel_config.use_shared_ep_kernels:
+        if backend != NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+            raise ValueError(
+                "Native NVFP4 SharedEP requires the FlashInfer CuTeDSL backend"
+            )
+        from vllm.model_executor.layers.fused_moe.experts.shared_ep_nvfp4 import (
+            SharedEPNvFP4Experts,
+        )
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.shared_ep import (
+            SharedEPPrepareAndFinalize,
+        )
+
+        assert isinstance(prepare_finalize, SharedEPPrepareAndFinalize)
+        experts_cls = SharedEPNvFP4Experts
+        extra_kwargs["prepare_finalize"] = prepare_finalize
     if backend == NvFp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs = {"layer": layer}

@@ -37,6 +37,7 @@ th {
 | deepep_low_latency | batched | fp8 | G(128),A,T<sup>3</sup> | Y | Y | [`DeepEPLLPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll.DeepEPLLPrepareAndFinalize] |
 | flashinfer_nvlink_two_sided | standard | nvfp4,fp8 | G,A,T | N | N | [`FlashInferNVLinkTwoSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided.FlashInferNVLinkTwoSidedPrepareAndFinalize] |
 | flashinfer_nvlink_one_sided | standard | nvfp4,bf16,mxfp8 | G,A,T | N | N | [`FlashInferNVLinkOneSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided.FlashInferNVLinkOneSidedPrepareAndFinalize] |
+| shared_ep | standard | nvfp4,mxfp8 | G(16),G(32) | N | N | [`SharedEPPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.shared_ep.SharedEPPrepareAndFinalize] |
 
 !!! info "Table key"
     1. All types: mxfp4, nvfp4, int4, int8, fp8
@@ -111,3 +112,4 @@ The following table shows "families" of modular kernels that are intended to wor
 | deepep_high_throughput | `DeepEPHTPrepareAndFinalize` | `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`, </br>`MarlinExperts` |
 | deepep_low_latency | `DeepEPLLPrepareAndFinalize` | `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`CutlassBatchedExpertsFp8`,</br>`BatchedMarlinExperts` |
 | flashinfer | `FlashInferCutlassMoEPrepareAndFinalize` | `FlashInferExperts` |
+| shared_ep | `SharedEPPrepareAndFinalize` | `SharedEPNvFP4Experts`,</br>`SharedEPMxfp4Experts` |

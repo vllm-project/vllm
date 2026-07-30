@@ -136,7 +136,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
 
-        if self.use_all2all:
+        # SharedEP owns its VMM-backed peer views and does not use the generic
+        # dispatch/combine manager.
+        if self.use_all2all and self.all2all_backend != "shared_ep":
             if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
