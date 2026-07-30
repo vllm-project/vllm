@@ -2315,3 +2315,98 @@ def resolve_block_hashes(
         return block_hashes
     assert block_size % hash_block_size == 0
     return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
+
+
+def partial_hash_hits_enabled(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    hash_block_size: int,
+    *,
+    dcp_world_size: int = 1,
+) -> bool:
+    """Whether fine-grained (partial) prefix-cache hits may be enabled.
+
+    Two conditions. The feature exists for mamba "align" groups whose block
+    size exceeds the hash granularity, so at least one must be present. And
+    every group must be *able* to be looked up at that granularity: a manager
+    without fine-grained lookup indexes the block-hash list in units of its own
+    block size, so including one at a finer alignment would key its lookups off
+    the wrong hashes.
+
+    The single copy on purpose. The core coordinator, the Mooncake store
+    coordinator and the scheduler all need this answer, and when they computed
+    it separately they disagreed -- the scheduler kept emitting a sub-block
+    prefill stop for a partial tail entry the coordinator would no longer
+    accept.
+
+    Args:
+        kv_cache_groups: One entry per KV cache group.
+        hash_block_size: The granularity ``Request.block_hashes`` is computed at.
+        dcp_world_size: Partial hits are unsupported under context parallelism.
+    """
+    if dcp_world_size != 1:
+        return False
+
+    specs = [
+        next(iter(g.kv_cache_spec.kv_cache_specs.values()))
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else g.kv_cache_spec
+        for g in kv_cache_groups
+    ]
+    if not any(
+        isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and spec.block_size > hash_block_size
+        for spec in specs
+    ):
+        return False
+
+    unsupported = set()
+    for spec in specs:
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        assert manager_cls is not None, f"No manager registered for KVCacheSpec {spec}"
+        if (
+            not manager_cls.supports_fine_grained_hash_lookup
+            and spec.block_size != hash_block_size
+        ):
+            unsupported.add(manager_cls.__name__)
+    if not unsupported:
+        return True
+    logger.warning_once(
+        "Disabling fine-grained (partial) prefix-cache hits: the prefix match "
+        "unit is %d but these block-aligned-only KV cache managers use a "
+        "larger block size: %s.",
+        hash_block_size,
+        ", ".join(sorted(unsupported)),
+    )
+    return False
+
+
+def truncate_downward_closed_groups(
+    groups: Iterable[tuple[KVCacheSpec, Sequence[int]]],
+    hit_length: int,
+    hit_blocks_by_group: list[list["KVCacheBlock"] | None],
+    hit_length_by_group: list[int],
+    block_size_of: Callable[[int], int],
+) -> None:
+    """Trim every downward-closed group's block list to ``hit_length``.
+
+    A downward-closed manager is looked up once against the initial candidate
+    length and skipped on later fixed-point passes, so a reduction afterwards
+    leaves its list too long. Untrimmed, the extra blocks reach
+    ``add_local_computed_blocks``, which extends the request's block table with
+    blocks past the reconciled boundary -- an assertion in the best case and
+    shared blocks the request does not own in the worst.
+
+    There can be more than one such group, at different block sizes, so each
+    trims at its own. Callers pass ``block_size_of`` because the coordinator's
+    manager block size is DCP-scaled while a spec-level caller's is not.
+    """
+    for spec, group_ids in groups:
+        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+        if manager_cls is None or not manager_cls.is_downward_closed:
+            continue
+        for group_id in group_ids:
+            if (blocks := hit_blocks_by_group[group_id]) is None:
+                continue
+            del blocks[cdiv(hit_length, block_size_of(group_id)) :]
+            hit_length_by_group[group_id] = hit_length

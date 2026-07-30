@@ -5,12 +5,14 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
-from vllm.utils.math_utils import cdiv
+from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
+    truncate_downward_closed_groups,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -25,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -579,12 +583,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     f"{type(g.kv_cache_spec).__name__}."
                 )
         # Partial hash hits are limited to full-attention + mamba ("align")
-        # without context parallelism.
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+        # without context parallelism, and only when no other group forces
+        # block-aligned lookup.
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups,
+            hash_block_size,
+            dcp_world_size=dcp_world_size,
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -795,17 +799,38 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]
-            ].block_size
-            num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-                    hit_length_by_group[group_id] = hit_length
+        if len(self.full_attention_group_ids) > 1:
+            # With more than one full-attention group -- a DFlash drafter
+            # booking its sliding-window layers as full attention keeps its
+            # own, smaller block size alongside the target's -- the loop
+            # above records each dense group's *own* hit as it is reached,
+            # and a finer group legitimately completes its next block sooner
+            # than a coarser one for identical underlying progress. That
+            # disagreement is block-size granularity, not a sparse-retention
+            # group falling behind, so the dense reference is where every
+            # dense group agrees (the min) rather than the deepest any one of
+            # them individually reached. Must run before the truncation below,
+            # which overwrites `hit_length_by_group` for these groups.
+            longest_hit_length = min(
+                hit_length_by_group[gid] for gid in self.full_attention_group_ids
+            )
+
+        # Truncate every full attention group to the final hit_length. Each is
+        # looked up once (they are downward-closed) against a candidate length
+        # that later iterations may have reduced, so the trim is what makes the
+        # returned blocks agree with the reconciled hit. There can be more than
+        # one such group with different block sizes -- a DFlash drafter booking
+        # its sliding-window layers as full attention keeps the sliding-window
+        # block size -- so each trims at its own, and a group left untrimmed
+        # hands `add_local_computed_blocks` more blocks than the hit covers,
+        # which lands as a copy-on-write assertion on the first partial hit.
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in self.attention_groups),
+            hit_length,
+            hit_blocks_by_group,
+            hit_length_by_group,
+            lambda gid: self.single_type_managers[gid].block_size,
+        )
 
         # Uncached shared prefix detection: if any attn. group cached a longer
         # prefix than the reconciled hit, it is an uncached common prefix across

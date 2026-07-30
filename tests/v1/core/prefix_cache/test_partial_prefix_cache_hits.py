@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 
 
@@ -1181,3 +1182,405 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
         len(group) * block_size >= num_computed for group in computed_blocks.blocks
     )
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
+
+
+def test_hybrid_sliding_window_group_keeps_block_aligned_hits():
+    """A sliding-window group makes the whole model fall back to
+    block-aligned hits. ``SlidingWindowManager.find_longest_cache_hit``
+    indexes ``block_hashes`` in whole blocks, so a hash-granularity alignment
+    would read the wrong entries; it asserts instead, which used to abort the
+    engine on the first request of a mamba-"align" + SWA model."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=block_size,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+    req0 = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+    manager.cache_blocks(req0, 8)
+    swa_block_ids = [b.block_id for b in manager.get_blocks("0").blocks[0]]
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", tokens + [9, 10, 11, 12], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert not manager.coordinator.enable_partial_hash_hits
+    assert num_computed == 8
+    # Out-of-window positions come back null, but every matched block must sit
+    # at the position it was cached at, not at that of its trailing hash unit.
+    swa_hit = computed_blocks.blocks[0]
+    null_block = manager.block_pool.null_block
+    assert len(swa_hit) * block_size == num_computed
+    assert swa_hit[-1] is not null_block
+    assert all(
+        block is null_block or block.block_id == swa_block_ids[i]
+        for i, block in enumerate(swa_hit)
+    )
+
+
+def test_hybrid_without_block_aligned_group_keeps_fine_grained_hits():
+    """The control for the fallback above.
+
+    The gate is a conjunction, so it can only ever over-fire. Without a
+    block-aligned-only group the mamba-"align" model must still get its
+    fine-grained partial hits, at a hit length that is not a multiple of the
+    physical block size.
+    """
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.enable_partial_hash_hits
+
+
+def test_hybrid_partial_hash_truncates_every_full_attention_group():
+    """Every full-attention-typed group is trimmed to the reconciled hit, not
+    just ``attention_groups[0]``.
+
+    Full attention is downward-closed, so the fixed-point loop looks each such
+    group up once and skips it on later passes. Only the final truncation
+    brings the block lists back to the reconciled length, and it used to visit
+    the first group alone. A second full-attention group therefore kept the
+    longer list from its own earlier lookup, and ``add_local_computed_blocks``
+    would extend the request's block table with blocks past the reconciled
+    boundary -- blocks it does not own.
+
+    One full-attention group cannot expose this, since sorting guarantees it is
+    the one the truncation visits.
+    """
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_a"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            # A *different* full-attention spec, so this does not merge into
+            # the group above. Two groups sharing one spec collapse into a
+            # single attention group whose `group_ids` the old truncation
+            # already iterated, which is why identical specs cannot expose
+            # this.
+            KVCacheGroupSpec(
+                ["full_b"],
+                FullAttentionSpec(
+                    block_size=2 * block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    # 24 tokens, so the wider group holds three whole blocks. With a shorter
+    # request it holds one, which is indistinguishable from the correctly
+    # trimmed answer and the assertion below cannot discriminate.
+    req = make_request(
+        "0",
+        [i // 2 for i in range(24)],
+        hash_block_size,
+        sha256,
+    )
+
+    # Both full-attention groups cache their whole prefix; the mamba group
+    # caches far less, so it is what drives the reconciled hit down.
+    for group_id in (0, 1):
+        group_bs = block_size * (1 + group_id)
+        num_full = 24 // group_bs
+        blocks = pool.get_new_blocks(num_full)
+        pool.cache_full_blocks(
+            request=req,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=num_full,
+            block_size=group_bs,
+            kv_cache_group_id=group_id,
+        )
+
+    # Genuinely partial: ``cache_partial_block`` asserts the entry does not
+    # land on a block boundary.
+    mamba_block = pool.get_new_blocks(1)[0]
+    pool.cache_partial_block(
+        request=req,
+        block=mamba_block,
+        num_tokens=6,
+        kv_cache_group_id=2,
+        block_size=block_size,
+    )
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+
+    # The invariant, asserted per group rather than against hand-computed
+    # counts: no group may report blocks covering more than the reconciled hit.
+    for group_id, blocks in enumerate(computed_blocks.blocks):
+        group_block_size = manager.coordinator.single_type_managers[group_id].block_size
+        assert len(blocks) <= -(-max(num_computed, 0) // group_block_size), (
+            f"group {group_id} returned {len(blocks)} blocks of "
+            f"{group_block_size} tokens, past the reconciled hit of "
+            f"{num_computed} tokens"
+        )
+
+
+def _two_dense_groups_plus_mamba_config(
+    hash_block_size: int, block_size: int, coarse_block_size: int
+) -> KVCacheConfig:
+    """Two full-attention groups at different block sizes plus a mamba
+    "align" group -- the DFlash-drafter-as-full-attention shape."""
+    return KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_fine"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["full_coarse"],
+                FullAttentionSpec(
+                    block_size=coarse_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
+def test_two_dense_groups_granularity_gap_is_not_an_uncached_prefix():
+    """Two full-attention groups at different block sizes, no sparse group
+    lagging: the finer group (e.g. a DFlash drafter booking its
+    sliding-window layers as full attention) legitimately completes more of
+    its own small blocks than the coarser (target) group for the same real
+    progress, purely from block-size granularity. That gap must not be read
+    as an uncached shared prefix -- nothing failed to cache anything; the
+    coarser group simply has not finished its next, bigger block yet.
+    """
+    hash_block_size = 2
+    block_size = 2 * hash_block_size  # fine group + mamba: 4
+    coarse_block_size = 2 * block_size  # 8
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    # Fine group: three whole 4-token blocks, genuinely caught up to 12.
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    # Coarse group: one whole 8-token block. 12 is not a multiple of its own
+    # (larger) block size, so it has nothing more to report -- not eviction,
+    # just granularity.
+    coarse_blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    # Mamba matches the fine group exactly: no sparse-retention group is
+    # lagging behind anything here.
+    mamba_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    _blocks, hit_length, num_uncached = manager.coordinator.find_longest_cache_hit(
+        req.block_hashes, req.num_tokens - 1
+    )
+
+    assert hit_length == 8
+    assert num_uncached == 0, (
+        f"num_uncached_common_prefix_tokens={num_uncached}, expected 0: the "
+        "gap comes from two full-attention groups' block-size granularity, "
+        "not from a sparse-retention group lagging behind."
+    )
+
+
+def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
+    """Control for the case above: when the two full-attention groups
+    genuinely agree on a longer prefix (the coarse group has its own partial
+    entry at the shared boundary, exactly as a request ending there would
+    produce) and only mamba lags, the gap must still be reported so
+    cross-request reuse is not lost.
+    """
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    coarse_block_size = 2 * block_size
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    # Coarse group genuinely reaches the same 12-token boundary via its own
+    # partial entry -- both dense groups agree here.
+    coarse_blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    pool.cache_partial_block(
+        request=req,
+        block=coarse_blocks[1],
+        num_tokens=12,
+        kv_cache_group_id=1,
+        block_size=coarse_block_size,
+    )
+    # Mamba genuinely lags: only two whole blocks (8 tokens).
+    mamba_blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    _blocks, hit_length, num_uncached = manager.coordinator.find_longest_cache_hit(
+        req.block_hashes, req.num_tokens - 1
+    )
+
+    assert hit_length == 8
+    assert num_uncached == 4, (
+        f"num_uncached_common_prefix_tokens={num_uncached}, expected 4: mamba "
+        "genuinely has not cached the shared prefix both full-attention "
+        "groups agree on."
+    )
