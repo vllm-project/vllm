@@ -334,11 +334,11 @@ class KVCacheManager:
             request.block_hashes, request.num_tokens - 1
         )
         # Two different questions, so two different reductions over the dense
-        # groups. There can be more than one -- a DFlash drafter booking its
-        # sliding-window layers as full attention adds a second at a smaller
-        # block size -- and the finer-grained one legitimately hits deeper
-        # whenever the reconciled hit is not a multiple of the coarser block
-        # size. Both reduce to the single-group behaviour when there is one.
+        # groups. There can be more than one (see
+        # truncate_downward_closed_groups), and the finer-grained one
+        # legitimately hits deeper whenever the reconciled hit is not a
+        # multiple of the coarser block size. Both reduce to the single-group
+        # behaviour when there is one.
         dense_hits = [
             per_group_hits[group_id]
             for group_id in coordinator.full_attention_group_ids
@@ -365,6 +365,8 @@ class KVCacheManager:
             ((g.spec, g.group_ids) for g in coordinator.attention_groups),
             num_local,
             hit_blocks,
+            # A copy on purpose: only the trimmed blocks are wanted here, and
+            # the caller-visible flag below reports on the pre-trim hits.
             list(per_group_hits),
             lambda gid: coordinator.single_type_managers[gid].block_size,
         )

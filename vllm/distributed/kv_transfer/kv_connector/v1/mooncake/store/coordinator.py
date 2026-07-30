@@ -378,11 +378,8 @@ class MooncakeStoreCoordinator:
         # Truncate full-attention hit_blocks to final converged length;
         # other specs already trim themselves inside their hit logic. cdiv keeps
         # the partial tail block when hit_length is not block-aligned.
-        # Every full-attention group, not just the first: a DFlash drafter
-        # booking its sliding-window layers as full attention keeps the
-        # sliding-window block size, so a model can carry two full-attention
-        # groups at different block sizes. Mirrors the core coordinator, which
-        # must not disagree with this one.
+        # Every full-attention group, not just the first. Mirrors the core
+        # coordinator, which must not disagree with this one.
         truncate_downward_closed_groups(
             ((g.spec, g.group_ids) for g in self.attention_groups),
             hit_length,

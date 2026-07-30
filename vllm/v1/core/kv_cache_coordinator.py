@@ -646,13 +646,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_group_id: int | None = (
             first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
-        # Every full-attention group, not just the first. A model can carry
-        # more than one at different block sizes -- a DFlash drafter booking
-        # its sliding-window layers as full attention keeps the smaller
-        # sliding-window block size -- and a finer-grained group reports a
+        # Every full-attention group, not just the first: a model can carry
+        # more than one at different block sizes (see
+        # truncate_downward_closed_groups). A finer-grained group reports a
         # legitimately deeper per-group hit whenever the reconciled hit is not
-        # a multiple of the coarser group's block size. Taking the first alone
-        # as the dense reference reads that as eviction.
+        # a multiple of the coarser group's block size, and taking the first
+        # alone as the dense reference reads that as eviction.
         self.full_attention_group_ids: list[int] = [
             group_id
             for group in self.attention_groups
@@ -831,10 +830,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Truncate every full attention group to the final hit_length. Each is
         # looked up once (they are downward-closed) against a candidate length
         # that later iterations may have reduced, so the trim is what makes the
-        # returned blocks agree with the reconciled hit. There can be more than
-        # one such group with different block sizes -- a DFlash drafter booking
-        # its sliding-window layers as full attention keeps the sliding-window
-        # block size -- so each trims at its own, and a group left untrimmed
+        # returned blocks agree with the reconciled hit. A group left untrimmed
         # hands `add_local_computed_blocks` more blocks than the hit covers,
         # which lands as a copy-on-write assertion on the first partial hit.
         truncate_downward_closed_groups(

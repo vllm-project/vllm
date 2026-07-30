@@ -2398,8 +2398,11 @@ def truncate_downward_closed_groups(
     shared blocks the request does not own in the worst.
 
     There can be more than one such group, at different block sizes, so each
-    trims at its own. Callers pass ``block_size_of`` because the coordinator's
-    manager block size is DCP-scaled while a spec-level caller's is not.
+    trims at its own: a DFlash drafter booking its sliding-window layers as
+    full attention keeps the smaller sliding-window block size, giving a model
+    two full-attention groups. Callers pass ``block_size_of`` because the
+    coordinator's manager block size is DCP-scaled while a spec-level caller's
+    is not.
     """
     for spec, group_ids in groups:
         manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
