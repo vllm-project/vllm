@@ -60,6 +60,100 @@ The arena does not make an arbitrary tensor safe merely by retaining it. The
 consumer must use the tensor returned by the arena, and every rebuild path
 must acquire the same slot.
 
+## Weight updates and arena updates are different
+
+Layerwise weight reload and arena refresh use intentionally different update
+paths.
+
+### Checkpoint weights use deferred staging and copy-back
+
+Parameters and registered buffers participate in the layerwise reload
+transaction:
+
+```text
+incoming checkpoint tensors
+  → buffer weight-loader arguments for one layer
+  → materialize a temporary checkpoint-format layer
+  → replay the buffered weight loaders
+  → run PWAL on the temporary state
+  → copy processed parameters and buffers back to original kernel storage
+```
+
+The original parameter and buffer storage is retained in
+`LayerReloadingInfo.kernel_tensors`. Incoming checkpoint values and PWAL
+results can therefore be staged on temporary storage. Only after the layer
+has loaded and processed its required weights does
+`_copy_and_restore_kernel_tensors` publish the result into the storage already
+used by serving kernels and captured graphs.
+
+This delayed copy-back is possible because parameters and registered buffers
+have an enumerable target set, and their processed values exist by the end of
+the layer's PWAL call.
+
+### Arena slots update their stable destination directly
+
+Arena slots do not have a second staging/copy-back phase:
+
+```text
+PWAL or first forward
+  → acquire the layer-owned slot
+  → initialize or copy directly into that stable slot
+  → rebuilt kernel/expert object uses the slot immediately
+```
+
+For a derived tensor, `arena.put()` performs `copy_` into the stable slot
+during PWAL. For workspace, `arena.get_or_alloc()` returns the stable slot
+itself. The arena is therefore the destination, not a temporary source whose
+contents are committed later.
+
+The ordering inside `_layerwise_process` is:
+
+```text
+replay buffered checkpoint loaders
+  → process_weights_after_loading
+      → arena writes happen here
+  → copy processed parameters/buffers back to kernel_tensors
+  → verify arena identities
+```
+
+Arena updates happen before parameter/buffer copy-back because PWAL both
+computes arena values and constructs objects that must immediately bind to
+the stable tensors returned by the arena.
+
+### Why arena updates cannot use the weight staging mechanism
+
+Arena-backed storage has more than one initialization lifetime:
+
+1. **Eager derived state.** MLA and similar PWAL paths compute the complete
+   runtime value during PWAL. `put()` must immediately refresh the stable
+   slot and return it to the rebuilt attention or kernel object.
+2. **Eager allocation with later writes.** Some PWAL paths allocate scratch
+   storage, but its contents are not meaningful until a kernel invocation.
+3. **Lazy allocation and initialization.** MoE implementations may construct
+   the expert object during PWAL but allocate permute scratch only on the
+   first real forward. The runtime call, not PWAL or reload finalization,
+   determines when and how the memory is initialized.
+
+Consequently, reload does not have a complete set of arena values that could
+be held in a temporary buffer and copied back at one final commit point.
+Some slots do not exist yet, some contain scratch with no persistent value,
+and some must be returned to a newly constructed object before reload
+finalization. Attempting to stage them like checkpoint weights would either:
+
+- allocate a second address and let the rebuilt object retain the wrong one;
+- require backend-specific knowledge of when scratch becomes initialized;
+- copy uninitialized or semantically meaningless workspace contents;
+- miss slots created lazily after PWAL.
+
+The arena instead preserves the destination address continuously. Eager
+values are copied into it when computed, and lazy users retain the arena so
+their eventual allocation resolves to that same layer-owned destination.
+
+This also means arena refresh is not an atomic value transaction. If a later
+reload step fails, an arena slot may already contain a newly computed value.
+The arena guarantees storage identity and provides a place to refresh values;
+it does not provide shadow storage or rollback.
+
 ## Lifecycle
 
 ### Initial model load
@@ -110,7 +204,7 @@ rebuilt.
 PWAL reacquires the existing slots:
 
 - `get_or_alloc` returns the original storage;
-- `put` copies a recomputed value into the original storage.
+- `put` immediately copies a recomputed value into the original storage.
 
 After reload, the model-wide commit gate verifies all slots captured before
 mutation:
@@ -389,9 +483,11 @@ Stable identity does not prove that contents were refreshed correctly:
 
 ### Transaction rollback
 
-The arena gate detects identity violations after mutation. It does not provide
-rollback or a shadow model. A strict failure prevents the reload from being
-reported as successful, but callers must treat the worker as unsafe for
+The arena gate detects identity violations after mutation. Arena values may
+already have been refreshed during PWAL, before parameter/buffer copy-back or
+model-wide verification completes. The arena does not provide rollback,
+shadow slots, or a shadow model. A strict failure prevents the reload from
+being reported as successful, but callers must treat the worker as unsafe for
 continued serving and recover according to the surrounding reload protocol.
 
 ### Graph visibility discovery
