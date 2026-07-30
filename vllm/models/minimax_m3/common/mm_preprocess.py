@@ -3,8 +3,9 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, Literal, cast
 
+import numpy.typing as npt
 import torch
 from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
@@ -31,6 +32,12 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+)
+from vllm.multimodal.video import (
+    VIDEO_LOADER_REGISTRY,
+    VideoBackend,
+    VideoSourceMetadata,
+    VideoTargetMetadata,
 )
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 from vllm.transformers_utils.processors.minimax_m3 import (
@@ -461,3 +468,70 @@ class MiniMaxM3VLMultiModalProcessor(
                 replacement=get_video_replacement,
             ),
         ]
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    name="minimax_m3_vl",
+    video_processor="MiniMaxM3VLVideoProcessor",
+)
+class MiniMaxM3VideoBackend(VideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal[
+            "opencv",
+            "pyav",
+            "torchcodec",
+            "pynvvideocodec",
+            "deepstream",
+        ] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames = source.total_frames_num
+        video_fps = source.original_fps
+        fps = target.fps
+        if total_frames <= 0 or video_fps <= 0 or fps <= 0:
+            return [0] if total_frames > 0 else []
+
+        read_time_interval = 1.0 / fps
+        eps = 1e-4
+
+        indices: list[int] = []
+        prev_kept_ts = -float("inf")
+        while True:
+            if not indices:
+                target_frame = 0
+            else:
+                target_ts = prev_kept_ts + read_time_interval - eps
+                target_frame = math.ceil(target_ts * video_fps)
+                target_frame = max(target_frame, indices[-1] + 1)
+            if target_frame >= total_frames:
+                break
+            indices.append(target_frame)
+            prev_kept_ts = target_frame / video_fps
+        if not indices:
+            indices = [0]
+        return indices
