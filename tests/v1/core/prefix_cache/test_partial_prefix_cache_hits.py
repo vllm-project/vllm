@@ -75,6 +75,34 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
 
 
+def test_mamba_align_split_stops_at_replay_boundary():
+    """A prompt whose length is an exact multiple of block_size still gets a
+    chunk end one block below it. Otherwise the only cached Mamba state sits
+    at num_tokens, one token above the cache-hit cap (num_tokens - 1), and a
+    later request replaying the prompt misses the prefix cache entirely."""
+    block_size = 512
+    hash_block_size = 32
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        use_eagle=False,
+        hash_block_size=hash_block_size,
+        mamba_partial_cache_hit=True,
+    )
+    split = Scheduler._mamba_block_aligned_split
+
+    req = make_request("0", [0] * 4096, hash_block_size, sha256)
+    req.num_computed_tokens = 0
+    assert split(self=mock, request=req, num_new_tokens=4096) == 3584
+    req.num_computed_tokens = 3584
+    assert split(self=mock, request=req, num_new_tokens=512) == 512
+
+    # One token more: the replay boundary is the last block boundary already,
+    # so the chunking is unchanged.
+    req2 = make_request("1", [0] * 4097, hash_block_size, sha256)
+    req2.num_computed_tokens = 0
+    assert split(self=mock, request=req2, num_new_tokens=4097) == 4096
+
+
 def test_hybrid_mamba_align_partial_hash_hit():
     hash_block_size = 2
     mamba_block_size = 2 * hash_block_size
