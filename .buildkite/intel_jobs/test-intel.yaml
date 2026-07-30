@@ -194,8 +194,9 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8'
-
-  - label: XPU Graph
+  - label: "XPU Graph"
+    depends_on:
+      - image-build-xpu
     timeout_in_minutes: 60
     device: intel_gpu
     agent_tags:
@@ -203,7 +204,6 @@ steps:
       gpu: 1+
       mem: 32+
     no_plugin: true
-    working_dir: "."
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
       REPO: "vllm-ci-test-repo"
@@ -213,6 +213,7 @@ steps:
       - vllm/platforms/xpu.py
       - vllm/v1/worker/xpu_model_runner.py
       - vllm/v1/worker/xpu_worker.py
+      - .buildkite/intel_jobs/test-intel.yaml
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
