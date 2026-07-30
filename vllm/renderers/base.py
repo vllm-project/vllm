@@ -225,9 +225,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
         start_time = time.perf_counter()
 
-        # warming up processor cache
-        processor.info.get_hf_processor()
-
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=model_config.max_model_len,
             mm_counts=dict.fromkeys(mm_limits, 1),
