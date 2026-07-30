@@ -28,8 +28,9 @@
 # amd_hf_offline_retry(bool): runner capability gate. Missing or false disables
 #     the cohort; individual steps still require an explicit opt-in.
 # hf_offline_retry(bool): per-step opt-in for eligible single-node AMD jobs.
-#     When true, use cache-only clients on the first Buildkite attempt and
-#     online clients on a retry. This is not network isolation.
+#     Presubmits use cache-only clients on the first Buildkite attempt.
+#     Scheduled jobs and all retries use online clients. This is not network
+#     isolation.
 
 # When adding a test
 # - If the test belongs to an existing group, add it there
@@ -1052,6 +1053,7 @@ steps:
   - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -1264,6 +1266,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: GPQA Eval (GPT-OSS) (2xH100-2xMI300) # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -3140,6 +3143,7 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -3222,6 +3226,7 @@ steps:
 #-----------------------------------------------------------  mi355 · evals  -----------------------------------------------------------#
 
 - label: GPQA Eval (GPT-OSS) (2xB200-2xMI355) # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false

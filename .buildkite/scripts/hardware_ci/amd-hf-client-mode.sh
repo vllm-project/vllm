@@ -4,14 +4,16 @@
 # cache mode. This does not provide network isolation.
 
 vllm_amd_hf_resolve_mode() {
-  if [[ $# -ne 3 ]]; then
-    echo "vllm_amd_hf_resolve_mode requires ENABLED, RETRY_COUNT, and DISABLED" >&2
+  if [[ $# -ne 4 ]]; then
+    echo "vllm_amd_hf_resolve_mode requires ENABLED, RETRY_COUNT," \
+      "DISABLED, and INITIAL_ONLINE" >&2
     return 2
   fi
 
   local enabled=$1
   local retry_count=$2
   local disabled=$3
+  local initial_online=$4
 
   if [[ "${enabled}" != "0" && "${enabled}" != "1" ]]; then
     echo "VLLM_CI_HF_OFFLINE_RETRY must be 0 or 1" >&2
@@ -25,13 +27,17 @@ vllm_amd_hf_resolve_mode() {
     echo "VLLM_CI_DISABLE_HF_OFFLINE_RETRY must be 0 or 1" >&2
     return 2
   fi
+  if [[ "${initial_online}" != "0" && "${initial_online}" != "1" ]]; then
+    echo "AMD Hugging Face initial-online mode must be 0 or 1" >&2
+    return 2
+  fi
 
   if [[ "${enabled}" == "0" || "${disabled}" == "1" ]]; then
     printf '%s\n' disabled
-  elif [[ "${retry_count}" == "0" ]]; then
-    printf '%s\n' cache-only
-  else
+  elif [[ "${retry_count}" != "0" || "${initial_online}" == "1" ]]; then
     printf '%s\n' online
+  else
+    printf '%s\n' cache-only
   fi
 }
 

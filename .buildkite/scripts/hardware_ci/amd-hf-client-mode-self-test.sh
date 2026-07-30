@@ -28,26 +28,32 @@ assert_mode() {
   local enabled=$2
   local retry_count=$3
   local disabled=$4
+  local initial_online=$5
   local actual
+  local context="enabled=${enabled}, retry_count=${retry_count}, disabled=${disabled}, initial_online=${initial_online}"
 
-  actual=$(vllm_amd_hf_resolve_mode "${enabled}" "${retry_count}" "${disabled}")
-  assert_equal "${expected}" "${actual}" \
-    "enabled=${enabled}, retry_count=${retry_count}, disabled=${disabled}"
+  actual=$(
+    vllm_amd_hf_resolve_mode \
+      "${enabled}" "${retry_count}" "${disabled}" "${initial_online}"
+  )
+  assert_equal "${expected}" "${actual}" "${context}"
 }
 
 assert_resolve_error() {
   local enabled=$1
   local retry_count=$2
   local disabled=$3
+  local initial_online=$4
   local status
+  local context="invalid enabled=${enabled}, retry_count=${retry_count}, disabled=${disabled}, initial_online=${initial_online}"
 
   set +e
   vllm_amd_hf_resolve_mode \
-    "${enabled}" "${retry_count}" "${disabled}" >/dev/null 2>&1
+    "${enabled}" "${retry_count}" "${disabled}" \
+    "${initial_online}" >/dev/null 2>&1
   status=$?
   set -e
-  assert_equal 2 "${status}" \
-    "invalid enabled=${enabled}, retry_count=${retry_count}, disabled=${disabled}"
+  assert_equal 2 "${status}" "${context}"
 }
 
 environment_snapshot() {
@@ -57,13 +63,15 @@ environment_snapshot() {
     "${HF_DATASETS_OFFLINE-unset}"'
 }
 
-assert_mode disabled 0 0 0
-assert_mode disabled 0 3 0
-assert_mode cache-only 1 0 0
-assert_mode online 1 1 0
-assert_mode online 1 12 0
-assert_mode disabled 1 0 1
-assert_mode disabled 1 3 1
+assert_mode disabled 0 0 0 0
+assert_mode disabled 0 3 0 1
+assert_mode cache-only 1 0 0 0
+assert_mode online 1 0 0 1
+assert_mode online 1 1 0 0
+assert_mode online 1 1 0 1
+assert_mode online 1 12 0 0
+assert_mode disabled 1 0 1 0
+assert_mode disabled 1 3 1 1
 
 assert_equal inherit \
   "$(vllm_amd_hf_container_offline_value disabled)" \
@@ -73,19 +81,22 @@ assert_equal 1 \
   "initial containers force cache-only clients"
 assert_equal 0 \
   "$(vllm_amd_hf_container_offline_value online)" \
-  "retry containers force online clients"
+  "online containers force online clients"
 
-assert_resolve_error "" 0 0
-assert_resolve_error 2 0 0
-assert_resolve_error true 0 0
-assert_resolve_error 1 "" 0
-assert_resolve_error 1 -1 0
-assert_resolve_error 1 01 0
-assert_resolve_error 1 +1 0
-assert_resolve_error 1 1.5 0
-assert_resolve_error 1 0 ""
-assert_resolve_error 1 0 2
-assert_resolve_error 1 0 true
+assert_resolve_error "" 0 0 0
+assert_resolve_error 2 0 0 0
+assert_resolve_error true 0 0 0
+assert_resolve_error 1 "" 0 0
+assert_resolve_error 1 -1 0 0
+assert_resolve_error 1 01 0 0
+assert_resolve_error 1 +1 0 0
+assert_resolve_error 1 1.5 0 0
+assert_resolve_error 1 0 "" 0
+assert_resolve_error 1 0 2 0
+assert_resolve_error 1 0 true 0
+assert_resolve_error 1 0 0 ""
+assert_resolve_error 1 0 0 2
+assert_resolve_error 1 0 0 true
 
 export HF_HUB_OFFLINE=inherited-hub
 export TRANSFORMERS_OFFLINE=inherited-transformers
