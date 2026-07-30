@@ -193,12 +193,16 @@ class ECCPUScheduler:
                 continue
             expected = pos.length * self._hidden_dim * self._element_size
             if int(info.get("size_bytes", -1)) != expected:
-                logger.warning("EC: size mismatch mm_hash=%s; local encode", mm_hash)
+                logger.warning(
+                    "EC consumer: size mismatch mm_hash=%s; local encode", mm_hash
+                )
                 continue
             try:
                 started = self._start_xfer(mm_hash, info, expected)
             except Exception:
-                logger.exception("EC: start xfer failed mm_hash=%s", mm_hash)
+                logger.exception(
+                    "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
+                )
                 continue
             if not started:
                 continue
@@ -226,7 +230,7 @@ class ECCPUScheduler:
         entry = self._cache.alloc(mm_hash, n_blocks)
         if entry is None:
             logger.debug(
-                "EC: cache full for mm_hash=%s (%d blocks); local encode",
+                "EC consumer: cache full for mm_hash=%s (%d blocks); local encode",
                 mm_hash,
                 n_blocks,
             )
@@ -249,6 +253,13 @@ class ECCPUScheduler:
         except Exception:
             self._cache.discard(mm_hash)
             raise
+        logger.debug(
+            "EC consumer: starting NIXL xfer mm_hash=%s from %s:%d blocks=%d",
+            mm_hash,
+            addr[0],
+            addr[1],
+            n_blocks,
+        )
         return True
 
     def _poll_step(self) -> None:
@@ -269,20 +280,32 @@ class ECCPUScheduler:
             self._in_flight.discard(mm_hash)
             self._cache.mark_ready(mm_hash)
             self._step_completed.add(mm_hash)
+            logger.debug("EC consumer: NIXL xfer complete mm_hash=%s", mm_hash)
         for mm_hash in r.tombstoned:
             self._in_flight.discard(mm_hash)
             self._cache.discard(mm_hash)
             self._tombstones.add(mm_hash)
+            logger.debug("EC consumer: NIXL xfer failed mm_hash=%s", mm_hash)
         for mm_hash in r.quarantined:
             # DMA still running: keep the blocks reserved (entry stays
             # not-ready, hence non-evictable) until the xfer settles.
             self._in_flight.discard(mm_hash)
             self._tombstones.add(mm_hash)
+            logger.debug(
+                "EC consumer: NIXL xfer mm_hash=%s quarantined; DMA still running",
+                mm_hash,
+            )
         for mm_hash in r.cancelled:
             self._in_flight.discard(mm_hash)
             self._cache.discard(mm_hash)
+            logger.debug(
+                "EC consumer: NIXL xfer mm_hash=%s cancelled (peer down)", mm_hash
+            )
         for mm_hash, _block_indices in r.settled:
             self._cache.discard(mm_hash)
+            logger.debug(
+                "EC consumer: quarantined NIXL xfer mm_hash=%s settled", mm_hash
+            )
 
     def _on_peer_down(self, addr: Any) -> None:
         session = self._sessions.pop(addr, None)
@@ -291,7 +314,7 @@ class ECCPUScheduler:
         session.on_peer_down()
         self._process_session_results(session)
         session.close()
-        logger.info("EC: peer down addr=%s", addr)
+        logger.info("EC consumer: producer peer down addr=%s", addr)
 
     def _promote_completed_reads(self) -> None:
         """Drain the just-completed set built during ``_poll_step``.
@@ -381,7 +404,9 @@ class ECCPUScheduler:
                 "size_bytes": size_bytes,
             }
         logger.debug(
-            "EC: request_finished req_id=%s params=%s", request.request_id, params
+            "EC producer: announcing NIXL-readable encodings req_id=%s params=%s",
+            request.request_id,
+            params,
         )
         return False, (params or None)
 

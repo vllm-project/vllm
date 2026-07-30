@@ -61,8 +61,8 @@ def make_k8s_specs(
     args,
     log_dir: Path,
     *,
-    producer_num_ec_blocks: int = 80000,
-    consumer_num_ec_blocks: int = 80000,
+    producer_ec_cpu_bytes: int = 4 * 1024**3,
+    consumer_ec_cpu_bytes: int = 4 * 1024**3,
 ) -> tuple[ServerSpec, ServerSpec]:
     producer = ServerSpec(
         role="producer",
@@ -72,7 +72,7 @@ def make_k8s_specs(
         engine_id="ec-producer-0",
         gpu_memory_utilization=0.05,
         log_path=log_dir / "producer.log",
-        num_ec_blocks=producer_num_ec_blocks,
+        ec_cpu_bytes=producer_ec_cpu_bytes,
     )
     consumer = ServerSpec(
         role="consumer",
@@ -82,7 +82,7 @@ def make_k8s_specs(
         engine_id="ec-consumer-0",
         gpu_memory_utilization=0.5,
         log_path=log_dir / "consumer.log",
-        num_ec_blocks=consumer_num_ec_blocks,
+        ec_cpu_bytes=consumer_ec_cpu_bytes,
     )
     return producer, consumer
 
