@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx90a, on_gfx950
+    from vllm.platforms.rocm import on_gfx90a
 
     on_mi250 = on_gfx90a()
 else:
@@ -207,6 +207,8 @@ def test_fused_rms_norm_quant(
         )
 
     if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
         if on_gfx950() and dtype == torch.float16 and not add_residual:
             # Fusion may round normalized FP16 across an E4M3 boundary on gfx950.
             assert fp8_allclose(out_quant_fused, out_quant, rtol=0.125, atol=2e-3)

@@ -19,8 +19,11 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+ON_GFX950 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
+
+    ON_GFX950 = on_gfx950()
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
@@ -322,7 +325,7 @@ def test_rms_norm(
     )
     use_gfx950_fp8_allclose = (
         current_platform.is_rocm()
-        and on_gfx950()
+        and ON_GFX950
         and group_size is None
         and dtype == torch.bfloat16
         and quant_dtype == current_platform.fp8_dtype()
