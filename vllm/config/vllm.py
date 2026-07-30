@@ -2244,22 +2244,19 @@ class VllmConfig:
                 speculative_config.use_adaptive_verification
                 and self.lora_config is not None
             ):
-                # The per-token LoRA mapping is built from CPU placeholder
-                # boundaries, while the trimmed batch's true boundaries are
-                # decided on the GPU. Set enable_adaptive_verification=false
-                # to combine dspark with LoRA.
-                unsupported.append("DSpark adaptive verification with LoRA")
+                # The per-token LoRA mapping is built from CPU placeholder boundaries,
+                # while the trimmed batch's true boundaries are decided on the GPU.
+                unsupported.append("adaptive verification with LoRA")
 
             if (
                 speculative_config.use_adaptive_verification
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
-                # Cost curves and confidences only exist on the last PP rank;
+                # Cost curves and confidences currently only exist on the last PP rank;
                 # earlier ranks would diverge on the trimmed batch shape.
-                # Set enable_adaptive_verification=false to use dspark with PP.
-                unsupported.append(
-                    "DSpark adaptive verification with pipeline parallelism"
-                )
+                # TODO: we should be able to support adaptive verification with PP by
+                # broadcasting the cost curves and confidences to all ranks.
+                unsupported.append("adaptive verification with pipeline parallelism")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")

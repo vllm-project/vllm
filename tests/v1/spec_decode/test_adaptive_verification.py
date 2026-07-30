@@ -27,7 +27,6 @@ def make_manager(
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
-    manager._count_rejected_drafts = True
     return manager
 
 
@@ -42,30 +41,12 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     manager.get_num_tokens(
         {"low": 3, "high": 3},
         {"low": [1, 2], "high": [3, 4]},
-        has_structured_output=False,
     )
     valid_drafts, num_non_draft_tokens, draft_budget = manager._batch_budget
 
     assert draft_budget == 1
     assert valid_drafts == {"low": 2, "high": 2}
     assert num_non_draft_tokens == {"low": 1, "high": 1}
-
-
-def test_structured_output_placeholders_do_not_consume_budget():
-    manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32),
-        np.ones(7),
-    )
-
-    manager.get_num_tokens(
-        {"low": 3, "high": 3},
-        {"low": [1, -1], "high": [3, 4]},
-        has_structured_output=True,
-    )
-    valid_drafts, _, draft_budget = manager._batch_budget
-
-    assert valid_drafts == {"low": 1, "high": 2}
-    assert draft_budget == 3
 
 
 def test_profiled_batches_seed_cost_curves_via_consumer():
@@ -149,21 +130,3 @@ def test_budget_caps_at_one_rejection_sampler_chunk():
     )
     _, _, draft_budget = manager._batch_budget
     assert draft_budget <= 1
-
-
-def test_async_placeholder_drafts_are_not_treated_as_grammar_rejected():
-    # Under async scheduling every draft id is a -1 placeholder at budget
-    # time; the grammar-validity filter must not zero the budget batch-wide.
-    manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32),
-        np.ones(7),
-    )
-    manager._count_rejected_drafts = False
-    manager.get_num_tokens(
-        {"low": 3, "high": 3},
-        {"low": [-1, -1], "high": [-1, -1]},
-        has_structured_output=True,
-    )
-    valid_drafts, _, draft_budget = manager._batch_budget
-    assert valid_drafts == {"low": 2, "high": 2}
-    assert draft_budget > 0

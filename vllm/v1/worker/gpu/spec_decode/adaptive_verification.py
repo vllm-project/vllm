@@ -18,13 +18,10 @@ from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
-_FIXED_OVERHEAD_MS = 1.0
 _PROFILE_REPLAYS = 5
 # KV context each profiling request pretends to carry, so the profiled step reads
 # a realistic amount of cache rather than attending over nothing.
 _PROFILE_CONTEXT_LEN = 8192
-# Median-filter width for cost curves; 5 also survives two adjacent outliers.
-_OUTLIER_FILTER_WIDTH = 5
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -106,19 +103,6 @@ def build_cost_tables_from_curves(
 
     def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
         xs, ys = np.asarray(curve, dtype=np.float64).T
-        # Drop isolated outliers before enforcing monotonicity: the cumulative
-        # max propagates a single bad point across every larger size, so an
-        # unfiltered spike corrupts the whole tail. A median filter is exact on
-        # monotone data, so genuine steps survive untouched.
-        if len(ys) >= _OUTLIER_FILTER_WIDTH:
-            k = _OUTLIER_FILTER_WIDTH // 2
-            padded = np.pad(ys, k, mode="edge")
-            ys = np.array(
-                [
-                    np.median(padded[i : i + _OUTLIER_FILTER_WIDTH])
-                    for i in range(len(ys))
-                ]
-            )
         ys = np.maximum.accumulate(ys)
         values = np.arange(limit + 1)
         # Execution pads to the next captured size, so cost is a step
@@ -145,7 +129,6 @@ def build_cost_tables_from_curves(
 
     draft_table = np.maximum(build_table(max_num_reqs, draft_curve), 0.0)
     verify_table = np.maximum(build_table(max_batch_tokens, verify_curve), 1e-6)
-    verify_table += _FIXED_OVERHEAD_MS
     return draft_table, verify_table
 
 
@@ -157,7 +140,6 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         confidence_ema_alpha: float,
         max_total_logits: int,
-        count_rejected_drafts: bool,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -170,11 +152,6 @@ class AdaptiveVerificationManager:
         # chunked path indexes by scheduled (untrimmed) offsets and cannot
         # address the compacted layout, so the budget must fit one chunk.
         self._max_total_logits = max_total_logits
-        # The sync scheduler overwrites grammar-rejected drafts with -1, so
-        # they can be excluded from the budget. Under async scheduling every
-        # draft is a -1 placeholder at budget time, so the convention does not
-        # hold and the filter must not run.
-        self._count_rejected_drafts = count_rejected_drafts
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -324,7 +301,6 @@ class AdaptiveVerificationManager:
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
-        has_structured_output: bool = False,
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
 
@@ -342,16 +318,6 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=num_reqs,
         )
-        valid_drafts = scheduled_drafts
-        if has_structured_output and self._count_rejected_drafts:
-            valid_drafts = np.fromiter(
-                (
-                    sum(token >= 0 for token in draft_tokens.get(req_id, ()))
-                    for req_id in req_ids
-                ),
-                dtype=np.int32,
-                count=len(req_ids),
-            )
         num_non_draft_tokens = scheduled_tokens - scheduled_drafts
         slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
@@ -361,11 +327,11 @@ class AdaptiveVerificationManager:
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
-        valid = steps[None, :] < valid_drafts[:, None]
+        valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = min(
-            int(valid_drafts.sum()),
+            int(scheduled_drafts.sum()),
             max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
         )
         scores = scores[:max_draft_budget]
@@ -385,9 +351,9 @@ class AdaptiveVerificationManager:
                 + 1
             ]
         )
-        valid_drafts_per_req = {
-            req_id: int(num_valid_drafts)
-            for req_id, num_valid_drafts in zip(req_ids, valid_drafts, strict=True)
+        num_drafts_per_req = {
+            req_id: int(num_drafts)
+            for req_id, num_drafts in zip(req_ids, scheduled_drafts, strict=True)
         }
         num_non_draft_tokens_per_req = {
             req_id: int(num_tokens)
@@ -395,7 +361,7 @@ class AdaptiveVerificationManager:
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
         self._batch_budget = (
-            valid_drafts_per_req,
+            num_drafts_per_req,
             num_non_draft_tokens_per_req,
             draft_budget,
         )
@@ -429,10 +395,10 @@ class AdaptiveVerificationManager:
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         batch_budget, self._batch_budget = self._batch_budget, None
         assert batch_budget is not None
-        valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
+        num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
         num_reqs = idx_mapping.shape[0]
-        valid_drafts = np.fromiter(
-            (valid_drafts_per_req[req_id] for req_id in req_ids),
+        scheduled_drafts = np.fromiter(
+            (num_drafts_per_req[req_id] for req_id in req_ids),
             dtype=np.int32,
             count=num_reqs,
         )
@@ -448,8 +414,8 @@ class AdaptiveVerificationManager:
         if draft_budget == 0:
             capacities.zero_()
         else:
-            async_copy_to_gpu(valid_drafts, out=capacities)
-            if draft_budget != int(valid_drafts.sum()):
+            async_copy_to_gpu(scheduled_drafts, out=capacities)
+            if draft_budget != int(scheduled_drafts.sum()):
                 block_size = triton.next_power_of_2(
                     num_reqs * self.num_speculative_steps
                 )

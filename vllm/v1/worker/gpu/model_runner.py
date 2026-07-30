@@ -534,7 +534,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_state.num_new_sampled_tokens_per_step,
                     self.speculative_config.adaptive_verification_ema_alpha,
                     max_total_logits=max_chunk_logits(self.vocab_size),
-                    count_rejected_drafts=not self.scheduler_config.async_scheduling,
                 )
                 self.step_timing.consumer = (
                     self.adaptive_verification.consume_step_timing
@@ -1412,7 +1411,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_toks = self.adaptive_verification.get_num_tokens(
                     scheduler_output.num_scheduled_tokens,
                     scheduler_output.scheduled_spec_decode_tokens,
-                    scheduler_output.has_structured_output_requests,
                 )
                 # Trimming drafts makes the batch non-uniform.
                 uniform_tok_count = None
