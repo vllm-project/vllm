@@ -1006,11 +1006,11 @@ class SpecDecodeBaseProposer:
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
-            # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
-            # norm hidden, so its forward returns (logit_hidden,
-            # recycle_hidden). Other MTP families return a single tensor.
-            return "DeepSeekMTPModel" in (
-                self.draft_model_config.hf_config.architectures or []
+            # These models return separate hidden states for logits and for
+            # feedback into the next draft step.
+            architectures = self.draft_model_config.hf_config.architectures or []
+            return bool(
+                {"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures)
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 
@@ -1300,6 +1300,15 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        if spec_cfg.kv_cache_dtype is not None:
+            base = replace(
+                base,
+                cache_config=replace(
+                    base.cache_config,
+                    cache_dtype=spec_cfg.kv_cache_dtype,
+                ),
+            )
+
         return base
 
     def _get_model(self) -> nn.Module:
@@ -1377,7 +1386,10 @@ class SpecDecodeBaseProposer:
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id
                 )
-            elif self.get_model_name(target_model) == "KimiK25ForConditionalGeneration":
+            elif self.get_model_name(target_model) in (
+                "KimiK25ForConditionalGeneration",
+                "KimiK3ForConditionalGeneration",
+            ):
                 self.model.config.image_token_index = (
                     target_model.config.media_placeholder_token_id
                 )
@@ -1468,9 +1480,13 @@ class SpecDecodeBaseProposer:
                     "Sharing target model embedding weights with the draft model."
                 )
 
-            if share_embeddings:
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE drafts consume input embeddings at their own hidden
+                # size, so only share when the widths match. MTP drafts
+                # project target-width embeddings (e.g. Gemma4 MTP's
+                # pre_projection takes 2 * backbone_hidden_size), so the
+                # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
                 # are not affected — mirrors the weight-equality check above.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
@@ -1727,7 +1743,10 @@ class SpecDecodeBaseProposer:
 
         attention_groups: dict[tuple[str, str], AttentionGroup] = {}
         if kv_cache_spec is not None:
-            for layer_name in self._draft_attn_layer_names:
+            # _draft_attn_layer_names is a set; iterate in sorted order so
+            # that attention_groups (and anything derived from its first
+            # element) is deterministic across processes.
+            for layer_name in sorted(self._draft_attn_layer_names):
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
                 backend_key = attn_backend.full_cls_name()
                 if backend_key not in attention_groups:
@@ -1759,9 +1778,20 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        self.block_size = (
-            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
-        )
+        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
+            kernel_block_sizes
+        ):
+            # Slot mappings are computed against the block table, which is
+            # stored at kernel-block granularity. Use the kernel block size
+            # rather than the KV cache manager's block size; the two differ
+            # when manager blocks are split for the attention kernel.
+            self.block_size = kernel_block_sizes[self.kv_cache_gid]
+        else:
+            self.block_size = (
+                self.draft_attn_groups[0]
+                .get_metadata_builder()
+                .kv_cache_spec.block_size
+            )
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

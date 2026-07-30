@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
@@ -115,14 +114,15 @@ class LogitsProcessor(PluggableLayer):
             )
         if (
             self.head_dtype == torch.float32
-            and current_platform.is_cuda()
+            and (current_platform.is_cuda() or current_platform.is_rocm())
             and hidden_states.is_cuda
         ):
             # Accumulate the projection directly into fp32. This avoids
             # materializing an fp32 copy of the lm_head weight on every step,
-            # unlike casting both operands. `torch.mm(out_dtype=...)` is
-            # CUDA-only and only supports fp32 output for fp16/bf16 inputs, so
-            # other cases fall back to the cast path below.
+            # unlike casting both operands. `torch.mm(out_dtype=...)` only
+            # supports fp32 output for fp16/bf16 inputs, and is only
+            # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
+            # path); other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:
@@ -144,7 +144,8 @@ class LogitsProcessor(PluggableLayer):
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
 
         # Gather logits for TP
-        logits = self._gather_logits(logits)
+        if lm_head.tp_size > 1:
+            logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
@@ -168,7 +169,7 @@ class LogitsProcessor(PluggableLayer):
                 "The local argmax reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = lm_head.tp_size
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:

@@ -560,6 +560,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             kInt4Static,
+            quant_config=self.quant_config,
+            may_have_zp=self.quant_config.zero_point,
+            may_have_bias=True,
         )
 
     def create_weights(
@@ -774,6 +777,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             a1_gscale=getattr(layer, "w13_input_global_scale", None),
             a2_gscale=getattr(layer, "w2_input_global_scale", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def select_gemm_impl(

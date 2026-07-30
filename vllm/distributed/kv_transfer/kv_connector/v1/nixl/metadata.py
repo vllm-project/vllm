@@ -39,8 +39,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
+#      clock-sync timestamp
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -157,6 +159,7 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
+    blocks_expiry_time: float | None = None
 
 
 @dataclass
@@ -177,6 +180,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        # The scheduler process's time.perf_counter() when this metadata was
+        # built. reqs_to_send deadlines are stamped with the scheduler's
+        # clock, which is NOT comparable across processes (perf_counter is
+        # process/boot-local): workers must rebase the remaining TTL onto
+        # their own clock via this reference. 0.0 = unset (legacy metadata).
+        self.scheduler_clock: float = 0.0
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
@@ -225,5 +234,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
+            blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
         )
         self.reqs_to_recv[request_id] = req
