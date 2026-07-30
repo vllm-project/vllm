@@ -3,6 +3,7 @@
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -37,8 +38,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
+        # Draft heads reuse embeddings produced by the target's multimodal encoder
+        # and commonly have text-only checkpoint configs.
         self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.draft_model_config
+            vllm_config.model_config
         )
         if self.supports_mm_inputs:
             self.inputs_embeds = torch.zeros(
@@ -47,6 +50,25 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if not self.supports_mm_inputs:
+            return
+
+        try:
+            dummy_input_ids = torch.tensor([[1]], device=self.device)
+            self.model.embed_input_ids(
+                dummy_input_ids,
+                multimodal_embeddings=None,
+                is_multimodal=None,
+            )
+        except (NotImplementedError, AttributeError, TypeError):
+            logger.warning(
+                "Draft model does not support multimodal inputs, "
+                "falling back to text-only mode"
+            )
+            self.supports_mm_inputs = False
 
     @property
     def advance_draft_positions(self) -> bool:

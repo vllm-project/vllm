@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_mod
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
@@ -25,6 +26,21 @@ class _DraftModel(torch.nn.Module):
 
     def forward(self, **kwargs):
         return self.output
+
+
+class _MultimodalDraftModel(torch.nn.Module):
+    def embed_input_ids(
+        self,
+        input_ids,
+        multimodal_embeddings=None,
+        is_multimodal=None,
+    ):
+        return input_ids
+
+
+class _TextOnlyDraftModel(torch.nn.Module):
+    def embed_input_ids(self, input_ids):
+        return input_ids
 
 
 def _make_speculator(
@@ -47,6 +63,70 @@ def _make_speculator(
     speculator.hidden_states = torch.zeros(4, 3)
     speculator.model = _DraftModel(output)
     return speculator
+
+
+def test_mm_support_uses_target_config(monkeypatch):
+    target_model_config = object()
+    draft_model_config = object()
+    vllm_config = SimpleNamespace(model_config=target_model_config)
+
+    def init_base(speculator, vllm_config, device):
+        speculator.max_num_tokens = 4
+        speculator.max_num_reqs = 2
+        speculator.hidden_size = 3
+        speculator.dtype = torch.float32
+        speculator.draft_model_config = draft_model_config
+
+    checked_configs = []
+
+    def supports_multimodal_inputs(model_config):
+        checked_configs.append(model_config)
+        return True
+
+    monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
+    monkeypatch.setattr(
+        spec_module.MULTIMODAL_REGISTRY,
+        "supports_multimodal_inputs",
+        supports_multimodal_inputs,
+    )
+
+    speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
+
+    assert checked_configs == [target_model_config]
+    assert speculator.supports_mm_inputs
+    assert speculator.inputs_embeds.shape == (4, 3)
+
+
+def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.supports_mm_inputs = True
+    speculator.device = torch.device("cpu")
+    draft_model = _MultimodalDraftModel()
+    monkeypatch.setattr(
+        DraftModelSpeculator,
+        "load_model",
+        lambda self, target_model: setattr(self, "model", draft_model),
+    )
+
+    speculator.load_model(torch.nn.Module())
+
+    assert speculator.supports_mm_inputs
+
+
+def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.supports_mm_inputs = True
+    speculator.device = torch.device("cpu")
+    draft_model = _TextOnlyDraftModel()
+    monkeypatch.setattr(
+        DraftModelSpeculator,
+        "load_model",
+        lambda self, target_model: setattr(self, "model", draft_model),
+    )
+
+    speculator.load_model(torch.nn.Module())
+
+    assert not speculator.supports_mm_inputs
 
 
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
