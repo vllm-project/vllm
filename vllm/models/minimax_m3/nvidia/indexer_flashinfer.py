@@ -32,9 +32,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 # KV page size == sparse block size == flashinfer's MSA block size.
 PAGE_SIZE = 128
 
-# Force-include bias: the max finite float outranks every real score.
-_FORCE_SCORE = torch.finfo(torch.float32).max
-
 
 class MiniMaxM3IndexerFlashInferBackend(MiniMaxM3IndexerBackend):
     """Indexer side-cache backend selecting the FlashInfer builder."""
@@ -53,10 +50,9 @@ class MiniMaxM3IndexerFlashInferMetadata(MiniMaxM3IndexerMetadata):
     proxy_page_table: torch.Tensor | None = None  # [num_reqs, max_pages] int32
     proxy_max_seqlen_q: int = 0
     max_k_tiles: int = 0
-    # Per-token last-block indices [local_blocks, total_q]; None when the
-    # model has no local window.
-    local_force_index: torch.Tensor | None = None
     num_valid_pages: torch.Tensor | None = None  # [total_q] int32
+    # Trailing local window, forced into every token's own selection.
+    local_blocks: int = 0
 
 
 class MiniMaxM3IndexerFlashInferMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -100,17 +96,9 @@ class MiniMaxM3IndexerFlashInferMetadataBuilder(MiniMaxM3IndexerMetadataBuilder)
         assert positions is not None
         num_valid_pages = self.num_valid_pages_buffer[:num_tokens]
         num_valid_pages.copy_(positions[:num_tokens] // PAGE_SIZE + 1)
-
-        local_force_index: torch.Tensor | None = None
-        if self.local_blocks > 0:
-            # A token's local window is its last causal blocks; tokens with
-            # fewer blocks than the window clamp onto block 0 (harmless).
-            offsets = torch.arange(
-                self.local_blocks, device=num_valid_pages.device, dtype=torch.int64
-            )
-            local_force_index = (
-                num_valid_pages.to(torch.int64).unsqueeze(0) - 1 - offsets.unsqueeze(1)
-            ).clamp_(min=0)
+        # msa_topk_select wants int32. .to() is a no-op when the shared buffer
+        # already is, and this runs once per step rather than once per layer.
+        num_valid_pages = num_valid_pages.to(torch.int32)
 
         return MiniMaxM3IndexerFlashInferMetadata(
             seq_lens=seq_lens,
@@ -126,8 +114,8 @@ class MiniMaxM3IndexerFlashInferMetadataBuilder(MiniMaxM3IndexerMetadataBuilder)
             proxy_page_table=block_table[:num_reqs],
             proxy_max_seqlen_q=common_attn_metadata.max_query_len,
             max_k_tiles=(common_attn_metadata.max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE,
-            local_force_index=local_force_index,
             num_valid_pages=num_valid_pages,
+            local_blocks=self.local_blocks,
         )
 
 
@@ -174,35 +162,20 @@ class MiniMaxM3IndexerFlashInferImpl(MiniMaxM3IndexerImpl):
             max_k_tiles=md.max_k_tiles,
         )
 
-        # The scalar force_end_blocks cannot express a per-token local window,
-        # so bias each token's last block(s) instead.
-        if md.local_force_index is not None:
-            scores.scatter_(
-                1,
-                md.local_force_index.unsqueeze(0).expand(scores.shape[0], -1, -1),
-                _FORCE_SCORE,
-            )
-
-        # Clamped so msa_topk_select's force-region checks cannot raise.
+        # Per-token valid-page counts carry both the causal clamp and the
+        # trailing local window into the kernel, so nothing needs repairing
+        # afterwards: no selected index can exceed its own token's extent, and
+        # the ascending, -1-tail-padded contract holds by construction.
+        assert md.num_valid_pages is not None
         force_begin = min(self.init_blocks, md.max_k_tiles, self.topk_blocks)
         msa_topk_select(
             scores,
             self.topk_blocks,
+            num_valid_pages=md.num_valid_pages,
             force_begin_blocks=force_begin,
+            force_end_blocks=md.local_blocks,
             output=buf[:num_tokens],
         )
-
-        # Clear above-causal selections to -1 like the other impls.
-        selected = buf[:num_tokens]
-        assert md.num_valid_pages is not None
-        selected.masked_fill_(selected >= md.num_valid_pages.view(num_tokens, 1, 1), -1)
-        if force_begin > 0:
-            # Forced begin blocks can turn into front -1s for short tokens;
-            # restore the ascending, -1-tail-padded contract.
-            tmp = selected.masked_fill(selected == -1, torch.iinfo(torch.int32).max)
-            tmp, _ = tmp.sort(dim=-1)
-            tmp.masked_fill_(tmp == torch.iinfo(torch.int32).max, -1)
-            selected.copy_(tmp)
 
         # The attend reads the shared buffer directly.
         return None, None
