@@ -143,6 +143,8 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
+    # Physical block-pool domain that owns this block.
+    pool_id: int = 0
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:

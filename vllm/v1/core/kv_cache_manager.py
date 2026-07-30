@@ -166,9 +166,6 @@ class KVCacheManager:
         self.block_pools = self.coordinator.block_pools
         self.block_pool = self.coordinator.block_pool
         self.hisparse = self.coordinator.hisparse
-        self._block_pool_by_object_id = {
-            id(block): pool for pool in self.block_pools for block in pool.blocks
-        }
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -666,7 +663,7 @@ class KVCacheManager:
         """Return blocks to their owning physical pool."""
         by_pool: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in blocks:
-            pool = self._block_pool_by_object_id[id(block)]
+            pool = self.block_pools[block.pool_id]
             by_pool.setdefault(pool, []).append(block)
         for pool, pool_blocks in by_pool.items():
             pool.free_blocks(pool_blocks)

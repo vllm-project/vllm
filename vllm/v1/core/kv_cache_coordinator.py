@@ -101,6 +101,7 @@ class KVCacheCoordinator(ABC):
                 hash_block_size=hash_block_size,
                 enable_kv_cache_events=enable_kv_cache_events,
                 metrics_collector=metrics_collector,
+                block_pool_id=pool_id,
             )
             for pool_id, num_blocks in enumerate(kv_cache_config.num_blocks_by_pool)
         )
