@@ -74,7 +74,11 @@ DEVICE_TYPE = current_platform.device_type
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     cache_dtype: str, expected_quant_mode: KVQuantMode
 ):
-    layer = SimpleNamespace(kv_cache_dtype=cache_dtype, head_size=576)
+    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=576,
+        non_causal_multi_token_decode=False,
+    )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
