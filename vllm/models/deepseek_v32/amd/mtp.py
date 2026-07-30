@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
 import typing
 from collections.abc import Callable, Iterable
 
@@ -8,10 +10,7 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -19,9 +18,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
-)
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -82,7 +78,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
         eh_input = fused_eh_norm(
             positions,
             inputs_embeds,
@@ -95,24 +90,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
-        if not is_sequence_parallel:
-            # Without sequence parallelism, the MoE output is left un-reduced.
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Recycle the POST-final-norm hidden into the next draft step. The
-        # residual-add is fused into the final RMSNorm so it is computed
-        # exactly once, and the result is returned for both tuple positions:
-        # the draft-logits hidden (compute_logits applies the LM head only) and
-        # the recycled previous_hidden_states. Recycling the pre-final-norm
-        # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
-        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
-        if is_sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[: positions.shape[0]]
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        hidden_states = residual + hidden_states
+        hidden_states = self.shared_head.norm(hidden_states)
         return hidden_states, hidden_states
 
 
@@ -141,20 +121,10 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
-        # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
-
-    def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
-        num_slots = slot_ids.numel()
-        for layer in self.layers.values():
-            self_attn = getattr(layer.mtp_block, "self_attn", None)
-            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
-                topk_indices_buffer = self_attn.topk_indices_buffer
-                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -185,9 +155,6 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        # hidden_states is already post-final-norm (produced in the layer
-        # forward and recycled as-is); apply the LM head only, without a
-        # second RMSNorm.
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
 
@@ -405,8 +372,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
-                loaded_params.add(name)
+                if not is_fusion_moe_shared_experts_layer:
+                    loaded_params.add(name)
 
         loaded_layers: set[int] = set()
         for param_name in loaded_params:
@@ -417,7 +384,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
+            if layer_idx not in loaded_layers:
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
