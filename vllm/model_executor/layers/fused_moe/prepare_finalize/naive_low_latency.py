@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-latency routed all-to-all prepare/finalize for the batched Triton MoE."""
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-
-logger = init_logger(__name__)
 
 
 class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """Routed all-to-all EP dispatch/combine in the batched activation format."""
+    """
+    Routed all-to-all EP dispatch/combine in the batched activation format,
+    over fixed-capacity all_to_all_single collectives. A token is sent to a
+    destination rank once, however many of its experts live there, carrying
+    its local expert ids and router weights as metadata.
+    """
 
     def __init__(
         self,
@@ -99,8 +100,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             flat_weight = torch.ones_like(flat_weight)
         dest = torch.div(flat_expert, e_local, rounding_mode="floor")
 
-        # deduplicated (dest, token) pairs: a token goes to a rank once with its
-        # local expert ids as metadata, so send_x stays token-sized, not topk-sized.
+        # Deduplicate (dest, token) pairs so send_x stays token-sized.
         order = torch.argsort(dest * (num_tokens + 1) + flat_token)
         d_sorted, t_sorted = dest[order], flat_token[order]
         new_slot = torch.ones_like(t_sorted, dtype=torch.bool)
@@ -116,8 +116,8 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         send_x = torch.zeros((world, cap, h), dtype=a1.dtype, device=dev)
         send_x[uniq_dest, local_slot] = a1.index_select(0, uniq_token)
 
-        # `pick` is a pair's index within its (dest, token) group, so the k-th
-        # expert a token wants on a rank lands in column k. -1 marks unused slots.
+        # `pick` indexes a pair within its (dest, token) group, so the k-th
+        # expert a token wants on a rank lands in column k; -1 marks unused.
         pair_ar = torch.arange(slot_of_pair.numel(), device=dev)
         group_start = pair_ar[new_slot]
         pair_slot = local_slot[slot_of_pair]
@@ -128,7 +128,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         send_w = torch.zeros((world, cap, slots), dtype=torch.float32, device=dev)
         send_w[d_sorted, pair_slot, pick] = flat_weight[order].to(torch.float32)
 
-        # fixed-size all-to-all, no host sync
+        # Fixed-size collectives, no host sync.
         send_meta_pkt = torch.empty(
             (world, cap * slots + 1), dtype=torch.int64, device=dev
         )
@@ -144,7 +144,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         recv_cnt = recv_meta_pkt[:, 0].contiguous()
         recv_eloc = recv_meta_pkt[:, 1:].reshape(world, cap, slots)
 
-        # expand back to one row per (token, expert) pair.
+        # Expand back to one row per (token, expert) pair.
         slot_ar = torch.arange(cap, device=dev)
         recv_valid = (slot_ar.view(1, -1) < recv_cnt.view(-1, 1)).unsqueeze(-1) & (
             recv_eloc >= 0
@@ -212,8 +212,8 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         world, cap, h = ctx["world"], ctx["cap"], ctx["h"]
         dev, dtype = ctx["device"], ctx["dtype"]
 
-        # weight and reduce a token's experts on the rank that owns them, so the
-        # return transfer is token-sized like the dispatch.
+        # Weight and reduce a token's experts on the owning rank, so the return
+        # transfer is token-sized like the dispatch.
         recv_out = torch.zeros((world, cap, h), dtype=torch.float32, device=dev)
         keep = ctx["keep"]
         if ctx["n_recv"] > 0 and keep.any():
@@ -227,7 +227,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_out.to(dtype).reshape(world, cap * h)
         ).reshape(world, cap, h)
 
-        # sum each token's per-rank partials.
+        # Sum each token's per-rank partials.
         output.zero_()
         output.index_add_(
             0,
