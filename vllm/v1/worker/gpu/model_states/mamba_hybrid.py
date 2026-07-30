@@ -303,9 +303,12 @@ class MambaHybridModelState(DefaultModelState):
                     idx_mapping, num_sampled, self.num_accepted_tokens_gpu
                 )
         else:
-            # Fill with single value.
+            # Fill with single value. index_fill_ only accepts int64 indices,
+            # while idx_mapping is int32. This branch is reached only from the
+            # non-last PP rank, which passes a dense mapping with no -1
+            # sentinels, so the cast is safe.
             self.num_accepted_tokens_gpu.index_fill_(
-                0, idx_mapping, max(num_sampled, 1)
+                0, idx_mapping.long(), max(num_sampled, 1)
             )
 
         # Align: save the running state to the block-aligned position when
