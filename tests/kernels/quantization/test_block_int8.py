@@ -40,13 +40,13 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
     int8_info = torch.iinfo(torch.int8)
     int8_max, int8_min = int8_info.max, int8_info.min
 
-    A_fp32 = torch.rand(M, K, dtype=torch.float32, device=device)
-    A_fp32 = (A_fp32 - 0.5) * 2 * int8_max
-    A_fp8 = A_fp32.clamp(min=int8_min, max=int8_max).to(torch.float8_e4m3fn)
+    A_int8 = torch.randint(
+        int8_min, int8_max + 1, (M, K), dtype=torch.int16, device=device
+    ).to(torch.int8)
 
-    B_fp32 = torch.rand(N, K, dtype=torch.float32, device=device)
-    B_fp32 = (B_fp32 - 0.5) * 2 * int8_max
-    B_fp8 = B_fp32.clamp(min=int8_min, max=int8_max).to(torch.float8_e4m3fn)
+    B_int8 = torch.randint(
+        int8_min, int8_max + 1, (N, K), dtype=torch.int16, device=device
+    ).to(torch.int8)
 
     block_n, block_k = block_size[0], block_size[1]
     n_tiles = (N + block_n - 1) // block_n
@@ -58,8 +58,8 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
         * factor_for_scale
     )
 
-    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
-    out = w8a8_block_int8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+    ref_out = native_w8a8_block_matmul(A_int8, B_int8, As, Bs, block_size, out_dtype)
+    out = w8a8_block_int8_matmul(A_int8, B_int8, As, Bs, block_size, out_dtype)
 
     rel_diff = torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))

@@ -320,10 +320,10 @@ def get_w8a8_block_int8_configs(
     N: int, K: int, block_n: int, block_k: int
 ) -> dict[int, Any] | None:
     """
-    Return optimized configurations for the w8a8 block fp8 kernel.
+    Return optimized configurations for the w8a8 block INT8 kernel.
 
     The return value will be a dictionary that maps an irregular grid of
-    batch sizes to configurations of the w8a8 block fp8 kernel. To evaluate the
+    batch sizes to configurations of the w8a8 block INT8 kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
@@ -368,7 +368,7 @@ def w8a8_block_int8_matmul(
     """This function performs matrix multiplication with block-wise
     quantization.
 
-    It takes two input tensors `A` and `B` with scales `As` and `Bs`.
+    It takes two INT8 input tensors `A` and `B` with scales `As` and `Bs`.
     The output is returned in the specified `output_dtype`.
 
     Args:
