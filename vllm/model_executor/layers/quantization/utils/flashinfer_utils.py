@@ -21,9 +21,6 @@ def activation_to_flashinfer_int(activation: MoEActivation) -> int:
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
-    if activation == MoEActivation.SITU:
-        return ActivationType.Situ
-
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
@@ -35,6 +32,7 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
+        MoEActivation.SITU: ActivationType.Situ,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 

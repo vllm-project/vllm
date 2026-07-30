@@ -46,28 +46,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        force_marlin = moe.moe_backend == "marlin"
-        cutlass_supports_activation = CutlassExpertsMxfp4._supports_activation(
-            moe.activation
-        )
-        if force_marlin:
-            logger.info_once(
-                "Using MarlinExperts for MXFP4 MoE because "
-                "--moe-backend=marlin was requested."
-            )
-        elif not cutlass_supports_activation:
-            logger.warning_once(
-                "CutlassExpertsMxfp4 does not support %s activation; "
-                "falling back to MarlinExperts for MXFP4 MoE.",
-                moe.activation.value,
-            )
-        # Use CUTLASS only when auto-selected and the activation is supported.
-        # Otherwise fall back to weight-only Marlin, which supports SITU.
-        self.use_cutlass_mxfp4 = (
-            not force_marlin
-            and CutlassExpertsMxfp4._supports_current_device()
-            and cutlass_supports_activation
-        )
+        # use cutlass if supported, otherwise fallback to marlin for weight-only FP4
+        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
         if self.use_cutlass_mxfp4:
             logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
