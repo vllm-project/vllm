@@ -342,16 +342,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert a1.size(0) == num_experts
             num_tokens = a1.size(1)
 
-        return meta1.num_experts, num_tokens, meta1.shape_n, meta1.shape_k, top_k
+        intermediate_dim = meta2.shape_k - meta2.pad_shape_k
+        hidden_dim = meta1.shape_k - meta1.pad_shape_k
+        return meta1.num_experts, num_tokens, intermediate_dim, hidden_dim, top_k
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
         from vllm.utils.humming import GemmType as HummingGemmType
         from vllm.utils.humming import dtypes
 
         num_experts = self.num_experts
-        gate_up_dim = self.humming_configs["w13"].shape_n
-        intermediate_dim = self.humming_configs["w2"].shape_k
-        K = self.humming_configs["w13"].shape_k
+        w13_config = self.humming_configs["w13"]
+        w2_config = self.humming_configs["w2"]
+        gate_up_dim = w13_config.shape_n - w13_config.pad_shape_n
+        intermediate_dim = w2_config.shape_k - w2_config.pad_shape_k
+        K = w13_config.shape_k - w13_config.pad_shape_k
         assert isinstance(num_experts, int)
         assert isinstance(gate_up_dim, int)
         assert isinstance(intermediate_dim, int)
