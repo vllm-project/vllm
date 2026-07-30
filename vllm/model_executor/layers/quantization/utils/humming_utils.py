@@ -788,7 +788,7 @@ def _convert_sublayer_to_humming(
 
     shape_k_stacks = [shape_k]
     shape_n_stacks = [shape_n]
-    if sublayer_name == "w13":
+    if sublayer_name == "w13" and layer.moe_config.activation.is_gated:
         shape_n_stacks = [shape_n // 2] * 2
 
     converted_weight_schema, converted_tensors = weight_schema.convert_humming(
@@ -991,15 +991,15 @@ def convert_to_humming_moe_kernel_format(
     # Build sublayer configs from layer properties if not provided
     if sublayer_configs is None:
         is_gated = layer.moe_config.activation.is_gated
+        intermediate_size = layer.moe_config.intermediate_size_per_partition
         sublayer_configs = {
             "w13": {
-                "shape_n": layer.moe_config.intermediate_size_per_partition * 2,
+                "shape_n": intermediate_size * (2 if is_gated else 1),
                 "shape_k": layer.moe_config.hidden_dim,
             },
             "w2": {
                 "shape_n": layer.moe_config.hidden_dim,
-                "shape_k": layer.moe_config.intermediate_size_per_partition
-                * (1 if is_gated else 2),
+                "shape_k": intermediate_size,
             },
         }
 
