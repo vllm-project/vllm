@@ -3739,8 +3739,6 @@ class GPUModelRunner(
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
-            if envs.VLLM_RAISE_ON_LOGIT_NANS:
-                raise_if_nan_logits(num_nans_in_logits)
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -5745,6 +5743,8 @@ class GPUModelRunner(
                     if num_nans_for_index is not None and req_index < logits.shape[0]
                     else 0
                 )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits
         except IndexError:
             return {}
