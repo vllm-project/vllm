@@ -157,20 +157,15 @@ def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     return registered[:size]
 
 
-def register_indexer_source(layer_name: str, cache: torch.Tensor) -> None:
-    _STATE.indexer_sources[layer_name] = (cache, None)
-
-
-def bind_indexer_source_slot_mapping(
-    layer_name: str, slot_mapping: torch.Tensor
+def register_indexer_source(
+    layer_name: str, cache: torch.Tensor, slot_mapping: torch.Tensor
 ) -> None:
-    cache, _ = _STATE.indexer_sources[layer_name]
     _STATE.indexer_sources[layer_name] = (cache, slot_mapping)
 
 
 def get_indexer_source(
     layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     return _STATE.indexer_sources.get(layer_name)
 
 
@@ -388,7 +383,7 @@ class _HiSparseProcessState:
     pinned_staging: torch.Tensor | None = None
     pinned_staging_event: torch.Event | None = None
     pinned_host_pools: list[torch.Tensor] = field(default_factory=list)
-    indexer_sources: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = field(
+    indexer_sources: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
     group_plans: dict[tuple[str, int, int], _GroupPlan] = field(default_factory=dict)

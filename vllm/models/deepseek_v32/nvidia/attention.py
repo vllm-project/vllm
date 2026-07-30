@@ -483,7 +483,6 @@ class DeepseekV32Attention(MLAAttention):
             source = get_indexer_source(self.indexer.k_cache.prefix)
             if source is not None:
                 host_cache, source_slot_mapping = source
-                assert source_slot_mapping is not None
                 torch.ops._C_cache_ops.hisparse_backup_indexer(
                     self.indexer.k_cache.kv_cache,
                     indexer_slot,

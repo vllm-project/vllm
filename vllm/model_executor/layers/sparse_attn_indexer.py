@@ -405,7 +405,6 @@ def sparse_attn_indexer(
         source = get_indexer_source(k_cache_prefix)
         if source is not None:
             host_cache, source_slot_mapping = source
-            assert source_slot_mapping is not None
             if use_pcp:
                 raise NotImplementedError(
                     "HiSparse indexer source backup does not support PCP."

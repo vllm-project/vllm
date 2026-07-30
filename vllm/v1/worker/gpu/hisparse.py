@@ -10,8 +10,6 @@ import torch
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.hisparse import (
     HiSparseCoordinator,
-    bind_indexer_source_slot_mapping,
-    get_indexer_source,
     invalidate_blocks,
     register_indexer_source,
     release_pinned_state,
@@ -29,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
     HiSparseSpill,
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.metrics.stats import HiSparseStats
@@ -363,9 +360,7 @@ def init_hisparse_runtime(
     hot_backing: torch.Tensor | None = None
     coordinators: list[HiSparseCoordinator] = []
     seen_coordinators: set[int] = set()
-    resident_bindings: dict[
-        str, tuple[torch.Tensor, KVCacheTensor, HiSparseResidentSpec, int]
-    ] = {}
+    indexer_sources: dict[str, torch.Tensor] = {}
     for cache_name, raw_tensor in raw_tensors.items():
         group_id = group_ids[cache_name]
         group_spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
@@ -387,19 +382,15 @@ def init_hisparse_runtime(
                 kernel_block_size,
                 source_spec.head_size,
             )
-            register_indexer_source(layer_name, source_cache)
+            register_indexer_source(
+                layer_name,
+                source_cache,
+                block_tables.slot_mappings[source_group_id],
+            )
+            indexer_sources[layer_name] = source_cache
             kv_caches[cache_name] = source_cache
             continue
         if cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
-            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            resident_spec = group_spec
-            assert isinstance(resident_spec, HiSparseResidentSpec)
-            resident_bindings[layer_name] = (
-                raw_tensor,
-                tensor_config,
-                resident_spec,
-                group_id,
-            )
             continue
         if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
             continue
@@ -426,12 +417,14 @@ def init_hisparse_runtime(
             coordinators.append(coordinator)
             seen_coordinators.add(id(coordinator))
 
-    for layer_name, (
-        raw_tensor,
-        tensor_config,
-        resident_spec,
-        resident_group_id,
-    ) in resident_bindings.items():
+    for cache_name, raw_tensor in raw_tensors.items():
+        if not cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+            continue
+        layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+        resident_group_id = group_ids[cache_name]
+        resident_spec = kv_cache_config.kv_cache_groups[resident_group_id].kv_cache_spec
+        assert isinstance(resident_spec, HiSparseResidentSpec)
+        tensor_config = tensor_configs[cache_name]
         coordinator = forward_context[layer_name].impl.hisparse_coordinator
         coordinator.bind_resident_cache(
             raw_tensor,
@@ -445,14 +438,10 @@ def init_hisparse_runtime(
         )
 
     indexer_group = kv_cache_config.kv_cache_groups[indexer_group_id]
-    cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for layer_name in indexer_group.layer_names:
-        source = get_indexer_source(layer_name)
-        assert source is not None
-        cache_pairs.append((source[0], kv_caches[layer_name]))
-        bind_indexer_source_slot_mapping(
-            layer_name, block_tables.slot_mappings[source_group_id]
-        )
+    cache_pairs = [
+        (indexer_sources[layer_name], kv_caches[layer_name])
+        for layer_name in indexer_group.layer_names
+    ]
 
     block_size = kv_cache_config.kv_cache_groups[
         source_group_id
