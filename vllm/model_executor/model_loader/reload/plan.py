@@ -44,6 +44,11 @@ def load_source(source_name: str) -> Iterator[None]:
         _CURRENT_LOAD_SOURCE.reset(token)
 
 
+def get_current_load_source() -> str | None:
+    """Return the checkpoint source currently being consumed."""
+    return _CURRENT_LOAD_SOURCE.get()
+
+
 def install_load_source_dispatch(model: torch.nn.Module) -> None:
     """Keep each checkpoint source active while the model consumes it."""
     load_weights = getattr(model, "load_weights", None)
@@ -66,7 +71,8 @@ def _with_load_sources(
 
 
 def make_load_key(
-    tensor_name: str, bound_args: inspect.BoundArguments
+    tensor_name: str,
+    bound_args: inspect.BoundArguments,
 ) -> LoadKey | None:
     """Identify one loader application by its source, destination, and every
     non-tensor argument, which is what selects the fragment being filled."""
@@ -85,6 +91,11 @@ def make_load_key(
 
 def get_load_plan(layer: torch.nn.Module) -> LoadPlan | None:
     return _PLANS.get(layer)
+
+
+def get_recorded_load_plan(layer: torch.nn.Module) -> LoadPlan | None:
+    """Return the in-progress initial-load recording for probe validation."""
+    return _RECORDING.get(layer)
 
 
 def install_load_recorder(model: torch.nn.Module) -> None:
