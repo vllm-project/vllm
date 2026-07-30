@@ -63,6 +63,31 @@ def test_encoder_cudagraph_uses_model_video_frame_limit():
     assert Glm4vForConditionalGeneration.get_max_frames_per_video(model) == 600
 
 
+@pytest.mark.parametrize(
+    ("temporal_patch_size", "expected_grid_t"),
+    [(2, 9), (4, 5), (8, 3)],
+)
+def test_vision_info_rounds_up_temporal_frames(
+    temporal_patch_size: int,
+    expected_grid_t: int,
+):
+    info = Mock(spec=Glm4vProcessingInfo)
+    vision_config = info.get_hf_config.return_value.vision_config
+    vision_config.patch_size = 14
+    vision_config.spatial_merge_size = 2
+    vision_config.temporal_patch_size = temporal_patch_size
+
+    _, num_vision_tokens = Glm4vProcessingInfo._get_vision_info(
+        info,
+        image_width=28,
+        image_height=28,
+        num_frames=17,
+        do_resize=False,
+    )
+
+    assert num_vision_tokens == expected_grid_t
+
+
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("expected_toks_per_frame", [299])
 @pytest.mark.parametrize(
