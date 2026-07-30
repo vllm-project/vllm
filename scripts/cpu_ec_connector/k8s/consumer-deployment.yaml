@@ -89,7 +89,7 @@ spec:
         - name: GPU_MEMORY_UTILIZATION
           value: "0.5"                              # CONFIGURE: set by driver
         - name: EC_TRANSFER_CONFIG
-          value: '{"ec_connector":"ECCPUConnector","ec_role":"ec_consumer","engine_id":"ec-consumer-0","ec_connector_extra_config":{"num_ec_blocks":80000}}'  # CONFIGURE: set by driver
+          value: '{"ec_connector":"ECCPUConnector","ec_role":"ec_consumer","engine_id":"ec-consumer-0","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'  # CONFIGURE: set by driver
         - name: EC_TEST_ROLE
           value: consumer
         - name: PYTHONPATH

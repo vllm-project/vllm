@@ -131,6 +131,14 @@ class ConsumerXfer:
             notif_msg=notif_msg,
         )
         self.deadline = time.monotonic() + _CONSUMER_READ_TIMEOUT_S
+        logger.debug(
+            "EC consumer: NIXL READ posted mm_hash=%s agent=%s local_blocks=%d "
+            "remote_blocks=%d",
+            self.mm_hash,
+            agent_name,
+            len(self.block_indices),
+            len(ack.src_block_indices),
+        )
         return True
 
     def poll(self, now: float) -> XferState:
@@ -154,6 +162,7 @@ class ConsumerXfer:
         if state == "DONE":
             self.data.release_xfer_handle(self.transfer_handle)
             self.transfer_handle = None
+            logger.debug("EC consumer: NIXL READ completed mm_hash=%s", self.mm_hash)
             return XferState.DONE
         if state == "PROC":
             if now > self.deadline:
@@ -307,7 +316,12 @@ class ProducerSession:
             block_indices=block_indices,
             deadline=time.monotonic() + PRODUCER_PIN_LEASE_S,
         )
-        logger.debug("EC: granted mm_hash=%s key=%s", req.mm_hash, key)
+        logger.debug(
+            "EC producer: serving NIXL READ request mm_hash=%s key=%s blocks=%d",
+            req.mm_hash,
+            key,
+            len(block_indices),
+        )
         return XferAck(
             mm_hash=req.mm_hash,
             status=XferStatus.OK,
@@ -329,12 +343,22 @@ class ProducerSession:
                 xfer = self._active_xfers.pop(key, None)
                 if xfer is not None:
                     self._cache.unpin(xfer.mm_hash)
-                    logger.debug("EC: READ done key=%s", key)
+                    logger.debug(
+                        "EC producer: NIXL READ completed mm_hash=%s key=%s",
+                        xfer.mm_hash,
+                        key,
+                    )
 
     def _sweep_timeouts(self) -> None:
         for key, xfer in list(self._active_xfers.items()):
             if xfer.is_expired():
-                logger.warning("EC: grant key=%s expired; releasing pin", key)
+                logger.warning(
+                    "EC producer: consumer did not complete NIXL READ "
+                    "mm_hash=%s key=%s within the pin lease; releasing "
+                    "pinned blocks",
+                    xfer.mm_hash,
+                    key,
+                )
                 self._cache.unpin(xfer.mm_hash)
                 del self._active_xfers[key]
 
