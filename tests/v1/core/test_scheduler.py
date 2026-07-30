@@ -4140,12 +4140,10 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
         assert scheduler_config.long_prefill_token_threshold == 0
 
 
-# ==============================================================================
-# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
+# =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
 # NOTE: In E->P->D disagg case, both KV and EC Connector works in P instance
 # Unless specify, the existence of KV Connector should not affect any test results
-# ==============================================================================
-
+# =======================================================================
 
 def _assert_right_encoder_cache_allocated(
     scheduler: Scheduler,
@@ -5208,10 +5206,8 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     )
 
 
-# ==============================================================================
-# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
-# ==============================================================================
-
+# =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
+# =======================================================================
 
 def test_prepend_skipped_requests_order():
     scheduler = create_scheduler(max_num_seqs=1, use_kv_connector=True)
@@ -5611,10 +5607,8 @@ def test_ec_connector_update_connector_output_called():
     )
 
 
-# ==============================================================================
-# Variable-length encoder cross-attention block allocation tests
-# ==============================================================================
-
+# =======================================================================# Variable-length encoder cross-attention block allocation tests
+# =======================================================================
 
 def _create_encoder_decoder_scheduler(
     block_size: int = 16,
@@ -7230,3 +7224,139 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def test_nan_fault_tolerance_aborts_request():
+    """NaN fault tolerance aborts requests with NaN logits."""
+    scheduler = create_scheduler()
+    scheduler.observability_config.enable_nan_fault_tolerance = True
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+
+    requests = create_requests(num_requests=2)
+    for req in requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100], [200]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={
+            requests[0].request_id: 3,
+            requests[1].request_id: 0,
+        },
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+
+
+def test_nan_fault_tolerance_disabled_does_not_abort():
+    """Without fault tolerance, NaN logits are recorded but not aborted."""
+    scheduler = create_scheduler()
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+    scheduler.observability_config.enable_nan_fault_tolerance = False
+
+    requests = create_requests(num_requests=2)
+    for req in requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100], [200]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={
+            requests[0].request_id: 5,
+            requests[1].request_id: 0,
+        },
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 2
+    assert requests[0].num_nans_in_logits == 5
+    assert requests[1].num_nans_in_logits == 0
+
+
+def test_nan_fault_tolerance_chunked_prefill():
+    """NaN abort fires during chunked prefill intermediate chunks."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=15,
+        enable_chunked_prefill=True,
+    )
+    scheduler.observability_config.enable_nan_fault_tolerance = True
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+
+    requests = create_requests(num_requests=1, num_tokens=30)
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[requests[0].request_id]
+    assert num_scheduled < 30
+
+    model_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={requests[0].request_id: 2},
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 0
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+
+
+def test_nan_fault_tolerance_implies_detect():
+    """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
+    from vllm.config.observability import ObservabilityConfig
+
+    config = ObservabilityConfig(enable_nan_fault_tolerance=True)
+    assert config.enable_detect_nans_in_logits is True
+
+
+def test_nan_env_var_deprecation():
+    """VLLM_COMPUTE_NANS_IN_LOGITS sets the config flag with a warning."""
+    import os
+    import warnings
+
+    from vllm.config.observability import ObservabilityConfig
+
+    old_val = os.environ.get("VLLM_COMPUTE_NANS_IN_LOGITS")
+    try:
+        os.environ["VLLM_COMPUTE_NANS_IN_LOGITS"] = "1"
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config = ObservabilityConfig()
+            deprecation_warnings = [
+                x for x in w if issubclass(x.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) >= 1
+            assert "deprecated" in str(deprecation_warnings[0].message).lower()
+
+        assert config.enable_detect_nans_in_logits is True
+    finally:
+        if old_val is None:
+            os.environ.pop("VLLM_COMPUTE_NANS_IN_LOGITS", None)
+        else:
+            os.environ["VLLM_COMPUTE_NANS_IN_LOGITS"] = old_val
+        importlib.reload(vllm.envs)
