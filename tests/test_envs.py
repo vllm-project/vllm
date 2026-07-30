@@ -14,6 +14,7 @@ from vllm.envs import (
     env_set_with_choices,
     env_with_choices,
     environment_variables,
+    validate_environ,
 )
 from vllm.exceptions import VLLMValidationError
 
@@ -566,3 +567,54 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+class TestValidateEnviron:
+    """Test cases for validate_environ's handling of removed env vars."""
+
+    def test_removed_var_warns_with_actionable_message(self, caplog_vllm):
+        with (
+            patch.dict(
+                os.environ, {"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"}, clear=True
+            ),
+            caplog_vllm.at_level("WARNING"),
+        ):
+            validate_environ(hard_fail=False)
+        assert any(
+            "VLLM_ATTENTION_BACKEND is no longer read by vLLM" in message
+            and "--attention-backend" in message
+            for message in caplog_vllm.messages
+        )
+
+    def test_removed_var_raises_actionable_error_with_hard_fail(self):
+        """hard_fail already rejects this variable as an unknown one -- it must
+        keep raising, now naming the replacement."""
+        with (
+            patch.dict(
+                os.environ, {"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"}, clear=True
+            ),
+            pytest.raises(
+                ValueError,
+                match=r"VLLM_ATTENTION_BACKEND is no longer read.*--attention-backend",
+            ),
+        ):
+            validate_environ(hard_fail=True)
+
+    def test_unrecognized_var_still_raises_with_hard_fail(self):
+        with (
+            patch.dict(os.environ, {"VLLM_THIS_IS_NOT_A_REAL_VAR": "1"}, clear=True),
+            pytest.raises(ValueError, match="Unknown vLLM environment variable"),
+        ):
+            validate_environ(hard_fail=True)
+
+    def test_unrecognized_var_warns_without_hard_fail(self, caplog_vllm):
+        with (
+            patch.dict(os.environ, {"VLLM_THIS_IS_NOT_A_REAL_VAR": "1"}, clear=True),
+            caplog_vllm.at_level("WARNING"),
+        ):
+            validate_environ(hard_fail=False)
+        assert any(
+            "Unknown vLLM environment variable detected: VLLM_THIS_IS_NOT_A_REAL_VAR"
+            in message
+            for message in caplog_vllm.messages
+        )
