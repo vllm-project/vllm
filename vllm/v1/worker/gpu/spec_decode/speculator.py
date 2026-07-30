@@ -126,18 +126,8 @@ class DraftModelSpeculator(BaseSpeculator):
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
 
-        draft_topk = (
-            getattr(self.draft_model_config.hf_config, "dspark_draft_topk", None)
-            if self.method == "dspark"
-            else None
-        )
         self.draft_logits: torch.Tensor | None = None
-        # Probabilistic top-k stores a compact proposal instead of keeping the
-        # full [request, step, vocab] draft-logits buffer alive.
-        if (
-            self.speculative_config.draft_sample_method == "probabilistic"
-            and draft_topk is None
-        ):
+        if self.speculative_config.draft_sample_method == "probabilistic":
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
@@ -145,13 +135,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 dtype=torch.float32,
                 device=device,
             )
-
-        # DSpark populates these for probabilistic top-k drafting. They retain
-        # everything rejection sampling needs to reconstruct the truncated q.
-        self.draft_topk_logits: torch.Tensor | None = None
-        self.draft_topk_token_ids: torch.Tensor | None = None
-        self.draft_topk_logsumexp: torch.Tensor | None = None
-        self.draft_topk_sampled_logprobs: torch.Tensor | None = None
 
     @abstractmethod
     def load_draft_model(

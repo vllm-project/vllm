@@ -1067,14 +1067,6 @@ class SpeculativeConfig:
                                 "dspark_draft_topk is only supported by "
                                 "Qwen3DSparkModel"
                             )
-                        if (
-                            self.draft_sample_method == "probabilistic"
-                            and self.rejection_sample_method != "standard"
-                        ):
-                            raise ValueError(
-                                "probabilistic dspark_draft_topk requires "
-                                "rejection_sample_method='standard'"
-                            )
                         hf_config.dspark_draft_topk = dspark_draft_topk
 
                 self.draft_tensor_parallel_size = (

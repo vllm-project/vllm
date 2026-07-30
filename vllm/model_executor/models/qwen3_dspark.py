@@ -66,18 +66,25 @@ class DSparkMarkovHead(nn.Module):
         """Vocab-size transition bias from a Markov embedding ([B, r] -> [B, V])."""
         return logits_processor(self.markov_w2, markov_embed)
 
-    def bias_gathered(
-        self, markov_embed: torch.Tensor, index: torch.Tensor
+    def apply_bias_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        index: torch.Tensor,
+        scale: float = 1.0,
     ) -> torch.Tensor:
-        """Project the Markov embedding only onto selected draft-vocab rows.
+        """Apply the Markov bias only to selected rows of ``logits``.
 
-        The sequential sampler already has a top-k candidate set, so evaluating
-        the remaining vocabulary would repeat unnecessary work at every step.
-        ``index`` stays in draft-vocabulary space because it indexes
-        ``markov_w2`` directly.
+        The caller initializes ``logits`` to ``-inf`` once for all draft
+        positions. This method scatters the corrected candidate values into
+        that dense buffer so the normal sampler sees the truncated proposal.
         """
         weight = self.markov_w2.weight[index]
-        return torch.bmm(weight, markov_embed.unsqueeze(-1)).squeeze(-1)
+        bias = torch.bmm(weight, markov_embed.unsqueeze(-1)).squeeze(-1)
+        if scale != 1.0:
+            bias = bias * scale
+        return logits.scatter_(1, index, values + bias)
 
 
 class Qwen3DSparkModel(DFlashQwen3Model):
@@ -159,11 +166,20 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
-    def markov_bias_gathered(
-        self, markov_embed: torch.Tensor, index: torch.Tensor
+    def apply_markov_bias_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        logits: torch.Tensor,
+        values: torch.Tensor,
+        index: torch.Tensor,
     ) -> torch.Tensor:
-        bias = self.model.markov_head.bias_gathered(markov_embed, index)
-        return bias * self.logits_processor.scale
+        return self.model.markov_head.apply_bias_gathered(
+            markov_embed,
+            logits,
+            values,
+            index,
+            self.logits_processor.scale,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
