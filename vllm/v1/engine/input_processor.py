@@ -338,7 +338,9 @@ class InputProcessor:
                     )
                 if sampling_params.top_k <= 0:
                     raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to bound sampling mask size"
+                        "sampling distribution replay requires top_k > 0 to "
+                        "bound sampling mask size, reduce transfer overhead, "
+                        "and avoid potential OOMs"
                     )
         else:
             pooling_params = params.clone()
