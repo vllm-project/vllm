@@ -293,16 +293,8 @@ class XPUPlatform(Platform):
                 "disabling cudagraph_mode."
             )
         elif (
-            "VLLM_XPU_ENABLE_XPU_GRAPH" in os.environ
-            and not envs.VLLM_XPU_ENABLE_XPU_GRAPH
-        ):
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning_once(
-                "XPU Graph is disabled by environment variable, "
-                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
-            )
-        elif (
-            envs.VLLM_XPU_ENABLE_XPU_GRAPH
+            ("VLLM_XPU_ENABLE_XPU_GRAPH" in os.environ
+            and envs.VLLM_XPU_ENABLE_XPU_GRAPH)
             or compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             logger.warning_once(
@@ -314,6 +306,13 @@ class XPUPlatform(Platform):
                 "potentially causing OOM errors or leaving less memory "
                 "for the KV cache and reducing performance."
             )
+        else:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning_once(
+                "XPU Graph is disabled by environment variable, "
+                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
+            )
+            
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
