@@ -878,7 +878,6 @@ def _prepare_and_transform_sublayer(
     tensors = transform_humming_tensors(
         config,
         _extract_sublayer_tensors(layer, sublayer_name),
-        already_padded=True,
     )
     _replace_layer_parameters(layer, sublayer_name, tensors)
     return config
