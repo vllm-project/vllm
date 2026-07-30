@@ -35,7 +35,7 @@ template <int BLOCK_M>
 int moe_align_block_size(
     int32_t* __restrict__ sorted_ids,
     int32_t* __restrict__ expert_ids,
-    int32_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ topk_ids,
     int32_t* __restrict__ total_cnts,
     int32_t* __restrict__ cumsums,
     int32_t* __restrict__ offsets,
@@ -50,7 +50,13 @@ int moe_align_block_size(
     int32_t* __restrict__ local_cnts = T_INDEX(tid + 1);
 
     for (int i = begin; i < end; ++i) {
-      local_cnts[topk_ids[i]]++;
+      int32_t e = topk_ids[i];
+      if (e == -1) {
+        continue;
+      }
+      TORCH_CHECK(
+          0 <= e && e < num_experts, "Invalid expert id ", e, " for ", num_experts, " experts.");
+      local_cnts[e]++;
     }
   });
 
@@ -63,10 +69,12 @@ int moe_align_block_size(
   // the last row holds sums of each experts
   int32_t* total_cnts_t_1 = T_INDEX(num_threads);
 
+  int num_valid = 0;
   cumsums[0] = 0;
   for (int e = 0; e < num_experts; ++e) {
     // accumulate `num_tokens_post_pad`, also as the expert offset
     cumsums[e + 1] = cumsums[e] + div_up(total_cnts_t_1[e], BLOCK_M) * BLOCK_M;
+    num_valid += total_cnts_t_1[e];
 
     for (int k = cumsums[e]; k < cumsums[e + 1]; k += BLOCK_M) {
       expert_ids[k / BLOCK_M] = e;
@@ -81,6 +89,9 @@ int moe_align_block_size(
 
     for (int i = begin; i < end; ++i) {
       int32_t expert_id = topk_ids[i];
+      if (expert_id == -1) {
+        continue;
+      }
       int32_t b_offset = cumsums[expert_id];
       int32_t t_offset = offsets[expert_id];
       sorted_ids[b_offset + t_offset] = i;
@@ -117,8 +128,8 @@ int moe_align_block_size(
   for (int mb = 0; mb < num_token_blocks; ++mb) {
     offsets[mb + 1] += offsets[mb];
   }
-  // debug: the last value of offsets should be `numel`
-  TORCH_CHECK(offsets[num_token_blocks] == numel);
+  // debug: the last value of offsets should be `num_valid`
+  TORCH_CHECK(offsets[num_token_blocks] == num_valid);
 
   return num_tokens_post_pad;
 }
@@ -942,6 +953,9 @@ at::Tensor fused_experts_cpu(
   }
   // check scales
   check_moe_scales(moe_comp_method, w1_scale, w2_scale, block_size);
+  if (moe_comp_method == CPUQuantMethod::FP8_W8A16) {
+    CHECK_MOE_SCALES_FP8(1, 2);
+  }
 
   at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
 
@@ -983,6 +997,13 @@ at::Tensor fused_experts_cpu(
   int64_t num_tokens_post_pad = moe_align_block_size<BLOCK_M>(
       sorted_ids, expert_ids, topk_ids_.data_ptr<int32_t>(), total_cnts, cumsums, offsets, E, numel, num_threads);
 
+  bool has_skip = offsets[num_tokens_post_pad / BLOCK_M] != numel;
+
+  if (num_tokens_post_pad == 0) {
+    out_hidden_states.zero_();
+    return out_hidden_states;
+  }
+
   // unlike triton kernel, we fuse silu with gemm1 so only need 2 intermediate_caches:
   //   1. intermediate_cache1 : [M * topk, N]
   //   2. intermediate_cache2 : [M * topk, K]
@@ -1018,6 +1039,12 @@ at::Tensor fused_experts_cpu(
   AT_DISPATCH_REDUCED_FLOATING_TYPES(st, "fused_experts_kernel_impl", [&] {
     scalar_t* __restrict__ intermediate_cache1 = (scalar_t*)((void*)(buffer2.data_ptr<int8_t>()));
     scalar_t* __restrict__ intermediate_cache2 = intermediate_cache1 + M * topk * N;
+
+    if (has_skip) {
+      at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+        fill_stub(intermediate_cache2 + begin * K, (scalar_t)0, (end - begin) * K);
+      });
+    }
 
     if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
       uint8_t* __restrict__ A_tmp = (uint8_t*)((void*)(intermediate_cache2 + M * topk * K));
