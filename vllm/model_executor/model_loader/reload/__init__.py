@@ -23,6 +23,9 @@ __all__ = [
     "finalize_layerwise_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
+    "LoadProbeError",
+    "LoadProbeReport",
+    "probe_model_load",
 ]
 
 from .layerwise import (
@@ -33,6 +36,7 @@ from .layerwise import (
     record_metadata_for_reloading,
     validate_layerwise_reload,
 )
+from .probe import LoadProbeError, LoadProbeReport, probe_model_load
 from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,
