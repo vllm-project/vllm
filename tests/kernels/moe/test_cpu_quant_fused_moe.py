@@ -1305,6 +1305,68 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     )
 
 
+@pytest.mark.parametrize("seed", [0])
+def test_int8_w8a8_cpu_fused_moe_skip_padding(seed):
+    """Skipped top-k entries contribute zero to INT8 fused MoE output."""
+    set_random_seed(seed)
+    M, N, K, E, topk = 8, 256, 512, 8, 2
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
+    w1, w2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    topk_ids_partial = topk_ids.clone()
+    topk_ids_partial[1, 0] = -1
+    topk_ids_partial[2, :] = -1
+
+    ref_out = _ref_int8_moe(
+        a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids_partial
+    )
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids_partial,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        None,
+        is_vnni=True,
+    )
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=2e-1, rtol=2e-1)
+
+    topk_ids_all = torch.full_like(topk_ids, -1)
+    out_all_skipped = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out_all_skipped,
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids_all,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        None,
+        is_vnni=True,
+    )
+    torch.testing.assert_close(
+        out_all_skipped, torch.zeros_like(out_all_skipped)
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
     """Test INT8 dispatch at exact and multi-block expert boundaries."""
