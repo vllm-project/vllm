@@ -35,6 +35,7 @@ from vllm.parser.engine.registered_adapters import (
     Glm47MoeParser,
     InklingParser,
     KimiK2Parser,
+    KimiK3Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
     Qwen3Parser,
@@ -748,6 +749,108 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── Kimi K3 (XTML channel format) ───────────────────────────────────
+
+_KIMI_K3_OPEN = "<|open|>"
+_KIMI_K3_CLOSE = "<|close|>"
+_KIMI_K3_SEP = "<|sep|>"
+_KIMI_K3_VOCAB: dict[str, int] = {
+    _KIMI_K3_OPEN: 163584,
+    _KIMI_K3_CLOSE: 163585,
+    _KIMI_K3_SEP: 163586,
+}
+
+
+def _kimi_k3_marker(control: str, channel: str) -> list[tuple[str, bool]]:
+    return [(control, True), (channel, False), (_KIMI_K3_SEP, True)]
+
+
+def _kimi_k3_arg_value(value: Any) -> tuple[str, str]:
+    if isinstance(value, str):
+        return "string", value
+    if value is None:
+        return "null", "null"
+    if isinstance(value, bool):
+        return "boolean", "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return "number", str(value)
+    if isinstance(value, dict):
+        return "object", json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return "array", json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _kimi_k3_tool_segments(tc: ToolCallSpec, index: int) -> list[tuple[str, bool]]:
+    segs = [
+        (_KIMI_K3_OPEN, True),
+        (f'call tool="{tc.name}" index="{index}"', False),
+        (_KIMI_K3_SEP, True),
+    ]
+    for key, value in tc.arguments.items():
+        value_type, value_text = _kimi_k3_arg_value(value)
+        segs.extend(
+            [
+                (_KIMI_K3_OPEN, True),
+                (f'argument key="{key}" type="{value_type}"', False),
+                (_KIMI_K3_SEP, True),
+                (value_text, False),
+                (_KIMI_K3_CLOSE, True),
+                ("argument", False),
+                (_KIMI_K3_SEP, True),
+            ]
+        )
+    segs.extend(_kimi_k3_marker(_KIMI_K3_CLOSE, "call"))
+    return segs
+
+
+def _kimi_k3_segments(
+    scenario: Scenario,
+    thinking: bool,
+) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if thinking:
+        segs.append((scenario.reasoning or "", False))
+        segs.extend(_kimi_k3_marker(_KIMI_K3_CLOSE, "think"))
+        segs.extend(_kimi_k3_marker(_KIMI_K3_OPEN, "response"))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    segs.extend(_kimi_k3_marker(_KIMI_K3_CLOSE, "response"))
+
+    if scenario.tool_calls:
+        segs.extend(_kimi_k3_marker(_KIMI_K3_OPEN, "tools"))
+        for index, tool_call in enumerate(scenario.tool_calls, start=1):
+            segs.extend(_kimi_k3_tool_segments(tool_call, index))
+        segs.extend(_kimi_k3_marker(_KIMI_K3_CLOSE, "tools"))
+
+    segs.extend(_kimi_k3_marker(_KIMI_K3_CLOSE, "message"))
+    return segs
+
+
+def _build_kimi_k3(scenario: Scenario, validate: bool = True) -> Sample | None:
+    if scenario.tool_calls == []:
+        return None
+
+    thinking = scenario.reasoning is not None
+    chat_kwargs = {"thinking": thinking}
+    sample = _make_sample(
+        sample_id=f"kimi_k3-{scenario.id}",
+        description=scenario.description,
+        vocab=_KIMI_K3_VOCAB,
+        segments=_kimi_k3_segments(scenario, thinking),
+        expected_reasoning=scenario.reasoning if thinking else None,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        chat_template_kwargs=chat_kwargs,
+    )
+    if validate:
+        _validate_sample(
+            sample,
+            KimiK3Parser,
+            chat_template_kwargs=chat_kwargs,
+        )
+    return sample
+
+
 # ── DeepSeek V3.2 (DSML tool format, no reasoning) ──────────────────
 
 _DSV32_VOCAB: dict[str, int] = {
@@ -1031,6 +1134,7 @@ _BUILDERS: dict[str, Any] = {
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
+    "kimi_k3": _build_kimi_k3,
     "qwen3": _build_qwen3,
     "inkling": _build_inkling,
 }
