@@ -322,11 +322,9 @@ class XPUPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
 
-        # The batched experts kernel (BatchedTritonExperts) consumes the batched
-        # activation format, which only naive_low_latency produces on XPU. When
-        # that kernel is requested under EP and no all-to-all backend was chosen,
-        # default to naive_low_latency so the batched path works without a second
-        # flag. The fused XPUExperts path (the default) is left untouched.
+        # naive_low_latency is the only XPU dispatch emitting the batched
+        # activation format BatchedTritonExperts needs, so switch to it rather
+        # than require a second flag. Leaves the default XPUExperts path alone.
         if (
             parallel_config.enable_expert_parallel
             and vllm_config.kernel_config.moe_backend == "batched_triton"

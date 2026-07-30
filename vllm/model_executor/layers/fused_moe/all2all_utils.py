@@ -328,8 +328,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_naive_ll_kernels and allow_new_interface:
-        # Portable low-latency routed all-to-all: route each token only to the
-        # rank(s) owning its expert(s), into the per-rank batched buffer.
         if current_platform.is_xpu() and not use_monolithic:
             prepare_finalize = NaiveLowLatencyPrepareAndFinalize(
                 max_num_tokens=moe.max_num_tokens,
@@ -338,10 +336,7 @@ def maybe_make_prepare_finalize(
                 rank=moe.moe_parallel_config.ep_rank,
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             )
-            logger.info_once(
-                "XPU MoE EP: using NaiveLowLatencyPrepareAndFinalize "
-                "(routed all_to_all_single into batched moe_mmk format)."
-            )
+            logger.info_once("XPU MoE EP: using NaiveLowLatencyPrepareAndFinalize.")
         else:
             prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
                 use_monolithic=use_monolithic,

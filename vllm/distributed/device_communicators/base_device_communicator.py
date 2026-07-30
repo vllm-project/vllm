@@ -314,12 +314,7 @@ class DeviceCommunicatorBase:
         output_split_sizes: list[int] | None = None,
         input_split_sizes: list[int] | None = None,
     ) -> torch.Tensor:
-        """Variable-sized all-to-all over dim 0 (routed dispatch/combine).
-
-        Portable wrapper over `torch.distributed.all_to_all_single`
-        `*_split_sizes` give the per-rank row counts to send/receive;
-        when `None` the input is split evenly across ranks (equal chunks).
-        """
+        """All-to-all over dim 0, split evenly across ranks if sizes are None."""
         if self.world_size == 1:
             return input_
         input_ = input_.contiguous()

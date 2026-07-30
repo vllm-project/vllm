@@ -190,10 +190,8 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
-    - "naive_low_latency": Portable low-latency routed all-to-all
-      (all_to_all_single) into the batched activation format; routes each token
-      only to the rank(s) owning its selected expert(s) instead of replicating
-      the full batch per rank. DeepEP-free analog of deepep_low_latency.
+    - "naive_low_latency": All2all based on all_to_all_single, routing each
+      token only to the ranks owning its experts, in batched activation format
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node

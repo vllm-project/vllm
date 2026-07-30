@@ -31,9 +31,8 @@ class XpuCommunicator(DeviceCommunicatorBase):
             ):
                 from .all2all import AgRsAll2AllManager
 
-                # The "naive_low_latency" (routed) backend drives dispatch/combine
-                # via the communicator's all_to_all_single directly; it only needs
-                # the AgRs manager for group metadata (world_size/rank/handles).
+                # naive_low_latency dispatches via all_to_all_single directly and
+                # only needs this manager for group metadata.
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
