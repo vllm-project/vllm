@@ -4,13 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.v1.outputs import LogprobsTensors
-
-
-@dataclass
-class SamplingMaskTensors:
-    keep: torch.Tensor
-    counts: torch.Tensor
+from vllm.v1.outputs import LogprobsTensors, SamplingMaskTensors
 
 
 @dataclass

@@ -4,7 +4,11 @@ from unittest import TestCase
 
 import torch
 
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import (
+    LogprobsLists,
+    LogprobsTensors,
+    SamplingMaskTensors,
+)
 
 
 def test_logprobs_tensors_cat():
@@ -28,6 +32,15 @@ def test_logprobs_tensors_cat():
     assert result.selected_token_ranks.tolist() == [1, 2]
     assert result.cu_num_generated_tokens == [0, 1, 2]
     assert LogprobsTensors.cat([first]) is first
+
+
+def test_sampling_mask_tensors_to_cpu_nonblocking():
+    sampling_mask = SamplingMaskTensors(
+        torch.tensor([3, 1, 4], dtype=torch.int32),
+        torch.tensor([2, 1], dtype=torch.int32),
+    )
+
+    assert sampling_mask.to_cpu_nonblocking() is sampling_mask
 
 
 class TestLogprobsLists(TestCase):
