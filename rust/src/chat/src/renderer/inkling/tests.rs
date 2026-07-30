@@ -105,7 +105,7 @@ fn fixture_request(name: &str) -> ChatRequest {
 
 fn inkling_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: false,
+        enable_thinking: Some(false),
         no_generation_prompt_when_last_assistant: false,
     }
 }
