@@ -51,6 +51,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_4BIT_NC = 7
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
+    NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
 
     @property
     def is_per_token_head(self) -> bool:
@@ -85,6 +86,11 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
+    # Must precede the ``nvfp4`` prefix test below, which would otherwise match.
+    if kv_cache_dtype == "nvfp4_fp8_ds_mla":
+        # Page size is keyed on cache_dtype_str in the MLA specs, not
+        # nvfp4_kv_cache_full_dim.
+        return KVQuantMode.NVFP4_DS_MLA
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):

@@ -25,6 +25,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "nvfp4_fp8_ds_mla",
     "turboquant_k8v4",
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",

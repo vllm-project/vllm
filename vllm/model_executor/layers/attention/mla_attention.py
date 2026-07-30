@@ -352,6 +352,10 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
 ) -> CacheDType:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
+        # (fp8, fp8_e4m3, ...) is served via the fp8_ds_mla format.
+        if kv_cache_dtype == "nvfp4_fp8_ds_mla":
+            return kv_cache_dtype
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
         "auto",
@@ -801,7 +805,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and self.kv_cache_dtype not in (
+            # Opaque per-token byte formats stay as raw uint8
+            "fp8_ds_mla",
+            "nvfp4_fp8_ds_mla",
+        ):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         assert (
@@ -1189,9 +1197,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+            # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
+            # blob, so the size is not derivable from head_size.
+            # See flashmla_sparse.py.
+            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_fp8_ds_mla": 352}.get(
+                self.kv_cache_dtype
+            ),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(

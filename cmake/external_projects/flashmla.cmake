@@ -18,8 +18,8 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG a8f794d1251cbfd88a5011445dd5582289c727e4
+        GIT_REPOSITORY https://github.com/sychen52/FlashMLA
+        GIT_TAG a25c58279520f89167546c4c2fdd7ea6f78fe47c
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -111,6 +111,7 @@ if(FLASH_MLA_ARCHS)
         # sm100 sparse decode
         ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/v32.cu
         ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/model1.cu
+        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/v32_nvfp4_fp8rope.cu
         ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512.cu
     )
 
