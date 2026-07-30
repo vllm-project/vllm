@@ -77,25 +77,30 @@ class LatentMoERunner(MoERunner):
             )
             self._k3_latent_moe_tail_op = op
 
-    def _get_zero_residual(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _get_zero_residual(
+        self,
+        hidden_states: torch.Tensor,
+        max_token_num: int,
+    ) -> torch.Tensor:
         """Read-only zero ``residual_in`` for the fused AR+RMSNorm kernel.
 
         flashinfer requires a residual buffer even when there is no residual to
         add.
         """
-        numel = hidden_states.numel()
         buf = getattr(self, "_zero_residual", None)
-        if (
-            buf is None
-            or buf.dtype != hidden_states.dtype
-            or buf.device != hidden_states.device
-            or buf.numel() < numel
-        ):
+        if buf is None:
             buf = torch.zeros(
-                numel, dtype=hidden_states.dtype, device=hidden_states.device
+                max_token_num * hidden_states.shape[-1],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
             )
             self._zero_residual = buf
-        return buf[:numel].view_as(hidden_states)
+
+        assert buf.dtype == hidden_states.dtype
+        assert buf.device == hidden_states.device
+        assert hidden_states.numel() <= buf.numel()
+
+        return buf[: hidden_states.numel()].view_as(hidden_states)
 
     def _use_fused_path(self) -> bool:
         # The fused path merges the latent and shared reductions into one
@@ -239,7 +244,7 @@ class LatentMoERunner(MoERunner):
                 # buffer and the normalized result into norm_out.
                 flashinfer_trtllm_fused_allreduce_norm(
                     allreduce_in=hidden_states,
-                    residual=self._get_zero_residual(hidden_states),
+                    residual=self._get_zero_residual(hidden_states, max_token_num),
                     rms_gamma=norm.weight,
                     rms_eps=norm.variance_epsilon,
                     world_size=self.moe_config.tp_size,
