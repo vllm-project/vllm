@@ -87,16 +87,6 @@ class QuarkConfig(QuantizationConfig):
         self.dynamic_mxfp4_quant = False
 
     @staticmethod
-    def _is_packed_int4_export(config: dict[str, Any]) -> bool:
-        if config.get("quant_method", "").lower() != "quark":
-            return False
-        export_config = config.get("export", {})
-        if export_config.get("pack_method") not in ("order", "reorder"):
-            return False
-        weight_config = config.get("global_quant_config", {}).get("weight", {})
-        return weight_config.get("dtype") in ("int4", "uint4")
-
-    @staticmethod
     def _dedupe_quark_excludes(exclude: list[str] | None) -> list[str] | None:
         if not exclude:
             return exclude
@@ -777,13 +767,6 @@ class QuarkConfig(QuantizationConfig):
             ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
         }
         cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
-        if self._is_packed_int4_export(self.quant_config):
-            cache_scale_mapper |= WeightsMapper(
-                orig_to_new_suffix={
-                    ".qscales": ".weight_scale",
-                    ".qqzeros": ".weight_zero_point",
-                },
-            )
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
