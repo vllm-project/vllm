@@ -362,10 +362,7 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        alpha = self.quant_config.gemm1_alpha
-        alpha = 1.702 if alpha is None else float(alpha)
-        beta = self.quant_config.gemm1_beta
-        beta = 1.0 if beta is None else float(beta)
+        # `self.gemm1_alpha` and `self.gemm1_beta`` are set by `TritonExperts.__init__`.
         limit = self.quant_config.gemm1_clamp_limit
         limit = None if limit is None else float(limit)
         out = fused_moe_mxfp8_native(
@@ -376,8 +373,8 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
             self.w2_scale_val,
             topk_weights,
             topk_ids,
-            alpha=alpha,
-            beta=beta,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
             limit=limit,
             global_num_experts=global_num_experts,
             expert_map=expert_map,

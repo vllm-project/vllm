@@ -724,18 +724,20 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
+        # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_with_hash = []
         blocks_without_hash = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                if block.block_hash is None:
+                # When caching is disabled we always append for better
+                # GPU cache locality from reusing recently used blocks
+                if block.block_hash is None and self.enable_caching:
                     blocks_without_hash.append(block)
                 else:
                     blocks_with_hash.append(block)
 
-        # Blocks without hash always get evicted first - prepend them last to the tail
+        # Blocks without hash get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
         self.free_block_queue.append_n(blocks_with_hash)
 
