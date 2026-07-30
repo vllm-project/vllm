@@ -265,6 +265,7 @@ class IquestCoderV2ToolParser(ToolParser):
                 continue
 
             tool_name, arguments = parsed
+            arguments_json = json.dumps(arguments, ensure_ascii=False)
             tool_call_deltas.append(
                 DeltaToolCall(
                     index=self._next_tool_index,
@@ -272,10 +273,22 @@ class IquestCoderV2ToolParser(ToolParser):
                     type="function",
                     function=DeltaFunctionCall(
                         name=tool_name,
-                        arguments=json.dumps(arguments, ensure_ascii=False),
+                        arguments=arguments_json,
                     ),
                 )
             )
+            # Keep the base-class streaming bookkeeping in sync. The serving
+            # layer's end-of-stream "unstreamed tool args" flush indexes into
+            # prev_tool_call_arr[index] / streamed_args_for_tool[index]; without
+            # a matching entry per emitted call it raises IndexError on an empty
+            # list. This shows up when the closing tag and the finish token land
+            # in the same streaming step (e.g. under MTP speculative decoding),
+            # so the tool-call delta carries finish_reason and the flush runs.
+            # We emit each call fully in one delta, so there is nothing left to
+            # flush and expected_call == streamed args -> empty remainder.
+            self.prev_tool_call_arr.append({"name": tool_name, "arguments": arguments})
+            self.streamed_args_for_tool.append(arguments_json)
+            self.current_tool_id = self._next_tool_index
             self._next_tool_index += 1
 
         content = "".join(content_parts)
