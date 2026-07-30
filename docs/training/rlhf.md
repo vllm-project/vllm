@@ -16,7 +16,7 @@ The following open-source RL libraries use vLLM for fast rollouts (sorted alphab
 - [Unsloth](https://github.com/unslothai/unsloth)
 - [verl](https://github.com/volcengine/verl)
 
-For weight synchronization between training and inference, see the [Weight Transfer](weight_transfer/README.md) documentation, which covers the pluggable backend system with [NCCL](weight_transfer/nccl.md) (multi-GPU) and [IPC](weight_transfer/ipc.md) (same-GPU) engines.
+For weight synchronization between training and inference, see the [Weight Transfer](weight_transfer/README.md) documentation, which covers the pluggable backend system with [NCCL](weight_transfer/nccl.md) (multi-GPU), [IPC](weight_transfer/ipc.md) (same-GPU), and [WPI](weight_transfer/wpi.md) (zero-copy cross-node) engines.
 
 For pipelining generation and training to improve GPU utilization and throughput, see the [Async Reinforcement Learning](async_rl.md) guide, which covers the pause/resume API for safely updating weights mid-flight.
 
