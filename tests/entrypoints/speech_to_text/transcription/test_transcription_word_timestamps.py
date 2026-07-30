@@ -88,6 +88,44 @@ async def test_word_timestamps_not_requested(whisper_client, mary_had_lamb):
 
 
 @pytest.mark.asyncio
+async def test_word_only_request_omits_segments(whisper_client, mary_had_lamb):
+    """Asking only for ``word`` should not pay for segments.
+
+    Skipping them is what lets the request skip ``logprobs`` and the
+    ``<|notimestamps|>`` -> ``<|0.00|>`` prompt swap as well, so ``segments``
+    coming back ``None`` is the observable half of the fast path.
+    """
+    transcription = await _transcribe_words(whisper_client, mary_had_lamb)
+    assert transcription.words
+    assert transcription.segments is None
+
+
+@pytest.mark.asyncio
+async def test_word_only_request_still_carries_text(whisper_client, mary_had_lamb):
+    """``text`` must survive the segment skip, and must match the json answer.
+
+    ``verbose_json`` builds ``text`` by joining its segments, so a word-only
+    request has to take it from the raw output instead. It is also the tighter
+    assertion: the two formats now send the *same* decoder prompt, so a fine-tune
+    that never learned to emit timestamp tokens no longer transcribes differently
+    (or not at all) depending on the response format. That divergence has been
+    measured -- one Whisper fine-tune returned 271 characters as ``json`` and 0 as
+    ``verbose_json`` for the same audio, with no warning anywhere.
+    """
+    word_only = await _transcribe_words(whisper_client, mary_had_lamb)
+    mary_had_lamb.seek(0)
+    plain = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="json",
+        temperature=0.0,
+    )
+    assert word_only.text.strip()
+    assert word_only.text.strip() == plain.text.strip()
+
+
+@pytest.mark.asyncio
 async def test_word_timestamps_batched(
     whisper_client, mary_had_lamb, winning_call, foscolo
 ):
