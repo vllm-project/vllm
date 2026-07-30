@@ -383,7 +383,6 @@ def init_hisparse_runtime(
     hot_backing: torch.Tensor | None = None
     coordinators: list[HiSparseCoordinator] = []
     seen_coordinators: set[int] = set()
-    indexer_sources: dict[str, torch.Tensor] = {}
     for cache_name, raw_tensor in raw_tensors.items():
         group_id = group_ids[cache_name]
         group_spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
@@ -410,10 +409,23 @@ def init_hisparse_runtime(
                 source_cache,
                 block_tables.slot_mappings[source_group_id],
             )
-            indexer_sources[layer_name] = source_cache
             kv_caches[cache_name] = source_cache
             continue
         if cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+            resident_spec = group_spec
+            assert isinstance(resident_spec, HiSparseResidentSpec)
+            coordinator = forward_context[layer_name].impl.hisparse_coordinator
+            coordinator.bind_resident_cache(
+                raw_tensor,
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=resident_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+                slot_mapping=block_tables.slot_mappings[group_id],
+                group_id=group_id,
+            )
             continue
         if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
             continue
@@ -440,29 +452,12 @@ def init_hisparse_runtime(
             coordinators.append(coordinator)
             seen_coordinators.add(id(coordinator))
 
-    for cache_name, raw_tensor in raw_tensors.items():
-        if not cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
-            continue
-        layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-        resident_group_id = group_ids[cache_name]
-        resident_spec = kv_cache_config.kv_cache_groups[resident_group_id].kv_cache_spec
-        assert isinstance(resident_spec, HiSparseResidentSpec)
-        tensor_config = tensor_configs[cache_name]
-        coordinator = forward_context[layer_name].impl.hisparse_coordinator
-        coordinator.bind_resident_cache(
-            raw_tensor,
-            byte_offset=tensor_config.offset,
-            block_stride=tensor_config.block_stride,
-            num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
-            block_size=resident_spec.block_size,
-            block_table=block_tables.input_block_tables[resident_group_id],
-            slot_mapping=block_tables.slot_mappings[resident_group_id],
-            group_id=resident_group_id,
-        )
-
     indexer_group = kv_cache_config.kv_cache_groups[indexer_group_id]
     cache_pairs = [
-        (indexer_sources[layer_name], kv_caches[layer_name])
+        (
+            kv_caches[f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"],
+            kv_caches[layer_name],
+        )
         for layer_name in indexer_group.layer_names
     ]
 
