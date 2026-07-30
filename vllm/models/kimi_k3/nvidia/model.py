@@ -1118,6 +1118,85 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             }
         )
 
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        super()._set_aux_hidden_state_layers(layers)
+        if self.use_attn_res:
+            # Emitted once, at configuration time. Which layers are tapped and
+            # which convention is in force are the two things you need to
+            # confirm from a running process, and neither is recoverable from
+            # the served output.
+            logger.info_once(
+                "Kimi-K3 aux hidden capture: layers=%s mode=%s "
+                "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
+                layers,
+                "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
+                int(self._aux_attn_res_stream),
+            )
+
+    @property
+    def _aux_attn_res_stream(self) -> bool:
+        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
+
+    def _capture_aux_hidden_stream(
+        self,
+        layer_idx: int,
+        prefix_sum: torch.Tensor,
+        pending_mlp_out: torch.Tensor | None,
+        block_residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
+
+        The wire between layers only carries the current block's running prefix;
+        the committed blocks live in the bank. The value the next consumer
+        actually reads is the pre-norm AttnRes mixture over
+        ``bank[:num_blocks] + prefix``, which is what the DFlash drafters were
+        trained against. ``attn_res`` with no delta, no block write and no
+        output norm computes exactly that and leaves both the prefix and the
+        bank untouched.
+
+        Folding the pending MLP output into the prefix rather than passing it as
+        ``delta`` is deliberate: the kernel writes an applied delta back into
+        the prefix in place, which would double-add it into the live residual
+        stream.
+        """
+        prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
+        # `use_attn_res` is what constructs the norm and projection weights this
+        # reads; without it there is no mixture to compute and the attribute
+        # lookups below would raise.
+        if not (self._aux_attn_res_stream and self.use_attn_res):
+            return prefix
+
+        if layer_idx + 1 < self.end_layer:
+            consumer = self.layers[layer_idx + 1]
+            score_norm = consumer.self_attention_res_norm
+            score_proj = consumer.self_attention_res_proj
+            num_blocks = consumer.prev_valid_blocks
+        elif get_pp_group().is_last_rank:
+            # Nothing downstream but the model's own output-side aggregation.
+            score_norm = self.output_attn_res_norm
+            score_proj = self.output_attn_res_proj
+            num_blocks = self.num_attn_res_blocks
+        else:
+            # Last layer of a non-final pipeline stage: the consumer lives on
+            # the next rank and the output-side aggregation only exists on the
+            # last one, so there is nothing here to mix against. Falling back
+            # to the running prefix keeps the tap defined rather than reaching
+            # for weights this rank does not construct.
+            return prefix
+
+        return attn_res(
+            prefix,
+            None,
+            block_residual,
+            score_norm.weight,
+            score_proj.weight.squeeze(0),
+            None,
+            num_blocks=num_blocks,
+            block_write_idx=-1,
+            eps=score_norm.variance_epsilon,
+            output_norm_eps=0.0,
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1185,7 +1264,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 if self.use_attn_res:
                     assert prefix_sum is not None
-                    aux_hidden_state = prefix_sum + hidden_states
+                    assert residual is not None
+                    aux_hidden_state = self._capture_aux_hidden_stream(
+                        layer_idx, prefix_sum, hidden_states, residual
+                    )
                 else:
                     assert residual is not None
                     aux_hidden_state = hidden_states + residual
