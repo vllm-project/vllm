@@ -225,8 +225,16 @@ class GraniteReasoningParser(ReasoningParser):
         if reasoning is None or ends_with_start_response_seq:
             return DeltaMessage(reasoning=None, content=None)
 
-        # Consider previous / current text only within context of the reasoning
-        previous_text = reasoning[: -len(delta_text)]
+        # Consider previous / current text only within context of the reasoning.
+        # A delta can straddle the end of the start of reasoning sequence, e.g.
+        # ":(" closing "Here is my thought process:", so only its tail is
+        # reasoning; clamp to what reasoning actually holds instead of assuming
+        # the whole delta is in it. Slicing by -len(delta_text) cannot do that:
+        # it yields "" both when the delta is longer than reasoning and, because
+        # -0 is 0, when the delta is empty.
+        delta_len = min(len(delta_text), len(reasoning))
+        previous_text = reasoning[: len(reasoning) - delta_len]
+        delta_text = reasoning[len(reasoning) - delta_len :]
         current_text = reasoning
 
         # We need to be careful about adding unfinished response sequences;

@@ -40,6 +40,14 @@ COMPLETE_REASONING_WITH_THINK = {
     "reasoning": "This is a reasoning section",
     "content": None,
 }
+PUNCTUATION_AFTER_START_SEQ = {
+    # BPE merges the marker's ":" with the punctuation that follows it into one
+    # token, so a single delta closes the start of reasoning sequence and opens
+    # the reasoning at the same time.
+    "output": f"{START_REASONING}(thinking){START_RESPONSE}(answer)",
+    "reasoning": "(thinking)",
+    "content": "(answer)",
+}
 MULTIPLE_LINES_WITH_THINK = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
     "reasoning": "This\nThat",
@@ -83,6 +91,11 @@ TEST_CASES = [
         id="multiple_lines_with_think",
     ),
     pytest.param(
+        False,
+        PUNCTUATION_AFTER_START_SEQ,
+        id="punctuation_after_start_seq",
+    ),
+    pytest.param(
         True,
         SIMPLE_REASONING,
         id="simple_reasoning_streaming",
@@ -116,6 +129,11 @@ TEST_CASES = [
         True,
         MULTIPLE_LINES_WITH_THINK,
         id="multiple_lines_with_think_streaming",
+    ),
+    pytest.param(
+        True,
+        PUNCTUATION_AFTER_START_SEQ,
+        id="punctuation_after_start_seq_streaming",
     ),
 ]
 
@@ -255,6 +273,16 @@ STREAMING_13 = {
     "content": None,
 }
 
+# The delta closes the start of reasoning sequence and carries reasoning with
+# it; only the part inside the reasoning belongs in the delta message.
+STREAMING_14 = {
+    "previous_text": "Here is my thought process",
+    "current_text": "Here is my thought process:(",
+    "delta_text": ":(",
+    "reasoning": "(",
+    "content": None,
+}
+
 STREAMING_SUBCASES = [
     pytest.param(
         STREAMING_1,
@@ -307,6 +335,10 @@ STREAMING_SUBCASES = [
     pytest.param(
         STREAMING_13,
         id="Delta breaks potential responise sequence",
+    ),
+    pytest.param(
+        STREAMING_14,
+        id="Delta ends the start reasoning sequence and starts the reasoning",
     ),
 ]
 
