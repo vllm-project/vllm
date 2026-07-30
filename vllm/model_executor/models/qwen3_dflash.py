@@ -83,6 +83,38 @@ def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     return target_hidden_size * num_features_to_use
 
 
+def _should_book_draft_kv_as_full_attention(
+    num_sliding_layers: int, num_layers: int, cache_config: CacheConfig
+) -> bool:
+    """Whether an all-sliding drafter should book its KV as full attention.
+
+    ``SlidingWindowManager`` refuses fine-grained (partial) prefix-cache hits,
+    so a drafter whose every layer is sliding cannot be looked up at a hash
+    granularity finer than its own block size. Booking those layers as full
+    attention gives the coordinator a manager that serves such a lookup; the
+    window stays on the spec and is still applied at compute time, so only
+    block accounting changes. The mixed sliding/full case is handled earlier,
+    by ``VllmConfig._dflash_needs_multi_kv_group``.
+
+    That granularity only ever becomes finer when a mamba "align" group is
+    present: ``partial_hash_hits_enabled`` returns False without one, and the
+    coordinator then hands every group scheduler-block-aligned lengths, which
+    ``SlidingWindowManager`` already serves (see
+    ``test_eagle_swa_alignment_caches_extra_block``). Converting anyway would
+    budget each drafter layer at ``max_model_len`` rather than at its window,
+    costing KV capacity for a lookup nothing asks for.
+
+    The predicate cannot be consulted directly here. It reads the KV cache
+    specs, and this drafter's own spec is one of its inputs -- the layers do
+    not exist yet when the decision has to be made.
+    """
+    if num_layers == 0 or num_sliding_layers != num_layers:
+        return False
+    if not cache_config.enable_prefix_caching:
+        return False
+    return cache_config.mamba_cache_mode == "align"
+
+
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
@@ -408,23 +440,13 @@ class DFlashQwen3Model(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
-        # An all-sliding drafter makes the prefix-cache hash granularity
-        # unsatisfiable, since SlidingWindowManager refuses partial hits.
-        # FullAttentionManager serves them; the window stays on the spec and is
-        # still applied by the kernel, so only block accounting changes. The
-        # mixed case is already handled by `_dflash_needs_multi_kv_group`.
-        #
-        # Gated on prefix caching because the conversion costs KV capacity: a
-        # full-attention group is budgeted at max_model_len, not at the window.
         swa_layers = [
             layer.self_attn.attn
             for layer in self.layers
             if layer.self_attn.attn.sliding_window is not None
         ]
-        if (
-            swa_layers
-            and len(swa_layers) == len(self.layers)
-            and vllm_config.cache_config.enable_prefix_caching
+        if _should_book_draft_kv_as_full_attention(
+            len(swa_layers), len(self.layers), vllm_config.cache_config
         ):
             for attn in swa_layers:
                 attn.book_sliding_window_as_full_attention = True

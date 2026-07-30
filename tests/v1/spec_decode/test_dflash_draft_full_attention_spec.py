@@ -17,6 +17,9 @@ import pytest
 from tests.v1.worker.test_gpu_model_runner import get_vllm_config
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.attention.attention import Attention
+from vllm.model_executor.models.qwen3_dflash import (
+    _should_book_draft_kv_as_full_attention,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
 WINDOW = 4096
@@ -95,6 +98,48 @@ def test_conversion_does_not_touch_a_non_sliding_layer():
     assert isinstance(before, FullAttentionSpec)
     assert isinstance(after, FullAttentionSpec)
     assert after.sliding_window is None
+
+
+@pytest.mark.parametrize(
+    "enable_prefix_caching,mamba_cache_mode,expected",
+    [
+        (True, "align", True),
+        # A drafter cannot be handed a hit finer than its own block size unless
+        # a mamba "align" group turns fine-grained hits on, and paying
+        # max_model_len per layer to serve a lookup nobody makes is a pure loss.
+        (True, "none", False),
+        (True, "all", False),
+        (False, "align", False),
+        (False, "none", False),
+    ],
+)
+def test_conversion_needs_a_layout_that_can_produce_a_finer_hit(
+    enable_prefix_caching, mamba_cache_mode, expected
+):
+    vllm_config = get_vllm_config()
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+
+    assert (
+        _should_book_draft_kv_as_full_attention(6, 6, vllm_config.cache_config)
+        is expected
+    )
+
+
+@pytest.mark.parametrize("num_sliding,num_layers", [(0, 6), (3, 6), (0, 0)])
+def test_a_drafter_that_is_not_all_sliding_is_left_alone(num_sliding, num_layers):
+    """The mixed case is handled by `_dflash_needs_multi_kv_group`, which gives
+    it a KV cache group per attention type rather than converting either."""
+    vllm_config = get_vllm_config()
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.cache_config.mamba_cache_mode = "align"
+
+    assert (
+        _should_book_draft_kv_as_full_attention(
+            num_sliding, num_layers, vllm_config.cache_config
+        )
+        is False
+    )
 
 
 if __name__ == "__main__":
