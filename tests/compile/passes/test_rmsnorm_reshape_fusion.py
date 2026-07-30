@@ -32,14 +32,15 @@ class RMSNormModel(torch.nn.Module):
 
 
 class AddRMSNormModel(torch.nn.Module):
-    def __init__(self, hidden_size: int) -> None:
+    def __init__(self, hidden_size: int, residual_first: bool) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.randn(hidden_size))
+        self.residual_first = residual_first
 
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = residual + x
+        residual = residual + x if self.residual_first else x + residual
         rms = vllm.ir.ops.rms_norm(residual, self.weight, 1e-6)
         return rms.reshape(-1, rms.shape[-1]), residual
 
@@ -87,10 +88,11 @@ def test_rmsnorm_reshape_fusion(vllm_config):
     assert _is_reshape(rms_node.args[0])
 
 
-def test_add_rmsnorm_reshape_fusion(vllm_config):
+@pytest.mark.parametrize("residual_first", [True, False])
+def test_add_rmsnorm_reshape_fusion(vllm_config, residual_first):
     add_fusion = AddRMSNormFusionPass(vllm_config)
     reshape_fusion = RMSNormReshapeFusionPass(vllm_config)
-    model = AddRMSNormModel(hidden_size=32)
+    model = AddRMSNormModel(hidden_size=32, residual_first=residual_first)
     x = torch.randn(2, 7, 32)
     residual = torch.randn_like(x)
     backend = _run_fusion_test(

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from itertools import product
+
 import torch
 
 import vllm.ir.ops
@@ -13,8 +15,9 @@ from ..vllm_inductor_pass import (
 
 
 class AddRMSNormPattern(VllmPatternReplacement):
-    def __init__(self, epsilon: float) -> None:
+    def __init__(self, epsilon: float, residual_first: bool) -> None:
         self.epsilon = epsilon
+        self.residual_first = residual_first
 
     @property
     def pattern(self):
@@ -23,7 +26,9 @@ class AddRMSNormPattern(VllmPatternReplacement):
             residual: torch.Tensor,
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            residual_out = residual + branch
+            residual_out = (
+                residual + branch if self.residual_first else branch + residual
+            )
             rms = vllm.ir.ops.rms_norm(residual_out, weight, self.epsilon)
             return rms, residual_out
 
@@ -138,8 +143,8 @@ class AddRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "add_rmsnorm_fusion_pass")
 
-        for epsilon in [1e-5, 1e-6]:
-            self.register(AddRMSNormPattern(epsilon))
+        for epsilon, residual_first in product([1e-5, 1e-6], [True, False]):
+            self.register(AddRMSNormPattern(epsilon, residual_first))
 
         self.dump_patterns(config, self.pm_pass)
 
