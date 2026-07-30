@@ -454,7 +454,7 @@ class SingleTypeKVCacheManager(ABC):
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
             extra_block_mask: Optional mask aligned with
-                ``blocks[num_cached_blocks:num_full_blocks]``, ANDed with this
+                ``blocks[num_cached_blocks:num_full_blocks]``, intersected with this
                 manager's own ``reachable_block_mask``. A manager whose blocks
                 only sometimes hold the content the hash they would be keyed
                 under describes uses this to withhold the ones that do not. It
@@ -1741,12 +1741,19 @@ class MambaManager(SingleTypeKVCacheManager):
             end_block=num_tokens // self.block_size,
         )
         if extra_block_mask is not None:
-            boundary_mask = [
-                caller and boundary
-                for caller, boundary in zip(
-                    extra_block_mask, boundary_mask, strict=True
-                )
-            ]
+            # A `None` boundary mask means non-align mode, where this manager
+            # imposes no per-block constraint, so the caller's mask stands on
+            # its own rather than being intersected with anything.
+            boundary_mask = (
+                extra_block_mask
+                if boundary_mask is None
+                else [
+                    caller and boundary
+                    for caller, boundary in zip(
+                        extra_block_mask, boundary_mask, strict=True
+                    )
+                ]
+            )
         super().cache_blocks(
             request,
             num_tokens,

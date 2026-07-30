@@ -4371,7 +4371,7 @@ def test_mamba_align_admits_a_state_block_written_at_its_own_boundary():
     )
 
 
-def test_mamba_align_ands_a_caller_mask_into_its_own():
+def test_mamba_align_intersects_a_caller_mask_with_its_own():
     """`MambaManager` computes a boundary mask internally, but it still has to
     honour one handed in by a caller.
 
@@ -4508,7 +4508,7 @@ def test_mamba_non_align_caching_is_untouched():
 
 
 def test_extra_block_mask_can_only_withhold_never_admit():
-    """The mask is ANDed into whatever the manager already computed, so it can
+    """The mask is intersected with whatever the manager already computed, so it can
     take a block out of the admitted set but never put one in."""
     block_size = 16
     manager = make_kv_cache_manager(

@@ -2384,7 +2384,7 @@ def partial_hash_hits_enabled(
 def truncate_downward_closed_groups(
     groups: Iterable[tuple[KVCacheSpec, Sequence[int]]],
     hit_length: int,
-    hit_blocks_by_group: list[list["KVCacheBlock"] | None],
+    hit_blocks_by_group: Sequence[list["KVCacheBlock"] | None],
     hit_length_by_group: list[int],
     block_size_of: Callable[[int], int],
 ) -> None:
