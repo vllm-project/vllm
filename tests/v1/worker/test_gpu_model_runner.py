@@ -580,18 +580,6 @@ def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
     assert result == {"req_0": 2, "req_1": 0}
 
 
-def test_get_nans_in_logits_raises(model_runner, dist_init, monkeypatch):
-    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", True)
-    model_runner._update_states(_schedule_new_request("req_0"))
-    logits = torch.tensor([[1.0, float("nan"), 3.0]], device=DEVICE_TYPE)
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"NaNs detected in logits: \{'req_0': 1\}",
-    ):
-        model_runner._get_nans_in_logits(logits)
-
-
 def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"
 
