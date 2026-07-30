@@ -68,7 +68,7 @@ pub fn merge_ec_transfer_params(
 
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
 /// internal `HashMap<u32, f32>` representation, validating that every key
-/// parses as a `u32`.
+/// parses as a `u32` and clamping values to the OpenAI-compatible range.
 pub fn convert_logit_bias(
     logit_bias: Option<HashMap<String, f32>>,
 ) -> Result<Option<HashMap<u32, f32>>, ApiError> {
@@ -76,6 +76,7 @@ pub fn convert_logit_bias(
         .map(|bias| {
             bias.into_iter()
                 .map(|(key, value)| {
+                    let value = value.clamp(-100.0, 100.0);
                     key.parse().map(|k| (k, value)).map_err(|_| {
                         ApiError::invalid_request(
                             format!(
@@ -124,4 +125,39 @@ pub fn resolve_base_request_id(
         id.truncate(8);
         id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use expect_test::expect;
+
+    use super::convert_logit_bias;
+
+    #[test]
+    fn convert_logit_bias_clamps_values_to_python_range() {
+        let converted = convert_logit_bias(Some(HashMap::from([
+            ("0".to_string(), -500.0),
+            ("1".to_string(), -100.0),
+            ("2".to_string(), 0.0),
+            ("3".to_string(), 100.0),
+            ("4".to_string(), 500.0),
+        ])))
+        .expect("valid token IDs")
+        .expect("logit bias is present")
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+        expect![[r#"
+            {
+                0: -100.0,
+                1: -100.0,
+                2: 0.0,
+                3: 100.0,
+                4: 100.0,
+            }
+        "#]]
+        .assert_debug_eq(&converted);
+    }
 }
