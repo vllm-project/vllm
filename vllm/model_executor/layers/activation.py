@@ -158,6 +158,51 @@ class SiluAndMul(CustomOp):
         return self.forward_native(x)
 
 
+@CustomOp.register("situ_and_mul")
+class SituAndMul(CustomOp):
+    """SituGLU activation used by Kimi models.
+
+    Computes beta * tanh(gate / beta) * sigmoid(gate) * up.  When
+    ``linear_beta`` is set, the up projection is also softly clipped with
+    linear_beta * tanh(up / linear_beta).
+    """
+
+    def __init__(
+        self,
+        beta: float = 1.0,
+        linear_beta: float | None = None,
+        *,
+        compile_native: bool = True,
+    ):
+        super().__init__(compile_native=compile_native)
+        self.beta = float(beta)
+        self.linear_beta = None if linear_beta is None else float(linear_beta)
+        if current_platform.is_cuda_alike():
+            self.op = torch.ops._C.situ_and_mul
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        gate = x[..., :d].float()
+        up = x[..., d:].float()
+        gate = self.beta * torch.tanh(gate / self.beta) * torch.sigmoid(gate)
+        if self.linear_beta is not None:
+            up = self.linear_beta * torch.tanh(up / self.linear_beta)
+        return (gate * up).to(x.dtype)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        # Fused CUDA kernel: writes straight to `out`, no fp32 temporaries.
+        # linear_beta<=0 signals "unset" to the kernel (up passed through).
+        d = x.shape[-1] // 2
+        out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+        self.op(
+            out, x, self.beta, -1.0 if self.linear_beta is None else self.linear_beta
+        )
+        return out
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
 @CustomOp.register("silu_and_mul_with_clamp")
 class SiluAndMulWithClamp(CustomOp):
     """SwiGLU activation with input clamping (used by some MoE shared experts).
@@ -613,8 +658,8 @@ class ReLUSquaredActivation(CustomOp):
 
     # --8<-- [end:relu2]
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.relu_squared
 

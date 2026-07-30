@@ -405,7 +405,7 @@ def test_max_logprobs():
         runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
         bad_sampling_params = SamplingParams(logprobs=2)
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
