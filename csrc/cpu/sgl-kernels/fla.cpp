@@ -86,10 +86,27 @@ inline void fill_stub(scalar_t* __restrict__ out, float val) {
   }
 }
 
+// Portable fallback for non-AVX512 builds (ARM/NEON, old x86 without
+// AVX512BF16). Mirrors the AVX512 specialization's math with plain scalar
+// loops; correctness over throughput since this path never runs on hardware
+// the AMX/AVX512 fast path already covers.
 template <typename scalar_t, int D, bool has_scale>
 struct l2norm_kernel {
   static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input, float eps) {
-    TORCH_CHECK(false, "l2norm_kernel: scalar path not implemented!");
+    constexpr float scale = 1.f / std::sqrt(static_cast<float>(D));
+    float sqsum = 0.f;
+    for (int d = 0; d < D; ++d) {
+      float v = static_cast<float>(input[d]);
+      sqsum += v * v;
+    }
+    float rscale = 1.f / std::sqrt(sqsum + eps);
+    for (int d = 0; d < D; ++d) {
+      float v = static_cast<float>(input[d]) * rscale;
+      if constexpr (has_scale) {
+        v *= scale;
+      }
+      out[d] = static_cast<scalar_t>(v);
+    }
   }
 };
 
@@ -147,7 +164,17 @@ struct cumsum_kernel {
       int hb_size,
       int ld_src,
       int ld_dst) {
-    TORCH_CHECK(false, "cumsum_kernel: scalar path not implemented!");
+    // out: [hb_size valid rows, CHUNK_SIZE] within a [BLOCK_H, ld_dst] buffer
+    // input: [mb_size valid rows, hb_size] within a [CHUNK_SIZE(padded), ld_src] buffer
+    for (int j = 0; j < hb_size; ++j) {
+      float running = 0.f;
+      for (int i = 0; i < CHUNK_SIZE; ++i) {
+        if (i < mb_size) {
+          running += static_cast<float>(input[i * ld_src + j]);
+        }
+        out[j * ld_dst + i] = static_cast<scalar_t>(running);
+      }
+    }
   }
 };
 
@@ -191,8 +218,16 @@ struct cumsum_kernel<float, CHUNK_SIZE, BLOCK_H> {
 
 template <typename scalar_t, int CHUNK_SIZE>
 struct decay_mask_kernel {
+  // decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
   static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input) {
-    TORCH_CHECK(false, "decay_mask_kernel: scalar path not implemented!");
+    for (int row = 0; row < CHUNK_SIZE; ++row) {
+      float g_row = static_cast<float>(input[row]);
+      for (int col = 0; col < CHUNK_SIZE; ++col) {
+        out[row * CHUNK_SIZE + col] =
+            col <= row ? static_cast<scalar_t>(std::exp(g_row - static_cast<float>(input[col])))
+                       : static_cast<scalar_t>(0);
+      }
+    }
   }
 };
 
@@ -244,6 +279,8 @@ struct decay_mask_kernel<float, CHUNK_SIZE> {
 
 template <typename scalar_t, int CHUNK_SIZE, bool has_beta>
 struct apply_mask_kernel {
+  // has_beta:  attn2 = -attn * beta * d  (strict lower, col < row)
+  // !has_beta: attn2 = attn * d         (lower incl. diagonal, col <= row)
   static inline void apply(
       scalar_t* __restrict__ attn2,
       const float* __restrict__ attn,
@@ -251,7 +288,20 @@ struct apply_mask_kernel {
       const float* __restrict__ d,
       int size,
       int b_stride = 0) {
-    TORCH_CHECK(false, "apply_mask_kernel: scalar path not implemented!");
+    for (int row = 0; row < size; ++row) {
+      int col_limit = has_beta ? row : row + 1;
+      float beta_val = 1.f;
+      if constexpr (has_beta) {
+        beta_val = -static_cast<float>(beta[row * b_stride]);
+      }
+      for (int col = 0; col < CHUNK_SIZE; ++col) {
+        float v = 0.f;
+        if (col < col_limit) {
+          v = attn[row * CHUNK_SIZE + col] * beta_val * d[row * CHUNK_SIZE + col];
+        }
+        attn2[row * CHUNK_SIZE + col] = static_cast<scalar_t>(v);
+      }
+    }
   }
 };
 
@@ -311,8 +361,32 @@ struct apply_mask_kernel<at::BFloat16, CHUNK_SIZE, has_beta> {
 
 template <typename scalar_t, int CHUNK_SIZE>
 struct solve_tril_kernel {
+  // (I + L)^{-1} via forward substitution, L = strict-lower part of attn2.
   static inline void apply(scalar_t* __restrict__ attn2, int size) {
-    TORCH_CHECK(false, "solve_tril_kernel: scalar path not implemented!");
+    // for len == 0 and row < size, we don't have to write back zero again
+    // as in `apply_mask_kernel`, we already set zero for the upper-triangular region
+    for (int i = 1; i < size; ++i) {
+      scalar_t* __restrict__ row_ptr = attn2 + i * CHUNK_SIZE;
+      float vsum[CHUNK_SIZE];
+      for (int j = 0; j < i; ++j) {
+        vsum[j] = static_cast<float>(row_ptr[j]);
+      }
+      for (int k = 0; k < i; ++k) {
+        float va = static_cast<float>(row_ptr[k]);
+        const scalar_t* __restrict__ row_k_ptr = attn2 + k * CHUNK_SIZE;
+        for (int j = 0; j < k; ++j) {
+          vsum[j] += va * static_cast<float>(row_k_ptr[j]);
+        }
+      }
+      for (int j = 0; j < i; ++j) {
+        row_ptr[j] = static_cast<scalar_t>(vsum[j]);
+      }
+    }
+
+    // attn = attn + torch.eye(chunk_size)
+    for (int i = 0; i < size; ++i) {
+      attn2[i * CHUNK_SIZE + i] = static_cast<scalar_t>(static_cast<float>(attn2[i * CHUNK_SIZE + i]) + 1.f);
+    }
   }
 };
 
@@ -387,7 +461,18 @@ struct apply_beta_kernel {
       int ld_src,
       int ld_dst,
       int b_stride) {
-    TORCH_CHECK(false, "apply_beta_kernel: scalar path not implemented!");
+    for (int i = 0; i < size; ++i) {
+      float scale = 1.f;
+      if constexpr (has_beta) {
+        scale *= static_cast<float>(beta[i * b_stride]);
+      }
+      if constexpr (has_g) {
+        scale *= std::exp(g[i]);
+      }
+      for (int d = 0; d < D; ++d) {
+        out[i * ld_dst + d] = static_cast<scalar_t>(static_cast<float>(input[i * ld_src + d]) * scale);
+      }
+    }
   }
 };
 
@@ -452,7 +537,11 @@ template <typename scalar_t, int D>
 struct update_kernel {
   static inline void
   apply(scalar_t* __restrict__ out, const float* __restrict__ input, int size, int ld_src, int ld_dst) {
-    TORCH_CHECK(false, "update_kernel: scalar path not implemented!");
+    for (int i = 0; i < size; ++i) {
+      for (int d = 0; d < D; ++d) {
+        out[i * ld_dst + d] = static_cast<scalar_t>(input[i * ld_src + d]);
+      }
+    }
   }
 };
 
@@ -487,7 +576,19 @@ struct update_value_kernel {
       int size,
       int padded_size,
       int v_strideT) {
-    TORCH_CHECK(false, "update_kernel: scalar path not implemented!");
+    // v2' = v - v'
+    for (int i = 0; i < size; ++i) {
+      for (int d = 0; d < D; ++d) {
+        float val = static_cast<float>(v[i * v_strideT + d]) - v_prime[i * D + d];
+        v_prime2[i * D + d] = static_cast<scalar_t>(val);
+      }
+    }
+    // pad the last chunk
+    for (int i = size; i < padded_size; ++i) {
+      for (int d = 0; d < D; ++d) {
+        v_prime2[i * D + d] = static_cast<scalar_t>(0);
+      }
+    }
   }
 };
 
@@ -544,7 +645,19 @@ struct update_key_kernel {
       const float* __restrict__ g,
       int size,
       int k_strideT) {
-    TORCH_CHECK(false, "update_key_kernel: scalar path not implemented!");
+    // k_updated is transposed: [D, CHUNK_SIZE], k_updated[d, t] = k[t, d] * exp(g_last - g[t])
+    const float g_last = g[size - 1];
+    for (int t = 0; t < size; ++t) {
+      float scale = std::exp(g_last - g[t]);
+      for (int d = 0; d < D; ++d) {
+        k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(static_cast<float>(k[t * k_strideT + d]) * scale);
+      }
+    }
+    for (int t = size; t < CHUNK_SIZE; ++t) {
+      for (int d = 0; d < D; ++d) {
+        k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(0);
+      }
+    }
   }
 };
 
@@ -1071,16 +1184,16 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
               /*     B */ s_packed,
               /*     C */ v_prime);
         } else {
-          // brgemm_supported()==false path: pack_vnni2 above also fuses
-          // `state *= exp(g_last)` into the pack; replicate that side effect
-          // explicitly here. blas_gemm requires both operands to share
-          // scalar_t, so also downcast the scaled state into s_packed (plain
-          // layout, no VNNI interleaving needed for the reference BLAS path);
-          // step 3.b's fallback reuses this same buffer.
+          // brgemm_supported()==false path: pack_vnni2 above packs the
+          // *unscaled* state into its dst (for this GEMM's B operand) while
+          // separately scaling src in place by exp(g_last) (consumed later,
+          // at step 5.3's state accumulation). Replicate both halves in the
+          // same order: snapshot s_ptr into s_packed BEFORE scaling s_ptr,
+          // not after, since the GEMM below needs the pre-scale state.
           float g_last_scale = std::exp(g_last);
           for (int64_t d0 = 0; d0 < D * D; ++d0) {
-            s_ptr[d0] *= g_last_scale;
             s_packed[d0] = static_cast<scalar_t>(s_ptr[d0]);
+            s_ptr[d0] *= g_last_scale;
           }
           blas_gemm(
               at::native::TransposeType::NoTranspose,
@@ -1178,6 +1291,15 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         scalar_t* __restrict__ o_ptr = out + (batch_offset + mb_start) * o_strideT + hv * o_strideH;
         update_kernel<scalar_t, D>::apply(o_ptr, attn_inter, mb_size, D, o_strideT);
 
+        // brgemm_supported()==false path: step 5.2 below overwrites k_updated,
+        // which aliases the same buffer as v_prime2 (both are `tmp`). Snapshot
+        // v_prime2 into v_packed (otherwise brgemm-only, and free by now since
+        // qg_exp was consumed at step 3.b) before that happens, so step 5.3
+        // doesn't read k_updated's data under the v_prime2 name.
+        if constexpr (!brgemm_supported()) {
+          std::copy(v_prime2, v_prime2 + padded_mb_size * D, v_packed);
+        }
+
         // step 5: update state
         //   state_new = state * exp(g_last) + (k * exp(g_last - g)).T @ v2'
 
@@ -1207,7 +1329,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
               D,
               padded_mb_size,
               1.0f,
-              v_prime2,
+              v_packed,
               D,
               k_updated,
               CHUNK_SIZE,
