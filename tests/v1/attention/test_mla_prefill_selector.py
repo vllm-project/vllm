@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.config import AttentionConfig, ModelConfig, VllmConfig
+from vllm.config import AttentionConfig, CacheConfig, ModelConfig, VllmConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
@@ -44,14 +44,20 @@ def _make_mock_model_config(
 def _make_vllm_config(
     model_config: ModelConfig | None = None,
     mla_prefill_backend: MLAPrefillBackendEnum | None = None,
+    use_prefill_query_quantization: bool = False,
+    kv_cache_dtype: str = "auto",
 ) -> VllmConfig:
     if model_config is None:
         model_config = _make_mock_model_config()
 
-    attention_config = AttentionConfig(mla_prefill_backend=mla_prefill_backend)
+    attention_config = AttentionConfig(
+        mla_prefill_backend=mla_prefill_backend,
+        use_prefill_query_quantization=use_prefill_query_quantization,
+    )
     mock_vllm_config = MagicMock(spec=VllmConfig)
     mock_vllm_config.model_config = model_config
     mock_vllm_config.attention_config = attention_config
+    mock_vllm_config.cache_config = CacheConfig(cache_dtype=kv_cache_dtype)
     return mock_vllm_config
 
 
@@ -158,6 +164,106 @@ class TestGetMLAPrefillBackend:
             mock_platform.is_rocm.return_value = False
 
             backend = get_mla_prefill_backend(vllm_config)
+            assert backend.get_name() == "FLASH_ATTN"
+
+
+def _mock_get_class(backend_enum: MLAPrefillBackendEnum):
+    """Stand in for every backend so selection is decided by priority alone."""
+    cls = MagicMock()
+    cls.get_name.return_value = backend_enum.name
+    cls.validate_configuration.return_value = []
+    cls.supports_query_quantization = backend_enum in (
+        MLAPrefillBackendEnum.TRTLLM_RAGGED,
+        MLAPrefillBackendEnum.FLASHINFER,
+        MLAPrefillBackendEnum.TOKENSPEED_MLA,
+    )
+    return cls
+
+
+class TestPrefillQueryQuantizationSelection:
+    """`use_prefill_query_quantization` must steer auto-selection.
+
+    Regression test for gh-50056: on Blackwell FLASH_ATTN is the default
+    first choice but cannot consume an FP8 query, so an explicit request for
+    FP8 prefill attention was silently dropped.
+    """
+
+    @staticmethod
+    def _blackwell_priorities(prefer_query_quantization: bool):
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_rocm.return_value = False
+            return _get_mla_prefill_backend_priorities(
+                DeviceCapability(major=10, minor=0),
+                MLADimensions(
+                    qk_nope_head_dim=128,
+                    qk_rope_head_dim=64,
+                    v_head_dim=128,
+                ),
+                prefer_query_quantization,
+            )
+
+    def test_flash_attn_stays_first_when_not_requested(self):
+        priorities = self._blackwell_priorities(prefer_query_quantization=False)
+        assert priorities[0] == MLAPrefillBackendEnum.FLASH_ATTN
+
+    def test_quantization_capable_backends_come_first_when_requested(self):
+        priorities = self._blackwell_priorities(prefer_query_quantization=True)
+
+        assert priorities == [
+            MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            MLAPrefillBackendEnum.FLASHINFER,
+            MLAPrefillBackendEnum.TOKENSPEED_MLA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+
+    @pytest.mark.parametrize(
+        ("kv_cache_dtype", "expected_backend"),
+        # Without an FP8 KV cache the flag is a no-op, so the default
+        # priority must be left untouched.
+        [("fp8", "TRTLLM_RAGGED"), ("auto", "FLASH_ATTN")],
+    )
+    def test_selection_honours_flag_only_with_quantized_kv_cache(
+        self, kv_cache_dtype: str, expected_backend: str
+    ):
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(MLAPrefillBackendEnum, "get_class", _mock_get_class),
+        ):
+            mock_platform.is_rocm.return_value = False
+            mock_platform.get_device_capability.return_value = DeviceCapability(
+                major=10, minor=0
+            )
+
+            backend = get_mla_prefill_backend(
+                _make_vllm_config(
+                    use_prefill_query_quantization=True,
+                    kv_cache_dtype=kv_cache_dtype,
+                )
+            )
+            assert backend.get_name() == expected_backend
+
+    def test_falls_back_to_flash_attn_when_no_capable_backend_is_valid(self):
+        def mock_get_class(backend_enum):
+            cls = _mock_get_class(backend_enum)
+            if cls.supports_query_quantization:
+                cls.validate_configuration.return_value = ["deps not available"]
+            return cls
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class),
+        ):
+            mock_platform.is_rocm.return_value = False
+            mock_platform.get_device_capability.return_value = DeviceCapability(
+                major=10, minor=0
+            )
+
+            backend = get_mla_prefill_backend(
+                _make_vllm_config(
+                    use_prefill_query_quantization=True,
+                    kv_cache_dtype="fp8",
+                )
+            )
             assert backend.get_name() == "FLASH_ATTN"
 
 
