@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import logging
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +12,13 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -41,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import (
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,
+    update_kv_cache_capacity,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -1536,6 +1544,40 @@ def test_get_max_concurrency_for_kv_cache_config():
     ) == get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_uniform_group
     )
+
+
+def test_kv_cache_capacity_logged_only_after_scheduler_resolution(
+    caplog_vllm, disable_log_dedup
+):
+    model_config = ModelConfig(max_model_len=32)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(block_size=256),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    kv_cache_spec = new_kv_cache_spec(block_size=4)
+    available_memory = kv_cache_spec.page_size_bytes * 10
+
+    caplog_vllm.set_level(logging.INFO, logger=kv_cache_utils.logger.name)
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [{"layer_0": kv_cache_spec}], [available_memory]
+    )
+
+    assert vllm_config.cache_config.block_size == 256
+    assert "GPU KV cache size" not in caplog_vllm.text
+    assert "Maximum concurrency" not in caplog_vllm.text
+
+    scheduler_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    vllm_config.cache_config.block_size = min(
+        group.kv_cache_spec.block_size for group in scheduler_config.kv_cache_groups
+    )
+    assert vllm_config.cache_config.block_size == 4
+    update_kv_cache_capacity(vllm_config, scheduler_config)
+
+    assert vllm_config.cache_config.kv_cache_size_tokens == 40
+    assert vllm_config.cache_config.kv_cache_max_concurrency == 1.25
+    assert "GPU KV cache size: 40 tokens" in caplog_vllm.text
+    assert "Maximum concurrency for 32 tokens per request: 1.25x" in caplog_vllm.text
 
 
 def test_get_max_concurrency_packed_kv_cache_config():
