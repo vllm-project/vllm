@@ -13,6 +13,8 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
+    truncate_downward_closed_groups,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
@@ -377,14 +379,18 @@ class MooncakeStoreCoordinator:
         # Truncate full-attention hit_blocks to final converged length;
         # other specs already trim themselves inside their hit logic. cdiv keeps
         # the partial tail block when hit_length is not block-aligned.
-        spec0, group_ids0, _ = self.attention_groups[0]
-        if isinstance(spec0, FullAttentionSpec):
-            num_blocks = cdiv(hit_length, spec0.block_size)
-            for gid in group_ids0:
-                full_blks = hit_blocks_by_group[gid]
-                assert full_blks is not None
-                del full_blks[num_blocks:]
-                hit_length_by_group[gid] = hit_length
+        # Every full-attention group, not just the first: a DFlash drafter
+        # booking its sliding-window layers as full attention keeps the
+        # sliding-window block size, so a model can carry two full-attention
+        # groups at different block sizes. Mirrors the core coordinator, which
+        # must not disagree with this one.
+        truncate_downward_closed_groups(
+            ((spec, group_ids) for spec, group_ids, _ in self.attention_groups),
+            hit_length,
+            hit_blocks_by_group,
+            hit_length_by_group,
+            lambda gid: self.kv_cache_groups[gid].kv_cache_spec.block_size,
+        )
 
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
@@ -398,16 +404,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     return spec
 
 
-def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
-) -> bool:
-    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
-    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
-    Single copy on purpose — scheduler and coordinator must not disagree.
-    """
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and spec.block_size > hash_block_size
-        for g in kv_cache_groups
-    )

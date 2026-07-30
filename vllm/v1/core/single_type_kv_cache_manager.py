@@ -41,6 +41,17 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    is_downward_closed: ClassVar[bool] = False
+    """Whether a hit at length N implies a hit at every shorter length.
+
+    A downward-closed manager is looked up once against the coordinator's
+    initial candidate length and then skipped on later fixed-point passes, so
+    whatever reduced the reconciled length afterwards leaves its block list too
+    long. Callers that reconcile across groups must trim every such group at
+    the end. Declared here rather than tested with ``isinstance`` at each site,
+    because the same omission has been fixed three times in different files.
+    """
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -677,6 +688,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    is_downward_closed: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -911,7 +923,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Fine-grained partial hits are not supported for sliding window now
+        # The scan below indexes `block_hashes` in whole blocks, so a finer
+        # alignment would read the wrong entries. The coordinator keeps this
+        # unreachable by disabling partial hash hits for models containing a
+        # group that only supports block-aligned lookup.
+        # TODO: supporting them here would let a mamba-"align" + sliding-window
+        # model keep its partial hits instead of falling back. It needs a
+        # block-size view for the contiguous-run scan alongside the raw hashes
+        # (as FullAttentionManager keeps), a partial-tail cache entry to match
+        # against, a `reachable_block_mask` that accepts a sub-block alignment,
+        # and a contiguous-block requirement computed from the partial tail
+        # length rather than once from the window.
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
