@@ -54,6 +54,8 @@ pub(super) struct ResponseOptions {
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
     pub return_tokens_as_token_ids: bool,
+    /// Whether the request forces one named function tool.
+    pub is_named_tool_choice: bool,
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat
@@ -87,6 +89,15 @@ pub(super) fn prepare_chat_request(
     )?;
 
     let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let response_format =
+        request.response_format.as_ref().map(serde_json::to_value).transpose().map_err(
+            |error| {
+                ApiError::invalid_request(
+                    format!("failed to serialize response_format: {error}"),
+                    Some("response_format"),
+                )
+            },
+        )?;
 
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
@@ -98,6 +109,7 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
+    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -147,6 +159,7 @@ pub(super) fn prepare_chat_request(
             generation_prompt_mode,
             chat_template: request.chat_template,
             reasoning_effort: request.reasoning_effort,
+            response_format,
             template_kwargs,
         },
         tools: convert_tools(request.tools)?,
@@ -180,6 +193,7 @@ pub(super) fn prepare_chat_request(
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            is_named_tool_choice,
         },
         chat_request,
     })
@@ -396,6 +410,7 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use axum::http::HeaderMap;
     use expect_test::expect;
@@ -403,16 +418,18 @@ mod tests {
     use serde_json::json;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        SamplingParams as VllmSamplingParams,
+        ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
+        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
     };
-    use vllm_text::output::TextDecodeOptions;
+    use vllm_text::{Prompt, output::TextDecodeOptions};
+    use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
+    use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
         AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
         MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
@@ -467,6 +484,60 @@ mod tests {
         .expect("request is valid");
 
         assert!(prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_response_format_to_kimi_k3_renderer() {
+        let mut request = base_request();
+        request.model = "moonshotai/Kimi-K3".to_string();
+        let response_format = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"}
+                    },
+                    "required": ["answer"]
+                }),
+                strict: Some(true),
+            },
+        };
+        request.response_format = Some(response_format.clone());
+        let template_response_format = json!({"type": "json_object"});
+        request.chat_template_kwargs = Some(HashMap::from([(
+            "response_format".to_string(),
+            template_response_format.clone(),
+        )]));
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["moonshotai/Kimi-K3"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.response_format.as_ref(),
+            Some(&serde_json::to_value(response_format).unwrap())
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs.get("response_format"),
+            Some(&template_response_format)
+        );
+
+        let tokenizer = Arc::new(TestTokenizer::new());
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+            .render(&prepared.chat_request)
+            .expect("Kimi K3 rendering succeeds")
+            .prompt;
+        let Prompt::TokenIds(prompt_token_ids) = prompt else {
+            panic!("Kimi K3 renders token IDs");
+        };
+        let prompt = tokenizer.decode(&prompt_token_ids, false).expect("Kimi K3 prompt decodes");
+        assert!(prompt.contains("response_format=json_schema"));
+        assert!(prompt.contains(r#""answer":{"type":"string"}"#));
     }
 
     #[test]
@@ -1068,6 +1139,7 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+        assert!(!prepared.options.is_named_tool_choice);
     }
 
     #[test]
@@ -1107,6 +1179,7 @@ mod tests {
                 name: "get_weather".to_string(),
             }
         );
+        assert!(prepared.options.is_named_tool_choice);
     }
 
     #[test]
