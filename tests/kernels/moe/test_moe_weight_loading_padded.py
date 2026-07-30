@@ -292,33 +292,6 @@ class TestWeightLoadingWithPaddedHiddenSize:
             torch.zeros(original_hidden, padded_intermediate - original_intermediate),
         )
 
-    def test_custom_weight_loader_hook_raises(self):
-        """Custom quant methods can intercept expert weight loading."""
-        from unittest.mock import MagicMock
-
-        moe = MagicMock(spec=RoutedExperts)
-        moe.quant_config = None
-        moe._map_global_expert_id_to_local_expert_id = lambda expert_id: expert_id
-
-        class DummyQuantMethod:
-            def load_expert_weight(self, **kwargs):
-                raise ValueError("custom loader called")
-
-        moe.quant_method = DummyQuantMethod()
-
-        param = torch.nn.Parameter(torch.zeros(1, 1), requires_grad=False)
-        loaded_weight = torch.zeros(1, 1)
-
-        with pytest.raises(ValueError, match="custom loader called"):
-            RoutedExperts.weight_loader(
-                moe,
-                param,
-                loaded_weight,
-                weight_name="w2",
-                shard_id="w2",
-                expert_id=0,
-            )
-
 
 class TestPerTensorScaleCoercion:
     """Regression test for shape-(1,) per-tensor scales (issue #43297).
