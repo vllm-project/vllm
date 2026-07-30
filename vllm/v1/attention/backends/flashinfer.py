@@ -2068,7 +2068,12 @@ class FlashInferImpl(AttentionImpl):
         self.o_sf_scale: float | None = None
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
-        if self.is_kvcache_nvfp4 and vllm_config is not None:
+        # The sm12x FA2 path writes into `output` directly and never reads this.
+        if (
+            self.is_kvcache_nvfp4
+            and vllm_config is not None
+            and not self.use_fa2_nvfp4_kv
+        ):
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self._nvfp4_fp8_out = torch.empty(
                 (max_num_tokens, num_heads, head_size),
