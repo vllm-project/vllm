@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
@@ -20,10 +21,11 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
 class CPUOffloadingSpec(OffloadingSpec):
-    BLOCK_SIZE_ALIGNMENT = 1
+    BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     SUPPORTS_REPLICATED_LAYOUT = False
 
     @classmethod
@@ -117,6 +119,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.cache_policy_module_path: str | None = self.extra_config.get(
+            "cache_policy_module_path"
+        )
 
     @override
     def get_manager(self) -> OffloadingManager:
@@ -131,7 +136,8 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                cache_policy=self.eviction_policy,
+                cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
@@ -139,10 +145,28 @@ class CPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        mmap_region: SharedOffloadRegion | None = None
+        # num_blocks == 0 would size the region to zero bytes, which cannot be
+        # mmap'd; fall back to the tensor path (empty tensors) as before.
+        if current_platform.is_cuda_alike() and self.num_blocks > 0:
+            # Back each worker's CPU buffer with a private slot in a single
+            # shared mmap region instead of a per-rank pinned tensor. Fold the
+            # global physical device index into this replica's
+            # [0, world_size) slot range.
+            world_size = self.config.parallel.world_size
+            rank = torch.accelerator.current_device_index() % world_size
+            mmap_region = SharedOffloadRegion(
+                engine_id=self.config.engine_id,
+                num_blocks=self.num_blocks,
+                rank=rank,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+            )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
+            mmap_region=mmap_region,
         )
 
     @override
