@@ -466,7 +466,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? slot_mapping, Tensor? index_slot_mapping, "
       "Tensor!? kv_cache, Tensor!? index_cache, "
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
-      "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
+      "str kv_cache_dtype, bool skip_index_branch=False, "
+      "Tensor!? q_fp8_out=None, float q_fp8_scale=1.0) -> ()");
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
   ops.def(

@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
 @config
@@ -19,6 +20,9 @@ class AttentionConfig:
 
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
+
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -96,6 +100,17 @@ class AttentionConfig:
     Must be a power of 2 and divisible by flex_attn_block_n.
     If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
     128 otherwise)."""
+
+    def __post_init__(self) -> None:
+        msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
+            AttentionBackendEnum.CUTLASS_MSA: "cutlass",
+            AttentionBackendEnum.TRITON_MSA: "triton",
+        }
+        if self.backend in msa_aliases:
+            self.minimax_m3_msa_decode_backend = msa_aliases[self.backend]
+            # The alias selects only MiniMax's sparse decode kernel. Dense
+            # layers still use the platform's normal automatic backend.
+            self.backend = None
 
     def compute_hash(self) -> str:
         """

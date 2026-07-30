@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import AttentionConfig
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn_decode,
 )
@@ -23,7 +24,7 @@ from vllm.models.minimax_m3.nvidia import (
 )
 from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     MSACutlassDecodePlanCache,
-    MSACutlassSparseDecodeRunner,
+    msa_cutlass_sparse_decode,
     prepare_decode_metadata,
     should_prepare_decode_metadata,
 )
@@ -34,6 +35,7 @@ from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
     MiniMaxM3SparseMSAMetadataBuilder,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if not current_platform.is_device_capability_family(100):
     pytest.skip(
@@ -73,18 +75,17 @@ SM_SCALE = HEAD_DIM**-0.5
     ],
 )
 def test_msa_cutlass_decode_static_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
     batch_size: int,
     decode_query_len: int,
     expected: bool,
     num_q_heads: int,
     num_kv_heads: int,
 ) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
     assert (
         should_prepare_decode_metadata(
             batch_size,
             decode_query_len,
+            decode_backend="cutlass",
             num_q_heads=num_q_heads,
             num_kv_heads=num_kv_heads,
             kv_cache_dtype="fp8_e4m3",
@@ -95,13 +96,11 @@ def test_msa_cutlass_decode_static_dispatch(
     )
 
 
-def test_msa_cutlass_decode_static_dispatch_requires_opt_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "triton")
+def test_msa_cutlass_decode_static_dispatch_requires_opt_in() -> None:
     assert not should_prepare_decode_metadata(
         32,
         DEFAULT_QUERY_LEN,
+        decode_backend="triton",
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype="fp8_e4m3",
@@ -110,13 +109,11 @@ def test_msa_cutlass_decode_static_dispatch_requires_opt_in(
     )
 
 
-def test_msa_cutlass_decode_static_dispatch_accepts_fp8_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
+def test_msa_cutlass_decode_static_dispatch_accepts_fp8_alias() -> None:
     assert should_prepare_decode_metadata(
         32,
         DEFAULT_QUERY_LEN,
+        decode_backend="cutlass",
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype="fp8",
@@ -130,13 +127,12 @@ def test_msa_cutlass_decode_static_dispatch_accepts_fp8_alias(
     ["auto", "bfloat16", "float16", "fp8_e5m2"],
 )
 def test_msa_cutlass_decode_static_dispatch_requires_fp8_e4m3(
-    monkeypatch: pytest.MonkeyPatch,
     kv_cache_dtype: str,
 ) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
     assert not should_prepare_decode_metadata(
         32,
         DEFAULT_QUERY_LEN,
+        decode_backend="cutlass",
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype=kv_cache_dtype,
@@ -148,7 +144,6 @@ def test_msa_cutlass_decode_static_dispatch_requires_fp8_e4m3(
 def test_msa_cutlass_decode_static_dispatch_requires_sm100(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
     monkeypatch.setattr(
         current_platform,
         "is_device_capability_family",
@@ -157,12 +152,29 @@ def test_msa_cutlass_decode_static_dispatch_requires_sm100(
     assert not should_prepare_decode_metadata(
         32,
         DEFAULT_QUERY_LEN,
+        decode_backend="cutlass",
         num_q_heads=16,
         num_kv_heads=1,
         kv_cache_dtype="fp8",
         page_size=BLOCK_SIZE,
         topk_blocks=TOPK,
     )
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        (AttentionBackendEnum.CUTLASS_MSA, "cutlass"),
+        (AttentionBackendEnum.TRITON_MSA, "triton"),
+    ],
+)
+def test_msa_attention_backend_alias(
+    backend: AttentionBackendEnum,
+    expected: str,
+) -> None:
+    config = AttentionConfig(backend=backend)
+    assert config.backend is None
+    assert config.minimax_m3_msa_decode_backend == expected
 
 
 def test_msa_backend_owns_msa_metadata_builder(
@@ -193,7 +205,6 @@ def test_msa_backend_owns_msa_metadata_builder(
 def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
     batch = 16
     block_table = torch.zeros(batch, 3, dtype=torch.int32, device="cuda")
     seq_lens = torch.full((batch,), 257, dtype=torch.int32, device="cuda")
@@ -222,9 +233,15 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
     builder.topk_blocks = TOPK
     builder.kv_cache_spec = SimpleNamespace(num_kv_heads=4)
     builder.kv_cache_dtype = "fp8_e4m3"
+    builder.decode_backend = "cutlass"
     builder.msa_cutlass_plan_cache = object()
 
-    metadata = builder.build(0, SimpleNamespace())
+    metadata = builder.build(
+        0,
+        SimpleNamespace(
+            seq_lens_cpu_upper_bound=torch.full((batch,), 257, dtype=torch.int32)
+        ),
+    )
 
     assert isinstance(metadata.decode, MiniMaxM3SparseMSADecodeMetadata)
     assert metadata.decode.decode_query_len == 1
@@ -237,6 +254,7 @@ def test_msa_cutlass_plan_cache_keys_query_len(
     batch = 16
     block_table = torch.zeros(batch, 3, dtype=torch.int32, device="cuda")
     seq_lens = torch.full((batch,), 257, dtype=torch.int32, device="cuda")
+    seq_lens_cpu = torch.full((batch,), 257, dtype=torch.int32)
     plan_cache = MSACutlassDecodePlanCache()
     built_query_lens: list[int] = []
 
@@ -260,6 +278,7 @@ def test_msa_cutlass_plan_cache_keys_query_len(
     first = prepare_decode_metadata(
         block_table,
         seq_lens,
+        seq_lens_cpu,
         1,
         num_q_heads=64,
         num_kv_heads=4,
@@ -270,6 +289,7 @@ def test_msa_cutlass_plan_cache_keys_query_len(
     repeated = prepare_decode_metadata(
         block_table,
         seq_lens,
+        seq_lens_cpu,
         1,
         num_q_heads=64,
         num_kv_heads=4,
@@ -280,6 +300,7 @@ def test_msa_cutlass_plan_cache_keys_query_len(
     different = prepare_decode_metadata(
         block_table,
         seq_lens,
+        seq_lens_cpu,
         2,
         num_q_heads=64,
         num_kv_heads=4,
@@ -335,14 +356,12 @@ def _make_topk(
     ],
 )
 def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
-    monkeypatch: pytest.MonkeyPatch,
     num_q_heads: int,
     num_kv_heads: int,
     num_request_pairs: int,
     query_len: int,
     capture_graph: bool,
 ) -> None:
-    monkeypatch.setenv("VLLM_MINIMAX_M3_MSA_DECODE_BACKEND", "cutlass")
     torch.manual_seed(0)
     seq_lens_list = [257, 513] * num_request_pairs
     seq_lens_cpu = torch.tensor(seq_lens_list, dtype=torch.int32)
@@ -419,6 +438,7 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
     metadata = prepare_decode_metadata(
         block_table,
         seq_lens,
+        seq_lens_cpu,
         query_len,
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
@@ -428,27 +448,18 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
     )
     assert metadata.page_table.data_ptr() == block_table.data_ptr()
     actual = torch.empty_like(query)
-    runner = MSACutlassSparseDecodeRunner()
-    used = runner.try_decode(
-        query,
+    msa_cutlass_sparse_decode(
+        query_fp8,
         kv_cache,
         topk_token_major,
-        seq_lens,
         actual,
         metadata,
-        num_kv_heads=num_kv_heads,
         scale=SM_SCALE,
-        block_size=BLOCK_SIZE,
-        topk_blocks=TOPK,
-        decode_query_len=query_len,
-        q_scale=q_scale,
         q_scale_float=1.0,
         k_scale_float=1.0,
         v_scale_float=1.0,
     )
 
-    assert used
-    torch.testing.assert_close(runner._get_query_buffer(query), query_fp8)
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
 
     # The same captured plan must remain correct as ragged lengths change.
@@ -456,10 +467,12 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
     seq_lens.copy_(
         torch.tensor(updated_seq_lens_list, dtype=torch.int32, device="cuda")
     )
+    updated_seq_lens_cpu = torch.tensor(updated_seq_lens_list, dtype=torch.int32)
     topk_token_major.copy_(_make_topk(updated_seq_lens_list, num_kv_heads, query_len))
     updated_metadata = prepare_decode_metadata(
         block_table,
         seq_lens,
+        updated_seq_lens_cpu,
         query_len,
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
@@ -483,19 +496,13 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
         k_scale=None,
         v_scale=None,
     )
-    assert runner.try_decode(
-        query,
+    msa_cutlass_sparse_decode(
+        query_fp8,
         kv_cache,
         topk_token_major,
-        seq_lens,
         actual,
         updated_metadata,
-        num_kv_heads=num_kv_heads,
         scale=SM_SCALE,
-        block_size=BLOCK_SIZE,
-        topk_blocks=TOPK,
-        decode_query_len=query_len,
-        q_scale=q_scale,
         q_scale_float=1.0,
         k_scale_float=1.0,
         v_scale_float=1.0,
@@ -505,19 +512,13 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
     if capture_graph:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            assert runner.try_decode(
-                query,
+            msa_cutlass_sparse_decode(
+                query_fp8,
                 kv_cache,
                 topk_token_major,
-                seq_lens,
                 actual,
                 updated_metadata,
-                num_kv_heads=num_kv_heads,
                 scale=SM_SCALE,
-                block_size=BLOCK_SIZE,
-                topk_blocks=TOPK,
-                decode_query_len=query_len,
-                q_scale=q_scale,
                 q_scale_float=1.0,
                 k_scale_float=1.0,
                 v_scale_float=1.0,
@@ -533,6 +534,7 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
         prepare_decode_metadata(
             block_table,
             seq_lens,
+            torch.tensor(replay_seq_lens_list, dtype=torch.int32),
             query_len,
             num_q_heads=num_q_heads,
             num_kv_heads=num_kv_heads,

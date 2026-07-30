@@ -330,6 +330,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        msa_decode_backend: str = "triton",
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -355,6 +356,8 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Attend the queries to the indexer-selected blocks. Per kernel.
 
@@ -363,6 +366,9 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         ``[:, nd:num_tokens]``); the attend reads them from there.
         """
         raise NotImplementedError
+
+    def should_use_msa_decode(self, layer_name: str) -> bool:
+        return False
 
 
 class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
@@ -374,6 +380,8 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):

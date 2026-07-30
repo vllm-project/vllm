@@ -12,7 +12,9 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn_decode,
@@ -27,15 +29,18 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     MSACutlassDecodeMetadata,
     MSACutlassDecodePlanCache,
-    MSACutlassSparseDecodeRunner,
+    msa_cutlass_sparse_decode,
     prepare_decode_metadata,
     should_prepare_decode_metadata,
+    supports_cutlass_sparse_decode,
 )
 from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+logger = init_logger(__name__)
 
 
 class MiniMaxM3SparseMSABackend(MiniMaxM3SparseBackend):
@@ -44,6 +49,22 @@ class MiniMaxM3SparseMSABackend(MiniMaxM3SparseBackend):
     @staticmethod
     def get_builder_cls() -> type["MiniMaxM3SparseMSAMetadataBuilder"]:
         return MiniMaxM3SparseMSAMetadataBuilder
+
+
+class MiniMaxM3SparseCutlassBackend(MiniMaxM3SparseMSABackend):
+    """Attention-backend alias selecting CUTLASS MSA sparse decode."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUTLASS_MSA"
+
+
+class MiniMaxM3SparseTritonBackend(MiniMaxM3SparseMSABackend):
+    """Attention-backend alias selecting Triton MSA sparse decode."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "TRITON_MSA"
 
 
 @dataclass
@@ -69,6 +90,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         # AttentionSpec stores every FP8 mode as uint8, so retain the configured
         # format to distinguish E4M3 (supported) from E5M2 before planning.
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        self.decode_backend = vllm_config.attention_config.minimax_m3_msa_decode_backend
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
 
     def build(
@@ -90,15 +112,19 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         if should_prepare_decode_metadata(
             metadata.num_decodes,
             decode.decode_query_len,
+            decode_backend=self.decode_backend,
             num_q_heads=self.num_q_heads,
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
             page_size=SPARSE_BLOCK_SIZE,
             topk_blocks=self.topk_blocks,
         ):
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
             msa_cutlass = prepare_decode_metadata(
                 decode.block_table,
                 decode.seq_lens,
+                seq_lens_cpu[: metadata.num_decodes],
                 decode.decode_query_len,
                 num_q_heads=self.num_q_heads,
                 num_kv_heads=self.kv_cache_spec.num_kv_heads,
@@ -128,6 +154,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton",
     ) -> None:
         super().__init__(
             num_heads,
@@ -138,7 +165,33 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             topk_blocks=topk_blocks,
             sparse_block_size=sparse_block_size,
         )
-        self.msa_cutlass_sparse_decode = MSACutlassSparseDecodeRunner()
+        self.use_cutlass_decode = supports_cutlass_sparse_decode(
+            decode_backend=msa_decode_backend,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            page_size=self.block_size,
+            topk_blocks=self.topk_blocks,
+        )
+        logger.info_once(
+            "MiniMax M3 MSA sparse decode selected %s",
+            "CUTLASS" if self.use_cutlass_decode else "Triton",
+        )
+
+    def should_use_msa_decode(self, layer_name: str) -> bool:
+        if not self.use_cutlass_decode:
+            return False
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return False
+        main_md = attn_metadata[layer_name]
+        if not isinstance(main_md, MiniMaxM3SparseMetadata):
+            return False
+        decode = main_md.decode
+        return (
+            isinstance(decode, MiniMaxM3SparseMSADecodeMetadata)
+            and decode.msa_cutlass is not None
+        )
 
     def forward(
         self,
@@ -146,6 +199,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -168,7 +223,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
         v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
-        # Decode [:nd]: opt-in CUTLASS, otherwise Triton.
+        # Decode [:nd]: CUTLASS for planned shapes, otherwise Triton.
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None
@@ -177,24 +232,20 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 if isinstance(d, MiniMaxM3SparseMSADecodeMetadata)
                 else None
             )
-            used_msa_cutlass = self.msa_cutlass_sparse_decode.try_decode(
-                q[:nd],
-                kv_cache,
-                topk[:nd],
-                d.seq_lens,
-                out[:nd],
-                msa_metadata,
-                num_kv_heads=self.num_kv_heads,
-                scale=self.scale,
-                block_size=self.block_size,
-                topk_blocks=self.topk_blocks,
-                decode_query_len=d.decode_query_len,
-                q_scale=getattr(layer, "_q_scale", None),
-                q_scale_float=getattr(layer, "_q_scale_float", 1.0),
-                k_scale_float=getattr(layer, "_k_scale_float", 1.0),
-                v_scale_float=getattr(layer, "_v_scale_float", 1.0),
-            )
-            if not used_msa_cutlass:
+            if self.use_cutlass_decode and msa_metadata is not None:
+                assert query_fp8 is not None
+                msa_cutlass_sparse_decode(
+                    query_fp8[:nd].view(-1, self.num_heads, hd),
+                    kv_cache,
+                    topk[:nd],
+                    out[:nd],
+                    msa_metadata,
+                    scale=self.scale,
+                    q_scale_float=getattr(layer, "_q_scale_float", 1.0),
+                    k_scale_float=getattr(layer, "_k_scale_float", 1.0),
+                    v_scale_float=getattr(layer, "_v_scale_float", 1.0),
+                )
+            else:
                 minimax_m3_sparse_attn_decode(
                     q[:nd],
                     kv_cache,
