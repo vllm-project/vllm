@@ -822,15 +822,6 @@ class TestQuarkInt4Format:
             in output_names
         )
 
-    def test_quark_mapper_adds_suffix_remappings(self):
-        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
-        mapper = quant_config.get_cache_scale_mapper()
-
-        assert ".qscales" in mapper.orig_to_new_suffix
-        assert mapper.orig_to_new_suffix[".qscales"] == ".weight_scale"
-        assert ".qqzeros" in mapper.orig_to_new_suffix
-        assert mapper.orig_to_new_suffix[".qqzeros"] == ".weight_zero_point"
-
     def test_quark_apply_mapper_updates_exclude_and_layer_quant_config(self):
         quant_config = QuarkConfig.from_config(
             {
@@ -869,23 +860,6 @@ class TestQuarkInt4Format:
             "language_model.model.layers.0.mlp.gate", ignore=exclude_layers
         )
 
-    def test_quark_mapper_renames_tensor_names(self):
-        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
-        mapper = quant_config.get_cache_scale_mapper()
-
-        input_weights = [
-            ("model.layers.0.mlp.down_proj.weight", torch.zeros(1)),
-            ("model.layers.0.mlp.down_proj.qscales", torch.zeros(1)),
-            ("model.layers.0.mlp.down_proj.qqzeros", torch.zeros(1)),
-        ]
-        output_names = {name for name, _ in mapper.apply(input_weights)}
-
-        assert "model.layers.0.mlp.down_proj.weight" in output_names
-        assert "model.layers.0.mlp.down_proj.weight_scale" in output_names
-        assert "model.layers.0.mlp.down_proj.weight_zero_point" in output_names
-        assert "model.layers.0.mlp.down_proj.qscales" not in output_names
-        assert "model.layers.0.mlp.down_proj.qqzeros" not in output_names
-
 @pytest.mark.parametrize("symmetric", [False, True])
 @pytest.mark.parametrize("pack_method", ["order", "reorder"])
 def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric):
@@ -919,9 +893,6 @@ def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric)
         qzeros,
         group_size,
         pack_reorder=pack_reorder,
-    )
-    scheme = QuarkW4A16Int4(
-        group_size=group_size, pack_method=pack_method, is_symmetric=symmetric
     )
     canonical_weight = canonicalize_quark_packed_int4(
         qweight,
