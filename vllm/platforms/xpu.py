@@ -292,13 +292,9 @@ class XPUPlatform(Platform):
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
-        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning_once(
-                "XPU Graph is disabled by environment variable, "
-                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
-            )
-        else:
+        elif (
+            "VLLM_XPU_ENABLE_XPU_GRAPH" in os.environ and envs.VLLM_XPU_ENABLE_XPU_GRAPH
+        ) or compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             logger.warning_once(
                 "XPU Graph support is experimental and has known limitations: "
                 "(1) only single-GPU execution is supported; "
@@ -307,6 +303,12 @@ class XPUPlatform(Platform):
                 "(3) XPU Graph may increase device memory usage, "
                 "potentially causing OOM errors or leaving less memory "
                 "for the KV cache and reducing performance."
+            )
+        else:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning_once(
+                "XPU Graph is disabled by environment variable, "
+                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
 
         # Disable fusion passes not yet supported on XPU.
