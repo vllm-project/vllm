@@ -23,6 +23,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     _is_torch_equal_or_newer,
     is_torch_equal,
@@ -498,6 +499,7 @@ def _mock_config_for_cudagraph_sizes(
     num_speculative_tokens: int,
     max_num_batched_tokens: int,
     compilation_config: CompilationConfig,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
     """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
 
@@ -517,8 +519,13 @@ def _mock_config_for_cudagraph_sizes(
     config.model_config.enforce_eager = False
     config.performance_mode = None
     config.diffusion_config = None
+    schedule = num_speculative_tokens_per_batch_size
     config.speculative_config = (
-        SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+        SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            num_speculative_tokens_per_batch_size=schedule,
+            uses_dynamic_speculative_decoding=lambda: schedule is not None,
+        )
         if num_speculative_tokens
         else None
     )
@@ -662,6 +669,49 @@ def test_default_cudagraph_capture_size_caps_requests_not_tokens():
         1024 if current_platform.is_device_capability_family(100) else 512
     )
     assert compilation_config.max_cudagraph_capture_size == default_max_graph_size * 17
+
+
+def _widest_covered_request_count(capture_sizes, query_len, max_num_seqs):
+    """Widest request count `CudaGraphManager` can build a decode graph for.
+
+    Mirrors `_init_candidates`: a capture size is rounded up to a multiple of
+    the tier's query length, then dropped once the implied request count runs
+    past `max_num_seqs`.
+    """
+    reachable = [
+        cdiv(size, query_len)
+        for size in capture_sizes
+        if cdiv(size, query_len) <= max_num_seqs
+    ]
+    return max(reachable, default=0)
+
+
+def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
+    """Each scheduled draft width needs sizes over the range it applies to.
+
+    Dynamic speculative decoding picks the width from the batch size, so
+    scaling by the widest one alone leaves the narrower tiers short: sizes
+    built from query length 17 round up to multiples of 3 that imply more
+    requests than the scheduler can run, and coverage stops at 227 of 256.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=256,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        # 16 draft tokens up to a batch of 16, then 2 out to 256.
+        num_speculative_tokens_per_batch_size=[(1, 16, 16), (17, 256, 2)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    # The wide tier only ever runs to a batch of 16, the narrow one to 256.
+    assert _widest_covered_request_count(sizes, 17, 256) >= 16
+    assert _widest_covered_request_count(sizes, 3, 256) == 256
 
 
 def test_default_cudagraph_capture_size_still_clamped_by_token_budget():

@@ -1964,17 +1964,47 @@ class VllmConfig:
                     # is rejected. Scaling a request-count grid keeps every
                     # entry usable and the count comparable to the non-
                     # speculative case.
-                    # At most the platform default number of requests,
-                    # mirroring the one-token-per-request decode ceiling.
-                    max_decode_reqs = min(max_num_seqs, default_max_graph_size)
-                    request_counts = [n for n in (1, 2, 4) if n <= max_decode_reqs]
-                    request_counts += list(range(8, min(max_decode_reqs + 1, 256), 8))
-                    request_counts += list(range(256, max_decode_reqs + 1, 16))
-                    if max_decode_reqs not in request_counts:
-                        request_counts.append(max_decode_reqs)
-                    uniform_decode_sizes = [
-                        n * decode_query_len for n in request_counts
-                    ]
+                    def request_counts(max_reqs: int) -> list[int]:
+                        # At most the platform default number of requests,
+                        # mirroring the one-token-per-request decode ceiling.
+                        max_reqs = min(max_reqs, default_max_graph_size)
+                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
+                        counts += list(range(8, min(max_reqs + 1, 256), 8))
+                        counts += list(range(256, max_reqs + 1, 16))
+                        return sorted(set(counts + [max_reqs]))
+
+                    # Dynamic speculative decoding picks the draft width from
+                    # the batch size, so a decode step is only uniform within a
+                    # tier and each tier needs its own sizes. Scaling by the
+                    # widest one alone leaves the narrower tiers short: the
+                    # manager rounds a capture size up to a multiple of the
+                    # tier's query length and drops it once the implied request
+                    # count exceeds max_num_seqs, so at query length 3 sizes
+                    # built from 17 stop covering at 227 of 256 requests.
+                    decode_tiers = [(decode_query_len, max_num_seqs)]
+                    speculative_config = self.speculative_config
+                    if (
+                        speculative_config is not None
+                        and speculative_config.uses_dynamic_speculative_decoding()
+                    ):
+                        schedule = (
+                            speculative_config.num_speculative_tokens_per_batch_size
+                        )
+                        assert schedule is not None
+                        # (range_start, range_end, num_speculative_tokens), and
+                        # a tier only ever runs up to the end of its range.
+                        decode_tiers = [
+                            (num_spec + 1, min(range_end, max_num_seqs))
+                            for _, range_end, num_spec in schedule
+                        ]
+
+                    uniform_decode_sizes = sorted(
+                        {
+                            n * query_len
+                            for query_len, tier_max_reqs in decode_tiers
+                            for n in request_counts(tier_max_reqs)
+                        }
+                    )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
