@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::borrow::Cow;
+
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -20,6 +22,10 @@ const ARGUMENTS_START: &str = "<arguments>";
 const ARGUMENTS_END: &str = "</arguments>";
 const CDATA_START: &str = "<![CDATA[";
 const CDATA_END: &str = "]]>";
+/// SentencePiece/GPT-style space marker some MiniCPM5 decodes emit.
+const TOKENIZER_SPACE: char = '\u{0120}';
+/// SentencePiece/GPT-style newline marker some MiniCPM5 decodes emit.
+const TOKENIZER_NEWLINE: char = '\u{010a}';
 
 type MiniCpm5Input<'i> = Partial<&'i str>;
 
@@ -128,7 +134,7 @@ impl ToolParser for MiniCpm5ToolParser {
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+        self.buffer.push_str(&normalize_tokenizer_artifacts(chunk));
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_minicpm5_event(input, &mut self.mode)
@@ -158,10 +164,38 @@ impl ToolParser for MiniCpm5ToolParser {
     }
 
     fn reset(&mut self) -> String {
+        // A started call already consumed `<function` into the mode, so put it
+        // back: callers surface the recovered text verbatim after an error.
+        let recovered = if matches!(self.mode, MiniCpm5Mode::Function { .. }) {
+            let mut recovered = String::with_capacity(FUNCTION_START.len() + self.buffer.len());
+            recovered.push_str(FUNCTION_START);
+            recovered.push_str(&self.buffer);
+            self.buffer.clear();
+            recovered
+        } else {
+            std::mem::take(&mut self.buffer)
+        };
         self.mode = MiniCpm5Mode::Text;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        recovered
     }
+}
+
+/// Rewrite the SentencePiece/GPT-style whitespace markers that MiniCPM5
+/// decoding can emit around the special-token tags.
+///
+/// Mirrors Python `_normalize_model_output`. The collapsed-tag rewrite it also
+/// performs is unnecessary here because the grammar accepts collapsed tags
+/// directly.
+fn normalize_tokenizer_artifacts(chunk: &str) -> Cow<'_, str> {
+    if !chunk.contains(TOKENIZER_SPACE) && !chunk.contains(TOKENIZER_NEWLINE) {
+        return Cow::Borrowed(chunk);
+    }
+    Cow::Owned(
+        chunk
+            .replace(TOKENIZER_SPACE, " ")
+            .replace(TOKENIZER_NEWLINE, "\n"),
+    )
 }
 
 /// Parse a MiniCPM5 event for the current parser mode.
@@ -434,6 +468,52 @@ mod tests {
 
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(parsed_arguments(&output, 0), json!({ "location": "SF" }));
+    }
+
+    #[test]
+    fn minicpm5_parse_complete_normalizes_tokenizer_space_marker() {
+        // Decoding can emit U+0120 in place of the space between the tag and
+        // its `name` attribute (Python `test_tokenizer_space_marker`).
+        let mut parser = MiniCpm5ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                "<function\u{0120}name=\"get_weather\"><param\u{0120}name=\"location\">SF</param></function>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(parsed_arguments(&output, 0), json!({ "location": "SF" }));
+    }
+
+    #[test]
+    fn minicpm5_parse_complete_normalizes_tokenizer_newline_marker() {
+        let mut parser = MiniCpm5ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(&build_tool_call(
+                "get_weather",
+                &[("location", "北\u{010a}京")],
+            ))
+            .unwrap();
+
+        assert_eq!(parsed_arguments(&output, 0), json!({ "location": "北\n京" }));
+    }
+
+    #[test]
+    fn minicpm5_reset_restores_consumed_function_marker() {
+        // `<function` is consumed into the parser mode; error recovery reads
+        // the buffer back through reset() and must not lose the opener.
+        let mut parser = MiniCpm5ToolParser::new(&test_tools());
+        parser.parse_chunk("ok <function name=\"get_weather\"").unwrap();
+
+        assert_eq!(parser.reset(), "<function name=\"get_weather\"");
+    }
+
+    #[test]
+    fn minicpm5_reset_restores_bare_consumed_function_marker() {
+        let mut parser = MiniCpm5ToolParser::new(&test_tools());
+        parser.parse_chunk("ok <function").unwrap();
+
+        assert_eq!(parser.reset(), "<function");
     }
 
     #[test]
