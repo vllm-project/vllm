@@ -133,6 +133,8 @@ def _rocm_aiter_fused_moe_impl(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
+    beta: float | None = None,
+    linear_beta: float | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -143,6 +145,12 @@ def _rocm_aiter_fused_moe_impl(
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
+    if (
+        getattr(ActivationType, "Situv2", None) is not None
+        and activation == ActivationType.Situv2
+    ):
+        extra_kwargs["beta"] = beta
+        extra_kwargs["linear_beta"] = linear_beta
 
     return fused_moe(
         hidden_states,
@@ -193,6 +201,8 @@ def _rocm_aiter_fused_moe_fake(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
+    beta: float | None = None,
+    linear_beta: float | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -409,37 +419,6 @@ def _rocm_aiter_fused_topk_fake(
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
-_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
-
-
-def check_aiter_fused_qk_rmsnorm() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm.
-
-    Supports both the new private name ``_fused_qk_rmsnorm``
-    (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
-    (AITER >= PR #2442).
-
-    TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    """
-    global _AITER_HAS_FUSED_QK_RMSNORM
-    if _AITER_HAS_FUSED_QK_RMSNORM is None:
-        try:
-            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                _fused_qk_rmsnorm,
-            )
-
-            _AITER_HAS_FUSED_QK_RMSNORM = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
-            try:
-                from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                    fused_qk_rmsnorm,
-                )
-
-                _AITER_HAS_FUSED_QK_RMSNORM = True
-            except (ImportError, ModuleNotFoundError, AttributeError):
-                _AITER_HAS_FUSED_QK_RMSNORM = False
-    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
@@ -795,7 +774,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
@@ -855,7 +834,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
@@ -1267,43 +1246,17 @@ def _fused_mla_dual_rms_norm_impl(
     x1_epsilon: float,
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    try:
-        import aiter.ops.fused_qk_norm_rope_cache_quant as aiter_ops
-    except (ImportError, ModuleNotFoundError, AttributeError) as exc:
-        raise ImportError(
-            "fused_qk_rmsnorm requires AITer >= PR #2442. "
-            "Please upgrade aiter or disable the "
-            "fuse_mla_dual_rms_norm pass."
-        ) from exc
+    from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
 
-    if hasattr(aiter_ops, "_fused_qk_rmsnorm"):
-        return aiter_ops._fused_qk_rmsnorm(
-            q_out=None,
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k_out=None,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    # AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    if hasattr(aiter_ops, "fused_qk_rmsnorm"):
-        return aiter_ops.fused_qk_rmsnorm(
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    raise ImportError(
-        "fused_qk_rmsnorm requires AITer >= PR #2442. "
-        "Please upgrade aiter or disable the "
-        "fuse_mla_dual_rms_norm pass."
+    return _fused_qk_rmsnorm(
+        q_out=None,
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k_out=None,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
     )
 
 
@@ -1461,6 +1414,65 @@ def _triton_rotary_embedding_fake(
     return
 
 
+def _rocm_aiter_fp8_attn_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run AITER FP8 attention for fixed or packed inputs."""
+    from aiter import flash_attn_varlen_fp8_pertensor_func
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    max_seqlen_value = q_len if max_seqlen is None else max_seqlen.item()
+
+    q, k, v = (x.flatten(0, 1) for x in (q, k, v))
+    output = flash_attn_varlen_fp8_pertensor_func(
+        q,
+        k,
+        v,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen_value,
+        max_seqlen_k=max_seqlen_value,
+        causal=False,
+        softmax_scale=scale,
+    )
+    return output.to(output_dtype).reshape(batch_size, q_len, *output.shape[1:])
+
+
+def _rocm_aiter_fp8_attn_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(
+        (*q.shape[:-1], v.shape[-1]), device=q.device, dtype=output_dtype
+    )
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1616,6 +1628,7 @@ class rocm_aiter_ops:
             "silu": ActivationType.Silu,
             "gelu": ActivationType.Gelu,
             "swiglu": ActivationType.Swiglu,
+            "situ": getattr(ActivationType, "Situv2", None),
         }
         return mapping.get(name)
 
@@ -2017,6 +2030,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="aiter_fp8_attn_wrapper",
+                op_func=_rocm_aiter_fp8_attn_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_fp8_attn_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8wfp4",
                 op_func=_rocm_aiter_gemm_a8wfp4_impl,
                 mutates_args=[],
@@ -2212,6 +2233,8 @@ class rocm_aiter_ops:
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
         swiglu_limit: float = 0.0,
+        beta: float | None = None,
+        linear_beta: float | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2236,6 +2259,8 @@ class rocm_aiter_ops:
             bias2,
             moe_sorting_dispatch_policy,
             swiglu_limit,
+            beta,
+            linear_beta,
         )
 
     @staticmethod
@@ -2885,6 +2910,34 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
+        )
+
+    @staticmethod
+    def fp8_attn_wrapper(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        q_descale: torch.Tensor,
+        k_descale: torch.Tensor,
+        v_descale: torch.Tensor,
+        batch_size: int,
+        output_dtype: torch.dtype,
+        scale: float | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.aiter_fp8_attn_wrapper(
+            q,
+            k,
+            v,
+            q_descale,
+            k_descale,
+            v_descale,
+            batch_size,
+            output_dtype,
+            scale,
+            cu_seqlens,
+            max_seqlen,
         )
 
     @staticmethod

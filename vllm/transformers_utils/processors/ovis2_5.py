@@ -78,7 +78,6 @@ class Ovis2_5Processor(ProcessorMixin):
 
     @cached_property
     def extra_special_tokens(self):
-        vocab = self.tokenizer.get_vocab()
         required_tokens = {
             "image_token": "<image>",
             "video_token": "<video>",
@@ -90,21 +89,16 @@ class Ovis2_5Processor(ProcessorMixin):
             "image_pad": "<|image_pad|>",
         }
 
-        extra_special_tokens = {}
-        suggestion = (
-            "please add '<image>', '<video>', '<ovis_visual_atom>', "
-            "'<ovis_image_start>', '<ovis_image_end>', '<ovis_video_start>', "
-            "'<ovis_video_end>' in 'additional_special_tokens' of "
-            "tokenizer_config.json, You can refer to "
-            "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
-        )
+        # The checkpoint defines both `additional_special_tokens` and
+        # `extra_special_tokens`, with the latter empty. Transformers ignores
+        # the former because the latter is explicitly empty, so the tokens are
+        # missing from the vocab. Re-add them to restore the expected ids.
+        self.tokenizer.add_tokens(list(required_tokens.values()), special_tokens=True)
 
-        for key, token_name in required_tokens.items():
-            if token_name not in vocab:
-                raise ValueError(f"Can not find {token_name}, {suggestion}")
-            extra_special_tokens[key] = vocab[token_name]
-
-        return extra_special_tokens
+        return {
+            key: self.tokenizer.convert_tokens_to_ids(token_name)
+            for key, token_name in required_tokens.items()
+        }
 
     def __call__(
         self,
