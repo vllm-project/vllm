@@ -318,7 +318,6 @@ class RequestGroupState:
 
     def iter_paired_offloads(
         self,
-        group_config: GroupOffloadConfig,  # accepted for signature symmetry
         ends_upper: int,
     ) -> Iterable[tuple[int, list[int]]]:
         """Yield ``(chunk_idx, all_block_ids)`` for each chunk in
@@ -331,12 +330,7 @@ class RequestGroupState:
         (preserving pre-refactor semantics where the second per-group
         loop recorded events for any chunk whose key survived
         ``prepare_store``).
-
-        ``group_config`` is accepted but unused; keeping the signature
-        symmetric with ``iter_reachable_offloads`` lets callers swap
-        helpers without branching.
         """
-        del group_config  # explicitly unused
         start = self.next_stored_chunk_idx
         bpc = self.blocks_per_chunk
         for abs_chunk_idx in range(start, ends_upper):
@@ -583,7 +577,7 @@ class RequestOffloadState:
             num_group_blocks = 0
             group_state = self.group_states[group_idx]
             for chunk_idx, chunk_block_ids in group_state.iter_paired_offloads(
-                group_config, extents[group_idx]
+                extents[group_idx]
             ):
                 offload_key = group_state.offload_keys[chunk_idx]
                 if offload_key not in keys_to_store:
