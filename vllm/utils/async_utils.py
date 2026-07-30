@@ -130,10 +130,14 @@ async def merge_async_iterators(
                 except StopAsyncIteration:
                     pass
     finally:
-        # Cancel any remaining iterators
-        for f, (_, it) in awaits.items():
+        # Cancel and await pending reads before closing their iterators.
+        pending = list(awaits.items())
+        for task, _ in pending:
+            task.cancel()
+        for task, (_, it) in pending:
             with contextlib.suppress(BaseException):
-                f.cancel()
+                await task
+            with contextlib.suppress(BaseException):
                 await it.aclose()
 
 
