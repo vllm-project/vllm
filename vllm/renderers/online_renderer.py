@@ -8,6 +8,7 @@ from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    AsyncMultiModalItemTracker,
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
@@ -30,6 +31,8 @@ from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
+    MultiModalDataDict,
+    MultiModalUUIDDict,
     PromptType,
     SingletonPrompt,
     tokens_input,
@@ -345,6 +348,18 @@ class OnlineRenderer:
             )
             for prompt in prompts
         ]
+
+        if image_urls := getattr(request, "image_urls", None):
+            mm_data, mm_uuids = await self._resolve_image_urls(image_urls)
+            for parsed_prompt in parsed_prompts:
+                # skip if prompt embeds, also required to narrow the type for mypy
+                if isinstance(parsed_prompt, bytes):
+                    continue
+                if mm_data is not None:
+                    parsed_prompt["multi_modal_data"] = mm_data
+                if mm_uuids is not None:
+                    parsed_prompt["multi_modal_uuids"] = mm_uuids
+
         tok_params = request.build_tok_params(model_config)
 
         return await renderer.render_cmpl_async(
@@ -357,6 +372,15 @@ class OnlineRenderer:
             },
             skip_mm_cache=skip_mm_cache,
         )
+
+    async def _resolve_image_urls(
+        self, image_urls: list[str]
+    ) -> tuple[MultiModalDataDict | None, MultiModalUUIDDict | None]:
+        mm_tracker = AsyncMultiModalItemTracker(self.model_config)
+        mm_parser = mm_tracker.create_parser()
+        for image_url in image_urls:
+            mm_parser.parse_image(image_url)
+        return await mm_tracker.resolve_items()
 
     async def preprocess_chat(
         self,

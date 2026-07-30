@@ -243,6 +243,15 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    image_urls: list[Annotated[str, Field(min_length=1)]] | None = Field(
+        default=None,
+        description=(
+            "Either a URL of the image or the base64 encoded image data. The "
+            "input prompt must contain the correct image placeholder token (one "
+            "per image). Not supported for multiple prompts or `prompt_embeds`."
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -539,6 +548,27 @@ class CompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "Either prompt or prompt_embeds must be provided and non-empty.",
                 parameter="prompt",
+            )
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_image_urls(cls, data):
+        if not data.get("image_urls"):
+            return data
+
+        if data.get("prompt_embeds") is not None:
+            raise VLLMValidationError(
+                "`image_urls` is not supported with `prompt_embeds`.",
+                parameter="image_urls",
+            )
+
+        prompt = data.get("prompt")
+        if isinstance(prompt, list) and len(prompt) > 1 and not is_list_of(prompt, int):
+            raise VLLMValidationError(
+                "`image_urls` is only supported with a single prompt.",
+                parameter="image_urls",
             )
 
         return data
