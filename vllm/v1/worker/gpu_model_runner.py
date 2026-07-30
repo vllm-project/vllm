@@ -68,6 +68,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
+from vllm.model_executor.layers.pooler.tokwise.methods import AllPool
 from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
@@ -3555,13 +3556,20 @@ class GPUModelRunner(
         #     full vector, so a later truncation would not be unit norm.
         #   - use_activation=False: project_batch unconditionally applies
         #     activation; this diverges from forward_chunk's gated path.
+        #   - Pooling method must be exactly AllPool: StepPool (an AllPool
+        #     subclass) filters tokens via step_tag_id/returned_token_ids
+        #     BEFORE the head, and the raw projected_batch slice would
+        #     bypass that filter — hence type(...) is AllPool, not
+        #     isinstance.
         projected_batch = None
         cursor = pooling_metadata.pooling_cursor
         use_zerocopy = (
-            self.late_interaction_runner.has_pending_docs
+            self._flash_late_interaction_enabled
+            and self.late_interaction_runner.has_pending_docs
             and not os.environ.get("VLLM_DISABLE_ZEROCOPY")
             and hasattr(model.pooler, "head")
             and hasattr(model.pooler.head, "project_batch")
+            and type(getattr(model.pooler, "pooling", None)) is AllPool
             and cursor is not None
             and not cursor.is_partial_prefill()
         )
@@ -5595,11 +5603,25 @@ class GPUModelRunner(
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         # Warm up flash-maxsim Triton kernels only when the loaded model
-        # supports late-interaction zero-copy scoring (same capability check
-        # the runtime path uses). Plain LLMs skip the autotune cost.
+        # supports late-interaction zero-copy scoring (same capability +
+        # pooling-method checks the runtime path uses; StepPool subclasses
+        # AllPool but filters tokens, so it must not warm or use the
+        # kernels). Plain LLMs, and servers started with
+        # --no-enable-flash-late-interaction (propagated via
+        # PoolerConfig.enable_flash_late_interaction), skip the autotune
+        # cost entirely.
+        pooler_config = getattr(self.model_config, "pooler_config", None)
+        self._flash_late_interaction_enabled = pooler_config is None or getattr(
+            pooler_config, "enable_flash_late_interaction", True
+        )
         pooler = getattr(self.model, "pooler", None)
         pooler_head = getattr(pooler, "head", None) if pooler is not None else None
-        if pooler_head is not None and hasattr(pooler_head, "project_batch"):
+        if (
+            self._flash_late_interaction_enabled
+            and pooler_head is not None
+            and hasattr(pooler_head, "project_batch")
+            and type(getattr(pooler, "pooling", None)) is AllPool
+        ):
             self.late_interaction_runner.warmup_kernels()
 
         if (

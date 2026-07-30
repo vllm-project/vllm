@@ -329,7 +329,9 @@ class FrontendArgs(BaseFrontendArgs):
     """
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance."""
+    Can significantly improve late-interaction scoring performance.
+    When disabled, the setting is also propagated to the engine's
+    `PoolerConfig`, skipping the flash-maxsim kernel warmup at model load."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -445,3 +447,21 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
         prog="-m vllm.entrypoints.openai.api_server"
     )
     return make_arg_parser(parser_for_docs)
+
+
+def propagate_flash_late_interaction(args, engine_args) -> None:
+    """Propagate `--no-enable-flash-late-interaction` into the engine config.
+
+    The frontend flag alone only disables the API-server scoring path; the
+    model runner would still pre-compile the flash-maxsim kernels at load.
+    Mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the
+    runner skip both the warmup and the zero-copy path (see PR #40337).
+    """
+    if getattr(args, "enable_flash_late_interaction", True):
+        return
+    from vllm.config.pooler import PoolerConfig
+
+    if engine_args.pooler_config is None:
+        engine_args.pooler_config = PoolerConfig(enable_flash_late_interaction=False)
+    else:
+        engine_args.pooler_config.enable_flash_late_interaction = False

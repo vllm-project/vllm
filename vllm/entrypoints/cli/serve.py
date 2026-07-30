@@ -11,7 +11,11 @@ import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.cli_args import (
+    make_arg_parser,
+    propagate_flash_late_interaction,
+    validate_parsed_serve_args,
+)
 from vllm.entrypoints.openai.dp_supervisor import (
     run_dp_supervisor,
 )
@@ -180,6 +184,7 @@ def run_headless(args: argparse.Namespace):
 
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(
         usage_context=usage_context, headless=True
@@ -290,6 +295,7 @@ def run_multi_api_server(args: argparse.Namespace):
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
     engine_args._api_process_count = num_api_servers
     engine_args._api_process_rank = -1
 
