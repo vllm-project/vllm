@@ -1,7 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+
+def cpu_thread_choices() -> list[int]:
+    """Candidate ``num_cpu_threads`` values for CPU autotuning.
+
+    Probe points scale with the compute-unit count; ``0`` means all cores.
+    Empty off-CPU, where it is unused.
+    """
+    if not current_platform.is_cpu():
+        return []
+    n = current_platform.num_compute_units() or 1
+    return sorted({max(1, n // 4), max(1, 3 * n // 4), 0})
 
 
 @triton.jit

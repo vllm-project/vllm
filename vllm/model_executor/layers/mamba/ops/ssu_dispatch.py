@@ -282,12 +282,16 @@ def initialize_mamba_ssu_backend(
     # unstable or unavailable.  Silently fall back to the CPU
     # backend unless the user explicitly chose something other than "triton".
     if backend == MambaBackendEnum.TRITON:
+        import vllm.envs as envs
         from vllm.platforms import current_platform
+        from vllm.triton_utils import HAS_TRITON
 
-        if current_platform.is_cpu():
+        if current_platform.is_cpu() and not (
+            HAS_TRITON and envs.VLLM_CPU_USE_TRITON
+        ):
             logger.info(
-                "CPU platform detected: overriding Mamba SSU backend "
-                "from 'triton' to 'cpu'."
+                "CPU platform detected: overriding Mamba SSU backend from "
+                "'triton' to 'cpu'."
             )
             backend = MambaBackendEnum.CPU
 

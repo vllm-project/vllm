@@ -8,11 +8,19 @@
 
 import torch
 
+from vllm.model_executor.layers.mamba.ops.triton_helpers import cpu_thread_choices
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+CPU_THREADS = cpu_thread_choices()
+IS_CPU = current_platform.is_cpu()
 
-@triton.autotune(
-    configs=[
+if IS_CPU:
+    # Fix tile sizes heuristically on CPU (M/N~chunk_size, K~contraction) and
+    # autotune only the OpenMP thread count, instead of sweeping the block grid.
+    _bmm_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _bmm_configs = [
         triton.Config(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
             num_stages=3,
@@ -58,7 +66,28 @@ from vllm.triton_utils import tl, triton
             num_stages=4,
             num_warps=2,
         ),
-    ],
+    ]
+
+
+@triton.heuristics(
+    {
+        **(
+            {
+                "BLOCK_SIZE_M": lambda args: min(
+                    triton.next_power_of_2(args["chunk_size"]), 64
+                ),
+                "BLOCK_SIZE_N": lambda args: min(
+                    triton.next_power_of_2(args["chunk_size"]), 64
+                ),
+                "BLOCK_SIZE_K": lambda args: min(triton.next_power_of_2(args["K"]), 64),
+            }
+            if IS_CPU
+            else {}
+        )
+    }
+)
+@triton.autotune(
+    configs=_bmm_configs,
     key=["chunk_size", "K", "IS_CAUSAL"],
 )
 @triton.jit
