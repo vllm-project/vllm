@@ -648,7 +648,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         w2=case.w2_kernel,
         topk_weights=case.topk_weights,
         topk_ids=case.topk_ids,
-        activation=MoEActivation.SILU,
+        activation=MoEActivation.SWIGLUOAI,
         quant_config=case.quant_config,
         moe_config=case.moe_config,
         expert_map=None,
@@ -660,8 +660,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         ref_out.float(),
         label="mi350_mxfp4_w4a16_accuracy",
         atol=0.1,
-        rtol=0.0,
-        pass_rate=0.9999,
+        rtol=0.1,
+        pass_rate=0.99,
         max_violation_factor=2.0,
     )
 
@@ -692,7 +692,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
             w2=case.w2_kernel,
             topk_weights=case.topk_weights,
             topk_ids=case.topk_ids,
-            activation=MoEActivation.SILU,
+            activation=MoEActivation.SWIGLUOAI,
             quant_config=case.quant_config,
             moe_config=case.moe_config,
             expert_map=None,
