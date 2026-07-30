@@ -89,11 +89,44 @@ def test_non_uniform_page_sizes():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_many_blocks_exceed_flat_grid_limit():
+    """Zero enough blocks that a flat 1-D grid would be an illegal launch.
+
+    AMD rejects a launch whose work groups times threads per block overflow
+    uint32, i.e. more than ``(2**32 - 1) // 256 == 16777215`` work groups for
+    the default 4 warps of 64 lanes (WG size = 4 * 64 = 256).
+    """
+    device = torch.device("cuda")
+    page_size_el = 1_048_577
+    num_blocks = 18
+    # len(block_ids) * page_size_el > (2**32 - 1) // 256
+    block_ids = list(range(1, num_blocks))
+
+    storage = torch.ones((num_blocks, page_size_el), dtype=torch.int32, device=device)
+
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.device = device
+    zeroer._meta = (
+        torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        page_size_el,  # max_chunks
+        1,  # blk_size
+        1,  # n_segs
+    )
+
+    zeroer.zero_block_ids(block_ids)
+    torch.accelerator.synchronize()
+
+    assert torch.all(storage[0] == 1)
+    assert torch.all(storage[1:] == 0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_warmup_compiles_every_n_blocks_specialization():
     """After warmup, no launch should trigger a first-request JIT compile.
 
-    ``n_blocks`` is ``do_not_specialize``, so a single warmup launch must
-    cover every block count.
+    The block count is carried by the grid rather than by an argument, so a
+    single warmup launch must cover every block count.
     """
     device = torch.device("cuda")
     num_blocks = 64
