@@ -2946,3 +2946,109 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+def _spec_decode_grouping_config(num_target_layers: int):
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=SimpleNamespace(use_eagle=lambda: True),
+        model_config=SimpleNamespace(
+            get_total_num_hidden_layers=lambda: num_target_layers
+        ),
+    )
+
+
+def test_drafter_layers_get_dedicated_kv_cache_group():
+    """EAGLE-family drafter layers must all land in one KV cache group.
+
+    `SpecDecodeBaseProposer.validate_same_kv_cache_group` requires all draft
+    layers in a single group, but the strided group assignment in
+    `_get_kv_cache_groups_uniform_page_size` scatters the drafter's layers
+    across the target's groups of the same spec (e.g. Laguna-S: 12 full + 36
+    sliding target layers + 6 DFlash drafter sliding layers -> the 42 sliding
+    layers form 4 strided groups with the drafter's 6 in all four). Drafter
+    layers are identified by layer index (EAGLE-family drafters continue the
+    target's numbering) and separated into a dedicated group, independent of
+    pipeline parallelism.
+    """
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(12):
+        specs[f"model.layers.{4 * i}.self_attn.attn"] = new_kv_cache_spec()
+    for i in range(48):
+        if i % 4 == 0:
+            continue
+        specs[f"model.layers.{i}.self_attn.attn"] = new_sliding_window_spec(
+            sliding_window=512
+        )
+    drafter_layers = [f"model.layers.{48 + i}.self_attn.attn" for i in range(6)]
+    for name in drafter_layers:
+        specs[name] = new_sliding_window_spec(sliding_window=512)
+
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(48), specs)
+
+    drafter_gids = {
+        gid
+        for gid, group in enumerate(groups)
+        for name in drafter_layers
+        if name in group.layer_names
+    }
+    assert len(drafter_gids) == 1
+    drafter_group = groups[drafter_gids.pop()]
+    assert set(drafter_group.layer_names) == set(drafter_layers)
+    # Target grouping is unchanged: 1 full group + 3 sliding groups of 12.
+    target_groups = [g for g in groups if g is not drafter_group]
+    assert sorted(len(g.layer_names) for g in target_groups) == [12, 12, 12, 12]
+
+
+def test_drafter_layers_alone_in_groups_are_left_untouched():
+    """A drafter that already has its groups to itself must not be regrouped.
+
+    Regrouping changes the group-size heuristic's inputs and can leave
+    undersized groups, which costs KV capacity. Measured on Qwen3.5-9B, whose
+    per-layer specs give one group per layer: separating anyway cut the pool
+    from 863k to 185k tokens. Only drafter layers sharing a group with target
+    layers (which corrupts their absolute-slot context writes) are separated.
+    """
+    # Distinct specs with a common page size, as a model whose layers differ
+    # only in window size produces: every layer lands in a group of its own.
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(4):
+        specs[f"model.layers.{i}.self_attn.attn"] = new_sliding_window_spec(
+            sliding_window=128 * (i + 1)
+        )
+    drafter_layers = [f"model.layers.{4 + i}.self_attn.attn" for i in range(2)]
+    for j, name in enumerate(drafter_layers):
+        specs[name] = new_sliding_window_spec(sliding_window=640 + 128 * j)
+
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(4), specs)
+
+    # Every spec is distinct, so each layer already occupies its own group and
+    # no drafter layer shares with a target layer: the layout must be untouched.
+    assert all(len(g.layer_names) == 1 for g in groups)
+    assert len(groups) == len(specs)
+
+
+def test_drafter_layer_identification_requires_eagle_family():
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(2):
+        specs[f"model.layers.{i}.self_attn.attn"] = new_kv_cache_spec()
+    for i in range(2, 6):
+        specs[f"model.layers.{i}.self_attn.attn"] = new_sliding_window_spec(
+            sliding_window=512
+        )
+
+    config = _spec_decode_grouping_config(num_target_layers=4)
+    assert kv_cache_utils._identify_drafter_layers(config, specs) == {
+        "model.layers.4.self_attn.attn",
+        "model.layers.5.self_attn.attn",
+    }
+
+    # No speculative config -> nothing is a drafter layer.
+    assert kv_cache_utils._identify_drafter_layers(_grouping_config(), specs) == set()
+
+    # Non-EAGLE-family methods do not follow the continued-index convention.
+    config_draft_model = SimpleNamespace(
+        speculative_config=SimpleNamespace(use_eagle=lambda: False),
+        model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 4),
+    )
+    assert kv_cache_utils._identify_drafter_layers(config_draft_model, specs) == set()
