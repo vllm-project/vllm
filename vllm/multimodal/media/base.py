@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import numpy as np
 
@@ -22,15 +23,27 @@ class MediaWithBytes(Generic[_T]):
     The wrapper delegates attribute access to the underlying media object,
     making it behave transparently like the wrapped type (e.g., PIL.Image).
 
-    NOTE: Currently, this wrapper is used only for the image modality.
+    NOTE: Currently, this wrapper is used only for the image and video
+    modalities.
     """
 
     media: _T
     original_bytes: bytes = field(repr=False)
+    io_config: dict[str, Any] | None = None
+    """Decode settings that altered the media relative to `original_bytes`
+    (e.g. `image_mode` conversion), so they participate in cache hashing."""
 
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
         return np.array(self.media, *args, **kwargs)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Allow unpacking obj to unpack obj.media (e.g. video tuples)."""
+        return iter(cast(Iterable[Any], self.media))
+
+    def __getitem__(self, index: Any) -> Any:
+        """Allow obj[i] to index obj.media (e.g. video tuples)."""
+        return cast(Any, self.media)[index]
 
     def __getstate__(self):
         return self.__dict__.copy()
