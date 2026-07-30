@@ -1,98 +1,272 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
-def _correct_attn_cp_out_kernel(
-    outputs_ptr,
-    new_output_ptr,
-    lses_ptr,
-    vlse_ptr,
-    outputs_stride_B,
-    outputs_stride_H,
-    outputs_stride_D,
-    lses_stride_N,
-    lses_stride_B,
-    lses_stride_H,
-    lse_idx,
-    HEAD_DIM: tl.constexpr,
-    N_ROUNDED: tl.constexpr,
-    IS_BASE_E: tl.constexpr,
-):
-    """
-    Apply the all-gathered lses to correct each local rank's attention
-    output. we still need perform a cross-rank reduction to obtain the
-    final attention output.
+class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        output_dtype: torch.dtype
+        lse_dtype: torch.dtype
+        outputs_stride_b: int
+        outputs_stride_h: int
+        outputs_stride_d: int
+        lses_stride_n: int
+        lses_stride_b: int
+        lses_stride_h: int
+        lse_idx: int
+        head_dim: int
+        n_rounded: int
+        is_base_e: bool
 
-    Args:
-        outputs_ptr (triton.PointerType):
-            Pointer to input tensor of shape [ B, H, D ]
-        lses_ptr (triton.PointerType):
-            Pointer to input tensor of shape [ N, B, H ]
-        new_output_ptr (triton.PointerType):
-            Pointer to output tensor of shape [ B, H, D ]
-        vlse_ptr (triton.PointerType):
-            Pointer to output tensor of shape [ B, H ]
-    """
-    batch_idx = tl.program_id(axis=0).to(tl.int64)
-    head_idx = tl.program_id(axis=1).to(tl.int64)
-    d_offsets = tl.arange(0, HEAD_DIM)
-    num_n_offsets = tl.arange(0, N_ROUNDED)
+    @staticmethod
+    @triton.jit
+    def kernel(
+        outputs_ptr,
+        new_output_ptr,
+        lses_ptr,
+        vlse_ptr,
+        outputs_stride_B,
+        outputs_stride_H,
+        outputs_stride_D,
+        lses_stride_N,
+        lses_stride_B,
+        lses_stride_H,
+        lse_idx,
+        HEAD_DIM: tl.constexpr,
+        N_ROUNDED: tl.constexpr,
+        IS_BASE_E: tl.constexpr,
+    ):
+        """
+        Apply the all-gathered lses to correct each local rank's attention
+        output. we still need perform a cross-rank reduction to obtain the
+        final attention output.
 
-    # shape = [N]
-    lse_offsets = (
-        num_n_offsets * lses_stride_N
-        + batch_idx * lses_stride_B
-        + head_idx * lses_stride_H
-    )
+        Args:
+            outputs_ptr (triton.PointerType):
+                Pointer to input tensor of shape [ B, H, D ]
+            lses_ptr (triton.PointerType):
+                Pointer to input tensor of shape [ N, B, H ]
+            new_output_ptr (triton.PointerType):
+                Pointer to output tensor of shape [ B, H, D ]
+            vlse_ptr (triton.PointerType):
+                Pointer to output tensor of shape [ B, H ]
+        """
+        batch_idx = tl.program_id(axis=0).to(tl.int64)
+        head_idx = tl.program_id(axis=1).to(tl.int64)
+        d_offsets = tl.arange(0, HEAD_DIM)
+        num_n_offsets = tl.arange(0, N_ROUNDED)
 
-    # calc final lse
-    lse = tl.load(lses_ptr + lse_offsets)
-    lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
-    lse_max = tl.max(lse, axis=0)
-    lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
-    lse -= lse_max
-    if IS_BASE_E:
-        lse_exp = tl.exp(lse)
-        lse_acc = tl.sum(lse_exp, axis=0)
-        lse = tl.log(lse_acc)
-    else:
-        lse_exp = tl.exp2(lse)
-        lse_acc = tl.sum(lse_exp, axis=0)
-        lse = tl.log2(lse_acc)
-    lse += lse_max
+        # shape = [N]
+        lse_offsets = (
+            num_n_offsets * lses_stride_N
+            + batch_idx * lses_stride_B
+            + head_idx * lses_stride_H
+        )
 
-    lse_offsets = batch_idx * lses_stride_B + head_idx * lses_stride_H
-    tl.store(vlse_ptr + lse_offsets, lse)
+        # calc final lse
+        lse = tl.load(lses_ptr + lse_offsets)
+        lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
+        lse_max = tl.max(lse, axis=0)
+        lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
+        lse -= lse_max
+        if IS_BASE_E:
+            lse_exp = tl.exp(lse)
+            lse_acc = tl.sum(lse_exp, axis=0)
+            lse = tl.log(lse_acc)
+        else:
+            lse_exp = tl.exp2(lse)
+            lse_acc = tl.sum(lse_exp, axis=0)
+            lse = tl.log2(lse_acc)
+        lse += lse_max
 
-    # shape = [D]
-    output_offsets = (
-        batch_idx * outputs_stride_B
-        + head_idx * outputs_stride_H
-        + d_offsets * outputs_stride_D
-    )
+        lse_offsets = batch_idx * lses_stride_B + head_idx * lses_stride_H
+        tl.store(vlse_ptr + lse_offsets, lse)
 
-    # correct output
-    lse_offset = (
-        lse_idx * lses_stride_N + batch_idx * lses_stride_B + head_idx * lses_stride_H
-    )
-    lse_tmp = tl.load(lses_ptr + lse_offset)
-    lse_finally = lse_tmp - lse
-    lse_finally = tl.where(
-        (lse_finally != lse_finally) | (lse_finally == float("inf")),
-        -float("inf"),
-        lse_finally,
-    )
-    factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
-    output = tl.load(outputs_ptr + output_offsets)
-    output = output * factor
-    output = tl.where(factor == 0.0, 0.0, output)
+        # shape = [D]
+        output_offsets = (
+            batch_idx * outputs_stride_B
+            + head_idx * outputs_stride_H
+            + d_offsets * outputs_stride_D
+        )
 
-    tl.store(new_output_ptr + output_offsets, output)
+        # correct output
+        lse_offset = (
+            lse_idx * lses_stride_N
+            + batch_idx * lses_stride_B
+            + head_idx * lses_stride_H
+        )
+        lse_tmp = tl.load(lses_ptr + lse_offset)
+        lse_finally = lse_tmp - lse
+        lse_finally = tl.where(
+            (lse_finally != lse_finally) | (lse_finally == float("inf")),
+            -float("inf"),
+            lse_finally,
+        )
+        factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
+        output = tl.load(outputs_ptr + output_offsets)
+        output = output * factor
+        output = tl.where(factor == 0.0, 0.0, output)
+
+        tl.store(new_output_ptr + output_offsets, output)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        output_dtype: torch.dtype,
+        lse_dtype: torch.dtype,
+        num_tokens: int,
+        num_heads: int,
+        head_dim: int,
+        n_rounded: int,
+        lse_idx: int,
+        is_base_e: bool,
+        runtime_outputs_stride_b: int | None = None,
+        runtime_outputs_stride_h: int | None = None,
+        runtime_outputs_stride_d: int | None = None,
+        runtime_lses_stride_n: int | None = None,
+        runtime_lses_stride_b: int | None = None,
+        runtime_lses_stride_h: int | None = None,
+    ) -> CompileKey:
+        outputs_stride_d = (
+            runtime_outputs_stride_d if runtime_outputs_stride_d is not None else 1
+        )
+        outputs_stride_h = (
+            runtime_outputs_stride_h
+            if runtime_outputs_stride_h is not None
+            else head_dim
+        )
+        outputs_stride_b = (
+            runtime_outputs_stride_b
+            if runtime_outputs_stride_b is not None
+            else num_heads * head_dim
+        )
+        lses_stride_h = (
+            runtime_lses_stride_h if runtime_lses_stride_h is not None else 1
+        )
+        lses_stride_b = (
+            runtime_lses_stride_b if runtime_lses_stride_b is not None else num_heads
+        )
+        lses_stride_n = (
+            runtime_lses_stride_n
+            if runtime_lses_stride_n is not None
+            else num_tokens * num_heads
+        )
+        return self.CompileKey(
+            output_dtype=output_dtype,
+            lse_dtype=lse_dtype,
+            outputs_stride_b=triton_scalar_specialization_rep(outputs_stride_b),
+            outputs_stride_h=triton_scalar_specialization_rep(outputs_stride_h),
+            outputs_stride_d=triton_scalar_specialization_rep(outputs_stride_d),
+            lses_stride_n=triton_scalar_specialization_rep(lses_stride_n),
+            lses_stride_b=triton_scalar_specialization_rep(lses_stride_b),
+            lses_stride_h=triton_scalar_specialization_rep(lses_stride_h),
+            lse_idx=triton_scalar_specialization_rep(lse_idx),
+            head_dim=head_dim,
+            n_rounded=n_rounded,
+            is_base_e=is_base_e,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        from vllm.model_executor.layers.attention.mla_attention import (
+            get_mla_dims,
+        )
+
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        max_tokens = min(
+            16,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        hf_config = vllm_config.model_config.hf_config
+        num_heads = (
+            hf_config.num_attention_heads
+            // vllm_config.parallel_config.tensor_parallel_size
+        )
+        head_dim = get_mla_dims(vllm_config.model_config).v_head_dim
+        if dcp_world_size <= 1 or max_tokens <= 0 or num_heads <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            output_dtype=vllm_config.model_config.dtype,
+            lse_dtype=torch.float32,
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            num_heads=num_heads,
+            head_dim=head_dim,
+            n_rounded=dcp_world_size,
+            lse_idx=WarmupIntRange(0, dcp_world_size),
+            is_base_e=(False, True),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        output_ptr = TritonWarmupTensor(compile_key.output_dtype)
+        lse_ptr = TritonWarmupTensor(compile_key.lse_dtype)
+        warmup(
+            output_ptr,
+            output_ptr,
+            lse_ptr,
+            lse_ptr,
+            compile_key.outputs_stride_b,
+            compile_key.outputs_stride_h,
+            compile_key.outputs_stride_d,
+            compile_key.lses_stride_n,
+            compile_key.lses_stride_b,
+            compile_key.lses_stride_h,
+            compile_key.lse_idx,
+            HEAD_DIM=compile_key.head_dim,
+            N_ROUNDED=compile_key.n_rounded,
+            IS_BASE_E=compile_key.is_base_e,
+            grid=(1, 1, 1),
+        )
+
+    def __call__(
+        self,
+        outputs: torch.Tensor,
+        new_output: torch.Tensor,
+        lses: torch.Tensor,
+        vlse: torch.Tensor,
+        lse_idx: int,
+        ctx: Any,
+        *,
+        is_base_e: bool,
+    ) -> None:
+        num_tokens, num_heads, head_dim = outputs.shape
+        n_rounded = lses.shape[0]
+        outputs_stride_b, outputs_stride_h, outputs_stride_d = outputs.stride()
+        lses_stride_n, lses_stride_b, lses_stride_h = lses.stride()
+        grid = (num_tokens, num_heads, 1)
+        ctx.call_kernel(
+            self.kernel,
+            grid,
+            outputs,
+            new_output,
+            lses,
+            vlse,
+            outputs_stride_b,
+            outputs_stride_h,
+            outputs_stride_d,
+            lses_stride_n,
+            lses_stride_b,
+            lses_stride_h,
+            lse_idx,
+            HEAD_DIM=head_dim,
+            N_ROUNDED=n_rounded,
+            IS_BASE_E=is_base_e,
+        )
 
 
 class CPTritonContext:
@@ -143,14 +317,12 @@ def correct_attn_out(
         f"got {tuple(lses.shape)}"
     )
 
-    B, H, D = out.shape
-    N = lses.shape[0]
+    B, H, _ = out.shape
 
     # Strides after we normalized shapes to 3-D views.  The kernel computes
     # offsets for `vlse_ptr` using lses_stride_B/H, so the output buffer must
     # have the same B/H stride layout as a slice of `lses`.
-    o_sB, o_sH, o_sD = out.stride()
-    l_sN, l_sB, l_sH = lses.stride()
+    _, l_sB, l_sH = lses.stride()
 
     # Allocate LSE with the same B/H strides as `lses` so writes land correctly
     # even when `lses` is a non-contiguous view (e.g., 4-D to 3-D squeeze).
@@ -158,24 +330,15 @@ def correct_attn_out(
         (B, H), (l_sB, l_sH), device=lses.device, dtype=lses.dtype
     )
 
-    # Kernel launch config
-    grid = (B, H, 1)
-
-    regular_args = (
+    _CORRECT_ATTN_CP_OUT_KERNEL(
         out,
         out,
         lses,
         lse,
-        o_sB,
-        o_sH,
-        o_sD,
-        l_sN,
-        l_sB,
-        l_sH,
         cp_rank,
+        ctx,
+        is_base_e=is_lse_base_on_e,
     )
-    const_args = {"HEAD_DIM": D, "N_ROUNDED": N, "IS_BASE_E": is_lse_base_on_e}
-    ctx.call_kernel(_correct_attn_cp_out_kernel, grid, *regular_args, **const_args)
     return out, lse
 
 
@@ -257,59 +420,151 @@ def cp_lse_ag_out_ar(
     return out
 
 
-@triton.jit
-def _pack_seq_kernel(
-    x_ptr,  # [N, D]
-    out_ptr,  # [B, Lmax, D]
-    lengths_ptr,  # *i32, [B]
-    N: tl.constexpr,
-    D: tl.constexpr,
-    Lmax: tl.constexpr,
-    PAD_VALUE: tl.constexpr,
-    PAD_IS_UINT8: tl.constexpr,
-    BLOCK_T: tl.constexpr,  # timesteps per program
-    BLOCK_D: tl.constexpr,  # features per program
-):
-    pid_b = tl.program_id(0)  # batch id
-    pid_t = tl.program_id(1)  # block over time dimension
-    pid_d = tl.program_id(2)  # block over feature dimension
-    off_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
-    off_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)  # [BLOCK_D]
+class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        pad_value: float | int
+        pad_is_uint8: bool
+        block_t: int
+        block_d: int
 
-    # Compute start index and sequence length from cumulative lengths
-    in_start = 0
-    for i in range(pid_b):
-        in_start += tl.load(lengths_ptr + i)
-    seq_len = tl.load(lengths_ptr + pid_b)
+    @staticmethod
+    @triton.jit(do_not_specialize=["N", "D", "Lmax"])
+    def kernel(
+        x_ptr,  # [N, D]
+        out_ptr,  # [B, Lmax, D]
+        lengths_ptr,  # *i32, [B]
+        N,
+        D,
+        Lmax,
+        PAD_VALUE: tl.constexpr,
+        PAD_IS_UINT8: tl.constexpr,
+        BLOCK_T: tl.constexpr,  # timesteps per program
+        BLOCK_D: tl.constexpr,  # features per program
+    ):
+        pid_b = tl.program_id(0)  # batch id
+        pid_t = tl.program_id(1)  # block over time dimension
+        pid_d = tl.program_id(2)  # block over feature dimension
+        off_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
+        off_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)  # [BLOCK_D]
 
-    # valid time positions for this block
-    t_mask = off_t < Lmax
+        # Compute start index and sequence length from cumulative lengths
+        in_start = 0
+        for i in range(pid_b):
+            in_start += tl.load(lengths_ptr + i)
+        seq_len = tl.load(lengths_ptr + pid_b)
 
-    # compute input row indices for valid (b, t)
-    in_row = in_start + off_t
-    valid_row = (off_t < seq_len) & t_mask
+        # valid time positions for this block
+        t_mask = off_t < Lmax
 
-    # Pointers
-    # x_ptr: row-major [N, D]
-    x_row_ptr = x_ptr + in_row[:, None] * D + off_d[None, :]
+        # compute input row indices for valid (b, t)
+        in_row = in_start + off_t
+        valid_row = (off_t < seq_len) & t_mask
 
-    # out_ptr: row-major [B, Lmax, D]
-    out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
+        # Pointers
+        # x_ptr: row-major [N, D]
+        x_row_ptr = x_ptr + in_row[:, None] * D + off_d[None, :]
 
-    # Initialize with PAD. PAD_IS_UINT8 selects the pad tensor's dtype so
-    # integer-typed outputs (e.g. MXFP4 packed nibbles, ue8m0 scale bytes)
-    # get an exact-byte pad rather than going through an fp32→uint8 cast
-    # that's implementation-defined outside of value 0.
-    d_mask = off_d[None, :] < D
-    if PAD_IS_UINT8:
-        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.uint8)
-    else:
-        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
-    tl.store(out_row_ptr, pad_vals, mask=t_mask[:, None] & d_mask)
+        # out_ptr: row-major [B, Lmax, D]
+        out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
-    # Load & write only where within seq_len
-    x_vals = tl.load(x_row_ptr, mask=valid_row[:, None] & d_mask)
-    tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
+        # Initialize with PAD. PAD_IS_UINT8 selects the pad tensor's dtype so
+        # integer-typed outputs (e.g. MXFP4 packed nibbles, ue8m0 scale bytes)
+        # get an exact-byte pad rather than going through an fp32→uint8 cast
+        # that's implementation-defined outside of value 0.
+        d_mask = off_d[None, :] < D
+        if PAD_IS_UINT8:
+            pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.uint8)
+        else:
+            pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
+        tl.store(out_row_ptr, pad_vals, mask=t_mask[:, None] & d_mask)
+
+        # Load & write only where within seq_len
+        x_vals = tl.load(x_row_ptr, mask=valid_row[:, None] & d_mask)
+        tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        pad_value: float | int,
+        block_t: int,
+        block_d: int,
+    ) -> CompileKey:
+        is_uint8 = dtype == torch.uint8
+        return self.CompileKey(
+            dtype=dtype,
+            pad_value=int(pad_value) if is_uint8 else float(pad_value),
+            pad_is_uint8=is_uint8,
+            block_t=block_t,
+            block_d=block_d,
+        )
+
+    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+        # SparseAttnIndexer uses this for packed decode Q. FP8 uses the current
+        # platform FP8 dtype; FP4 uses uint8 values/scales with zero padding.
+        return self._trace_dispatch(self.dispatch)(
+            dtype=(torch.float8_e4m3fn, torch.uint8),
+            pad_value=(-float("inf"), 0),
+            block_t=64,
+            block_d=64,
+            _when=lambda *, dtype, pad_value: (
+                (dtype == torch.uint8 and pad_value == 0)
+                or (dtype != torch.uint8 and pad_value != 0)
+            ),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        data_ptr = TritonWarmupTensor(compile_key.dtype)
+        lengths_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            data_ptr,
+            data_ptr,
+            lengths_ptr,
+            1,  # do not specialize N
+            1,  # do not specialize D
+            1,  # do not specialize Lmax
+            PAD_VALUE=compile_key.pad_value,
+            PAD_IS_UINT8=compile_key.pad_is_uint8,
+            BLOCK_T=compile_key.block_t,
+            BLOCK_D=compile_key.block_d,
+            grid=(1, 1, 1),
+            num_warps=4,
+            num_stages=2,
+        )
+
+    def __call__(
+        self,
+        x_reshaped: torch.Tensor,
+        out: torch.Tensor,
+        lengths: torch.Tensor,
+        *,
+        N: int,
+        D: int,
+        Lmax: int,
+        pad_value: float | int,
+        pad_is_uint8: bool,
+        block_t: int,
+        block_d: int,
+    ) -> None:
+        grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
+        self.kernel[grid](
+            x_reshaped,
+            out,
+            lengths.int(),
+            N,
+            D,
+            Lmax,
+            PAD_VALUE=pad_value,
+            PAD_IS_UINT8=pad_is_uint8,
+            BLOCK_T=block_t,
+            BLOCK_D=block_d,
+            num_warps=4,
+            num_stages=2,
+        )
 
 
 def pack_seq_triton(
@@ -361,20 +616,17 @@ def pack_seq_triton(
 
     out = torch.empty((B, Lmax, D), device=x.device, dtype=x.dtype)
 
-    grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-    _pack_seq_kernel[grid](
+    _PACK_SEQ_TRITON_KERNEL(
         x_reshaped,
         out,
-        lengths.int(),
-        N,
-        D,
-        Lmax,
-        PAD_VALUE=pad_constexpr,
-        PAD_IS_UINT8=is_uint8,
-        BLOCK_T=block_t,
-        BLOCK_D=block_d,
-        num_warps=4,
-        num_stages=2,
+        lengths,
+        N=N,
+        D=D,
+        Lmax=Lmax,
+        pad_value=pad_constexpr,
+        pad_is_uint8=is_uint8,
+        block_t=block_t,
+        block_d=block_d,
     )
 
     if len(original_shape) > 2:
@@ -383,47 +635,118 @@ def pack_seq_triton(
     return out
 
 
-@triton.jit
-def _unpack_seq_triton_kernel(
-    packed_ptr,  # [B, Lmax, D]
-    out_ptr,  # [N, D]
-    lengths_ptr,  # *i32, [B]
-    B: tl.constexpr,
-    Lmax: tl.constexpr,
-    D: tl.constexpr,
-    BLOCK_T: tl.constexpr,  # timesteps per program
-    BLOCK_D: tl.constexpr,  # features per program
-):
-    pid_b = tl.program_id(0)  # batch id
-    pid_t = tl.program_id(1)  # block over time dimension
-    pid_d = tl.program_id(2)  # block over feature dimension
-    off_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
-    off_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)  # [BLOCK_D]
+class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        block_t: int
+        block_d: int
 
-    # bounds: compute start from cumulative lengths
-    in_start = 0
-    for i in range(pid_b):
-        in_start += tl.load(lengths_ptr + i)
-    seq_len = tl.load(lengths_ptr + pid_b)
+    @staticmethod
+    @triton.jit(do_not_specialize=["B", "Lmax", "D"])
+    def kernel(
+        packed_ptr,  # [B, Lmax, D]
+        out_ptr,  # [N, D]
+        lengths_ptr,  # *i32, [B]
+        B,
+        Lmax,
+        D,
+        BLOCK_T: tl.constexpr,  # timesteps per program
+        BLOCK_D: tl.constexpr,  # features per program
+    ):
+        pid_b = tl.program_id(0)  # batch id
+        pid_t = tl.program_id(1)  # block over time dimension
+        pid_d = tl.program_id(2)  # block over feature dimension
+        off_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)  # [BLOCK_T]
+        off_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)  # [BLOCK_D]
 
-    # valid time positions for this block
-    t_mask = off_t < Lmax
-    valid_row = (off_t < seq_len) & t_mask
+        # bounds: compute start from cumulative lengths
+        in_start = 0
+        for i in range(pid_b):
+            in_start += tl.load(lengths_ptr + i)
+        seq_len = tl.load(lengths_ptr + pid_b)
 
-    # compute output row indices for valid (b, t)
-    out_row = in_start + off_t
+        # valid time positions for this block
+        t_mask = off_t < Lmax
+        valid_row = (off_t < seq_len) & t_mask
 
-    # Pointers
-    # packed_ptr: row-major [B, Lmax, D]
-    packed_row_ptr = packed_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
+        # compute output row indices for valid (b, t)
+        out_row = in_start + off_t
 
-    # out_ptr: row-major [N, D]
-    out_row_ptr = out_ptr + out_row[:, None] * D + off_d[None, :]
+        # Pointers
+        # packed_ptr: row-major [B, Lmax, D]
+        packed_row_ptr = (
+            packed_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
+        )
 
-    # Load from packed tensor and store to output
-    d_mask = off_d[None, :] < D
-    packed_vals = tl.load(packed_row_ptr, mask=valid_row[:, None] & d_mask)
-    tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
+        # out_ptr: row-major [N, D]
+        out_row_ptr = out_ptr + out_row[:, None] * D + off_d[None, :]
+
+        # Load from packed tensor and store to output
+        d_mask = off_d[None, :] < D
+        packed_vals = tl.load(packed_row_ptr, mask=valid_row[:, None] & d_mask)
+        tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        block_t: int,
+        block_d: int,
+    ) -> CompileKey:
+        return self.CompileKey(dtype=dtype, block_t=block_t, block_d=block_d)
+
+    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            dtype=torch.int32,
+            block_t=64,
+            block_d=64,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        data_ptr = TritonWarmupTensor(compile_key.dtype)
+        lengths_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            data_ptr,
+            data_ptr,
+            lengths_ptr,
+            1,  # do not specialize B
+            1,  # do not specialize Lmax
+            1,  # do not specialize D
+            BLOCK_T=compile_key.block_t,
+            BLOCK_D=compile_key.block_d,
+            grid=(1, 1, 1),
+            num_warps=4,
+            num_stages=2,
+        )
+
+    def __call__(
+        self,
+        packed_reshaped: torch.Tensor,
+        out: torch.Tensor,
+        lengths: torch.Tensor,
+        *,
+        B: int,
+        Lmax: int,
+        D: int,
+        block_t: int,
+        block_d: int,
+    ) -> None:
+        grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
+        self.kernel[grid](
+            packed_reshaped,
+            out,
+            lengths.int(),
+            B,
+            Lmax,
+            D,
+            BLOCK_T=block_t,
+            BLOCK_D=block_d,
+            num_warps=4,
+            num_stages=2,
+        )
 
 
 def unpack_seq_triton(
@@ -461,18 +784,15 @@ def unpack_seq_triton(
 
     out = torch.empty((N, D), device=packed_tensor.device, dtype=packed_tensor.dtype)
 
-    grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
-    _unpack_seq_triton_kernel[grid](
+    _UNPACK_SEQ_TRITON_KERNEL(
         packed_reshaped,
         out,
-        lengths.int(),
-        B,
-        Lmax,
-        D,
-        BLOCK_T=block_t,
-        BLOCK_D=block_d,
-        num_warps=4,
-        num_stages=2,
+        lengths,
+        B=B,
+        Lmax=Lmax,
+        D=D,
+        block_t=block_t,
+        block_d=block_d,
     )
 
     # Reshape output back to original dimensions (except first dimension)
@@ -481,3 +801,8 @@ def unpack_seq_triton(
         out = out.reshape(output_shape)
 
     return out
+
+
+_CORRECT_ATTN_CP_OUT_KERNEL = CorrectAttnCPOutKernel()
+_PACK_SEQ_TRITON_KERNEL = PackSeqTritonKernel()
+_UNPACK_SEQ_TRITON_KERNEL = UnpackSeqTritonKernel()
