@@ -3397,18 +3397,27 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
-                    cudagraph_mode=cudagraph_mode.value,
-                )
+            (
+                should_ubatch,
+                num_tokens_across_dp,
+                synced_cudagraph_mode,
+                synced_uniform_decode,
+            ) = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.parallel_config,
+                allow_microbatching=allow_microbatching,
+                allow_dp_padding=allow_dp_padding,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                cudagraph_mode=cudagraph_mode.value,
             )
+            # Adopt the DP-synced uniform_decode so all ranks dispatch the SAME
+            # cudagraph BatchDescriptor (num_tokens, uniform_decode). Without this
+            # a real MTP/spec-decode batch on one rank and a dummy batch on
+            # another pick different FULL graphs and deadlock in the captured
+            # cross-DP collective. dispatch_cudagraph closes over uniform_decode.
+            uniform_decode = synced_uniform_decode
 
             # Extract DP-synced values
             if num_tokens_across_dp is not None:

@@ -1749,15 +1749,27 @@ class SpecDecodeBaseProposer:
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
         use_iquest_multilayer = self._use_iquest_multilayer()
-        if not is_graph_capturing:
-            num_forwards = self.num_speculative_tokens
-        elif use_iquest_multilayer:
-            # Capture the outer layer-0 graph and each remaining physical layer.
+        if use_iquest_multilayer:
+            # Real multilayer propose (_propose_mtp_chained) runs the layer-0
+            # first pass + (_num_mtp_layers - 1) chained MTP-layer passes, and
+            # issues the DP coordinate all-reduce (_pad_batch_across_dp) ONLY
+            # once (for the first pass; the chained passes reuse that padding).
+            # The dummy path must mirror this EXACTLY -- same number of forwards
+            # AND the same single coordinate -- otherwise an idle DP rank issues
+            # extra cross-DP coordinate all-reduces with no peer on the busy rank
+            # and the ranks deadlock (only with DP + multilayer MTP).
             num_forwards = self._num_mtp_layers
+        elif not is_graph_capturing:
+            num_forwards = self.num_speculative_tokens
         else:
             num_forwards = 1
         for fwd_idx in range(num_forwards):
-            if fwd_idx <= 1:
+            # Coordinate once per forward for non-multilayer (matches propose's
+            # two _pad_batch_across_dp calls at fwd 0/1); for multilayer,
+            # coordinate only on the first pass (matches _propose_mtp_chained,
+            # which coordinates once and reuses it for the chained layers).
+            do_coordinate = (fwd_idx == 0) if use_iquest_multilayer else (fwd_idx <= 1)
+            if do_coordinate:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
@@ -1887,7 +1899,7 @@ class SpecDecodeBaseProposer:
         num_tokens_padded: int,
     ) -> tuple[int, torch.Tensor]:
         # TODO(Flechman): support DBO ubatching
-        should_ubatch, num_toks_across_dp, _ = coordinate_batch_across_dp(
+        should_ubatch, num_toks_across_dp, _, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,

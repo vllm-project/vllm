@@ -796,7 +796,17 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        # NOTE: DP idle-rank dummy batches are made NON-uniform (uniform_decode=
+        # False). Combined with the uniform_decode DP-sync in
+        # coordinate_batch_across_dp, any engine step in which some rank is idle
+        # resolves to PIECEWISE across all ranks, so the cross-DP MoE collective
+        # (reduce_scatter) runs eagerly (split out of the graph) instead of being
+        # captured inside a FULL cudagraph. This avoids the DP FULL-cudagraph
+        # replay deadlock under speculative decoding (MTP), where a busy rank and
+        # an idle rank would otherwise replay mismatched FULL graphs. When ALL
+        # ranks are busy (the throughput-critical case) there are no dummy
+        # batches, so FULL cudagraphs are still used at full speed.
+        self.model_runner._dummy_run(1, uniform_decode=False)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
