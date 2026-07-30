@@ -49,6 +49,11 @@ def test_compiled_vs_eager(
         device=device,
         dtype=dtype,
     )
+    # Model parameters use torch.empty because checkpoint loading overwrites
+    # them. Initialize the standalone test module so allocator contents cannot
+    # introduce NaNs and make this comparison flaky.
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     g = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
@@ -94,6 +99,8 @@ def test_compiled_vs_eager_multidim(
         device=device,
         dtype=dtype,
     )
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
     x = torch.randn(*shape, dtype=dtype, device=device)
     g = torch.randn(*shape, dtype=dtype, device=device)
 
