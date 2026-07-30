@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import safetensors
+import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -187,7 +188,7 @@ class ECExampleConnector(ECConnectorBase):
                 grids = {
                     key: value.tolist()
                     for key, value in feature.data.get_data().items()
-                    if key.endswith("_grid_thw") and hasattr(value, "tolist")
+                    if key.endswith("_grid_thw") and isinstance(value, torch.Tensor)
                 }
             # `data` is None for items served from the processor cache, in which
             # case the grid is unavailable here and the consumer has to fall

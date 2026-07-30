@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import hashlib
 import io
 import json
@@ -33,6 +32,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import aiohttp
+import pybase64 as base64
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
