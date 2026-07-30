@@ -93,24 +93,38 @@ class CPUOffloadingSpec(OffloadingSpec):
         )
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             num_copies = 1 if self.replicated_layout else world_size
-            kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
-            kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
+            # worker_kv_bytes_per_block is derived from the worker's KV cache
+            # tensors. For UniformTypeKVCacheSpecs this is already the group
+            # page size, which aggregates all layers in the group. CPU offload
+            # capacity is configured per worker, so num_blocks must not be
+            # divided by world_size. The shared mmap row stride still includes
+            # all worker slots so rank offsets remain valid.
+            worker_kv_bytes_per_chunk = (
+                config.worker_kv_bytes_per_block * self.blocks_per_chunk
+            )
+            shared_kv_bytes_per_chunk = worker_kv_bytes_per_chunk * num_copies
 
             # calculate cpu_page_size_per_worker
-            self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
+            self.cpu_page_size_per_worker = worker_kv_bytes_per_chunk
 
             # calculate num_blocks
-            aligned_kv_bytes_per_chunk = round_up(
-                kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
+            aligned_worker_kv_bytes_per_chunk = round_up(
+                worker_kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            self.num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            self.num_blocks = (
+                int(cpu_bytes_to_use) // aligned_worker_kv_bytes_per_chunk
+            )
 
-            # Expose aligned_kv_bytes_per_chunk as
+            aligned_shared_kv_bytes_per_chunk = round_up(
+                shared_kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
+            )
+
+            # Expose aligned_shared_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
             # some padding. i.e. each offloaded block is of the form,
             # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
             # or |--- B0 (single copy) ---| *** maybe-pad *** |
-            self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
+            self.kv_bytes_per_chunk = aligned_shared_kv_bytes_per_chunk
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
