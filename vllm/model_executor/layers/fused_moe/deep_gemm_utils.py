@@ -424,7 +424,7 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    BLOCK_D = min(hidden_size, 1024)
+    BLOCK_D = min(hidden_size, 512)
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 

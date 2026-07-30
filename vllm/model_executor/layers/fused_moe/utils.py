@@ -100,7 +100,7 @@ def count_expert_num_tokens(
     )
 
     grid = num_local_experts
-    BLOCK_SIZE = min(topk_ids.numel(), 1024)
+    BLOCK_SIZE = min(topk_ids.numel(), 512)
     BLOCK_SIZE = triton.next_power_of_2(BLOCK_SIZE)
 
     _count_expert_num_tokens[(grid,)](
