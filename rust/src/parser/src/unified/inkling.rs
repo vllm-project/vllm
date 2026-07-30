@@ -61,7 +61,7 @@ enum InklingEvent {
     TextStart,
     ReasoningStart,
     MessageStart,
-    Header,
+    Header { len: usize },
     ToolJsonStart,
     ToolJsonHeader { name: String },
     ToolJsonArgs { len: usize, complete: bool },
@@ -72,7 +72,9 @@ enum InklingEvent {
 enum InklingMode {
     #[default]
     Idle,
-    MessageHeader,
+    MessageHeader {
+        pending: String,
+    },
     Text,
     Reasoning,
     ToolJsonHeader,
@@ -117,7 +119,9 @@ impl InklingUnifiedParser {
         self.mode = InklingMode::Idle;
         for token_id in prompt_token_ids.iter().rev().copied() {
             if token_id == self.message_model_token_id {
-                self.mode = InklingMode::MessageHeader;
+                self.mode = InklingMode::MessageHeader {
+                    pending: String::new(),
+                };
                 return;
             }
             if token_id == self.content_thinking_token_id {
@@ -140,8 +144,19 @@ impl InklingUnifiedParser {
             InklingEvent::Reasoning { len } => {
                 output.push_reasoning(self.buffer[..len].to_string());
             }
-            InklingEvent::MessageStart => self.mode = InklingMode::MessageHeader,
-            InklingEvent::Header => {}
+            InklingEvent::MessageStart => {
+                self.mode = InklingMode::MessageHeader {
+                    pending: String::new(),
+                };
+            }
+            InklingEvent::Header { len } => {
+                let InklingMode::MessageHeader { pending } = &mut self.mode else {
+                    return Err(parsing_failed!(
+                        "Inkling header text outside a message header"
+                    ));
+                };
+                pending.push_str(&self.buffer[..len]);
+            }
             InklingEvent::TextStart => self.mode = InklingMode::Text,
             InklingEvent::ReasoningStart => self.mode = InklingMode::Reasoning,
             InklingEvent::ToolJsonStart => self.mode = InklingMode::ToolJsonHeader,
@@ -174,7 +189,10 @@ impl InklingUnifiedParser {
                 }
             }
             InklingEvent::BlockEnd => {
-                self.mode = InklingMode::Idle;
+                let mode = std::mem::take(&mut self.mode);
+                if let InklingMode::MessageHeader { pending } = mode {
+                    output.push_text(pending);
+                }
                 self.active_tool_index = None;
             }
         }
@@ -182,10 +200,14 @@ impl InklingUnifiedParser {
     }
 
     fn reset(&mut self) -> String {
-        self.mode = InklingMode::Idle;
+        let mut uncommitted = match std::mem::take(&mut self.mode) {
+            InklingMode::MessageHeader { pending } => pending,
+            _ => String::new(),
+        };
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        uncommitted.push_str(&std::mem::take(&mut self.buffer));
+        uncommitted
     }
 }
 
@@ -225,11 +247,15 @@ impl UnifiedParser for InklingUnifiedParser {
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
         let mut output = UnifiedParserOutput::default();
 
-        match &self.mode {
+        match &mut self.mode {
             InklingMode::Idle | InklingMode::Text => {
                 output.push_text(std::mem::take(&mut self.buffer))
             }
-            InklingMode::MessageHeader => self.buffer.clear(),
+            InklingMode::MessageHeader { pending } => {
+                pending.push_str(&self.buffer);
+                self.buffer.clear();
+                output.push_text(std::mem::take(pending));
+            }
             InklingMode::Reasoning => output.push_reasoning(std::mem::take(&mut self.buffer)),
             InklingMode::ToolJsonHeader
             | InklingMode::ToolJsonArgs { .. }
@@ -254,7 +280,7 @@ fn parse_next_inkling_event(
 ) -> ModalResult<InklingEvent> {
     match mode {
         InklingMode::Idle => parse_idle_event(input),
-        InklingMode::MessageHeader => parse_message_header_event(input),
+        InklingMode::MessageHeader { .. } => parse_message_header_event(input),
         InklingMode::Text => parse_text_event(input),
         InklingMode::Reasoning => parse_reasoning_event(input),
         InklingMode::ToolJsonHeader => parse_tool_json_header_event(input),
@@ -346,7 +372,7 @@ fn safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEven
 
 /// Parse safe header text before the next Inkling marker.
 fn safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Header)
+    safe_text_len_mul(input, IDLE_MARKERS).map(|len| InklingEvent::Header { len })
 }
 
 /// Parse safe text before the end of a Inkling text block.
@@ -672,15 +698,58 @@ mod tests {
         let mut parser = test_parser();
         parser.initialize(&[200001]).unwrap();
 
-        let output = parser
-            .parse_complete(concat!(
-                "get_weather<|content_invoke_tool_json|>",
-                "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
-            ))
-            .unwrap();
+        let mut output = parser.parse_chunk("get_").unwrap();
+        output.append(
+            parser
+                .parse_complete(concat!(
+                    "weather<|content_invoke_tool_json|>",
+                    "{\"name\":\"get_weather\",\"args\":{}}<|end_message|>"
+                ))
+                .unwrap(),
+        );
 
         assert!(output.normal_text().is_empty());
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    }
+
+    #[test]
+    fn inkling_initialize_model_opener_flushes_bare_text_at_finish() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+
+        let mut output = parser.parse_chunk("plain ").unwrap();
+        output.append(parser.parse_chunk("answer").unwrap());
+        assert!(output.normal_text().is_empty());
+
+        output.append(parser.finish().unwrap());
+
+        assert_eq!(output.normal_text(), "plain answer");
+    }
+
+    #[test]
+    fn inkling_initialize_model_opener_flushes_bare_text_before_end_marker() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+
+        let output = parser
+            .parse_complete(concat!(
+                "plain answer",
+                "<|end_message|>",
+                "<|content_model_end_sampling|>"
+            ))
+            .unwrap();
+
+        assert_eq!(output.normal_text(), "plain answer");
+    }
+
+    #[test]
+    fn inkling_reset_returns_pending_message_header() {
+        let mut parser = test_parser();
+        parser.initialize(&[200001]).unwrap();
+        parser.parse_chunk("plain ").unwrap();
+        parser.parse_chunk("answer").unwrap();
+
+        assert_eq!(parser.reset(), "plain answer");
     }
 
     #[test]
