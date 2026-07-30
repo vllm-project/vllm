@@ -294,23 +294,21 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
+        num_reqs = idx_mapping.shape[0]
+        if not num_reqs:
+            return
+
         if not isinstance(num_sampled, int):
             # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
             # kernel skips them rather than scattering with a host-side gather.
-            n = idx_mapping.shape[0]
-            if n:
-                _scatter_num_accepted_kernel[(n,)](
-                    idx_mapping, num_sampled, self.num_accepted_tokens_gpu
-                )
+            _scatter_num_accepted_kernel[(num_reqs,)](
+                idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+            )
         else:
             # Fill with single value.
-            n = idx_mapping.shape[0]
-            if n:
-                _fill_num_accepted_kernel[(n,)](
-                    idx_mapping,
-                    self.num_accepted_tokens_gpu,
-                    max(num_sampled, 1),
-                )
+            _fill_num_accepted_kernel[(num_reqs,)](
+                idx_mapping, self.num_accepted_tokens_gpu, max(num_sampled, 1)
+            )
 
         # Align: save the running state to the block-aligned position when
         # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
@@ -321,15 +319,13 @@ class MambaHybridModelState(DefaultModelState):
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
-            num_reqs = idx_mapping.shape[0]
-            if num_reqs:
-                self._mamba_ctx.run_fused_postprocess_align(
-                    num_reqs,
-                    self.num_accepted_tokens_gpu,
-                    self._mamba_state_idx_gpu,
-                    num_computed_tokens,
-                    idx_mapping,
-                )
+            self._mamba_ctx.run_fused_postprocess_align(
+                num_reqs,
+                self.num_accepted_tokens_gpu,
+                self._mamba_state_idx_gpu,
+                num_computed_tokens,
+                idx_mapping,
+            )
 
 
 @triton.jit
