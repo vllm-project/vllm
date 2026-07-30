@@ -421,8 +421,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/libtorch_stable/custom_all_reduce.cu"
-    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
+    "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -1080,6 +1083,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
+      "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+  endif()
+  if(FUSED_KDA_DECODE_ARCHS)
+    set(FUSED_KDA_DECODE_SRC
+      "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FUSED_KDA_DECODE_SRC}"
+      CUDA_ARCHS "${FUSED_KDA_DECODE_ARCHS}")
+    set_property(SOURCE ${FUSED_KDA_DECODE_SRC} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_SRC}")
+    message(STATUS
+      "Building fused KDA decode for archs: ${FUSED_KDA_DECODE_ARCHS}")
+  endif()
+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
   endif()
@@ -1137,6 +1157,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
+    if(FUSED_KDA_DECODE_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_DECODE=1)
     endif()
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1477,6 +1501,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
+    include(cmake/external_projects/flashkda.cmake)
     include(cmake/external_projects/qutlass.cmake)
     include(cmake/external_projects/tml_fa4.cmake)
 

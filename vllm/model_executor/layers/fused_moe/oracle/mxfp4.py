@@ -651,7 +651,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         else:
             hidden_size = round_up(hidden_size, 256)
     elif backend in TRTLLM_BACKENDS:
-        intermediate_size = round_up(intermediate_size, 256)
+        intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 256)
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,

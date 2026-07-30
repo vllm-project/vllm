@@ -5,6 +5,7 @@ import pytest
 import torch
 from transformers import AutoModel
 
+from vllm import PoolingParams
 from vllm.config import PoolerConfig
 
 from ...utils import check_embeddings_close
@@ -132,10 +133,85 @@ def test_encoder_only_model_runner_v2_attention(
             task="embed", seq_pooling_type="LAST", use_activation=True
         ),
     ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+
+@pytest.mark.core_model
+def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+    model = "sentence-transformers/all-MiniLM-L6-v2"
+    prompt_batches = [
+        ["short input"],
+        [
+            "short input",
+            "a longer input that exercises mixed sequence lengths",
+        ],
+    ]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = [hf_model.encode(prompts) for prompts in prompt_batches]
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = [vllm_model.embed(prompts) for prompts in prompt_batches]
+
+    for hf_batch, vllm_batch in zip(hf_outputs, vllm_outputs):
+        check_embeddings_close(
+            embeddings_0_lst=hf_batch,
+            embeddings_1_lst=vllm_batch,
+            name_0="hf",
+            name_1="vllm",
+            tol=1e-2,
+        )
+
+
+@pytest.mark.core_model
+def test_matryoshka_dimensions_model_runner_v2(
+    hf_runner, vllm_runner, monkeypatch
+) -> None:
+    model = "Snowflake/snowflake-arctic-embed-m-v1.5"
+    prompts = ["short input", "a longer input for a different output width"]
+    dimensions = [None, 256]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = hf_model.encode(prompts)
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_outputs = vllm_model.embed(
+            prompts,
+            pooling_params=[PoolingParams(dimensions=d) for d in dimensions],
+        )
+
+    expected_outputs = []
+    for output, dimension in zip(hf_outputs, dimensions):
+        output = torch.as_tensor(output)
+        if dimension is not None:
+            output = torch.nn.functional.normalize(output[:dimension], dim=0)
+        expected_outputs.append(output.tolist())
+
+    assert [len(output) for output in vllm_outputs] == [768, 256]
+    check_embeddings_close(
+        embeddings_0_lst=expected_outputs,
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
