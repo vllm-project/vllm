@@ -315,17 +315,6 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_q_out,
     const std::string& kv_cache_dtype, bool skip_index_branch);
 
-#ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
-void kimi_k3_attn_res(torch::stable::Tensor& prefix,
-                      torch::stable::Tensor const& delta,
-                      torch::stable::Tensor const& blocks,
-                      torch::stable::Tensor const& norm_weight,
-                      torch::stable::Tensor const& qk_weight,
-                      torch::stable::Tensor const& output_norm_weight,
-                      torch::stable::Tensor& output, int64_t num_blocks,
-                      double eps, double output_norm_eps);
-#endif
-
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
     torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
