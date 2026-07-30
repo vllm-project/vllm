@@ -545,7 +545,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # both places so OpenAI-shaped consumers see it on the function
         # definition and the cohere renderer can read it back from
         # ``chat_template_kwargs`` for cmd3/cmd4 preamble selection.
-        strict = bool(request.strict_tools) if request.strict_tools else False
+        strict = bool(request.strict_tools)
         chat_req.tools = [
             ChatCompletionToolsParam.model_validate(
                 {
@@ -567,7 +567,9 @@ class CohereServingChatV2(OpenAIServingChat):
         chat_req: ChatCompletionRequest,
         request: CohereChatV2Request,
     ) -> None:
-        # TODO need to add support for this
+        # Cohere v2's ``tool_choice`` only admits ``REQUIRED`` / ``NONE``
+        # (see :data:`CohereToolChoice`); named-tool selection is not
+        # part of the v2 spec. Map both onto OpenAI's equivalents.
         if request.tool_choice == "REQUIRED":
             chat_req.tool_choice = "required"
         elif request.tool_choice == "NONE":
@@ -824,12 +826,16 @@ class CohereServingChatV2(OpenAIServingChat):
                 else:
                     # A string or missing content is wrapped by the
                     # cohere renderer into a single text block before
-                    # melody sees it, so it consumes one slot. We
-                    # can't cheaply recover the text here (the raw
-                    # ``msg.content`` string is what gets used) --
-                    # emit a synthetic tool source carrying it so
-                    # a model citation against this slot still has a
-                    # payload to attach on the wire.
+                    # melody sees it, so it consumes one slot. For
+                    # string content, emit a synthetic id-less tool
+                    # source carrying the text as its payload so a
+                    # model citation against this slot still has
+                    # something to attach on the wire (matching the
+                    # id-less tool_output behavior for text-only
+                    # ``ToolChatMessageV2`` content blocks). Missing
+                    # content still advances the slot cursor but
+                    # produces no source -- a citation against it
+                    # would be dropped by ``_to_wire_citation``.
                     if isinstance(msg.content, str):
                         payload = cls._text_to_tool_output_payload(msg.content)
                         out.append(

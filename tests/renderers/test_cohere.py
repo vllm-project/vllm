@@ -227,10 +227,13 @@ class TestDocumentToMelody:
         assert _document_to_melody("hello") == {"text": "hello"}
 
     def test_pure_dict_passthrough(self):
-        out = _document_to_melody({"text": "x", "id": "d1"})
+        inp = {"text": "x", "id": "d1"}
+        out = _document_to_melody(inp)
         assert out == {"text": "x", "id": "d1"}
-        # Must be a defensive copy (mutating output should not affect input).
+        # Must be a defensive copy so caller-side mutations of the
+        # returned dict don't leak back into the input.
         out["new_key"] = "value"
+        assert "new_key" not in inp
 
     def test_data_wrapper_flattened(self):
         # Cohere v2 documents use ``{id, data: {...}}``; melody expects

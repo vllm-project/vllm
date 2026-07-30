@@ -586,10 +586,11 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
     ) -> tuple[str | None, str | None]:
         result = self.melody_unary.process_full_text(model_output)
         # Cache citations so citation-aware handlers can surface them
-        # on :class:`CohereChatMessage.citations`. The ``parse`` return
-        # tuple is fixed at ``(reasoning, content, tool_calls)`` across
-        # all parsers, so we pass citations back via parser-instance
-        # state -- safe because the parser is constructed per-request.
+        # on :class:`CohereChatMessage.citations`. The base
+        # :meth:`ReasoningParser.extract_reasoning` contract only
+        # returns ``(reasoning, content)``, so citations are passed
+        # back via parser-instance state -- safe because the parser is
+        # constructed per-request.
         self.last_unary_citations = _melody_citations_to_vllm(
             getattr(result, "citations", None), self._position_to_source
         )
