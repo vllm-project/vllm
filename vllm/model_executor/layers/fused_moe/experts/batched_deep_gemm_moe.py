@@ -204,6 +204,7 @@ def persistent_masked_m_silu_mul_quant(
         dtype=ys_dtype,
         device=y.device,
     )
+    y_s.zero_()
 
     ceil_ue8m0 = quant_scale_fmt in [
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,

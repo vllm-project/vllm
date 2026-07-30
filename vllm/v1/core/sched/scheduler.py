@@ -368,10 +368,11 @@ class Scheduler(SchedulerInterface):
     ) -> int:
         """Clip a prefill chunk so it ends where Mamba state must be cached.
 
-        In "align" cache mode the SSM state is only materialized at chunk
-        ends, so chunk ends are steered onto cacheable positions: block
-        boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary, a detected shared-prefix junction).
+        In "align" cache mode reusable SSM states are materialized at block
+        boundaries, plus mandatory early stops (the prompt's partial-tail hash
+        boundary, a detected shared-prefix junction). If a block is larger
+        than the configured prefill chunk limit, intermediate chunks keep
+        private running state until they reach the next cacheable position.
         """
         start = (
             request.num_computed_tokens
@@ -392,11 +393,17 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        # Until `last_cache_position`, chunk ends must land on block
-        # boundaries. May yield an empty chunk (budget cannot reach the next
-        # boundary); the caller then skips the request.
+        # Until `last_cache_position`, prefer chunks ending on block
+        # boundaries. When a block cannot fit in any configured prefill chunk,
+        # allow sub-block progress and re-align at the next reachable boundary.
         if end < last_cache_position:
-            end = end // block_size * block_size
+            max_prefill_tokens = self.max_num_scheduled_tokens
+            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            if long_prefill_threshold > 0:
+                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+            aligned_end = end // block_size * block_size
+            if aligned_end > start or block_size <= max_prefill_tokens:
+                end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (

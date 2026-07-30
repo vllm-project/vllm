@@ -340,6 +340,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_all_gather(input_.contiguous())
+
+    def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_reduce_scatter(input_.contiguous())
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the

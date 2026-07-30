@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -225,15 +226,15 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU, RELU^2 non-gated, GELU, clamped SwiGLU-OAI, and the
-        private SituGLU (SITU) cubin."""
+        """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SITU,
         ]
 
     @staticmethod

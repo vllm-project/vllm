@@ -419,6 +419,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return attn_out, lse
         return attn_out
 
+    def supports_out(self) -> bool:
+        # A padded V produces a qk_head_dim output that cannot be written into
+        # a v_head_dim `out`; only the unpadded path honors `out`.
+        return not self.requires_v_padding
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,

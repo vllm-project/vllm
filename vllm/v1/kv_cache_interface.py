@@ -385,6 +385,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
+    # Marks draft groups that flatten a non-causal query block into decode rows.
+    non_causal_multi_token_decode: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -434,7 +436,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "quantization method, compress ratio, model version, and KV block "
             "stride indexing."
         )
-        return cls(
+        merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
@@ -445,7 +447,17 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        return merged_spec
 
 
 @dataclass(frozen=True, kw_only=True)
