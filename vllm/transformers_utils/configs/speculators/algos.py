@@ -119,15 +119,24 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
 
     # DFlash configs use different indexing for the target layers, see #40727
-    pre_trained_config["dflash_config"] = {
+    dflash_config = {
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
         "sample_from_anchor": config_dict.get("sample_from_anchor", False),
     }
     # Enable causal masking in SWA for vllm-project/speculators models
-    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
+    dflash_config["causal"] = not config_dict.get(
         "sliding_window_non_causal", True
     )
+
+    # Domino projector fields
+    for key in ("projector_type", "shift_label", "pure_draft_prefix_len",
+                "gru_hidden_dim", "emb_dim"):
+        if key in config_dict:
+            pre_trained_config[key] = config_dict[key]
+            dflash_config[key] = config_dict[key]
+
+    pre_trained_config["dflash_config"] = dflash_config
 
 
 @register_speculator("dspark")
