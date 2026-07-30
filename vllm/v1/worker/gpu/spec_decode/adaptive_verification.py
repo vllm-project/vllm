@@ -157,6 +157,7 @@ class AdaptiveVerificationManager:
         num_bonus_tokens: int,
         confidence_ema_alpha: float,
         max_total_logits: int,
+        count_rejected_drafts: bool,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -169,6 +170,11 @@ class AdaptiveVerificationManager:
         # chunked path indexes by scheduled (untrimmed) offsets and cannot
         # address the compacted layout, so the budget must fit one chunk.
         self._max_total_logits = max_total_logits
+        # The sync scheduler overwrites grammar-rejected drafts with -1, so
+        # they can be excluded from the budget. Under async scheduling every
+        # draft is a -1 placeholder at budget time, so the convention does not
+        # hold and the filter must not run.
+        self._count_rejected_drafts = count_rejected_drafts
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -337,7 +343,7 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         valid_drafts = scheduled_drafts
-        if has_structured_output:
+        if has_structured_output and self._count_rejected_drafts:
             valid_drafts = np.fromiter(
                 (
                     sum(token >= 0 for token in draft_tokens.get(req_id, ()))

@@ -529,6 +529,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.num_new_sampled_tokens_per_step,
                 self.speculative_config.adaptive_verification_ema_alpha,
                 max_total_logits=max_chunk_logits(self.vocab_size),
+                count_rejected_drafts=not self.scheduler_config.async_scheduling,
             )
             self.step_timing.consumer = self.adaptive_verification.consume_step_timing
         self.block_tables = BlockTables(
