@@ -773,6 +773,7 @@ class Platform:
         """
         from math import lcm
 
+        from vllm.config.cache import CacheConfig
         from vllm.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
@@ -873,19 +874,48 @@ class Platform:
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
-            kernel_block_alignment_size = max(
-                min(
-                    s.base if isinstance(s, MultipleOf) else s
-                    for s in backend_cls.get_supported_kernel_block_sizes()
-                ),
-                cache_config.block_size,
+            backend_min_block_size = min(
+                s.base if isinstance(s, MultipleOf) else s
+                for s in backend_cls.get_supported_kernel_block_sizes()
             )
+            # The floor forced by the backend and (for MLA) the kernel's
+            # 128-alignment requirement, independent of any user-supplied
+            # `--block-size`.
+            kernel_block_alignment_floor = backend_min_block_size
             if model_config.use_mla:
                 # TRTLLM/FlashInfer MLA decode kernels require the physical
                 # number of kernel blocks to be aligned to 128 / kernel_block_size.
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
-                kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+                kernel_block_alignment_floor = max(kernel_block_alignment_floor, 128)
+            kernel_block_alignment_size = max(
+                kernel_block_alignment_floor,
+                cache_config.block_size,
+            )
+            # What Phase 1 of `update_block_size_for_backend` would have
+            # chosen had `--block-size` not been set explicitly, so a value
+            # below the floor isn't assumed to be discarded when the backend
+            # would otherwise have preferred something above it.
+            no_flag_alignment_size = max(
+                kernel_block_alignment_floor,
+                backend_cls.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE),
+            )
+
+        # An explicit --block-size that resolves to the same kernel block
+        # alignment as omitting it entirely has no effect; say so once.
+        if (
+            cache_config.user_specified_block_size
+            and kernel_block_alignment_size == no_flag_alignment_size
+        ):
+            logger.warning_once(
+                "--block-size %d has no effect: kernel block alignment for "
+                "%s resolves to %d whether or not it is passed. Pass a "
+                "value above %d to change the kernel block alignment size.",
+                cache_config.block_size,
+                backend_cls.get_name(),
+                kernel_block_alignment_size,
+                kernel_block_alignment_size,
+            )
 
         if cache_config.mamba_cache_mode == "all":
             # With prefix caching, align to mamba chunk size for kernel perf

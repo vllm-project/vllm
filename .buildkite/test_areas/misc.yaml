@@ -357,6 +357,7 @@ steps:
   - tests/parser
   - tests/transformers_utils
   - tests/config
+  - tests/platforms
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
@@ -374,6 +375,7 @@ steps:
   - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
+  - pytest -v -s platforms
 
 - label: Batch Invariance (A100)
   key: batch-invariance-a100
