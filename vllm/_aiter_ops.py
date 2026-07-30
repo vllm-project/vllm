@@ -1404,6 +1404,65 @@ def _triton_rotary_embedding_fake(
     return
 
 
+def _rocm_aiter_fp8_attn_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run AITER FP8 attention for fixed or packed inputs."""
+    from aiter import flash_attn_varlen_fp8_pertensor_func
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    max_seqlen_value = q_len if max_seqlen is None else max_seqlen.item()
+
+    q, k, v = (x.flatten(0, 1) for x in (q, k, v))
+    output = flash_attn_varlen_fp8_pertensor_func(
+        q,
+        k,
+        v,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen_value,
+        max_seqlen_k=max_seqlen_value,
+        causal=False,
+        softmax_scale=scale,
+    )
+    return output.to(output_dtype).reshape(batch_size, q_len, *output.shape[1:])
+
+
+def _rocm_aiter_fp8_attn_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty(
+        (*q.shape[:-1], v.shape[-1]), device=q.device, dtype=output_dtype
+    )
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1956,6 +2015,14 @@ class rocm_aiter_ops:
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="aiter_fp8_attn_wrapper",
+                op_func=_rocm_aiter_fp8_attn_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_fp8_attn_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2828,6 +2895,34 @@ class rocm_aiter_ops:
             return_lse=return_lse,
             out=out,
             sink_ptr=sink_ptr,
+        )
+
+    @staticmethod
+    def fp8_attn_wrapper(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        q_descale: torch.Tensor,
+        k_descale: torch.Tensor,
+        v_descale: torch.Tensor,
+        batch_size: int,
+        output_dtype: torch.dtype,
+        scale: float | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.aiter_fp8_attn_wrapper(
+            q,
+            k,
+            v,
+            q_descale,
+            k_descale,
+            v_descale,
+            batch_size,
+            output_dtype,
+            scale,
+            cu_seqlens,
+            max_seqlen,
         )
 
     @staticmethod
