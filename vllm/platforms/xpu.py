@@ -293,10 +293,8 @@ class XPUPlatform(Platform):
                 "disabling cudagraph_mode."
             )
         elif (
-            ("VLLM_XPU_ENABLE_XPU_GRAPH" in os.environ
-            and envs.VLLM_XPU_ENABLE_XPU_GRAPH)
-            or compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
+            "VLLM_XPU_ENABLE_XPU_GRAPH" in os.environ and envs.VLLM_XPU_ENABLE_XPU_GRAPH
+        ) or compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             logger.warning_once(
                 "XPU Graph support is experimental and has known limitations: "
                 "(1) only single-GPU execution is supported; "
@@ -312,7 +310,6 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
-            
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
