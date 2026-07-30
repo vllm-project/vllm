@@ -5,15 +5,12 @@ import pytest
 import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
-from tests.utils import large_gpu_mark, single_gpu_only
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
 
-@pytest.mark.slow_test
-@large_gpu_mark(min_gb=80)
 def test_gemma4_dspark_correctness_and_acceptance_rate(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -42,9 +39,9 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
             "num_speculative_tokens": 7,
             "draft_sample_method": "probabilistic",
         },
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=32,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.85,
         enforce_eager=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
@@ -93,8 +90,6 @@ def dspark_config():
     )
 
 
-@single_gpu_only
-@large_gpu_mark(min_gb=24)
 def test_dspark_correctness_and_acceptance_rate(dspark_config):
     """
     E2E test for DSpark speculative decoding: acceptance rate/length

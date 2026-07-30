@@ -3,7 +3,7 @@
 
 import pytest
 
-from tests.utils import large_gpu_mark, single_gpu_only
+from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
@@ -19,7 +19,6 @@ from ..utils import evaluate_llm_for_gsm8k, get_test_prompts
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
 @single_gpu_only
-@large_gpu_mark(min_gb=24)
 def test_speculators_model_integration(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

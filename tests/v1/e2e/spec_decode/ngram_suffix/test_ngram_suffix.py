@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.utils import large_gpu_mark, single_gpu_only
+from tests.utils import single_gpu_only
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -36,7 +36,6 @@ def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
 )
 @pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
 @single_gpu_only
-@large_gpu_mark(min_gb=20)
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     model_name: str,
@@ -58,7 +57,6 @@ def test_ngram_and_suffix_correctness(
 
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
 @single_gpu_only
-@large_gpu_mark(min_gb=20)
 def test_ngram_gpu_default_with_async_scheduling(
     async_scheduling: bool,
 ):
@@ -90,7 +88,6 @@ def test_ngram_gpu_default_with_async_scheduling(
 
 
 @single_gpu_only
-@large_gpu_mark(min_gb=20)
 def test_suffix_decoding_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

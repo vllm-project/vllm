@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
-from tests.utils import large_gpu_mark, single_gpu_only
+from tests.utils import single_gpu_only
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
@@ -92,19 +92,16 @@ def test_dflash_reference_acceptance_lengths(
         pytest.param(
             QWEN3_DFLASH,
             False,
-            marks=large_gpu_mark(min_gb=24),
             id="qwen3-mrv1",
         ),
         pytest.param(
             QWEN3_DFLASH,
             True,
-            marks=large_gpu_mark(min_gb=24),
             id="qwen3-mrv2",
         ),
         pytest.param(
             LAGUNA_DFLASH_NVFP4,
             True,
-            marks=large_gpu_mark(min_gb=32),
             id="laguna-nvfp4-mrv2",
         ),
     ],

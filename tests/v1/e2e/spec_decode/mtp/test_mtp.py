@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import torch
 
-from tests.utils import large_gpu_mark, single_gpu_only
+from tests.utils import single_gpu_only
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
@@ -46,7 +46,6 @@ from ..utils import (
     ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
 )
 @single_gpu_only
-@large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

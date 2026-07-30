@@ -4,14 +4,12 @@
 import torch
 
 from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts
-from tests.utils import large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...utils import compute_acceptance_rate
 
 
-@large_gpu_mark(min_gb=24)
 def test_medusa_acceptance_rate(
     sampling_config: SamplingParams,
 ):

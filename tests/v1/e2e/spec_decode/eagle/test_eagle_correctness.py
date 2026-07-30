@@ -5,7 +5,6 @@ import pytest
 
 from tests.utils import (
     get_attn_backend_list_based_on_platform,
-    large_gpu_mark,
     single_gpu_only,
 )
 from vllm import SamplingParams
@@ -67,7 +66,6 @@ def test_eagle_correctness_light(
 
 
 @single_gpu_only
-@large_gpu_mark(min_gb=24)
 @pytest.mark.parametrize(
     [
         "model_setup",
