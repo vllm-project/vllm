@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
 )
+from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
@@ -25,6 +26,42 @@ from ..models.utils import check_embeddings_close, check_logprobs_close
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
 DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
+
+
+@pytest.mark.parametrize(
+    ("supports_small_blocks", "uses_paged_kv", "expected"),
+    [
+        (True, True, (16, 16)),
+        (True, False, (128, 128)),
+        (False, True, (128, 128)),
+        (False, False, (128, 128)),
+    ],
+)
+def test_flex_attention_default_block_sizes(
+    supports_small_blocks: bool,
+    uses_paged_kv: bool,
+    expected: tuple[int, int],
+):
+    block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(),
+        supports_small_blocks=supports_small_blocks,
+        cache_block_size=16,
+        uses_paged_kv=uses_paged_kv,
+    )
+    assert block_sizes == expected
+
+
+def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
+    block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(
+            flex_attn_q_block_size=64,
+            flex_attn_kv_block_size=32,
+        ),
+        supports_small_blocks=True,
+        cache_block_size=16,
+        uses_paged_kv=False,
+    )
+    assert block_sizes == (64, 32)
 
 
 @pytest.mark.skipif(
@@ -213,10 +250,12 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
     the default backend for encoder models.
     """
     model_name = "BAAI/bge-base-en-v1.5"
+    # Exercise packed sequence boundaries inside 128-token FlexAttention
+    # blocks, including sequences that span more than one block.
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
+        "hello " * 120,
+        "world " * 130,
+        "attention " * 254,
     ]
 
     # Run with flex attention
@@ -225,7 +264,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=100,
+        max_model_len=384,
         enforce_eager=True,
         attention_config={"backend": "FLEX_ATTENTION"},
     ) as llm_flex:
@@ -237,7 +276,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=100,
+        max_model_len=384,
         enforce_eager=True,
     ) as llm_default:
         default_outputs = llm_default.embed(prompts)
