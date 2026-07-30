@@ -575,6 +575,27 @@ class VllmConfig:
         return 0
 
     @property
+    def uniform_decode_query_len(self) -> int:
+        """Query length of every request in a uniform decode batch.
+
+        A decode step submits one query for the newly sampled token plus one
+        for each draft token, so the widest uniform decode batch the scheduler
+        can build is `max_num_seqs * uniform_decode_query_len` tokens. Anything
+        that has to cover a decode batch reads this, so the sizing rule cannot
+        drift between the places that apply it.
+
+        This deliberately does not derive from the KV slots a drafter reserves
+        past the target's query range, which is a *reservation* contract rather
+        than a query-length one. The two do not differ by a constant: DFlash
+        reserves `num_speculative_tokens + 1` slots yet still verifies `1 +
+        num_speculative_tokens` queries, while EAGLE reserves
+        `num_speculative_tokens` and verifies the same `1 + n`. Deriving one
+        from the other would under-size EAGLE by a full request width, which is
+        the failure this property exists to prevent.
+        """
+        return 1 + self.num_speculative_tokens
+
+    @property
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
@@ -1785,7 +1806,13 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        decode_query_len = 1 + num_speculative_tokens
+        # The 512 ceiling bounds a request count but is written in tokens, so
+        # it is converted into the same units a speculative request is
+        # measured in. Without speculation min(max_num_seqs, 512) * 1 never
+        # exceeds 512, so this stays exactly 512 as in every prior release.
+        size_ceiling = max(512, min(max_num_seqs, 512) * decode_query_len)
+        max_graph_size = min(max_num_seqs * decode_query_len * 2, size_ceiling)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1793,7 +1820,10 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride.
+        even when off-stride. Likewise, once more than one speculative token
+        is in play, the widest uniform decode batch (`max_num_seqs *
+        decode_query_len`) is appended when it fits, since it need not land on
+        an 8- or 16-token stride.
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
@@ -1832,11 +1862,33 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
+            # Widest uniform decode batch, tracked only when a request is more
+            # than one token wide and only when the default is computed here,
+            # so an explicit capture range is left exactly as configured.
+            max_uniform_decode_size: int | None = None
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1 + self.num_speculative_tokens
+                decode_query_len = self.uniform_decode_query_len
+                max_num_seqs = self.scheduler_config.max_num_seqs
+                # The 512 ceiling caps a *request* count. It predates
+                # speculation, when a decode batch was one token per request,
+                # and is still written in tokens. A speculative request is
+                # decode_query_len tokens wide, so the ceiling has to be
+                # converted into the same units, or it silently caps the batch
+                # at 512 // decode_query_len requests instead of at
+                # max_num_seqs and the largest decode step falls outside the
+                # captured range. Capping at min(max_num_seqs, 512) requests
+                # rather than at max_num_seqs keeps the original intent of
+                # bounding how many graphs get captured: a speculative request
+                # is wider than one token, not a reason to capture more of
+                # them. Without speculation min(max_num_seqs, 512) * 1 is never
+                # above 512, so this is identically the historical
+                # min(max_num_seqs * 2, 512) for every max_num_seqs.
+                size_ceiling = max(512, min(max_num_seqs, 512) * decode_query_len)
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    max_num_seqs * decode_query_len * 2, size_ceiling
                 )
+                if decode_query_len > 1:
+                    max_uniform_decode_size = max_num_seqs * decode_query_len
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -1884,6 +1936,18 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
+                # Same for the widest uniform decode batch. A decode batch is
+                # only ever padded up to a captured size that is a multiple of
+                # decode_query_len, so unlike a one-token-per-request batch it
+                # cannot borrow the next size up the stride: at query length 17
+                # a captured 560 rounds to 561 and is rejected. Lifting the
+                # ceiling to reach the widest batch is therefore not enough on
+                # its own when it lands off the stride.
+                if (
+                    max_uniform_decode_size is not None
+                    and max_uniform_decode_size <= max_cudagraph_capture_size
+                ):
+                    cudagraph_capture_sizes.append(max_uniform_decode_size)
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
