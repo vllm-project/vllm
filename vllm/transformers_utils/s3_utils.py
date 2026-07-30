@@ -5,14 +5,19 @@ import fnmatch
 from typing import TYPE_CHECKING
 
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient
 
 try:
     import boto3
+    from botocore.config import Config
 except ImportError:
     boto3 = PlaceholderModule("boto3")  # type: ignore[assignment]
+    Config = PlaceholderModule("botocore").placeholder_attr(  # type: ignore[assignment]
+        "config.Config"
+    )
 
 
 def _filter_allow(paths: list[str], patterns: list[str]) -> list[str]:
@@ -48,7 +53,10 @@ def glob(
         list[str]: List of full S3 paths allowed by the pattern
     """
     if s3 is None:
-        s3 = boto3.client("s3")
+        s3 = boto3.client(
+            "s3",
+            config=Config(user_agent_extra=f"vLLM/{VLLM_VERSION}"),
+        )
     if not path.endswith("/"):
         path = path + "/"
     bucket_name, _, paths = list_files(s3, path=path, allow_pattern=allow_pattern)
