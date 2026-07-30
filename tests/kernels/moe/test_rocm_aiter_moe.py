@@ -30,7 +30,6 @@ import torch.nn.functional as F
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx942, on_gfx950
-from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -306,6 +305,14 @@ def _make_moe_case(
     }
 
 
+def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
+    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
+    e, two_i = t.shape[0], t.shape[1]
+    i, rest = two_i // 2, t.shape[2:]
+    perm = (0, 2, 1, *range(3, 3 + len(rest)))
+    return t.view(e, 2, i, *rest).permute(*perm).contiguous().view(e, two_i, *rest)
+
+
 def _make_aiter_mxfp4_moe_case(
     *,
     num_tokens: int,
@@ -363,9 +370,12 @@ def _make_aiter_mxfp4_moe_case(
     ) = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         mxfp4_backend=Mxfp4MoeBackend.AITER,
         layer=torch.nn.Module(),
-        w13_weight=w1_q.clone(),
+        # w13 rows must be gpt-oss-interleaved; the converter de-interleaves them
+        # back to the contiguous gate/up blocks that ``w1_ref`` / ``ref_moe_forward``
+        # use. w2 has no gate/up split, so it stays as-is.
+        w13_weight=_interleave_gate_up_rows(w1_q),
         w2_weight=w2_q.clone(),
-        w13_weight_scale=w1_scale.clone(),
+        w13_weight_scale=_interleave_gate_up_rows(w1_scale),
         w2_weight_scale=w2_scale.clone(),
     )
 
@@ -608,14 +618,6 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-@pytest.mark.skipif(
-    not has_triton_kernels(),
-    reason="triton_kernels are required for MXFP4 test weight quantization",
-)
-@pytest.mark.skipif(
-    not hasattr(torch, "float4_e2m1fn_x2"),
-    reason="native FP4 dtype not available in this torch build",
-)
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
     MXFP4 reference."""
@@ -665,14 +667,6 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-@pytest.mark.skipif(
-    not has_triton_kernels(),
-    reason="triton_kernels are required for MXFP4 test weight quantization",
-)
-@pytest.mark.skipif(
-    not hasattr(torch, "float4_e2m1fn_x2"),
-    reason="native FP4 dtype not available in this torch build",
-)
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     """The gfx950 AITER MXFP4 W4A16 MoE path should stay bitwise
     deterministic."""
@@ -711,8 +705,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
 
 
 @pytest.mark.skipif(
-    not current_platform.supports_fp8(),
-    reason="FP8 not supported on this hardware",
+    not (on_gfx942() or on_gfx950()),
+    reason="gfx942/gfx950 ROCm only",
 )
 @pytest.mark.parametrize("num_tokens,hidden_dim", [(16, 2048), (64, 4096), (128, 8192)])
 def test_aiter_moe_group_fp8_quant_reconstructs_hidden_states(
@@ -1010,10 +1004,6 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
 @pytest.mark.skipif(
     not (on_gfx942() or on_gfx950()),
     reason="gfx942/gfx950 ROCm only",
-)
-@pytest.mark.skipif(
-    not current_platform.supports_fp8(),
-    reason="FP8 not supported on this hardware",
 )
 def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     """The MI3xx FP8 per-tensor MoE path should stay within the measured FP8
