@@ -517,6 +517,10 @@ def _run_eagle_correctness(
         ref_llm = LLM(
             model=model_name,
             max_model_len=max_model_len,
+            # Keep ref/spec batch geometry aligned so exact-output comparison
+            # isolates speculative decoding.
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=enable_chunked_prefill,
             tensor_parallel_size=tp_size,
             attention_config=attention_config,
         )
