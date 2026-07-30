@@ -570,6 +570,13 @@ class Scheduler(SchedulerInterface):
                         # The request can be scheduled.
                         break
 
+                    # HiSparse reclamation is stream ordered and becomes
+                    # allocatable after the worker acknowledges the spill.
+                    # Yield this scheduling iteration instead of preempting a
+                    # request whose resident pages are already being reclaimed.
+                    if self.kv_cache_manager.has_pending_hisparse_reclamation():
+                        break
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -1150,6 +1157,15 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            hisparse_block_table_updates=(
+                self.kv_cache_manager.take_hisparse_block_table_updates()
+            ),
+            hisparse_spills=self.kv_cache_manager.take_hisparse_spills(),
+            hisparse_fully_resident=(
+                self.kv_cache_manager.are_hisparse_requests_fully_resident(
+                    list(num_scheduled_tokens)
+                )
+            ),
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
@@ -1586,6 +1602,9 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         hisparse_stats = model_runner_output.hisparse_stats
+        self.kv_cache_manager.complete_hisparse_spills(
+            model_runner_output.hisparse_spill_completions
+        )
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is

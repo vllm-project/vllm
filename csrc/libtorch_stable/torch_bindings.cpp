@@ -841,7 +841,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(f!)? valid_counts=None,"
       "                 Tensor(g!)? compact_miss_globals=None,"
       "                 Tensor(h!)? compact_miss_hots=None,"
-      "                 Tensor(i!)? compact_miss_counts=None) -> ()");
+      "                 Tensor(i!)? compact_miss_counts=None,"
+      "                 Tensor? resident_block_table=None,"
+      "                 int resident_block_size=0,"
+      "                 int resident_null_block=0) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"

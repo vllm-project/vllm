@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -126,12 +127,24 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
         log_layout=False,
     )
 
-    host_group, indexer_group, *hot_groups = cache_config.kv_cache_groups
+    host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert cache_config.num_blocks_by_pool == [7, 7]
     assert host_group.kv_cache_spec.block_size == block_size
     assert indexer_group.kv_cache_spec.block_size == 64
-    assert hot_groups
+    resident_groups = [
+        group
+        for group in auxiliary_groups
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    ]
+    hot_groups = [
+        group
+        for group in auxiliary_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    assert resident_groups
     assert all(isinstance(group.kv_cache_spec, HiSparseHotSpec) for group in hot_groups)
+    assert len(resident_groups) == len(hot_groups)
+    assert all(group.kv_cache_spec.block_size == 64 for group in resident_groups)
     assert all(group.kv_cache_spec.block_size == 64 for group in hot_groups)
 
 

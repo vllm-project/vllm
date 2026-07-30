@@ -160,14 +160,15 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t* __restrict__ global_indices,   // global or request-relative
     const int32_t* __restrict__ request_ids,      // [num_rows] or nullptr
     const int32_t* __restrict__ source_block_table,  // [num_reqs, max_blocks]
-    int32_t* __restrict__ resolved_global_indices,   // [num_rows, top_k]
-    int32_t* __restrict__ valid_counts,              // [num_rows] or nullptr
-    int32_t* __restrict__ compact_miss_globals,      // [num_rows, top_k]
-    int32_t* __restrict__ compact_miss_hots,         // [num_rows, top_k]
-    int32_t* __restrict__ compact_miss_counts,       // [num_rows]
-    const int32_t* __restrict__ newest_global,       // [num_rows] or nullptr
-    int32_t* __restrict__ hot_indices,               // [num_rows, top_k]
-    int32_t* __restrict__ attention_indices,         // [num_rows, top_k]
+    const int32_t* __restrict__ resident_block_table,
+    int32_t* __restrict__ resolved_global_indices,  // [num_rows, top_k]
+    int32_t* __restrict__ valid_counts,             // [num_rows] or nullptr
+    int32_t* __restrict__ compact_miss_globals,     // [num_rows, top_k]
+    int32_t* __restrict__ compact_miss_hots,        // [num_rows, top_k]
+    int32_t* __restrict__ compact_miss_counts,      // [num_rows]
+    const int32_t* __restrict__ newest_global,      // [num_rows] or nullptr
+    int32_t* __restrict__ hot_indices,              // [num_rows, top_k]
+    int32_t* __restrict__ attention_indices,        // [num_rows, top_k]
     int32_t* __restrict__ miss_mask,       // [num_rows, top_k] or nullptr
     int64_t* __restrict__ newest_indices,  // [num_rows] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
@@ -181,7 +182,9 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t hash_size, const int64_t region_stride,
     const int64_t attention_block_stride, const int64_t source_bt_stride,
     const int32_t source_num_reqs, const int32_t source_num_blocks,
-    const int32_t source_block_size) {
+    const int32_t source_block_size, const int64_t resident_bt_stride,
+    const int32_t resident_num_reqs, const int32_t resident_num_blocks,
+    const int32_t resident_block_size, const int32_t resident_null_block) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
@@ -240,10 +243,10 @@ __global__ void hisparse_swap_in_kernel(
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_hash_keys = s_evict_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_hash_keys + hash_size;
-  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 4);
+  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 5);
   int16_t* s_hash_vals = s_lru_out + hot_size;
 
-  if (tid < 4) {
+  if (tid < 5) {
     s_counters[tid] = 0;
   }
   if (newest_indices != nullptr && tid == 0) {
@@ -266,6 +269,7 @@ __global__ void hisparse_swap_in_kernel(
   for (int i = tid; i < top_k; i += blockDim.x) {
     const int32_t token_index = row_topk[i];
     int32_t g = token_index;
+    int32_t resident_row = -1;
     if (source_block_table != nullptr) {
       const int32_t request_id = request_ids[batch_row];
       const int32_t source_block =
@@ -282,13 +286,34 @@ __global__ void hisparse_swap_in_kernel(
       } else {
         g = -1;
       }
+      if (resident_block_table != nullptr) {
+        const int32_t resident_block =
+            token_index >= 0 ? token_index / resident_block_size : -1;
+        if (request_id >= 0 && request_id < resident_num_reqs &&
+            resident_block >= 0 && resident_block < resident_num_blocks) {
+          const int32_t physical_block =
+              resident_block_table[static_cast<int64_t>(request_id) *
+                                       resident_bt_stride +
+                                   resident_block];
+          if (physical_block != resident_null_block && physical_block >= 0) {
+            resident_row = physical_block * resident_block_size +
+                           token_index % resident_block_size;
+          }
+        }
+      }
     }
     if (resolved_global_indices != nullptr) {
       resolved_global_indices[static_cast<int64_t>(batch_row) * top_k + i] = g;
     }
     if (g >= 0) atomicAdd(&s_counters[3], 1);
     if (row_miss != nullptr) row_miss[i] = 0;
-    if (g < 0) {
+    if (resident_row >= 0) {
+      store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
+                      attention_block_stride);
+      s_topk[i] = kTokenDone;
+      atomicAdd(&s_counters[1], 1);
+      atomicAdd(&s_counters[4], 1);
+    } else if (g < 0) {
       store_hot_index(row_out, row_attention, i, -1, hot_block_size,
                       attention_block_stride);
       s_topk[i] = kTokenDone;
@@ -320,6 +345,19 @@ __global__ void hisparse_swap_in_kernel(
   __syncthreads();
   if (valid_counts != nullptr && tid == 0) {
     valid_counts[batch_row] = s_counters[3];
+  }
+  // Fully resident rows need only request-relative page translation. Avoid
+  // scanning or rewriting the hot LRU when no selected row can consult it.
+  if (resident_block_table != nullptr && s_counters[1] == top_k) {
+    if (tid == 0) {
+      if (compact_miss_counts != nullptr) {
+        compact_miss_counts[batch_row] = 0;
+      }
+      if (stats != nullptr) {
+        atomicAdd(&stats[0], static_cast<unsigned long long>(s_counters[4]));
+      }
+    }
+    return;
   }
 
   // Phase 2: walk hot slots in LRU order, classify hit / evictable, and
@@ -511,7 +549,8 @@ __global__ void hisparse_swap_in_kernel(
 
   // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
   if (stats != nullptr && threadIdx.x == 0) {
-    atomicAdd(&stats[0], static_cast<unsigned long long>(total_hits));
+    atomicAdd(&stats[0],
+              static_cast<unsigned long long>(total_hits + s_counters[4]));
     atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
   }
 
@@ -838,7 +877,9 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& valid_counts,
     std::optional<torch::stable::Tensor> const& compact_miss_globals,
     std::optional<torch::stable::Tensor> const& compact_miss_hots,
-    std::optional<torch::stable::Tensor> const& compact_miss_counts) {
+    std::optional<torch::stable::Tensor> const& compact_miss_counts,
+    std::optional<torch::stable::Tensor> const& resident_block_table,
+    int64_t resident_block_size, int64_t resident_null_block) {
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
                   "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
@@ -898,9 +939,11 @@ void hisparse_swap_in(
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
   const auto hot_size = static_cast<int32_t>(lru_slots.size(1));
   STD_TORCH_CHECK(hot_size >= top_k, "hot buffer size must be >= top_k");
-  STD_TORCH_CHECK(hot_size <= 32767, "hot buffer size must fit int16 slots");
-  STD_TORCH_CHECK(region_stride == hot_size + 1,
-                  "region_stride must contain the LRU plus one reserved row");
+  const bool uses_resident_pages = resident_block_table.has_value();
+  STD_TORCH_CHECK(hot_size <= (uses_resident_pages ? 32768 : 32767),
+                  "hot buffer size must fit int16 slots");
+  STD_TORCH_CHECK(region_stride == hot_size + (uses_resident_pages ? 0 : 1),
+                  "region_stride must match the LRU and optional reserved row");
   STD_TORCH_CHECK(device_global_indices.size(1) == region_stride,
                   "device_global_indices must cover the full hot region");
   STD_TORCH_CHECK(device_global_indices.size(0) >= num_rows,
@@ -939,6 +982,30 @@ void hisparse_swap_in(
     source_bt_stride = table.stride(0);
     source_num_reqs = static_cast<int32_t>(table.size(0));
     source_num_blocks = static_cast<int32_t>(table.size(1));
+  }
+
+  const int32_t* resident_block_table_ptr = nullptr;
+  int64_t resident_bt_stride = 0;
+  int32_t resident_num_reqs = 0;
+  int32_t resident_num_blocks = 0;
+  if (resident_block_table.has_value()) {
+    auto const& table = resident_block_table.value();
+    STD_TORCH_CHECK(
+        source_block_table.has_value() && request_ids.has_value(),
+        "resident lookup requires request_ids and source_block_table");
+    STD_TORCH_CHECK(
+        table.is_cuda() &&
+            table.scalar_type() == torch::headeronly::ScalarType::Int &&
+            table.dim() == 2 && table.stride(1) == 1,
+        "resident_block_table must be a row-major 2D int32 CUDA tensor");
+    STD_TORCH_CHECK(resident_block_size == hot_block_size,
+                    "resident and hot block sizes must match");
+    STD_TORCH_CHECK(resident_null_block >= 0,
+                    "resident null block must be non-negative");
+    resident_block_table_ptr = table.const_data_ptr<int32_t>();
+    resident_bt_stride = table.stride(0);
+    resident_num_reqs = static_cast<int32_t>(table.size(0));
+    resident_num_blocks = static_cast<int32_t>(table.size(1));
   }
 
   int32_t* resolved_global_indices_ptr = nullptr;
@@ -1079,7 +1146,7 @@ void hisparse_swap_in(
   const int hash_size = 2 * top_k;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 4) +
+      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 5) +
       sizeof(int16_t) * (hot_size + hash_size);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1098,17 +1165,21 @@ void hisparse_swap_in(
       static_cast<char*>(hot_cache.mutable_data_ptr()),
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
-      source_block_table_ptr, resolved_global_indices_ptr, valid_counts_ptr,
-      compact_miss_globals_ptr, compact_miss_hots_ptr, compact_miss_counts_ptr,
-      newest_ptr, hot_indices.mutable_data_ptr<int32_t>(),
-      attention_indices_ptr, miss_mask_ptr, newest_indices_ptr,
+      source_block_table_ptr, resident_block_table_ptr,
+      resolved_global_indices_ptr, valid_counts_ptr, compact_miss_globals_ptr,
+      compact_miss_hots_ptr, compact_miss_counts_ptr, newest_ptr,
+      hot_indices.mutable_data_ptr<int32_t>(), attention_indices_ptr,
+      miss_mask_ptr, newest_indices_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
       lru_slots.mutable_data_ptr<int16_t>(),
       reserved_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
       host_rows, row_bytes, hot_block_stride, hot_block_table.stride(0),
       hot_block_size, top_k, hot_size, hash_size, region_stride,
       attention_block_stride, source_bt_stride, source_num_reqs,
-      source_num_blocks, static_cast<int32_t>(source_block_size));
+      source_num_blocks, static_cast<int32_t>(source_block_size),
+      resident_bt_stride, resident_num_reqs, resident_num_blocks,
+      static_cast<int32_t>(resident_block_size),
+      static_cast<int32_t>(resident_null_block));
   const cudaError_t launch_error = cudaGetLastError();
   STD_TORCH_CHECK(launch_error == cudaSuccess,
                   "HiSparse swap-in kernel launch failed: ",

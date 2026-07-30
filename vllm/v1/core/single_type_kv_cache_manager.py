@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -805,11 +806,22 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class HiSparseHotManager(SingleTypeKVCacheManager):
-    """Allocate a fixed ephemeral hot region for each active request."""
+    """Allocate a hot region only after a request acquires CPU-only history."""
 
     def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.blocks_per_request = kv_cache_spec.blocks_per_request
+        self.hot_required: set[str] = set()
+
+    def require_hot(self, request_id: str) -> None:
+        self.hot_required.add(request_id)
+
+    def has_hot(self, request_id: str) -> bool:
+        return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
+
+    def activate_hot(self, request_id: str) -> list[KVCacheBlock]:
+        self.require_hot(request_id)
+        return self.allocate_new_blocks(request_id, 0, 0)
 
     def get_num_blocks_to_allocate(
         self,
@@ -822,6 +834,8 @@ class HiSparseHotManager(SingleTypeKVCacheManager):
         apply_admission_cap: bool = False,
     ) -> int:
         assert not new_computed_blocks
+        if request_id not in self.hot_required:
+            return 0
         return max(
             self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
             0,
@@ -848,8 +862,105 @@ class HiSparseHotManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
+        if request_id not in self.hot_required:
+            return []
         req_blocks = self.req_to_blocks[request_id]
         num_new_blocks = self.blocks_per_request - len(req_blocks)
+        if num_new_blocks <= 0:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        return new_blocks
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self.hot_required.discard(request_id)
+        return super().pop_blocks_for_free(request_id)
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        return None
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+
+class HiSparseResidentManager(SingleTypeKVCacheManager):
+    """Track reclaimable resident pages for otherwise host-backed KV."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.host_valid_pages: defaultdict[str, set[int]] = defaultdict(set)
+        self.num_cpu_only_pages: defaultdict[str, int] = defaultdict(int)
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        del num_local_computed_tokens, num_tokens_main_model, apply_admission_cap
+        assert not new_computed_blocks
+        existing = len(self.req_to_blocks.get(request_id, ()))
+        host_pages = cdiv(total_computed_tokens, self.block_size)
+        required = cdiv(num_tokens, self.block_size)
+        return max(required - max(existing, host_pages), 0)
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        assert not new_computed_blocks
+        req_blocks = self.req_to_blocks[request_id]
+        assert not req_blocks
+        num_host_pages = cdiv(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self.block_size,
+        )
+        req_blocks.extend([self._null_block] * num_host_pages)
+        self.host_valid_pages[request_id].update(range(num_host_pages))
+        self.num_cpu_only_pages[request_id] = num_host_pages
+        self.num_cached_block[request_id] = 0
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        return None
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        del num_tokens_main_model
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
         if num_new_blocks <= 0:
             return []
         new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
@@ -866,6 +977,60 @@ class HiSparseHotManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         return 0
+
+    def reclaimable_pages(
+        self, *, host_valid: bool | None = None
+    ) -> set[tuple[str, int]]:
+        """Return sealed resident pages with the requested host state."""
+        pages: set[tuple[str, int]] = set()
+        for request_id, blocks in self.req_to_blocks.items():
+            # Retain the active page and one predecessor for overlapping steps.
+            for block_idx, block in enumerate(blocks[:-2]):
+                if not block.is_null and (
+                    host_valid is None
+                    or (block_idx in self.host_valid_pages[request_id]) == host_valid
+                ):
+                    pages.add((request_id, block_idx))
+        return pages
+
+    def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None or block_idx >= len(blocks):
+            return None
+        block = blocks[block_idx]
+        return None if block.is_null else block
+
+    def mark_host_valid(self, request_id: str, block_idx: int) -> None:
+        if request_id in self.req_to_blocks:
+            self.host_valid_pages[request_id].add(block_idx)
+
+    def is_fully_resident(self, request_id: str) -> bool:
+        blocks = self.req_to_blocks.get(request_id)
+        return bool(blocks) and self.num_cpu_only_pages.get(request_id, 0) == 0
+
+    def release_resident_page(
+        self,
+        request_id: str,
+        block_idx: int,
+        expected_block: KVCacheBlock | None = None,
+    ) -> KVCacheBlock | None:
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None or block_idx >= len(blocks):
+            return None
+        block = blocks[block_idx]
+        if block.is_null or (
+            expected_block is not None and block is not expected_block
+        ):
+            return None
+        blocks[block_idx] = self._null_block
+        self.num_cpu_only_pages[request_id] += 1
+        self.block_pool.free_blocks([block])
+        return block
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self.host_valid_pages.pop(request_id, None)
+        self.num_cpu_only_pages.pop(request_id, None)
+        return super().pop_blocks_for_free(request_id)
 
     @classmethod
     def find_longest_cache_hit(
@@ -1909,6 +2074,11 @@ def register_all_kvcache_specs(vllm_config):
         HiSparseHotSpec,
         HiSparseHotManager,
         uniform_type_base_spec=HiSparseHotSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseResidentSpec,
+        HiSparseResidentManager,
+        uniform_type_base_spec=HiSparseResidentSpec,
     )
 
     KVCacheSpecRegistry.register(

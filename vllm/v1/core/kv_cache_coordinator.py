@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from vllm import envs
@@ -14,17 +15,30 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    HiSparseHotManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseResidentSpec,
+    HiSparseSpill,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+
+@dataclass
+class _PendingHiSparseSpill:
+    plan: HiSparseSpill
+    host_manager: SingleTypeKVCacheManager
+    host_block: KVCacheBlock
+    resident_entries: tuple[tuple[int, SingleTypeKVCacheManager, KVCacheBlock], ...]
+    release_after: bool
+    copy_enqueued: bool = False
 
 
 def _validate_prefix_cache_retention_interval(
@@ -135,6 +149,12 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self._hisparse_block_table_updates: set[str] = set()
+        self._hisparse_spills_to_send: list[HiSparseSpill] = []
+        self._pending_hisparse_spills: dict[int, _PendingHiSparseSpill] = {}
+        self._pending_hisparse_pages: dict[tuple[str, int], int] = {}
+        self._hisparse_transition_target_pages: dict[str, int] = {}
+        self._next_hisparse_spill_id = 0
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -180,6 +200,17 @@ class KVCacheCoordinator(ABC):
         apply_admission_cap: bool = False,
     ) -> tuple[int, ...]:
         """Get allocation requirements independently for each block pool."""
+        has_hisparse_resident = any(
+            isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+            for group in self.kv_cache_config.kv_cache_groups
+        )
+        has_cpu_history = bool(new_computed_blocks[0]) or (
+            total_computed_tokens > num_local_computed_tokens
+        )
+        if not has_hisparse_resident or has_cpu_history:
+            for manager in self.single_type_managers:
+                if isinstance(manager, HiSparseHotManager):
+                    manager.require_hot(request_id)
         required = [0] * len(self.block_pools)
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
@@ -307,6 +338,9 @@ class KVCacheCoordinator(ABC):
                 num_computed_tokens,
                 retention_interval=self.retention_interval,
             )
+        self._plan_hisparse_prefix_materialization(
+            request.request_id, num_computed_tokens
+        )
 
     def free(self, request_id: str) -> None:
         """
@@ -317,6 +351,360 @@ class KVCacheCoordinator(ABC):
         """
         for manager in self.single_type_managers:
             manager.free(request_id)
+
+    def reclaim_hisparse_resident_blocks(
+        self, block_pool_id: int, num_blocks: int
+    ) -> int:
+        """Reclaim host-valid pages and enqueue copies for GPU-only pages."""
+        resident_entries = [
+            (group_id, manager)
+            for group_id, (group, manager) in enumerate(
+                zip(
+                    self.kv_cache_config.kv_cache_groups,
+                    self.single_type_managers,
+                )
+            )
+            if group.block_pool_id == block_pool_id
+            and isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        ]
+        if not resident_entries or num_blocks <= 0:
+            return 0
+        resident_managers = [manager for _, manager in resident_entries]
+        spill_plan_budget = max(
+            self.max_model_len // resident_managers[0].block_size
+            - len(self._hisparse_spills_to_send),
+            0,
+        )
+        growing_managers = sum(
+            1
+            for group, manager in zip(
+                self.kv_cache_config.kv_cache_groups,
+                self.single_type_managers,
+            )
+            if group.block_pool_id == block_pool_id
+            and not isinstance(manager, HiSparseHotManager)
+        )
+        candidates = resident_managers[0].reclaimable_pages()  # type: ignore[attr-defined]
+        for manager in resident_managers[1:]:
+            candidates.intersection_update(
+                manager.reclaimable_pages()  # type: ignore[attr-defined]
+            )
+        hot_managers = [
+            manager
+            for group, manager in zip(
+                self.kv_cache_config.kv_cache_groups,
+                self.single_type_managers,
+            )
+            if group.block_pool_id == block_pool_id
+            and isinstance(manager, HiSparseHotManager)
+        ]
+        by_request: dict[str, list[int]] = {}
+        for request_id, block_idx in candidates:
+            by_request.setdefault(request_id, []).append(block_idx)
+        num_blocks = max(num_blocks, len(by_request) * growing_managers)
+
+        reclaimed = 0
+        eventual = sum(
+            len(pending.resident_entries)
+            for pending in self._pending_hisparse_spills.values()
+            if pending.release_after
+            and pending.resident_entries[0][1].block_pool
+            is resident_managers[0].block_pool
+        )
+        for request_id, pages in sorted(
+            by_request.items(), key=lambda item: len(item[1]), reverse=True
+        ):
+            pages.sort()
+            has_hot = all(manager.has_hot(request_id) for manager in hot_managers)
+            if has_hot:
+                for block_idx in pages:
+                    if eventual + reclaimed >= num_blocks:
+                        break
+                    host_valid = all(
+                        block_idx in manager.host_valid_pages.get(request_id, set())  # type: ignore[attr-defined]
+                        for manager in resident_managers
+                    )
+                    if host_valid:
+                        for manager in resident_managers:
+                            block = manager.release_resident_page(  # type: ignore[attr-defined]
+                                request_id, block_idx
+                            )
+                            assert block is not None
+                            reclaimed += 1
+                        self._hisparse_block_table_updates.add(request_id)
+                    else:
+                        pending = (
+                            request_id,
+                            block_idx,
+                        ) in self._pending_hisparse_pages
+                        if not pending and spill_plan_budget == 0:
+                            continue
+                        if self._mark_or_plan_hisparse_release(
+                            request_id, block_idx, resident_entries
+                        ):
+                            eventual += len(resident_entries)
+                            if not pending:
+                                spill_plan_budget -= 1
+                continue
+
+            if request_id in self._hisparse_transition_target_pages:
+                continue
+            hot_cost = sum(manager.blocks_per_request for manager in hot_managers)
+            remaining = max(num_blocks - reclaimed - eventual, 1)
+            pages_needed = cdiv(remaining + hot_cost, len(resident_entries))
+            pages_needed = min(len(pages), pages_needed, spill_plan_budget)
+            if pages_needed * len(resident_entries) <= hot_cost:
+                continue
+            for manager in hot_managers:
+                manager.require_hot(request_id)
+            self._hisparse_transition_target_pages[request_id] = pages_needed
+            for block_idx in pages[:pages_needed]:
+                pending = (request_id, block_idx) in self._pending_hisparse_pages
+                if self._mark_or_plan_hisparse_release(
+                    request_id, block_idx, resident_entries
+                ):
+                    eventual += len(resident_entries)
+                    if not pending:
+                        spill_plan_budget -= 1
+            eventual -= hot_cost
+            if reclaimed + eventual >= num_blocks:
+                break
+        return reclaimed
+
+    def _mark_or_plan_hisparse_release(
+        self,
+        request_id: str,
+        block_idx: int,
+        resident_entries: list[tuple[int, SingleTypeKVCacheManager]],
+    ) -> bool:
+        pending_id = self._pending_hisparse_pages.get((request_id, block_idx))
+        if pending_id is not None:
+            pending = self._pending_hisparse_spills[pending_id]
+            if pending.release_after:
+                return False
+            pending.release_after = True
+            return True
+        return (
+            self._plan_hisparse_spill(
+                request_id,
+                block_idx,
+                resident_entries,
+                release_after=True,
+                after_forward=False,
+            )
+            is not None
+        )
+
+    def _plan_hisparse_prefix_materialization(
+        self, request_id: str, num_computed_tokens: int
+    ) -> None:
+        resident_entries = [
+            (group_id, manager)
+            for group_id, (group, manager) in enumerate(
+                zip(
+                    self.kv_cache_config.kv_cache_groups,
+                    self.single_type_managers,
+                )
+            )
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        ]
+        if not resident_entries:
+            return
+        host_block_size = self.single_type_managers[0].block_size
+        resident_block_size = resident_entries[0][1].block_size
+        if host_block_size % resident_block_size != 0:
+            raise RuntimeError(
+                "HiSparse host and resident block sizes are incompatible."
+            )
+        num_pages = (num_computed_tokens // host_block_size) * (
+            host_block_size // resident_block_size
+        )
+        for page_idx in range(num_pages):
+            key = (request_id, page_idx)
+            if key in self._pending_hisparse_pages:
+                continue
+            if all(
+                page_idx in manager.host_valid_pages.get(request_id, set())  # type: ignore[attr-defined]
+                for _, manager in resident_entries
+            ):
+                continue
+            if not all(
+                manager.get_resident_page(request_id, page_idx) is not None  # type: ignore[attr-defined]
+                for _, manager in resident_entries
+            ):
+                continue
+            self._plan_hisparse_spill(
+                request_id,
+                page_idx,
+                resident_entries,
+                release_after=False,
+                after_forward=True,
+            )
+
+    def _plan_hisparse_spill(
+        self,
+        request_id: str,
+        page_idx: int,
+        resident_entries: list[tuple[int, SingleTypeKVCacheManager]],
+        *,
+        release_after: bool,
+        after_forward: bool,
+    ) -> HiSparseSpill | None:
+        host_manager = self.single_type_managers[0]
+        resident_block_size = resident_entries[0][1].block_size
+        if host_manager.block_size % resident_block_size != 0:
+            raise RuntimeError(
+                "HiSparse host and resident block sizes are incompatible."
+            )
+        pages_per_host_block = host_manager.block_size // resident_block_size
+        host_block_idx = page_idx // pages_per_host_block
+        host_blocks = host_manager.req_to_blocks.get(request_id)
+        if host_blocks is None or host_block_idx >= len(host_blocks):
+            return None
+        host_block = host_blocks[host_block_idx]
+        if host_block.is_null:
+            return None
+        blocks: list[tuple[int, SingleTypeKVCacheManager, KVCacheBlock]] = []
+        for group_id, manager in resident_entries:
+            block = manager.get_resident_page(request_id, page_idx)  # type: ignore[attr-defined]
+            if block is None:
+                return None
+            blocks.append((group_id, manager, block))
+
+        host_manager.block_pool.touch([host_block])
+        for _, manager, block in blocks:
+            manager.block_pool.touch([block])
+        spill_id = self._next_hisparse_spill_id
+        self._next_hisparse_spill_id += 1
+        plan = HiSparseSpill(
+            spill_id=spill_id,
+            request_id=request_id,
+            page_index=page_idx,
+            host_block_id=host_block.block_id,
+            host_page_offset=page_idx % pages_per_host_block,
+            resident_block_ids=tuple(
+                (group_id, block.block_id) for group_id, _, block in blocks
+            ),
+            after_forward=after_forward,
+        )
+        self._pending_hisparse_spills[spill_id] = _PendingHiSparseSpill(
+            plan=plan,
+            host_manager=host_manager,
+            host_block=host_block,
+            resident_entries=tuple(blocks),
+            release_after=release_after,
+        )
+        self._pending_hisparse_pages[(request_id, page_idx)] = spill_id
+        self._hisparse_spills_to_send.append(plan)
+        return plan
+
+    def take_hisparse_spills(self) -> list[HiSparseSpill] | None:
+        if not self._hisparse_spills_to_send:
+            return None
+        plans = self._hisparse_spills_to_send
+        self._hisparse_spills_to_send = []
+        return plans
+
+    def has_pending_hisparse_reclamation(self) -> bool:
+        return bool(self._hisparse_transition_target_pages) or any(
+            pending.release_after for pending in self._pending_hisparse_spills.values()
+        )
+
+    def are_hisparse_requests_fully_resident(self, request_ids: Sequence[str]) -> bool:
+        resident_managers = [
+            manager
+            for group, manager in zip(
+                self.kv_cache_config.kv_cache_groups,
+                self.single_type_managers,
+            )
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        ]
+        return (
+            bool(request_ids)
+            and bool(resident_managers)
+            and all(
+                manager.is_fully_resident(request_id)  # type: ignore[attr-defined]
+                for request_id in request_ids
+                for manager in resident_managers
+            )
+        )
+
+    def complete_hisparse_spills(self, spill_ids: list[int]) -> None:
+        for spill_id in spill_ids:
+            pending = self._pending_hisparse_spills.get(spill_id)
+            if pending is not None:
+                pending.copy_enqueued = True
+
+        request_ids = {
+            pending.plan.request_id
+            for pending in self._pending_hisparse_spills.values()
+            if pending.copy_enqueued
+        }
+        for request_id in request_ids:
+            ready = [
+                pending
+                for pending in self._pending_hisparse_spills.values()
+                if pending.copy_enqueued and pending.plan.request_id == request_id
+            ]
+            transition_target = self._hisparse_transition_target_pages.get(request_id)
+            release_ready = [pending for pending in ready if pending.release_after]
+            if transition_target is not None and len(release_ready) < transition_target:
+                for pending in ready:
+                    if not pending.release_after:
+                        self._finalize_hisparse_spill(pending, release=False)
+                continue
+
+            if transition_target is not None:
+                for pending in release_ready:
+                    self._finalize_hisparse_spill(pending, release=True)
+                for pending in ready:
+                    if not pending.release_after:
+                        self._finalize_hisparse_spill(pending, release=False)
+                self._hisparse_transition_target_pages.pop(request_id, None)
+                if any(
+                    request_id in manager.req_to_blocks
+                    for _, manager, _ in release_ready[0].resident_entries
+                ):
+                    for manager in self.single_type_managers:
+                        if isinstance(manager, HiSparseHotManager):
+                            manager.activate_hot(request_id)
+                    self._hisparse_block_table_updates.add(request_id)
+            else:
+                for pending in ready:
+                    self._finalize_hisparse_spill(
+                        pending, release=pending.release_after
+                    )
+
+    def _finalize_hisparse_spill(
+        self, pending: _PendingHiSparseSpill, *, release: bool
+    ) -> None:
+        plan = pending.plan
+        self._pending_hisparse_spills.pop(plan.spill_id, None)
+        self._pending_hisparse_pages.pop((plan.request_id, plan.page_index), None)
+        table_changed = False
+        for _, manager, block in pending.resident_entries:
+            current = manager.get_resident_page(  # type: ignore[attr-defined]
+                plan.request_id, plan.page_index
+            )
+            if current is block:
+                manager.mark_host_valid(plan.request_id, plan.page_index)  # type: ignore[attr-defined]
+                if release:
+                    released = manager.release_resident_page(  # type: ignore[attr-defined]
+                        plan.request_id,
+                        plan.page_index,
+                        expected_block=block,
+                    )
+                    assert released is block
+                    table_changed = True
+            manager.block_pool.free_blocks([block])
+        pending.host_manager.block_pool.free_blocks([pending.host_block])
+        if table_changed:
+            self._hisparse_block_table_updates.add(plan.request_id)
+
+    def take_hisparse_block_table_update_requests(self) -> set[str]:
+        requests = self._hisparse_block_table_updates
+        self._hisparse_block_table_updates = set()
+        return requests
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         """
@@ -711,6 +1099,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
             )
+        self._plan_hisparse_prefix_materialization(
+            request.request_id, aligned_num_computed_tokens
+        )
 
     def find_longest_cache_hit(
         self,

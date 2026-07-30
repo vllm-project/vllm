@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mla.hisparse import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVQuantMode,
@@ -106,7 +107,10 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if isinstance(kv_cache_group_spec.kv_cache_spec, HiSparseHotSpec):
+        if isinstance(
+            kv_cache_group_spec.kv_cache_spec,
+            (HiSparseHotSpec, HiSparseResidentSpec),
+        ):
             attn_groups.append([])
             continue
         if active_layer_names is not None:
@@ -503,6 +507,7 @@ def init_kv_cache(
             block_tables=block_tables,
             max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
             max_model_len=vllm_config.model_config.max_model_len,
+            max_concurrent_batches=vllm_config.max_concurrent_batches,
             device=device,
         )
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per

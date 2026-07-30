@@ -1,26 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Experimental HiSparse hot-buffer decode for sparse MLA (GLM-5 / DSA).
+"""Experimental pressure-adaptive HiSparse decode for sparse MLA.
 
-Port of SGLang's HiSparse decode design to vLLM's attention-backend boundary.
-HiSparse keeps the full-size MLA KV off the GPU and serves decode from a small
-per-request device hot buffer; that is what frees GPU memory for higher decode
-concurrency.
+Indexer KV, paged resident MLA KV, and per-request hot buffers share one GPU
+HMA pool. New tokens are written to ordinary resident pages. Fully resident
+batches use the regular paged attention path and do not allocate hot buffers
+or copy KV through host memory.
 
-- Full-size KV residency. The V2 KV allocator places MLA layers in pinned host
-  memory; only the GPU indexer pool and the
-  per-request hot buffers stay on device. Decode-step writes land in the
-  reserved hot slot and are scattered back to the host pool by a CUDA kernel
-  writing straight into pinned memory, so the backup is stream-ordered with
-  the decode kernels and needs no host synchronization.
-- Each active request owns ``device_buffer_size`` logical hot rows backed by
-  ephemeral blocks from the shared GPU HMA pool. One row is reserved for the
-  newest token. When selected, that row joins the LRU and an evicted row takes
-  over its reserved role, without moving KV bytes.
-- At decode time, the indexer's top-k positions are converted to global slot
-  ids and a swap-in kernel resolves them against the hot region: hits are
-  reused, misses are copied from the pinned host pool, and the LRU order is
-  updated.
+When the shared pool comes under pressure, sealed resident pages are copied to
+the pinned host source pool and recycled after the copy is enqueued. Only
+requests with CPU-only history acquire an ephemeral hot buffer. Their sparse
+lookup hierarchy is resident GPU page, hot-buffer hit, then host-source miss;
+misses are gathered without host synchronization. The host source remains the
+authoritative backing store for spilled pages and prefix-cache entries.
 """
 
 from __future__ import annotations
@@ -28,6 +20,7 @@ from __future__ import annotations
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from math import gcd
 
 import numpy as np
 import psutil
@@ -38,6 +31,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_convert_req_index_to_global_index,
+)
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
@@ -65,6 +61,10 @@ class ResolvedHiSparseConfig:
 
     @property
     def lru_size(self) -> int:
+        return self.device_buffer_size
+
+    @property
+    def legacy_lru_size(self) -> int:
         return self.device_buffer_size - 1
 
     def num_hot_blocks(self, block_size: int) -> int:
@@ -88,13 +88,12 @@ class ResolvedHiSparseConfig:
         else:
             device_buffer_size = configured_size
 
-        if device_buffer_size - 1 < model_top_k:
+        if device_buffer_size < model_top_k:
             raise ValueError(
-                "HiSparse device_buffer_size must include the newest-token "
-                "slot plus at least the model's index_topk LRU rows. Got "
+                "HiSparse device_buffer_size must cover at least the model's "
+                "index_topk rows. Got "
                 f"device_buffer_size={device_buffer_size}, "
-                f"index_topk={model_top_k}; expected at least "
-                f"{model_top_k + 1}."
+                f"index_topk={model_top_k}; expected at least {model_top_k}."
             )
         max_device_buffer_size = torch.iinfo(torch.int16).max + 1
         if device_buffer_size > max_device_buffer_size:
@@ -461,14 +460,12 @@ def _get_copy_stream(device: torch.device) -> torch.Stream:
 
 
 class HiSparseCoordinator:
-    """Per-layer decode-time hot buffer for sparse MLA KV rows.
+    """Per-layer resident/hot/host resolver for sparse MLA KV rows.
 
-    The pinned host-resident KV pool is the only full-size store; misses are
-    always served from it. Hot-buffer hits are keyed by global KV slot id, so
-    correctness relies on one invariant: a recycled slot's stale state is
-    dropped before reuse — the KV connector invalidates all blocks
-    (re)assigned to incoming requests (covering connector RDMA loads of any
-    kind) before any step can select them.
+    Hot-buffer hits are keyed by global host slot ID. Correctness therefore
+    requires stale copies to be invalidated before a recycled host block is
+    reused; the KV connector lifecycle performs that invalidation for every
+    block assigned to an incoming request.
     """
 
     def __init__(
@@ -503,6 +500,12 @@ class HiSparseCoordinator:
 
         self.hot_cache: torch.Tensor | None = None
         self.attention_hot_cache: torch.Tensor | None = None
+        self.resident_block_table: torch.Tensor | None = None
+        self.resident_slot_mapping: torch.Tensor | None = None
+        self.resident_cache: torch.Tensor | None = None
+        self.resident_group_id = -1
+        self.resident_block_size = 0
+        self.fully_resident_batch = False
         self.hot_block_table: torch.Tensor | None = None
         self.hot_group_id = -1
         self.attention_block_stride = 0
@@ -522,14 +525,16 @@ class HiSparseCoordinator:
             dtype=torch.int32,
             device=self.device,
         )
-        lru_init = torch.arange(config.lru_size, dtype=torch.int16, device=self.device)
+        lru_init = torch.arange(
+            config.legacy_lru_size, dtype=torch.int16, device=self.device
+        )
         self._lru_init: torch.Tensor | None = lru_init
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
         self.reserved_slots: torch.Tensor | None = torch.full(
             (max_num_reqs,),
-            config.lru_size,
+            config.legacy_lru_size,
             dtype=torch.int16,
             device=self.device,
         )
@@ -556,9 +561,10 @@ class HiSparseCoordinator:
 
         self._host_cache: torch.Tensor | None = None
         self._host_write_event: torch.Event | None = None
+        self.eager_host_mirror = False
         # Standalone coordinators retain eager backup behavior. The GPU runtime
-        # switches this off and launches one all-layer backup, captured with
-        # uniform decode graphs when possible.
+        # switches it off unless an outbound KV connector needs every active
+        # host page to remain immediately exportable.
         self.defer_newest_backup = False
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -624,6 +630,47 @@ class HiSparseCoordinator:
     def bind_hot_block_table(self, block_table: torch.Tensor) -> None:
         self.hot_block_table = block_table
 
+    def bind_resident_cache(
+        self,
+        raw_tensor: torch.Tensor,
+        *,
+        byte_offset: int,
+        block_stride: int,
+        num_blocks: int,
+        block_size: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        group_id: int,
+    ) -> None:
+        """Bind the paged resident view sharing the hot HMA layout."""
+        itemsize = self.kv_dtype.itemsize
+        row_bytes = self.row_width * itemsize
+        page_bytes = block_size * row_bytes
+        assert byte_offset % page_bytes == 0 and block_stride % page_bytes == 0
+        resident = torch.as_strided(
+            raw_tensor.view(self.kv_dtype),
+            size=(num_blocks, block_size, self.row_width),
+            stride=(block_stride // itemsize, self.row_width, 1),
+            storage_offset=byte_offset // itemsize,
+        )
+        if self.hot_cache is not None:
+            assert resident.untyped_storage().data_ptr() == (
+                self.hot_cache.untyped_storage().data_ptr()
+            )
+            assert resident.stride() == self.hot_cache.stride()
+        self.resident_block_table = block_table
+        self.resident_slot_mapping = slot_mapping
+        self.resident_cache = resident
+        self.resident_group_id = group_id
+        self.resident_block_size = block_size
+        if self.lru_slots is not None and self.lru_slots.shape[1] != self.region_stride:
+            self._lru_init = torch.arange(
+                self.region_stride, dtype=torch.int16, device=self.device
+            )
+            self.lru_slots = self._lru_init.repeat(self.max_num_reqs, 1).contiguous()
+            assert self.reserved_slots is not None
+            self.reserved_slots.fill_(-1)
+
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         flat = kv_cache.view(-1, kv_cache.shape[-1])
         if self._host_cache is not None and (
@@ -656,6 +703,35 @@ class HiSparseCoordinator:
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
         self._host_cache = flat
+
+    def resolve_resident(
+        self,
+        req_id_per_token: torch.Tensor,
+        topk_indices: torch.Tensor,
+        *,
+        return_valid_counts: bool,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
+        """Resolve a fully resident batch without consulting hot-cache state."""
+        assert self.resident_block_table is not None
+        assert self.resident_block_size > 0
+        converted = triton_convert_req_index_to_global_index(
+            req_id_per_token[: topk_indices.shape[0]],
+            self.resident_block_table,
+            topk_indices,
+            BLOCK_SIZE=self.resident_block_size,
+            PHYSICAL_BLOCK_STRIDE=self.attention_block_stride,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            BLOCK_N=gcd(topk_indices.shape[1], 128),
+            return_valid_counts=return_valid_counts,
+        )
+        cache = self.hot_cache_paged(self.resident_block_size)
+        if return_valid_counts:
+            indices, valid_counts = converted
+            return cache, indices, valid_counts
+        return cache, converted
 
     def stage_prefill_cache(
         self,
@@ -715,7 +791,9 @@ class HiSparseCoordinator:
         )
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
-        self.reserved_slots.fill_(self.config.lru_size)
+        self.reserved_slots.fill_(
+            -1 if self.resident_block_table is not None else self.config.legacy_lru_size
+        )
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         assert self.device_global_indices is not None
@@ -756,11 +834,8 @@ class HiSparseCoordinator:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return the static tensors needed by the all-layer backup plan."""
         assert self.hot_cache is not None and self._host_cache is not None
-        source_indices = (
-            self._newest_slots if self.leader is None else self.leader._newest_slots
-        )
-        self.defer_newest_backup = True
-        return self.hot_cache, source_indices, self._host_cache
+        self.defer_newest_backup = not self.eager_host_mirror
+        return self.hot_cache, self._newest_slots, self._host_cache
 
     # ------------------------------------------------------- newest-token path
 
@@ -775,10 +850,8 @@ class HiSparseCoordinator:
     ) -> None:
         """Decode-step KV update.
 
-        Writes the newest token of each batch row to its reserved hot slot
-        (so the swap-in kernel can serve the newest token without a host
-        roundtrip), then scatters it into the host pool at its global KV slot
-        (so later steps can miss-load it).
+        Writes the newest token into its ordinary resident GPU page. The runtime
+        materializes sealed pages in the host pool only when required.
         """
         if kv_cache.numel() == 0:
             return
@@ -793,25 +866,26 @@ class HiSparseCoordinator:
         num_tokens = min(kv_c_normed.shape[0], slot_mapping.numel(), self.max_num_reqs)
         if num_tokens == 0:
             return
-        state_rows = self.request_state_indices[:num_tokens]
         global_slots = slot_mapping[:num_tokens].to(torch.int64)
-        if self.leader is not None:
+        newest_slots = self._newest_slots[:num_tokens]
+        concat_kwargs = {}
+        if self.resident_slot_mapping is not None:
+            newest_slots.copy_(self.resident_slot_mapping[:num_tokens])
+            concat_slot_mapping = newest_slots
+        elif self.leader is not None:
             newest_slots = self._plan.newest_indices[:num_tokens]
             concat_slot_mapping = newest_slots
-            concat_kwargs = {}
         else:
             assert self.reserved_slots is not None
-            newest_slots = self._newest_slots[:num_tokens]
             concat_slot_mapping = global_slots
             concat_kwargs = {
                 "hot_block_table": self.hot_block_table,
                 "reserved_slots": self.reserved_slots,
-                "request_state_indices": state_rows,
+                "request_state_indices": self.request_state_indices[:num_tokens],
                 "resolved_slots": newest_slots,
             }
 
-        # -1-padded slots (CUDA-graph padding) are skipped by the backup
-        # kernel.
+        # The cache-update kernel skips -1 slots introduced by graph padding.
         ops.concat_and_cache_mla(
             kv_c_normed[:num_tokens],
             k_pe[:num_tokens].squeeze(1),
@@ -841,11 +915,12 @@ class HiSparseCoordinator:
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
     ) -> None:
-        """Write prefill/mixed-batch rows directly to the host pool.
+        """Write prefill/mixed-batch rows to resident and host storage.
 
         Local prefill on a decode instance (router shortcut, preemption
-        resume, recompute after a failed KV load): quantize the rows on GPU,
-        then scatter them to their global host slots via the backup kernel.
+        resume, recompute after a failed KV load) stages attention context
+        from the host pool. Quantize new rows into resident pages when they
+        exist, then mirror them to their authoritative global host slots.
         Recycled-slot hygiene is handled at block-assignment time by the
         KV connector lifecycle, so no hot-copy invalidation is needed here.
         """
@@ -858,14 +933,22 @@ class HiSparseCoordinator:
         num_rows = flat_slots.numel()
         if num_rows == 0:
             return
-        # Fixed shapes only: -1 (padding) slots are carried through and
-        # skipped by the backup kernel. Masking them out here
-        # (flat_slots[flat_slots >= 0]) would force a device->host sync per
-        # layer per mixed step; a few wasted copies of padded rows into the
-        # staging tensor are cheaper.
         dst = flat_slots.to(device=self.device, dtype=torch.int64).contiguous()
         real_kv_rows = kv_c_normed[:num_rows]
         real_pe_rows = k_pe[:num_rows]
+        if self.resident_slot_mapping is not None:
+            assert self.hot_cache is not None
+            src = self.resident_slot_mapping[:num_rows]
+            ops.concat_and_cache_mla(
+                real_kv_rows,
+                real_pe_rows.squeeze(1),
+                self.hot_cache,
+                src,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=k_scale,
+            )
+            self._backup_rows(self.hot_cache, src, dst)
+            return
 
         if kv_cache_dtype == "fp8_ds_mla":
             rows = torch.empty(
@@ -917,15 +1000,12 @@ class HiSparseCoordinator:
 
         relative_indices = topk_indices[:num_tokens].contiguous()
 
-        # Newest tokens resolve to the reserved hot slot the KV update wrote
-        # this step, keyed by their global slot id from the slot mapping.
-        # When slot_mapping is None (mixed batches: the newest rows were
-        # written to the host pool, not the reserved hot slots), newest
-        # tokens are resolved like any other entry (miss -> host load). That
-        # is only visible for THIS layer's compute-stream gather (its own
-        # backup ran earlier in the same forward); the overlapped prefetch of
-        # the group's shared layers is gated off below, since it would read
-        # host rows their backups have not written yet.
+        # Supply the global identity of rows written by this step. Production
+        # coordinators resolve them through the resident block table; legacy
+        # standalone coordinators may still use their reserved hot row. With
+        # no slot mapping, mixed-batch rows resolve like any other host entry.
+        # Shared-layer prefetch is gated off in that case because those host
+        # writes may not yet have been enqueued for every layer.
         newest_global = (
             slot_mapping[:num_tokens].to(torch.int32).contiguous()
             if slot_mapping is not None
@@ -978,6 +1058,9 @@ class HiSparseCoordinator:
             compact_miss_globals,
             compact_miss_hots,
             compact_miss_counts,
+            self.resident_block_table,
+            self.resident_block_size,
+            0,
         )
 
         if produce_plan and self.group_shared:
@@ -1077,9 +1160,13 @@ def create_hisparse_coordinator(
         kv_dtype=kv_dtype,
         device=device,
     )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    coordinator.eager_host_mirror = bool(
+        kv_transfer_config is not None and kv_transfer_config.is_kv_producer
+    )
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d (%d LRU + 1 newest), host_pool_gib=%s, "
+        "device_buffer_size=%d (%d LRU rows), host_pool_gib=%s, "
         "max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,

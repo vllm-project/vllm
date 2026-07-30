@@ -25,6 +25,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class HiSparseSpill:
+    """One kernel-page transfer from resident HMA storage to the host pool."""
+
+    spill_id: int
+    request_id: str
+    page_index: int
+    host_block_id: int
+    host_page_offset: int
+    resident_block_ids: tuple[tuple[int, int], ...]
+    after_forward: bool
+
+
 # ---------------------------------------------------------------------------
 # KV cache quantization mode
 # ---------------------------------------------------------------------------
@@ -188,6 +201,25 @@ class HiSparseHotSpec(KVCacheSpec):
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         return self.blocks_per_request
+
+
+@dataclass(frozen=True, kw_only=True)
+class HiSparseResidentSpec(KVCacheSpec):
+    """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
+
+    page_size: int
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
+            self.page_size
+        )
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return cdiv(max_len, self.block_size)
 
 
 @dataclass(frozen=True, kw_only=True)

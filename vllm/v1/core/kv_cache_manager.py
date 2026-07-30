@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    HiSparseSpill,
     KVCacheConfig,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -536,7 +537,7 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        if any(
+        lacks_capacity = any(
             required + watermark > pool.get_num_free_blocks() - reserved
             for required, watermark, reserved, pool in zip(
                 num_blocks_to_allocate,
@@ -544,7 +545,29 @@ class KVCacheManager:
                 reserved_blocks_by_pool,
                 self.block_pools,
             )
-        ):
+        )
+        if lacks_capacity:
+            for pool_id, (required, watermark, reserved, pool) in enumerate(
+                zip(
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                    self.block_pools,
+                )
+            ):
+                shortage = required + watermark + reserved - pool.get_num_free_blocks()
+                if shortage > 0:
+                    self.coordinator.reclaim_hisparse_resident_blocks(pool_id, shortage)
+            lacks_capacity = any(
+                required + watermark > pool.get_num_free_blocks() - reserved
+                for required, watermark, reserved, pool in zip(
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                    self.block_pools,
+                )
+            )
+        if lacks_capacity:
             # Cannot allocate new blocks
             return None
 
@@ -585,6 +608,30 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def take_hisparse_block_table_updates(
+        self,
+    ) -> dict[str, tuple[list[int], ...]] | None:
+        request_ids = self.coordinator.take_hisparse_block_table_update_requests()
+        if not request_ids:
+            return None
+        return {
+            request_id: self.get_blocks(request_id).get_block_ids()
+            for request_id in request_ids
+        }
+
+    def take_hisparse_spills(self) -> list[HiSparseSpill] | None:
+        return self.coordinator.take_hisparse_spills()
+
+    def complete_hisparse_spills(self, spill_ids: list[int] | None) -> None:
+        if spill_ids:
+            self.coordinator.complete_hisparse_spills(spill_ids)
+
+    def has_pending_hisparse_reclamation(self) -> bool:
+        return self.coordinator.has_pending_hisparse_reclamation()
+
+    def are_hisparse_requests_fully_resident(self, request_ids: Sequence[str]) -> bool:
+        return self.coordinator.are_hisparse_requests_fully_resident(request_ids)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

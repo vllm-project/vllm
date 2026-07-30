@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -1357,6 +1358,7 @@ def _is_hisparse_host_layer(layer_name: str) -> bool:
 
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
+HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
 
 
@@ -1441,6 +1443,7 @@ def _get_hisparse_hma_config(
             )
         )
 
+    resident_groups: list[KVCacheGroupSpec] = []
     hot_groups: list[KVCacheGroupSpec] = []
     current: list[tuple[str, KVCacheSpec]] = []
     current_page = 0
@@ -1452,12 +1455,28 @@ def _get_hisparse_hma_config(
                 "HiSparse hot-cache groups require one page size, got "
                 f"{sorted(page_sizes)}."
             )
+        page_size = page_sizes.pop()
+        resident_groups.append(
+            KVCacheGroupSpec(
+                [
+                    name[: -len(HISPARSE_HOT_SUFFIX)] + HISPARSE_RESIDENT_SUFFIX
+                    for name, _ in layers
+                ],
+                HiSparseResidentSpec(
+                    block_size=HISPARSE_KERNEL_BLOCK_SIZE,
+                    page_size=page_size,
+                ),
+                block_pool_id=1,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            )
+        )
         hot_groups.append(
             KVCacheGroupSpec(
                 [name for name, _ in layers],
                 HiSparseHotSpec(
                     block_size=HISPARSE_KERNEL_BLOCK_SIZE,
-                    page_size=page_sizes.pop(),
+                    page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
                 ),
                 block_pool_id=1,
@@ -1477,7 +1496,7 @@ def _get_hisparse_hma_config(
     if current:
         append_hot_group(current)
 
-    gpu_groups = [indexer_group, *hot_groups]
+    gpu_groups = [indexer_group, *resident_groups, *hot_groups]
     gpu_stride, gpu_layers_by_offset = _get_packed_kv_cache_layout(gpu_groups)
     hot_page_alignment = math.lcm(
         *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
@@ -1517,7 +1536,7 @@ def _get_hisparse_hma_config(
     if log_layout:
         logger.info(
             "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
-            "GPU indexer/hot pool (%d blocks, %d hot groups).",
+            "GPU indexer/resident/hot pool (%d blocks, %d resident/hot groups).",
             host_num_blocks * host_page / 2**30,
             host_num_blocks,
             gpu_num_blocks * gpu_stride / 2**30,
@@ -1528,7 +1547,12 @@ def _get_hisparse_hma_config(
         num_blocks=host_num_blocks,
         num_blocks_by_pool=[host_num_blocks, gpu_num_blocks],
         kv_cache_tensors=tensors,
-        kv_cache_groups=[host_group, indexer_group, *hot_groups],
+        kv_cache_groups=[
+            host_group,
+            indexer_group,
+            *resident_groups,
+            *hot_groups,
+        ],
     )
 
 

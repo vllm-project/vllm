@@ -20,10 +20,13 @@ from vllm.v1.attention.backends.mla.hisparse import (
 from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_INDEXER_SOURCE_SUFFIX,
+    HISPARSE_RESIDENT_SUFFIX,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
+    HiSparseSpill,
     KVCacheConfig,
     UniformTypeKVCacheSpecs,
 )
@@ -53,6 +56,7 @@ class HiSparseRuntime:
         backup_dst_slots: torch.Tensor,
         max_num_reqs: int,
         max_model_len: int,
+        max_concurrent_batches: int,
         block_size: int,
         device: torch.device,
     ) -> None:
@@ -70,13 +74,20 @@ class HiSparseRuntime:
         self.coordinators = coordinators
         self.hot_backing = hot_backing
         self.backup_dst_slots = backup_dst_slots
-        self._init_backup_plan(device)
+        self._post_forward_spills: list[HiSparseSpill] = []
+        self._enqueued_spill_ids: list[int] = []
+        self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
-    def _init_backup_plan(self, device: torch.device) -> None:
+    def _init_backup_plan(
+        self,
+        device: torch.device,
+        max_model_len: int,
+        max_concurrent_batches: int,
+    ) -> None:
         entries = [
             coordinator.prepare_deferred_backup() for coordinator in self.coordinators
         ]
-        hot_caches, source_indices, host_caches = zip(*entries)
+        hot_caches, _, host_caches = zip(*entries)
         first_hot = hot_caches[0]
         first_host = host_caches[0]
         row_bytes = first_hot.shape[-1] * first_hot.element_size()
@@ -109,11 +120,6 @@ class HiSparseRuntime:
             dtype=torch.int64,
             device=device,
         )
-        self.backup_src_indices_ptrs = torch.tensor(
-            [indices.data_ptr() for indices in source_indices],
-            dtype=torch.uint64,
-            device=device,
-        )
         self.backup_host_cache_ptrs = torch.tensor(
             [cache.data_ptr() for cache in host_caches],
             dtype=torch.uint64,
@@ -126,16 +132,45 @@ class HiSparseRuntime:
         self.host_write_event = torch.Event()
         for coordinator in self.coordinators:
             coordinator._host_write_event = self.host_write_event
-        self.backup_num_items = 0
+        self.spill_row_capacity = max_model_len
+        self.spill_staging_count = max_concurrent_batches + 1
+        self.spill_src_cpu = torch.empty(
+            (
+                self.spill_staging_count,
+                len(self.coordinators),
+                self.spill_row_capacity,
+            ),
+            dtype=torch.int64,
+            pin_memory=True,
+        )
+        self.spill_dst_cpu = torch.empty(
+            (self.spill_staging_count, self.spill_row_capacity),
+            dtype=torch.int64,
+            pin_memory=True,
+        )
+        self.spill_src_gpu = torch.empty(
+            (len(self.coordinators), self.spill_row_capacity),
+            dtype=torch.int64,
+            device=device,
+        )
+        self.spill_dst_gpu = torch.empty(
+            self.spill_row_capacity, dtype=torch.int64, device=device
+        )
+        self.spill_src_indices_ptrs = torch.tensor(
+            [row.data_ptr() for row in self.spill_src_gpu],
+            dtype=torch.uint64,
+            device=device,
+        )
+        self._spill_staging_index = 0
+        self._spill_staging_events: list[torch.Event | None] = [
+            None
+        ] * self.spill_staging_count
 
     def pre_step(self, scheduler_output: SchedulerOutput) -> None:
-        scheduled_tokens = scheduler_output.num_scheduled_tokens
-        self.backup_num_items = (
-            len(scheduled_tokens)
-            if scheduled_tokens
-            and all(num_tokens == 1 for num_tokens in scheduled_tokens.values())
-            else 0
-        )
+        self.set_fully_resident_batch(scheduler_output.hisparse_fully_resident)
+        spills = scheduler_output.hisparse_spills or []
+        self._post_forward_spills = [spill for spill in spills if spill.after_forward]
+        self._enqueue_spills([spill for spill in spills if not spill.after_forward])
         block_ids = [
             block_id
             for request in scheduler_output.scheduled_new_reqs
@@ -148,28 +183,83 @@ class HiSparseRuntime:
         invalidate_blocks(block_ids, self.block_size)
         self.restore_prefix(scheduler_output)
 
-    def backup_decode_rows(self, num_items: int) -> None:
+    def set_fully_resident_batch(self, fully_resident: bool) -> None:
+        self.fully_resident_batch = fully_resident
+        for coordinator in self.coordinators:
+            coordinator.fully_resident_batch = fully_resident
+
+    def _enqueue_spills(self, spills: list[HiSparseSpill]) -> None:
+        if not spills:
+            return
+        num_rows = len(spills) * self.kernel_block_size
+        if num_rows > self.spill_row_capacity:
+            raise RuntimeError(
+                "HiSparse spill exceeded its preallocated row capacity "
+                f"({num_rows} > {self.spill_row_capacity})."
+            )
+        staging_idx = self._spill_staging_index
+        staging_event = self._spill_staging_events[staging_idx]
+        if staging_event is not None and not staging_event.query():
+            raise RuntimeError(
+                "HiSparse exceeded its preallocated in-flight spill staging."
+            )
+        src_staging = self.spill_src_cpu[staging_idx]
+        dst_staging = self.spill_dst_cpu[staging_idx]
+        src = src_staging.numpy()
+        dst = dst_staging.numpy()
+        offsets = np.arange(self.kernel_block_size, dtype=np.int64)
+        for spill_idx, spill in enumerate(spills):
+            start = spill_idx * self.kernel_block_size
+            end = start + self.kernel_block_size
+            resident_blocks = dict(spill.resident_block_ids)
+            for layer_idx, coordinator in enumerate(self.coordinators):
+                block_id = resident_blocks[coordinator.resident_group_id]
+                src[layer_idx, start:end] = block_id * self.kernel_block_size + offsets
+            host_page = (
+                spill.host_block_id * self.blocks_per_kv_block + spill.host_page_offset
+            )
+            dst[start:end] = host_page * self.kernel_block_size + offsets
+        self.spill_src_gpu[:, :num_rows].copy_(
+            src_staging[:, :num_rows], non_blocking=True
+        )
+        self.spill_dst_gpu[:num_rows].copy_(dst_staging[:num_rows], non_blocking=True)
+        staging_event = torch.Event()
+        staging_event.record(torch.accelerator.current_stream(self.hot_backing.device))
+        self._spill_staging_events[staging_idx] = staging_event
+        self._spill_staging_index = (staging_idx + 1) % self.spill_staging_count
         torch.ops._C_cache_ops.hisparse_backup_layers(
             self.hot_backing,
             self.backup_layer_offsets,
-            self.backup_src_indices_ptrs,
+            self.spill_src_indices_ptrs,
             self.backup_host_anchor,
             self.backup_host_cache_ptrs,
-            self.backup_dst_slots,
-            num_items,
+            self.spill_dst_gpu,
+            num_rows,
             self.backup_src_block_stride,
             self.backup_src_block_size,
             self.backup_src_rows,
         )
+        self.host_write_event.record(
+            torch.accelerator.current_stream(self.hot_backing.device)
+        )
+        self._enqueued_spill_ids.extend(spill.spill_id for spill in spills)
 
     def post_forward(self, backup_in_graph: bool = False) -> None:
+        del backup_in_graph
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
-        if self.backup_num_items > 0 and not backup_in_graph:
-            self.backup_decode_rows(self.backup_num_items)
+        self._enqueue_spills(self._post_forward_spills)
+        self._post_forward_spills = []
         self.host_write_event.record(current_stream)
 
     def post_step(self) -> HiSparseStats | None:
         return take_hisparse_stats()
+
+    def take_spill_completions(self) -> list[int] | None:
+        if not self._enqueued_spill_ids:
+            return None
+        spill_ids = self._enqueued_spill_ids
+        self._enqueued_spill_ids = []
+        return spill_ids
 
     def shutdown(self) -> None:
         release_pinned_state()
@@ -236,6 +326,7 @@ def init_hisparse_runtime(
     block_tables: BlockTables,
     max_num_reqs: int,
     max_model_len: int,
+    max_concurrent_batches: int,
     device: torch.device,
 ) -> HiSparseRuntime | None:
     tensor_configs = {
@@ -251,6 +342,7 @@ def init_hisparse_runtime(
     hot_backing: torch.Tensor | None = None
     coordinators: list[HiSparseCoordinator] = []
     seen_coordinators: set[int] = set()
+    resident_bindings: dict[str, tuple[torch.Tensor, Any, int]] = {}
     for cache_name, raw_tensor in raw_tensors.items():
         if cache_name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX):
             layer_name = cache_name[: -len(HISPARSE_INDEXER_SOURCE_SUFFIX)]
@@ -273,6 +365,16 @@ def init_hisparse_runtime(
             )
             register_indexer_source(layer_name, source_cache)
             kv_caches[cache_name] = source_cache
+            continue
+        if cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+            resident_spec, resident_group_id = group_specs[cache_name]
+            assert isinstance(resident_spec, HiSparseResidentSpec)
+            resident_bindings[layer_name] = (
+                raw_tensor,
+                tensor_configs[cache_name],
+                resident_group_id,
+            )
             continue
         if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
             continue
@@ -301,6 +403,26 @@ def init_hisparse_runtime(
             coordinator.bind_source_cache(kv_caches[layer_name])
             coordinators.append(coordinator)
             seen_coordinators.add(id(coordinator))
+
+    for layer_name, (
+        raw_tensor,
+        tensor_config,
+        resident_group_id,
+    ) in resident_bindings.items():
+        coordinator = forward_context[layer_name].impl.hisparse_coordinator
+        resident_spec, _ = group_specs[f"{layer_name}{HISPARSE_RESIDENT_SUFFIX}"]
+        assert isinstance(resident_spec, HiSparseResidentSpec)
+        assert kv_cache_config.num_blocks_by_pool is not None
+        coordinator.bind_resident_cache(
+            raw_tensor,
+            byte_offset=tensor_config.offset,
+            block_stride=tensor_config.block_stride,
+            num_blocks=kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id],
+            block_size=resident_spec.block_size,
+            block_table=block_tables.input_block_tables[resident_group_id],
+            slot_mapping=block_tables.slot_mappings[resident_group_id],
+            group_id=resident_group_id,
+        )
 
     source_group_ids = [
         group_id
@@ -343,6 +465,7 @@ def init_hisparse_runtime(
         block_tables.slot_mappings[source_group_id],
         max_num_reqs,
         max_model_len,
+        max_concurrent_batches,
         block_size,
         device,
     )

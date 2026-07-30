@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -354,7 +355,7 @@ def prepare_kernel_block_sizes(
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
             kernel_block_sizes.append(kv_cache_spec.block_size)
-        elif isinstance(kv_cache_spec, HiSparseHotSpec):
+        elif isinstance(kv_cache_spec, (HiSparseHotSpec, HiSparseResidentSpec)):
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
             raise NotImplementedError(

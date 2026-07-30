@@ -424,6 +424,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         assert pure_decode or n == attn_metadata.num_decodes, (
             "HiSparse requires one token per mixed-batch decode request."
         )
+        if self.hisparse_coordinator.fully_resident_batch:
+            return self.hisparse_coordinator.resolve_resident(
+                attn_metadata.req_id_per_token[:n],
+                topk_indices[:n],
+                return_valid_counts=return_valid_counts,
+            )
         if self.hisparse_coordinator.leader is not None:
             return self.hisparse_coordinator.apply_plan(
                 kv_cache=kv_cache,

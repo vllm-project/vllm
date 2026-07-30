@@ -512,7 +512,9 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& valid_counts,
     std::optional<torch::stable::Tensor> const& compact_miss_globals,
     std::optional<torch::stable::Tensor> const& compact_miss_hots,
-    std::optional<torch::stable::Tensor> const& compact_miss_counts);
+    std::optional<torch::stable::Tensor> const& compact_miss_counts,
+    std::optional<torch::stable::Tensor> const& resident_block_table,
+    int64_t resident_block_size, int64_t resident_null_block);
 
 void hisparse_gather_plan(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,

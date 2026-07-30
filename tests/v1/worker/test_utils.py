@@ -4,11 +4,11 @@
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 import torch
 
 import vllm.v1.worker.utils as worker_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.kv_cache_interface import HiSparseSpill
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.gpu import hisparse as worker_hisparse
 from vllm.v1.worker.gpu.hisparse import HiSparseRuntime, _expand_source_block_ids
@@ -59,7 +59,10 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
         num_scheduled_tokens={"request-0": 1, "request-1": 1},
         scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
         scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
+        hisparse_spills=None,
+        hisparse_fully_resident=True,
     )
+    runtime.coordinators = []
     calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         worker_hisparse,
@@ -69,34 +72,56 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
         ),
     )
     runtime.restore_prefix = lambda output: calls.append(("restore", output))
+    runtime._enqueue_spills = lambda spills: calls.append(("spill", spills))
 
     runtime.pre_step(scheduler_output)
 
     assert calls == [
+        ("spill", []),
         ("invalidate", [2, 3, 4], 64),
         ("restore", scheduler_output),
     ]
-    assert runtime.backup_num_items == 2
+    assert runtime.fully_resident_batch
+    assert runtime._post_forward_spills == []
 
 
-def test_hisparse_runtime_launches_fused_backup_on_current_stream(monkeypatch):
+def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
-    runtime.backup_num_items = 3
+    runtime.kernel_block_size = 4
+    runtime.blocks_per_kv_block = 2
+    runtime.spill_row_capacity = 8
+    runtime.spill_staging_count = 1
+    runtime.spill_src_cpu = torch.empty((1, 2, 8), dtype=torch.int64)
+    runtime.spill_dst_cpu = torch.empty((1, 8), dtype=torch.int64)
+    runtime.spill_src_gpu = torch.empty((2, 8), dtype=torch.int64)
+    runtime.spill_dst_gpu = torch.empty(8, dtype=torch.int64)
+    runtime._spill_staging_index = 0
+    runtime._spill_staging_events = [None]
+    runtime.spill_src_indices_ptrs = object()
+    runtime.coordinators = [
+        SimpleNamespace(resident_group_id=2),
+        SimpleNamespace(resident_group_id=3),
+    ]
+    runtime._enqueued_spill_ids = []
     runtime.hot_backing = SimpleNamespace(device="cuda:0")
     runtime.backup_layer_offsets = object()
-    runtime.backup_src_indices_ptrs = object()
     runtime.backup_host_anchor = object()
     runtime.backup_host_cache_ptrs = object()
-    runtime.backup_dst_slots = object()
     runtime.backup_src_block_stride = 4
     runtime.backup_src_block_size = 5
     runtime.backup_src_rows = 6
     current_stream = object()
     recorded_streams: list[object] = []
+    staging_recorded_streams: list[object] = []
     runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
     calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
+    )
+    monkeypatch.setattr(
+        worker_hisparse.torch,
+        "Event",
+        lambda: SimpleNamespace(record=staging_recorded_streams.append),
     )
     monkeypatch.setattr(
         worker_hisparse.torch,
@@ -108,29 +133,47 @@ def test_hisparse_runtime_launches_fused_backup_on_current_stream(monkeypatch):
         ),
     )
 
-    runtime.post_forward()
+    spill = HiSparseSpill(
+        spill_id=7,
+        request_id="request-0",
+        page_index=3,
+        host_block_id=5,
+        host_page_offset=1,
+        resident_block_ids=((2, 11), (3, 13)),
+        after_forward=False,
+    )
+    runtime._enqueue_spills([spill])
 
     assert len(calls) == 1
-    assert calls[0][6:] == (3, 4, 5, 6)
+    assert calls[0][6:] == (4, 4, 5, 6)
+    assert runtime.spill_src_gpu[0, :4].tolist() == [44, 45, 46, 47]
+    assert runtime.spill_src_gpu[1, :4].tolist() == [52, 53, 54, 55]
+    assert runtime.spill_dst_gpu[:4].tolist() == [44, 45, 46, 47]
+    assert runtime.spill_src_gpu.dtype == torch.int64
+    assert runtime.spill_dst_gpu.dtype == torch.int64
+    assert runtime._enqueued_spill_ids == [7]
+    assert staging_recorded_streams == [current_stream]
     assert recorded_streams == [current_stream]
 
 
-def test_hisparse_runtime_skips_backup_captured_in_graph(monkeypatch):
+def test_hisparse_runtime_post_forward_enqueues_deferred_spills(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
-    runtime.backup_num_items = 3
     runtime.hot_backing = SimpleNamespace(device="cuda:0")
+    spill = object()
+    runtime._post_forward_spills = [spill]
     current_stream = object()
     recorded_streams: list[object] = []
     runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
-    runtime.backup_decode_rows = lambda num_items: pytest.fail(
-        "captured backup must not relaunch"
-    )
+    calls: list[list[object]] = []
+    runtime._enqueue_spills = lambda spills: calls.append(spills)
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
 
     runtime.post_forward(backup_in_graph=True)
 
+    assert calls == [[spill]]
+    assert runtime._post_forward_spills == []
     assert recorded_streams == [current_stream]
 
 
@@ -140,6 +183,14 @@ def test_hisparse_runtime_post_step_returns_stats(monkeypatch):
     monkeypatch.setattr(worker_hisparse, "take_hisparse_stats", lambda: stats)
 
     assert runtime.post_step() is stats
+
+
+def test_hisparse_runtime_reports_each_enqueued_spill_once():
+    runtime = object.__new__(HiSparseRuntime)
+    runtime._enqueued_spill_ids = [3, 5]
+
+    assert runtime.take_spill_completions() == [3, 5]
+    assert runtime.take_spill_completions() is None
 
 
 def test_hisparse_runtime_shutdown_releases_pinned_state(monkeypatch):
