@@ -429,6 +429,8 @@ def test_speculators_model_integration(
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
+    # ROCm frees VRAM lazily; wait so the reference engine below does not OOM.
+    wait_for_rocm_memory_to_settle()
 
     # Second run: Reference without speculative decoding
     ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.92)
