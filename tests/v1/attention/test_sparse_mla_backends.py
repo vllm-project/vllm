@@ -1710,7 +1710,7 @@ def test_hisparse_apply_plan_matches_independent():
     seq_len = blocks_per_req * block_size
     slot_mapping = block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
 
-    hisparse._GROUP_PLANS.clear()
+    hisparse._STATE.group_plans.clear()
     producer, shared, indep = make(), make(), make()
     shared.join_group(producer)
     for _ in range(8):
@@ -2096,7 +2096,7 @@ def test_hisparse_shared_layer_uses_prerotation_newest_slot():
         8, block_size, row_width, dtype=torch.float32
     ).pin_memory()
     shared_pool = torch.zeros_like(leader_pool).pin_memory()
-    hisparse._GROUP_PLANS.clear()
+    hisparse._STATE.group_plans.clear()
     leader = _make_hisparse_coordinator(block_size=block_size, row_width=row_width)
     shared = _make_hisparse_coordinator(block_size=block_size, row_width=row_width)
     shared.join_group(leader)

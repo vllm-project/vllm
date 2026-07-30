@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import gcd
 
 import numpy as np
@@ -122,54 +122,33 @@ class ResolvedHiSparseConfig:
         )
 
 
-_COORDINATORS: list[HiSparseCoordinator] = []
 _METRICS_INTERVAL = 2000
-_metrics_calls = 0
-_metrics_last = HiSparseStats()
-_CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
 
 
 def take_hisparse_stats() -> HiSparseStats | None:
     """Return counter deltas periodically, avoiding per-step synchronization."""
-    global _metrics_calls, _metrics_last
-    _metrics_calls += 1
-    if not _COORDINATORS or _metrics_calls % _METRICS_INTERVAL != 0:
+    _STATE.metrics_calls += 1
+    if not _STATE.coordinators or _STATE.metrics_calls % _METRICS_INTERVAL != 0:
         return None
 
     current = HiSparseStats()
-    for coordinator in _COORDINATORS:
+    for coordinator in _STATE.coordinators:
         hits, misses = coordinator._swap_stats.cpu().tolist()
         current.cache_hits += hits
         current.cache_misses += misses
         current.host_to_device_bytes += misses * coordinator.stats_row_bytes
 
     delta = HiSparseStats(
-        cache_hits=current.cache_hits - _metrics_last.cache_hits,
-        cache_misses=current.cache_misses - _metrics_last.cache_misses,
+        cache_hits=current.cache_hits - _STATE.metrics_last.cache_hits,
+        cache_misses=current.cache_misses - _STATE.metrics_last.cache_misses,
         host_to_device_bytes=(
-            current.host_to_device_bytes - _metrics_last.host_to_device_bytes
+            current.host_to_device_bytes - _STATE.metrics_last.host_to_device_bytes
         ),
     )
-    _metrics_last = current
+    _STATE.metrics_last = current
     if delta.cache_hits == 0 and delta.cache_misses == 0:
         return None
     return delta
-
-
-# Persistent pinned staging for per-step invalidated-slot uploads. One shared buffer is
-# safe: these uploads run eagerly at batch preparation, never under
-# CUDA-graph capture, and the event guards against overwriting bytes a
-# previous upload's async copy is still reading.
-_PINNED_STAGING: torch.Tensor | None = None
-_PINNED_STAGING_EVENT: torch.Event | None = None
-
-# Host ranges the V2 allocator pinned via cudaHostRegister for the
-# host-resident pool. torch's Tensor.is_pinned() only recognizes memory from
-# its own caching host allocator, so bind_source_cache consults this registry
-# for the fail-loud "pool must be pinned" check.
-_REGISTERED_HOST_RANGES: list[tuple[int, int]] = []
-_PINNED_HOST_POOLS: list[torch.Tensor] = []
-_INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
 
 def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None:
@@ -192,46 +171,47 @@ def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     registered = backing[aligned_offset : aligned_offset + padded_size]
     pin_tensor(registered)
     note_registered_host_range(registered.data_ptr(), registered.nbytes)
-    _PINNED_HOST_POOLS.append(registered)
+    _STATE.pinned_host_pools.append(registered)
     return registered[:size]
 
 
 def note_registered_host_range(ptr: int, nbytes: int) -> None:
-    _REGISTERED_HOST_RANGES.append((ptr, nbytes))
+    _STATE.registered_host_ranges.append((ptr, nbytes))
 
 
 def discard_registered_host_range(ptr: int) -> None:
-    global _REGISTERED_HOST_RANGES
-    _REGISTERED_HOST_RANGES = [(p, n) for p, n in _REGISTERED_HOST_RANGES if p != ptr]
+    _STATE.registered_host_ranges[:] = [
+        (p, n) for p, n in _STATE.registered_host_ranges if p != ptr
+    ]
 
 
 def register_indexer_source(layer_name: str, cache: torch.Tensor) -> None:
-    _INDEXER_SOURCES[layer_name] = (cache, None)
+    _STATE.indexer_sources[layer_name] = (cache, None)
 
 
 def bind_indexer_source_slot_mapping(
     layer_name: str, slot_mapping: torch.Tensor
 ) -> None:
-    cache, _ = _INDEXER_SOURCES[layer_name]
-    _INDEXER_SOURCES[layer_name] = (cache, slot_mapping)
+    cache, _ = _STATE.indexer_sources[layer_name]
+    _STATE.indexer_sources[layer_name] = (cache, slot_mapping)
 
 
 def get_indexer_source(
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
-    return _INDEXER_SOURCES.get(layer_name)
+    return _STATE.indexer_sources.get(layer_name)
 
 
 def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
-    return any(p <= ptr and ptr + nbytes <= p + n for p, n in _REGISTERED_HOST_RANGES)
+    return any(
+        p <= ptr and ptr + nbytes <= p + n for p, n in _STATE.registered_host_ranges
+    )
 
 
 def release_pinned_state() -> bool:
     """Synchronize, unregister host KV pools, and drop global state."""
-    global _CURRENT_GROUP_LEADER, _PINNED_STAGING, _PINNED_STAGING_EVENT
-    global _metrics_calls, _metrics_last
-    released = bool(_PINNED_HOST_POOLS or _PINNED_STAGING is not None)
-    if _PINNED_HOST_POOLS:
+    released = bool(_STATE.pinned_host_pools or _STATE.pinned_staging is not None)
+    if _STATE.pinned_host_pools:
         try:
             torch.accelerator.synchronize()
         except RuntimeError as e:
@@ -239,28 +219,28 @@ def release_pinned_state() -> bool:
                 "HiSparse: CUDA context unusable at teardown (%s); leaving "
                 "%d host-pool tensors pinned for kernel exit reclaim.",
                 e,
-                len(_PINNED_HOST_POOLS),
+                len(_STATE.pinned_host_pools),
             )
             return released
 
         cudart = torch.cuda.cudart()
         release_start = time.perf_counter()
         freed_bytes = 0
-        while _PINNED_HOST_POOLS:
-            tensor = _PINNED_HOST_POOLS[-1]
+        while _STATE.pinned_host_pools:
+            tensor = _STATE.pinned_host_pools[-1]
             err = cudart.cudaHostUnregister(tensor.data_ptr())
             if err.value != 0:
                 logger.warning(
                     "HiSparse: cudaHostUnregister failed (code=%d); leaving "
                     "%d host-pool tensors pinned for kernel exit reclaim.",
                     err.value,
-                    len(_PINNED_HOST_POOLS),
+                    len(_STATE.pinned_host_pools),
                 )
                 cudart.cudaGetLastError()
                 break
             freed_bytes += tensor.nbytes
             discard_registered_host_range(tensor.data_ptr())
-            _PINNED_HOST_POOLS.pop()
+            _STATE.pinned_host_pools.pop()
         if freed_bytes:
             logger.info(
                 "HiSparse: unpinned %.1f GiB of host pool in %.1fs.",
@@ -268,42 +248,41 @@ def release_pinned_state() -> bool:
                 time.perf_counter() - release_start,
             )
 
-    _PINNED_STAGING = None
-    _PINNED_STAGING_EVENT = None
-    for leader in _COORDINATORS:
+    _STATE.pinned_staging = None
+    _STATE.pinned_staging_event = None
+    for leader in _STATE.coordinators:
         for coordinator in (leader, *leader.group_shared):
             if coordinator._host_cache is not None:
                 coordinator._host_cache = None
                 released = True
-    _COORDINATORS.clear()
-    _metrics_calls = 0
-    _metrics_last = HiSparseStats()
-    _GROUP_PLANS.clear()
-    _COPY_STREAMS.clear()
-    _CURRENT_GROUP_LEADER = None
+    _STATE.coordinators.clear()
+    _STATE.metrics_calls = 0
+    _STATE.metrics_last = HiSparseStats()
+    _STATE.group_plans.clear()
+    _STATE.copy_streams.clear()
+    _STATE.current_group_leader = None
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
-    _INDEXER_SOURCES.clear()
+    _STATE.indexer_sources.clear()
     return released
 
 
 def _pinned_to_device(values: list[int], device: torch.device) -> torch.Tensor:
     """Copy a small int list to ``device`` via pinned staging (grow-on-demand,
     power-of-2) instead of a per-step pageable tensor."""
-    global _PINNED_STAGING, _PINNED_STAGING_EVENT
     n = len(values)
-    if _PINNED_STAGING is None or _PINNED_STAGING.shape[0] < n:
+    if _STATE.pinned_staging is None or _STATE.pinned_staging.shape[0] < n:
         size = 1 << max(10, (n - 1).bit_length())
-        _PINNED_STAGING = torch.empty(size, dtype=torch.long, pin_memory=True)
-        _PINNED_STAGING_EVENT = None
-    if _PINNED_STAGING_EVENT is not None:
-        _PINNED_STAGING_EVENT.synchronize()
-    staging = _PINNED_STAGING[:n]
+        _STATE.pinned_staging = torch.empty(size, dtype=torch.long, pin_memory=True)
+        _STATE.pinned_staging_event = None
+    if _STATE.pinned_staging_event is not None:
+        _STATE.pinned_staging_event.synchronize()
+    staging = _STATE.pinned_staging[:n]
     staging.copy_(torch.from_numpy(np.asarray(values, dtype=np.int64)))
     out = staging.to(device, non_blocking=True)
-    if _PINNED_STAGING_EVENT is None:
-        _PINNED_STAGING_EVENT = torch.Event()
-    _PINNED_STAGING_EVENT.record(torch.accelerator.current_stream(device))
+    if _STATE.pinned_staging_event is None:
+        _STATE.pinned_staging_event = torch.Event()
+    _STATE.pinned_staging_event.record(torch.accelerator.current_stream(device))
     return out
 
 
@@ -318,7 +297,7 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
     if not block_ids:
         return
     slots: torch.Tensor | None = None
-    for coordinator in _COORDINATORS:
+    for coordinator in _STATE.coordinators:
         if slots is None:
             # Built once on device and shared by every leader.
             blocks = _pinned_to_device(block_ids, coordinator.device)
@@ -332,7 +311,7 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
 def wait_for_hisparse_host_writes() -> None:
     """Wait for pending GPU writes before accessing host KV from the CPU."""
     waited_devices: set[torch.device] = set()
-    for coordinator in _COORDINATORS:
+    for coordinator in _STATE.coordinators:
         device = coordinator.device
         event = coordinator._host_write_event
         if event is not None and device not in waited_devices:
@@ -435,27 +414,41 @@ class _GroupPlan:
         self.valid_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
 
 
-_GROUP_PLANS: dict[tuple[str, int, int], _GroupPlan] = {}
+@dataclass
+class _HiSparseProcessState:
+    coordinators: list[HiSparseCoordinator] = field(default_factory=list)
+    metrics_calls: int = 0
+    metrics_last: HiSparseStats = field(default_factory=HiSparseStats)
+    current_group_leader: HiSparseCoordinator | None = None
+    pinned_staging: torch.Tensor | None = None
+    pinned_staging_event: torch.Event | None = None
+    registered_host_ranges: list[tuple[int, int]] = field(default_factory=list)
+    pinned_host_pools: list[torch.Tensor] = field(default_factory=list)
+    indexer_sources: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = field(
+        default_factory=dict
+    )
+    group_plans: dict[tuple[str, int, int], _GroupPlan] = field(default_factory=dict)
+    copy_streams: dict[str, torch.Stream] = field(default_factory=dict)
+
+
+_STATE = _HiSparseProcessState()
 
 
 def _get_group_plan(device: torch.device, max_rows: int, top_k: int) -> _GroupPlan:
     key = (str(device), max_rows, top_k)
-    plan = _GROUP_PLANS.get(key)
+    plan = _STATE.group_plans.get(key)
     if plan is None:
         plan = _GroupPlan(device, max_rows, top_k)
-        _GROUP_PLANS[key] = plan
+        _STATE.group_plans[key] = plan
     return plan
-
-
-_COPY_STREAMS: dict[str, torch.Stream] = {}
 
 
 def _get_copy_stream(device: torch.device) -> torch.Stream:
     key = str(device)
-    stream = _COPY_STREAMS.get(key)
+    stream = _STATE.copy_streams.get(key)
     if stream is None:
         stream = torch.Stream(device=device)
-        _COPY_STREAMS[key] = stream
+        _STATE.copy_streams[key] = stream
     return stream
 
 
@@ -551,7 +544,7 @@ class HiSparseCoordinator:
         # leader's misses), so the leader's counter covers the whole group.
         self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
         self.stats_row_bytes = row_bytes
-        _COORDINATORS.append(self)
+        _STATE.coordinators.append(self)
 
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
         self.group_shared: list[HiSparseCoordinator] = []
@@ -576,17 +569,16 @@ class HiSparseCoordinator:
         self.request_state_indices = indices
 
     def join_indexer_group(self, has_indexer: bool) -> None:
-        global _CURRENT_GROUP_LEADER
         if has_indexer:
-            _CURRENT_GROUP_LEADER = self
-        elif _CURRENT_GROUP_LEADER is not None:
-            self.join_group(_CURRENT_GROUP_LEADER)
+            _STATE.current_group_leader = self
+        elif _STATE.current_group_leader is not None:
+            self.join_group(_STATE.current_group_leader)
 
     def join_group(self, leader: HiSparseCoordinator) -> None:
         self.leader = leader
         leader.group_shared.append(self)
         leader.stats_row_bytes += self.stats_row_bytes
-        _COORDINATORS.remove(self)
+        _STATE.coordinators.remove(self)
         self.device_global_indices = None
         self.lru_slots = None
         self.reserved_slots = None
