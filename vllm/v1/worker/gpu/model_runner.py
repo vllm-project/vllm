@@ -123,6 +123,9 @@ from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
 
+_HISPARSE_RESIDENT_GRAPH_VARIANT = 0
+_HISPARSE_HYBRID_GRAPH_VARIANT = 1
+
 
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -496,6 +499,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
+            decode_graph_variants=(
+                (
+                    _HISPARSE_RESIDENT_GRAPH_VARIANT,
+                    _HISPARSE_HYBRID_GRAPH_VARIANT,
+                )
+                if self.vllm_config.attention_config.hisparse_config is not None
+                else (_HISPARSE_RESIDENT_GRAPH_VARIANT,)
+            ),
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -749,6 +760,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): It is TBD whether we keep this API or not.
         return 0
 
+    def _set_hisparse_capture_variant(self, variant: int) -> None:
+        assert self.hisparse_runtime is not None
+        self.hisparse_runtime.set_fully_resident_batch(
+            variant == _HISPARSE_RESIDENT_GRAPH_VARIANT
+        )
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         assert self.cudagraph_manager is not None
@@ -782,10 +799,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
                     decode_post_forward_hook=None,
+                    graph_variant_capture_hook=(
+                        self._set_hisparse_capture_variant
+                        if self.hisparse_runtime is not None
+                        else None
+                    ),
                 )
             finally:
                 if self.hisparse_runtime is not None:
                     self.hisparse_runtime.set_fully_resident_batch(False)
+                    self.hisparse_runtime.reset_hot_state()
             if self.speculator is not None:
                 self.speculator.capture()
 
@@ -1273,15 +1296,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             uniform_tok_count,
             self.dp_size,
             self.dp_rank,
-            need_eager=(
-                is_profile
-                or skip_compiled
-                or (
-                    self.hisparse_runtime is not None
-                    and not self.hisparse_runtime.fully_resident_batch
-                )
-            ),
+            need_eager=(is_profile or skip_compiled),
             num_active_loras=num_active_loras,
+            graph_variant=(
+                _HISPARSE_HYBRID_GRAPH_VARIANT
+                if self.hisparse_runtime is not None
+                and not self.hisparse_runtime.fully_resident_batch
+                else _HISPARSE_RESIDENT_GRAPH_VARIANT
+            ),
         )
 
         if batch_desc.num_tokens == 0:

@@ -55,6 +55,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    # Component-defined execution path captured for the same batch shape.
+    graph_variant: int = 0
 
 
 class CreateForwardFn(Protocol):
@@ -75,6 +77,7 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    graph_variant: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -86,6 +89,7 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and desc.graph_variant == graph_variant
     )
 
 
@@ -113,6 +117,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        decode_graph_variants: tuple[int, ...] = (0,),
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -127,6 +132,7 @@ class CudaGraphManager:
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
         self.lora_capture_cases = lora_capture_cases or [0]
+        self.decode_graph_variants = decode_graph_variants
         # Precompute actual num_active_loras -> captured case mapping so that
         # dispatch() is a plain dict lookup instead of a per-call bisect.
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
@@ -136,7 +142,9 @@ class CudaGraphManager:
 
         self._graphs_captured = False
 
-        self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
+        self._candidates: dict[
+            tuple[int, int, int], list[BatchExecutionDescriptor]
+        ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -187,9 +195,9 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
+        descs_by_token_lora_variant: dict[
+            tuple[int, int, int], list[BatchExecutionDescriptor]
+        ] = defaultdict(list)
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -237,20 +245,26 @@ class CudaGraphManager:
                     ):
                         continue
 
-                    desc = BatchExecutionDescriptor(
-                        cg_mode=decode_mode,
-                        num_tokens=rounded_num_tokens,
-                        num_reqs=rounded_num_reqs,
-                        uniform_token_count=decode_query_len,
-                        num_active_loras=num_active_loras,
-                    )
+                    for graph_variant in self.decode_graph_variants:
+                        desc = BatchExecutionDescriptor(
+                            cg_mode=decode_mode,
+                            num_tokens=rounded_num_tokens,
+                            num_reqs=rounded_num_reqs,
+                            uniform_token_count=decode_query_len,
+                            num_active_loras=num_active_loras,
+                            graph_variant=graph_variant,
+                        )
 
-                    # avoid duplicate graphs
-                    if desc not in descs_by_mode[decode_mode]:
-                        descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
-                        ].append(desc)
+                        # avoid duplicate graphs
+                        if desc not in descs_by_mode[decode_mode]:
+                            descs_by_mode[decode_mode].append(desc)
+                            descs_by_token_lora_variant[
+                                (
+                                    rounded_num_tokens,
+                                    num_active_loras,
+                                    graph_variant,
+                                )
+                            ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -268,21 +282,28 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
+                descs_by_token_lora_variant[(num_tokens, num_active_loras, 0)].append(
+                    desc
+                )
 
-        if not descs_by_token_lora:
+        if not descs_by_token_lora_variant:
             return
 
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
+        all_token_counts = sorted({k[0] for k in descs_by_token_lora_variant})
         current_range_start = 0
         for token_cg_size in all_token_counts:
             for i in range(current_range_start, token_cg_size + 1):
                 for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
+                    for graph_variant in self.decode_graph_variants:
+                        staging_key = (
+                            token_cg_size,
+                            num_active_loras,
+                            graph_variant,
+                        )
+                        if staging_key in descs_by_token_lora_variant:
+                            self._candidates[(i, num_active_loras, graph_variant)] = (
+                                descs_by_token_lora_variant[staging_key]
+                            )
             current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
@@ -368,11 +389,12 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        graph_variant: int = 0,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
         effective_loras = self._resolve_effective_loras(num_active_loras)
-        key = (num_tokens, effective_loras)
+        key = (num_tokens, effective_loras, graph_variant)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
                 if _is_compatible(
@@ -381,6 +403,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    graph_variant,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -388,6 +411,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            graph_variant=graph_variant,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -429,6 +453,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        decode_graph_variants: tuple[int, ...] = (0,),
     ):
         super().__init__(
             vllm_config,
@@ -436,6 +461,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            decode_graph_variants=decode_graph_variants,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -455,6 +481,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         decode_post_forward_hook: Callable[[int], None] | None = None,
+        graph_variant_capture_hook: Callable[[int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture CUDA graphs for model forward pass.
@@ -472,6 +499,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
+
+            if graph_variant_capture_hook is not None:
+                graph_variant_capture_hook(desc.graph_variant)
 
             # Set LoRA state before capture so kernels see correct adapters.
             if lora_capture_hook is not None:

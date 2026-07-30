@@ -22,6 +22,7 @@ def sync_cudagraph_and_dp_padding(
     dp_size: int,
     dp_rank: int,
     num_active_loras: int = 0,
+    graph_variant: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -55,6 +56,7 @@ def sync_cudagraph_and_dp_padding(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=desired_batch_desc.num_active_loras,
+            graph_variant=graph_variant,
         ), num_tokens_across_dp
 
     assert cudagraph_manager is not None, (
@@ -71,12 +73,13 @@ def sync_cudagraph_and_dp_padding(
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
-    # num_active_loras is per-rank and doesn't need cross-rank agreement.
+    # LoRA state and graph variants are per-rank and need no cross-rank agreement.
     synced_desc = cudagraph_manager.dispatch(
         num_reqs,
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
+        graph_variant=graph_variant,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -94,6 +97,7 @@ def dispatch_cg_and_sync_dp(
     dp_rank: int,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    graph_variant: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -101,6 +105,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=num_active_loras,
+            graph_variant=graph_variant,
         )
     else:
         assert cudagraph_manager is not None, (
@@ -112,6 +117,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
+            graph_variant=graph_variant,
         )
 
     if dp_size == 1:
@@ -126,4 +132,5 @@ def dispatch_cg_and_sync_dp(
         dp_size,
         dp_rank,
         num_active_loras=num_active_loras,
+        graph_variant=graph_variant,
     )

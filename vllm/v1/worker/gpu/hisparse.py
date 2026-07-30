@@ -76,6 +76,7 @@ class HiSparseRuntime:
         self.backup_dst_slots = backup_dst_slots
         self._post_forward_spills: list[HiSparseSpill] = []
         self._enqueued_spill_ids: list[int] = []
+        self.fully_resident_batch = False
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
     def _init_backup_plan(
@@ -187,6 +188,10 @@ class HiSparseRuntime:
         self.fully_resident_batch = fully_resident
         for coordinator in self.coordinators:
             coordinator.fully_resident_batch = fully_resident
+
+    def reset_hot_state(self) -> None:
+        for coordinator in self.coordinators:
+            coordinator.reset_hot_state()
 
     def _enqueue_spills(self, spills: list[HiSparseSpill]) -> None:
         if not spills:
