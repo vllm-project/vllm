@@ -406,6 +406,14 @@ class Scheduler(SchedulerInterface):
                 end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
+        # A later request replaying this prompt resumes at `num_tokens - 1` at
+        # the latest (`get_computed_blocks` caps the hit there), so the block
+        # boundary at or below that must be a chunk end too: when `num_tokens`
+        # is an exact multiple of `block_size` the only state cached below it
+        # would otherwise sit one token above the cap, missing entirely.
+        replay_boundary = min(
+            (request.num_tokens - 1) // block_size * block_size, last_cache_position
+        )
         tail_boundary = (
             request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
             if self.mamba_partial_cache_hit
@@ -420,6 +428,8 @@ class Scheduler(SchedulerInterface):
             else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
+            # Keep the boundary a replay of this prompt can resume from.
+            replay_boundary,
             # Fine-grained hits: the prompt's partial-tail entry can only be
             # registered by a chunk ending exactly at its last hash boundary.
             tail_boundary
