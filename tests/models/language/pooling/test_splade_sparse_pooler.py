@@ -138,9 +138,11 @@ def test_pooling_runner_stores_only_required_token_ids() -> None:
     runner.pooling_params = {}
     runner.pooling_states = {}
     runner.prompt_token_ids = {}
+    runner.late_interaction_runner = MagicMock()
 
-    runner.add_request(1, PoolingParams(task="embed"), [101, 102])
+    runner.add_request("req-1", 1, PoolingParams(task="embed"), [101, 102])
     runner.add_request(
+        "req-2",
         2,
         PoolingParams(task="embed", requires_token_ids=True),
         [101, 11, 102],
@@ -182,6 +184,19 @@ def test_pooling_runner_supports_encoder_token_classification() -> None:
     assert runner.supported_tasks == {"token_classify"}
 
 
+def test_pooling_runner_supports_encoder_token_embedding() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"token_embed"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "encoder_only"
+    vllm_config.model_config.get_pooling_task.return_value = "token_embed"
+
+    runner = PoolingRunner(model, vllm_config)
+
+    assert runner.supported_tasks == {"token_embed"}
+
+
 def test_pooling_runner_rejects_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"token_classify"}
@@ -199,6 +214,19 @@ def test_pooling_runner_rejects_decoder_token_classification() -> None:
 def test_pooling_runner_filters_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "decoder"
+    vllm_config.model_config.get_pooling_task.return_value = "embed"
+
+    runner = PoolingRunner(model, vllm_config)
+
+    assert runner.supported_tasks == {"embed"}
+
+
+def test_pooling_runner_filters_decoder_token_embedding() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"embed", "token_embed"}
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 2
     vllm_config.model_config.attn_type = "decoder"

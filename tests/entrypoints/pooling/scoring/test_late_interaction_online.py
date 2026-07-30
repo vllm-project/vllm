@@ -38,7 +38,11 @@ def server(request):
     if not request.param:
         args += ["--no-enable-flash-late-interaction"]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
+    ) as remote_server:
         yield remote_server
 
 

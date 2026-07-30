@@ -380,7 +380,7 @@ def test_colbert_embed_not_supported(
 
 
 @pytest.mark.parametrize("backend", list(COLBERT_MODELS.keys()))
-def test_colbert_hf_comparison(vllm_runner, backend):
+def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend):
     """Test that vLLM ColBERT embeddings match HuggingFace for each backend."""
     from transformers import AutoTokenizer
 
@@ -393,6 +393,9 @@ def test_colbert_hf_comparison(vllm_runner, backend):
     assert isinstance(extra_kwargs, dict)
     test_texts = [TEXTS_1[0], TEXTS_2[0]]
 
+    if backend == "bert":
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
     with vllm_runner(
         model_name,
         runner="pooling",
@@ -401,6 +404,8 @@ def test_colbert_hf_comparison(vllm_runner, backend):
         enforce_eager=True,
         **extra_kwargs,
     ) as vllm_model:
+        if backend == "bert":
+            assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.token_embed(test_texts)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
