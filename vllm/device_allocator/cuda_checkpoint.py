@@ -8,27 +8,39 @@ artifacts, CUDA graphs) across suspend/resume cycles for near-zero cold
 start times. Requires NVIDIA driver >= 570.
 """
 
+import os
+
 import torch
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# CUprocessState values returned by the driver (see cuda.h).
+PROCESS_STATE_RUNNING = 0
+PROCESS_STATE_LOCKED = 1
+PROCESS_STATE_CHECKPOINTED = 2
+PROCESS_STATE_FAILED = 3
+
 cuda_checkpoint_available = False
 try:
     from vllm.cuda_checkpoint import (
-        checkpoint_get_state,
-        checkpoint_resume,
-        checkpoint_suspend,
+        get_state,
         is_available,
+        process_checkpoint,
+        process_lock,
+        process_restore,
+        process_unlock,
     )
 
     cuda_checkpoint_available = is_available()
 except ModuleNotFoundError:
     # C extension not built (non-CUDA platform or build without it)
-    checkpoint_suspend = None
-    checkpoint_resume = None
-    checkpoint_get_state = None
+    process_lock = None
+    process_checkpoint = None
+    process_restore = None
+    process_unlock = None
+    get_state = None
     is_available = None
 
 
@@ -54,7 +66,10 @@ class CudaCheckpointer:
 
     def __init__(self):
         self._is_suspended = False
-        self._checkpoint_handle: int | None = None
+        # The checkpoint API is keyed by process id; there is no opaque
+        # handle. We record the pid that was checkpointed and return it
+        # from suspend() so callers have a stable token to pass to resume().
+        self._checkpoint_pid: int | None = None
 
     @property
     def is_suspended(self) -> bool:
@@ -63,13 +78,16 @@ class CudaCheckpointer:
     def suspend(self) -> int:
         """Suspend the CUDA process, preserving GPU state.
 
-        Synchronizes all CUDA streams before suspending.
+        Synchronizes all CUDA streams, then locks and checkpoints the
+        process (RUNNING -> LOCKED -> CHECKPOINTED), releasing GPU memory
+        to host.
 
         Returns:
-            Checkpoint handle (integer) for later resume.
+            The checkpointed process id, usable as the ``handle`` for a
+            later resume() call.
 
         Raises:
-            RuntimeError: If already suspended or CUDA API fails.
+            RuntimeError: If already suspended or a CUDA API fails.
         """
         if self._is_suspended:
             raise RuntimeError(
@@ -80,22 +98,29 @@ class CudaCheckpointer:
         # Synchronize all CUDA streams before checkpoint
         torch.cuda.synchronize()
 
-        logger.info("Suspending CUDA process...")
-        handle = checkpoint_suspend()
-        self._checkpoint_handle = handle
+        pid = os.getpid()
+        logger.info("Suspending CUDA process (pid=%d)...", pid)
+        # Two-step checkpoint sequence: lock blocks further CUDA API calls,
+        # checkpoint moves GPU state to host memory.
+        process_lock(pid)
+        process_checkpoint(pid)
+        self._checkpoint_pid = pid
         self._is_suspended = True
-        logger.info("CUDA process suspended with handle %s.", handle)
-        return handle
+        logger.info("CUDA process suspended (pid=%d).", pid)
+        return pid
 
     def resume(self, handle: int | None = None) -> None:
         """Resume the CUDA process from a checkpoint.
 
+        Restores GPU state and unlocks the process
+        (CHECKPOINTED -> LOCKED -> RUNNING).
+
         Args:
-            handle: Checkpoint handle from suspend(). If None, uses
-                the handle from the last suspend() call.
+            handle: The pid returned by suspend(). If None, uses the pid
+                from the last suspend() call.
 
         Raises:
-            RuntimeError: If not suspended or CUDA API fails.
+            RuntimeError: If not suspended or a CUDA API fails.
         """
         if not self._is_suspended:
             raise RuntimeError(
@@ -103,30 +128,32 @@ class CudaCheckpointer:
             )
 
         if handle is None:
-            handle = self._checkpoint_handle
+            handle = self._checkpoint_pid
 
         if handle is None:
-            raise RuntimeError("No checkpoint handle available for resume.")
+            raise RuntimeError("No checkpoint pid available for resume.")
 
-        logger.info("Resuming CUDA process from handle %s...", handle)
-        checkpoint_resume(handle)
+        logger.info("Resuming CUDA process (pid=%s)...", handle)
+        # Inverse of suspend: restore GPU state, then unlock.
+        process_restore(handle)
+        process_unlock(handle)
         self._is_suspended = False
         logger.info("CUDA process resumed.")
 
     def get_state(self, handle: int | None = None) -> int:
-        """Query the state of a checkpoint.
+        """Query the CUprocessState of the process.
 
         Args:
-            handle: Checkpoint handle to query. If None, uses the
-                handle from the last suspend() call.
+            handle: The pid to query. If None, uses the pid from the last
+                suspend() call, falling back to the current process.
 
         Returns:
-            Integer state value from the CUDA driver.
+            Integer CUprocessState value from the CUDA driver (see the
+            ``PROCESS_STATE_*`` constants in this module).
         """
         if handle is None:
-            handle = self._checkpoint_handle
-
+            handle = self._checkpoint_pid
         if handle is None:
-            raise RuntimeError("No checkpoint handle available to query.")
+            handle = os.getpid()
 
-        return checkpoint_get_state(handle)
+        return get_state(handle)
