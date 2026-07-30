@@ -293,6 +293,10 @@ But you are sure that the model is in the [list of supported models](../models/s
 
 If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](../../vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](https://github.com/vllm-project/vllm/pull/14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
+**ROCm users in containers:** This error is often caused by `amdsmi` being unavailable
+inside unprivileged containers. See the
+[ROCm-specific troubleshooting section below](#rocm-specific-issues) for the fix.
+
 ## NCCL error: unhandled system error during `ncclCommInitRank`
 
 If your serving workload uses GPUDirect RDMA for distributed serving across multiple nodes and encounters an error during `ncclCommInitRank`, with no clear error message even with `NCCL_DEBUG=INFO` set, it might look like this:
@@ -368,6 +372,99 @@ export CUDA_HOME=/usr/local/cuda
 export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
+
+## ROCm-Specific Issues
+
+### Platform detection failure in containers
+
+**Symptom:** `RuntimeError: Failed to infer device type` when running vLLM inside a
+container on an AMD GPU, even though the GPU works via `rocminfo` or `hipGetDeviceCount`.
+
+**Cause:** vLLM uses `amdsmi` to detect ROCm. Inside unprivileged containers `amdsmi`
+often fails because it requires sysfs / hwmon paths (e.g. `/sys/bus/pci/drivers/amdgpu`)
+that are not mounted, even when the GPU device nodes (`/dev/kfd`, `/dev/dri`) are
+present.
+
+**Solutions (in order of preference):**
+
+1. **(Recommended)** Mount the required paths or run with `--privileged`. With
+   containerd / k3s make sure the device plugin exposes `/dev/dri` with `rwm`
+   permissions (not just `rw`):
+
+   ```yaml
+   # Kubernetes pod spec excerpt
+   securityContext:
+     privileged: true
+   ```
+
+2. If `--privileged` is not an option, upgrade to vLLM ≥ the commit that adds the
+   HIP ctypes fallback (PR #41585). That version probes `hipGetDeviceCount()` via
+   `libamdhip64.so` when `amdsmi` fails, which only requires `/dev/kfd` and `/dev/dri`.
+
+3. Ensure the container has access to the required devices:
+
+   ```bash
+   docker run --device /dev/kfd --device /dev/dri \
+              --group-add video --group-add render ...
+   ```
+
+### GCN arch detection / `PYTORCH_ROCM_ARCH`
+
+When `amdsmi` is unavailable vLLM falls back to `torch.cuda.get_device_properties()`.
+In containerised environments where this also fails you will see an `ImportError` or
+hang during module import.
+
+**Fix:** Set `PYTORCH_ROCM_ARCH` to the GCN architecture of your GPU before starting
+vLLM:
+
+```bash
+# gfx942 for MI300X, gfx1151 for Strix Halo, gfx1201 for RX 9070 XT, etc.
+export PYTORCH_ROCM_ARCH=gfx942
+vllm serve ...
+```
+
+### Vision encoder hang on gfx1151 (Strix Halo / missing MIOpen solver DB)
+
+**Symptom:** vLLM hangs indefinitely during initialisation when serving any model with
+a vision encoder (e.g. `Qwen3.5-*B-A*B`, multimodal models) on gfx1151:
+
+```text
+INFO: Encoder cache will be initialized with a budget of 16384 tokens ...
+MIOpen(HIP): Error [...] Could not open metadata file: .../gfx1151_ConvHipImplicit...
+```
+
+The process then hangs forever because MIOpen has no pre-compiled solver database for
+gfx1151, causing an exhaustive kernel search that never finishes.
+
+**Workaround:** Use the `--skip-mm-profiling` CLI flag to skip the encoder profiling
+step.  Text-only inference will work normally; only the encoder cache pre-profiling is
+disabled:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B --skip-mm-profiling --enforce-eager ...
+```
+
+Alternatively, set `--limit-mm-per-prompt '{"image": 0}'` to avoid the encoder
+entirely if you only need text output from the model.
+
+**Affected platforms:** All AMD gfx1151 / Ryzen AI MAX+ 395 (Strix Halo) machines when
+running vision-language models. See [#37472](https://github.com/vllm-project/vllm/issues/37472).
+
+### RCCL multi-GPU errors on RDNA3 (gfx1100/gfx1101)
+
+**Symptom:** vLLM fails at startup with RCCL / collective communication errors when
+using tensor parallelism (`--tensor-parallel-size > 1`) on consumer RDNA3 GPUs:
+
+```text
+RuntimeError: NCCL / RCCL error during ncclAllReduce ...
+```
+
+Consumer RDNA3 GPUs have limited peer-to-peer support. Try:
+
+- Use `NCCL_P2P_DISABLE=1` to fall back to CPU-mediated transfers (lower throughput
+  but often works)
+- Set `HSA_FORCE_FINE_GRAIN_PCIE=1` if you see fence / cache coherence issues
+- Confirm both GPUs are on the same CPU NUMA node
 
 ## Known Issues
 
