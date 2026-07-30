@@ -2740,10 +2740,6 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
-    hot_block_table: torch.Tensor | None = None,
-    reserved_slots: torch.Tensor | None = None,
-    request_state_indices: torch.Tensor | None = None,
-    resolved_slots: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c,
@@ -2752,10 +2748,6 @@ def concat_and_cache_mla(
         slot_mapping,
         kv_cache_dtype,
         scale,
-        hot_block_table,
-        reserved_slots,
-        request_state_indices,
-        resolved_slots,
     )
 
 

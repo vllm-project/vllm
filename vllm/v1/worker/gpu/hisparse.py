@@ -88,7 +88,7 @@ class HiSparseRuntime:
         entries = [
             coordinator.prepare_deferred_backup() for coordinator in self.coordinators
         ]
-        hot_caches, _, host_caches = zip(*entries)
+        hot_caches, host_caches = zip(*entries)
         first_hot = hot_caches[0]
         first_host = host_caches[0]
         row_bytes = first_hot.shape[-1] * first_hot.element_size()

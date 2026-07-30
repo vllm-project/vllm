@@ -443,7 +443,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             block_table=attn_metadata.block_table,
             topk_indices=topk_indices[:n],
             block_size=attn_metadata.block_size,
-            slot_mapping=attn_metadata.slot_mapping if pure_decode else None,
             return_valid_counts=return_valid_counts,
             produce_plan=bool(self.hisparse_coordinator.group_shared),
         )

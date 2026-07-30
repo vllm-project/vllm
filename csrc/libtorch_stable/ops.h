@@ -479,14 +479,12 @@ void reshape_and_cache_flash(
     torch::stable::Tensor& slot_mapping, const std::string& kv_cache_dtype,
     torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale);
 
-void concat_and_cache_mla(
-    torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,
-    torch::stable::Tensor& kv_cache, torch::stable::Tensor& slot_mapping,
-    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
-    std::optional<torch::stable::Tensor> const& hot_block_table,
-    std::optional<torch::stable::Tensor> const& reserved_slots,
-    std::optional<torch::stable::Tensor> const& request_state_indices,
-    std::optional<torch::stable::Tensor> const& resolved_slots);
+void concat_and_cache_mla(torch::stable::Tensor& kv_c,
+                          torch::stable::Tensor& k_pe,
+                          torch::stable::Tensor& kv_cache,
+                          torch::stable::Tensor& slot_mapping,
+                          const std::string& kv_cache_dtype,
+                          torch::stable::Tensor& scale);
 
 #ifndef USE_ROCM
 // HiSparse kernels use raw PTX in the row copy; CUDA-only.
@@ -494,14 +492,12 @@ void hisparse_swap_in(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
     torch::stable::Tensor const& global_indices,
-    std::optional<torch::stable::Tensor> const& newest_global_indices,
     torch::stable::Tensor& hot_indices,
     torch::stable::Tensor& device_global_indices,
-    torch::stable::Tensor& lru_slots, torch::stable::Tensor& reserved_slots,
+    torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
-    std::optional<torch::stable::Tensor> const& newest_indices,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,

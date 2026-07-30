@@ -166,14 +166,11 @@ __global__ void hisparse_swap_in_kernel(
     int32_t* __restrict__ compact_miss_globals,     // [num_rows, top_k]
     int32_t* __restrict__ compact_miss_hots,        // [num_rows, top_k]
     int32_t* __restrict__ compact_miss_counts,      // [num_rows]
-    const int32_t* __restrict__ newest_global,      // [num_rows] or nullptr
     int32_t* __restrict__ hot_indices,              // [num_rows, top_k]
     int32_t* __restrict__ attention_indices,        // [num_rows, top_k]
-    int32_t* __restrict__ miss_mask,       // [num_rows, top_k] or nullptr
-    int64_t* __restrict__ newest_indices,  // [num_rows] or nullptr
+    int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
-    int16_t* __restrict__ reserved_slots,         // [max_rows]
     unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t row_bytes,
@@ -203,9 +200,6 @@ __global__ void hisparse_swap_in_kernel(
         resolved_global_indices[index] = -1;
       }
     }
-    if (newest_indices != nullptr && threadIdx.x == 0) {
-      newest_indices[batch_row] = -1;
-    }
     if (valid_counts != nullptr && threadIdx.x == 0) {
       valid_counts[batch_row] = 0;
     }
@@ -218,10 +212,6 @@ __global__ void hisparse_swap_in_kernel(
   const int warp_id = tid / kWarpSize;
   const int lane_id = tid % kWarpSize;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
-
-  const int32_t newest_id =
-      (newest_global != nullptr) ? newest_global[batch_row] : -1;
-  const int16_t newest_slot = reserved_slots[state_row];
 
   const int32_t* row_topk =
       global_indices + static_cast<int64_t>(batch_row) * top_k;
@@ -243,18 +233,11 @@ __global__ void hisparse_swap_in_kernel(
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_hash_keys = s_evict_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_hash_keys + hash_size;
-  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 5);
+  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 4);
   int16_t* s_hash_vals = s_lru_out + hot_size;
 
-  if (tid < 5) {
+  if (tid < 4) {
     s_counters[tid] = 0;
-  }
-  if (newest_indices != nullptr && tid == 0) {
-    newest_indices[batch_row] =
-        (newest_slot >= 0 && newest_slot < region_stride)
-            ? get_physical_hot_row(hot_block_table, batch_row, hot_table_stride,
-                                   hot_block_size, newest_slot)
-            : -1;
   }
   for (int i = tid; i < hash_size; i += blockDim.x) {
     s_hash_keys[i] = kHashEmpty;
@@ -305,30 +288,19 @@ __global__ void hisparse_swap_in_kernel(
     if (resolved_global_indices != nullptr) {
       resolved_global_indices[static_cast<int64_t>(batch_row) * top_k + i] = g;
     }
-    if (g >= 0) atomicAdd(&s_counters[3], 1);
+    if (g >= 0) atomicAdd(&s_counters[2], 1);
     if (row_miss != nullptr) row_miss[i] = 0;
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
                       attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
-      atomicAdd(&s_counters[4], 1);
+      atomicAdd(&s_counters[3], 1);
     } else if (g < 0) {
       store_hot_index(row_out, row_attention, i, -1, hot_block_size,
                       attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
-    } else if (g == newest_id && newest_slot >= 0 &&
-               newest_slot < region_stride) {
-      // Newest token lives in the row currently reserved for this request.
-      store_hot_index(row_out, row_attention, i,
-                      static_cast<int32_t>(get_physical_hot_row(
-                          hot_block_table, batch_row, hot_table_stride,
-                          hot_block_size, newest_slot)),
-                      hot_block_size, attention_block_stride);
-      s_topk[i] = kTokenDone;
-      atomicAdd(&s_counters[1], 1);
-      atomicExch(&s_counters[2], 1);
     } else {
       int slot = hash_slot(g, hash_size);
       while (true) {
@@ -344,7 +316,7 @@ __global__ void hisparse_swap_in_kernel(
   }
   __syncthreads();
   if (valid_counts != nullptr && tid == 0) {
-    valid_counts[batch_row] = s_counters[3];
+    valid_counts[batch_row] = s_counters[2];
   }
   // Fully resident rows need only request-relative page translation. Avoid
   // scanning or rewriting the hot LRU when no selected row can consult it.
@@ -354,7 +326,7 @@ __global__ void hisparse_swap_in_kernel(
         compact_miss_counts[batch_row] = 0;
       }
       if (stats != nullptr) {
-        atomicAdd(&stats[0], static_cast<unsigned long long>(s_counters[4]));
+        atomicAdd(&stats[0], static_cast<unsigned long long>(s_counters[3]));
       }
     }
     return;
@@ -530,44 +502,24 @@ __global__ void hisparse_swap_in_kernel(
   if (compact_miss_counts != nullptr && tid == 0) {
     compact_miss_counts[batch_row] = total_misses;
   }
-  // A selected newest row joins the LRU without moving its bytes. The next
-  // evictable LRU row becomes the reserved destination for the following
-  // decode step. Newest consumes a top-k position without occupying the LRU,
-  // so this exchange candidate always exists.
-  if (tid == 0 && s_counters[2] != 0) {
-    const int16_t next_reserved = s_lru_out[hot_size - 1 - total_misses];
-    if (next_reserved >= 0 && next_reserved < region_stride &&
-        newest_slot >= 0 && newest_slot < region_stride) {
-      row_dgi[newest_slot] = newest_id;
-      row_dgi[next_reserved] = -1;
-      reserved_slots[state_row] = next_reserved;
-    } else {
-      s_counters[2] = 0;
-    }
-  }
-  __syncthreads();
-
   // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
   if (stats != nullptr && threadIdx.x == 0) {
     atomicAdd(&stats[0],
-              static_cast<unsigned long long>(total_hits + s_counters[4]));
+              static_cast<unsigned long long>(total_hits + s_counters[3]));
     atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
   }
 
   // Phase 4: write back the LRU order: stale evictables at the front,
-  // freshly loaded misses next, hits, then the admitted newest row at MRU.
+  // freshly loaded misses next, then hits at MRU.
   const int total_evictable = hot_size - total_hits;
-  const int remaining_evictable =
-      total_evictable - total_misses - s_counters[2];
+  const int remaining_evictable = total_evictable - total_misses;
   for (int i = tid; i < hot_size; i += blockDim.x) {
     if (i < remaining_evictable) {
-      row_lru[i] = s_lru_out[hot_size - 1 - total_misses - s_counters[2] - i];
+      row_lru[i] = s_lru_out[hot_size - 1 - total_misses - i];
     } else if (i < remaining_evictable + total_misses) {
       row_lru[i] = s_lru_out[hot_size - 1 - (i - remaining_evictable)];
-    } else if (i < hot_size - s_counters[2]) {
-      row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     } else {
-      row_lru[i] = newest_slot;
+      row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     }
   }
 
@@ -859,14 +811,12 @@ void hisparse_swap_in(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
     torch::stable::Tensor const& global_indices,
-    std::optional<torch::stable::Tensor> const& newest_global_indices,
     torch::stable::Tensor& hot_indices,
     torch::stable::Tensor& device_global_indices,
-    torch::stable::Tensor& lru_slots, torch::stable::Tensor& reserved_slots,
+    torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
-    std::optional<torch::stable::Tensor> const& newest_indices,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,
@@ -889,8 +839,7 @@ void hisparse_swap_in(
           hot_block_table.dim() == 2,
       "hot_block_table must be a 2D int32 CUDA tensor");
   STD_TORCH_CHECK(global_indices.is_cuda() && hot_indices.is_cuda() &&
-                      device_global_indices.is_cuda() && lru_slots.is_cuda() &&
-                      reserved_slots.is_cuda(),
+                      device_global_indices.is_cuda() && lru_slots.is_cuda(),
                   "index tensors must be on CUDA");
   STD_TORCH_CHECK(
       global_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
@@ -900,9 +849,8 @@ void hisparse_swap_in(
       device_global_indices.scalar_type() == torch::headeronly::ScalarType::Int,
       "device_global_indices must be int32");
   STD_TORCH_CHECK(
-      lru_slots.scalar_type() == torch::headeronly::ScalarType::Short &&
-          reserved_slots.scalar_type() == torch::headeronly::ScalarType::Short,
-      "lru_slots/reserved_slots must be int16");
+      lru_slots.scalar_type() == torch::headeronly::ScalarType::Short,
+      "lru_slots must be int16");
   STD_TORCH_CHECK(global_indices.dim() == 2 && global_indices.is_contiguous(),
                   "global_indices must be contiguous 2D");
   STD_TORCH_CHECK(hot_indices.size(0) == global_indices.size(0) &&
@@ -917,12 +865,6 @@ void hisparse_swap_in(
           lru_slots.size(0) == device_global_indices.size(0) &&
           lru_slots.is_contiguous(),
       "lru_slots must be contiguous with one row per request state");
-  STD_TORCH_CHECK(
-      reserved_slots.dim() == 1 &&
-          reserved_slots.numel() == device_global_indices.size(0) &&
-          reserved_slots.is_contiguous(),
-      "reserved_slots must be contiguous with one entry per request state");
-
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
@@ -939,11 +881,9 @@ void hisparse_swap_in(
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
   const auto hot_size = static_cast<int32_t>(lru_slots.size(1));
   STD_TORCH_CHECK(hot_size >= top_k, "hot buffer size must be >= top_k");
-  const bool uses_resident_pages = resident_block_table.has_value();
-  STD_TORCH_CHECK(hot_size <= (uses_resident_pages ? 32768 : 32767),
-                  "hot buffer size must fit int16 slots");
-  STD_TORCH_CHECK(region_stride == hot_size + (uses_resident_pages ? 0 : 1),
-                  "region_stride must match the LRU and optional reserved row");
+  STD_TORCH_CHECK(hot_size <= 32768, "hot buffer size must fit int16 slots");
+  STD_TORCH_CHECK(region_stride == hot_size,
+                  "region_stride must match the LRU size");
   STD_TORCH_CHECK(device_global_indices.size(1) == region_stride,
                   "device_global_indices must cover the full hot region");
   STD_TORCH_CHECK(device_global_indices.size(0) >= num_rows,
@@ -1061,17 +1001,6 @@ void hisparse_swap_in(
     compact_miss_counts_ptr = counts.mutable_data_ptr<int32_t>();
   }
 
-  const int32_t* newest_ptr = nullptr;
-  if (newest_global_indices.has_value()) {
-    auto const& newest = newest_global_indices.value();
-    STD_TORCH_CHECK(
-        newest.is_cuda() &&
-            newest.scalar_type() == torch::headeronly::ScalarType::Int &&
-            newest.numel() >= num_rows && newest.is_contiguous(),
-        "newest_global_indices must be contiguous int32 on CUDA");
-    newest_ptr = newest.const_data_ptr<int32_t>();
-  }
-
   const int32_t* request_state_ptr = nullptr;
   if (request_state_indices.has_value()) {
     auto const& state_indices = request_state_indices.value();
@@ -1098,17 +1027,6 @@ void hisparse_swap_in(
         "miss_mask must be a contiguous int32 CUDA tensor matching "
         "global_indices");
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
-  }
-
-  int64_t* newest_indices_ptr = nullptr;
-  if (newest_indices.has_value()) {
-    auto const& indices = newest_indices.value();
-    STD_TORCH_CHECK(
-        indices.is_cuda() &&
-            indices.scalar_type() == torch::headeronly::ScalarType::Long &&
-            indices.numel() >= num_rows && indices.is_contiguous(),
-        "newest_indices must be contiguous int64 on CUDA");
-    newest_indices_ptr = indices.mutable_data_ptr<int64_t>();
   }
 
   unsigned long long* stats_ptr = nullptr;
@@ -1146,7 +1064,7 @@ void hisparse_swap_in(
   const int hash_size = 2 * top_k;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 5) +
+      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 4) +
       sizeof(int16_t) * (hot_size + hash_size);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1167,12 +1085,10 @@ void hisparse_swap_in(
       global_indices.const_data_ptr<int32_t>(), request_ids_ptr,
       source_block_table_ptr, resident_block_table_ptr,
       resolved_global_indices_ptr, valid_counts_ptr, compact_miss_globals_ptr,
-      compact_miss_hots_ptr, compact_miss_counts_ptr, newest_ptr,
+      compact_miss_hots_ptr, compact_miss_counts_ptr,
       hot_indices.mutable_data_ptr<int32_t>(), attention_indices_ptr,
-      miss_mask_ptr, newest_indices_ptr,
-      device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(),
-      reserved_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
+      miss_mask_ptr, device_global_indices.mutable_data_ptr<int32_t>(),
+      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
       host_rows, row_bytes, hot_block_stride, hot_block_table.stride(0),
       hot_block_size, top_k, hot_size, hash_size, region_stride,
       attention_block_stride, source_bt_stride, source_num_reqs,

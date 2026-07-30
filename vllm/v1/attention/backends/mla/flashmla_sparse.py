@@ -626,8 +626,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                # Mixed-batch writes put newest rows in host memory, so they
-                # must resolve as misses during swap-in.
                 hot_cache, decode_topk, decode_topk_length = self._hisparse_swap_in(
                     kv_c_and_k_pe_cache,
                     topk_indices,
@@ -689,11 +687,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         decode_topk: torch.Tensor | None = None
         use_hisparse = self.hisparse_coordinator is not None
         if use_hisparse and num_decode_tokens > 0:
-            # Swap-in mode must match how do_kv_cache_update wrote this
-            # step's newest rows, which is decided by the batch composition
-            # (fp8_metadata counts), not by q: a mixed batch writes all rows
-            # to the host pool even when its prefill tokens run elsewhere,
-            # so the newest rows must resolve as misses.
             decode_cache, decode_topk = self._hisparse_swap_in(
                 kv_c_and_k_pe_cache,
                 topk_indices,
@@ -868,8 +861,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                # Mixed-batch writes put newest rows in host memory, so they
-                # must resolve as misses during swap-in.
                 decode_cache, decode_topk = self._hisparse_swap_in(
                     kv_c_and_k_pe_cache,
                     topk_indices,

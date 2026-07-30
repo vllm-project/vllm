@@ -59,14 +59,6 @@ class ResolvedHiSparseConfig:
     device_buffer_size: int
     host_pool_gib: float
 
-    @property
-    def lru_size(self) -> int:
-        return self.device_buffer_size
-
-    @property
-    def legacy_lru_size(self) -> int:
-        return self.device_buffer_size - 1
-
     def num_hot_blocks(self, block_size: int) -> int:
         return cdiv(self.device_buffer_size, block_size)
 
@@ -381,7 +373,6 @@ class _GroupPlan:
         "miss_global_indices",
         "miss_hot_indices",
         "miss_counts",
-        "newest_indices",
         "valid_counts",
     )
 
@@ -394,9 +385,6 @@ class _GroupPlan:
         )
         self.miss_hot_indices = torch.empty_like(self.miss_global_indices)
         self.miss_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
-        self.newest_indices = torch.full(
-            (max_rows,), -1, dtype=torch.int64, device=device
-        )
         self.valid_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
 
 
@@ -504,21 +492,12 @@ class HiSparseCoordinator:
             device=self.device,
         )
         lru_init = torch.arange(
-            config.legacy_lru_size, dtype=torch.int16, device=self.device
+            self.region_stride, dtype=torch.int16, device=self.device
         )
         self._lru_init: torch.Tensor | None = lru_init
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
-        self.reserved_slots: torch.Tensor | None = torch.full(
-            (max_num_reqs,),
-            config.legacy_lru_size,
-            dtype=torch.int16,
-            device=self.device,
-        )
-        self._newest_slots = torch.empty(
-            max_num_reqs, dtype=torch.int64, device=self.device
-        )
         self.request_state_indices = torch.arange(
             max_num_reqs, dtype=torch.int32, device=self.device
         )
@@ -566,7 +545,6 @@ class HiSparseCoordinator:
         _STATE.coordinators.remove(self)
         self.device_global_indices = None
         self.lru_slots = None
-        self.reserved_slots = None
         self._lru_init = None
 
     def hot_cache_paged(self, block_size: int) -> torch.Tensor:
@@ -640,13 +618,6 @@ class HiSparseCoordinator:
         self.resident_cache = resident
         self.resident_group_id = group_id
         self.resident_block_size = block_size
-        if self.lru_slots is not None and self.lru_slots.shape[1] != self.region_stride:
-            self._lru_init = torch.arange(
-                self.region_stride, dtype=torch.int16, device=self.device
-            )
-            self.lru_slots = self._lru_init.repeat(self.max_num_reqs, 1).contiguous()
-            assert self.reserved_slots is not None
-            self.reserved_slots.fill_(-1)
 
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         flat = kv_cache.view(-1, kv_cache.shape[-1])
@@ -761,16 +732,9 @@ class HiSparseCoordinator:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         if self.device_global_indices is None:
             return
-        assert (
-            self.lru_slots is not None
-            and self.reserved_slots is not None
-            and self._lru_init is not None
-        )
+        assert self.lru_slots is not None and self._lru_init is not None
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
-        self.reserved_slots.fill_(
-            -1 if self.resident_block_table is not None else self.config.legacy_lru_size
-        )
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         assert self.device_global_indices is not None
@@ -808,11 +772,11 @@ class HiSparseCoordinator:
 
     def prepare_deferred_backup(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the static tensors needed by the all-layer backup plan."""
         assert self.hot_cache is not None and self._host_cache is not None
         self.defer_newest_backup = not self.eager_host_mirror
-        return self.hot_cache, self._newest_slots, self._host_cache
+        return self.hot_cache, self._host_cache
 
     # ------------------------------------------------------- newest-token path
 
@@ -833,7 +797,7 @@ class HiSparseCoordinator:
         if kv_cache.numel() == 0:
             return
         self.bind_source_cache(kv_cache)
-        assert self.hot_cache is not None and self.hot_block_table is not None
+        assert self.hot_cache is not None and self.resident_slot_mapping is not None
         # Pad clamp: the forward can run more rows than the scheduler
         # produced (DP alignment pads to a peer's batch, eager/PIECEWISE pads
         # to a capture size) while slot_mapping stays unpadded. Real rows are
@@ -844,38 +808,21 @@ class HiSparseCoordinator:
         if num_tokens == 0:
             return
         global_slots = slot_mapping[:num_tokens].to(torch.int64)
-        newest_slots = self._newest_slots[:num_tokens]
-        concat_kwargs = {}
-        if self.resident_slot_mapping is not None:
-            newest_slots.copy_(self.resident_slot_mapping[:num_tokens])
-            concat_slot_mapping = newest_slots
-        elif self.leader is not None:
-            newest_slots = self._plan.newest_indices[:num_tokens]
-            concat_slot_mapping = newest_slots
-        else:
-            assert self.reserved_slots is not None
-            concat_slot_mapping = global_slots
-            concat_kwargs = {
-                "hot_block_table": self.hot_block_table,
-                "reserved_slots": self.reserved_slots,
-                "request_state_indices": self.request_state_indices[:num_tokens],
-                "resolved_slots": newest_slots,
-            }
+        resident_slots = self.resident_slot_mapping[:num_tokens]
 
         # The cache-update kernel skips -1 slots introduced by graph padding.
         ops.concat_and_cache_mla(
             kv_c_normed[:num_tokens],
             k_pe[:num_tokens].squeeze(1),
             self.hot_cache,
-            concat_slot_mapping,
+            resident_slots,
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
-            **concat_kwargs,
         )
         if not self.defer_newest_backup:
             self._backup_rows(
                 self.hot_cache,
-                newest_slots,
+                resident_slots,
                 global_slots,
             )
         # Recycled-slot hygiene is handled at block-assignment time. The KV
@@ -958,7 +905,6 @@ class HiSparseCoordinator:
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         block_size: int,
-        slot_mapping: torch.Tensor | None,
         return_valid_counts: bool = False,
         produce_plan: bool = False,
     ) -> (
@@ -977,28 +923,14 @@ class HiSparseCoordinator:
 
         relative_indices = topk_indices[:num_tokens].contiguous()
 
-        # Supply the global identity of rows written by this step. Production
-        # coordinators resolve them through the resident block table; legacy
-        # standalone coordinators may still use their reserved hot row. With
-        # no slot mapping, mixed-batch rows resolve like any other host entry.
-        # Shared-layer prefetch is gated off in that case because those host
-        # writes may not yet have been enqueued for every layer.
-        newest_global = (
-            slot_mapping[:num_tokens].to(torch.int32).contiguous()
-            if slot_mapping is not None
-            else None
-        )
-
         if produce_plan:
             hot_indices = self._plan.hot_indices[:num_tokens]
-            newest_indices = self._plan.newest_indices[:num_tokens]
             valid_counts = self._plan.valid_counts[:num_tokens]
             compact_miss_globals = self._plan.miss_global_indices[:num_tokens]
             compact_miss_hots = self._plan.miss_hot_indices[:num_tokens]
             compact_miss_counts = self._plan.miss_counts[:num_tokens]
         else:
             hot_indices = self._hot_indices[:num_tokens]
-            newest_indices = None
             valid_counts = (
                 self._valid_counts[:num_tokens] if return_valid_counts else None
             )
@@ -1015,15 +947,12 @@ class HiSparseCoordinator:
             self.hot_cache,
             self.hot_block_table,
             relative_indices,
-            newest_global,
             hot_indices,
             self.device_global_indices,
             self.lru_slots,
-            self.reserved_slots,
             self.request_state_indices,
             self.region_stride,
             None,
-            newest_indices,
             self._swap_stats,
             attention_indices,
             self.attention_block_stride,
@@ -1041,11 +970,7 @@ class HiSparseCoordinator:
         )
 
         if produce_plan and self.group_shared:
-            if slot_mapping is not None:
-                self._prefetch_group(num_tokens)
-            else:
-                for shared in self.group_shared:
-                    shared._prefetch_event = None
+            self._prefetch_group(num_tokens)
 
         if not return_valid_counts:
             return self.hot_cache_paged(block_size), attention_indices
@@ -1147,7 +1072,7 @@ def create_hisparse_coordinator(
         "max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,
-        config.lru_size,
+        config.device_buffer_size,
         config.host_pool_gib,
         max_num_reqs,
     )
