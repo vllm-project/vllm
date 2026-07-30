@@ -1883,7 +1883,10 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
-        self.running = False
+        # The request thread is left to its blocking recv: closing the socket
+        # under it does not raise, so ``running`` cannot be observed and the
+        # thread is not joinable here. It is a daemon, so it dies with the
+        # process. Draining it cleanly needs a polling loop (follow-up).
         self.socket.close(linger=0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
