@@ -33,19 +33,14 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
     pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
+    Before use vLLM CPU installed via wheels, make Intel OpenMP is added to `LD_PRELOAD`:
     ```bash
-    # install TCMalloc, Intel OpenMP is installed with vLLM CPU
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
-
     # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
     sudo find / -iname *libiomp5.so
-    TC_PATH=...
     IOMP_PATH=...
 
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
+    # add it to LD_PRELOAD
+    export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
     ```
 
 #### Install the latest code
@@ -131,7 +126,7 @@ uv pip install dist/*.whl
     ```
 
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
+    Before using vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
     ```bash
     # install TCMalloc, Intel OpenMP is installed with vLLM CPU
     sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
