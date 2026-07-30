@@ -17,7 +17,6 @@ from tests.utils import (
     multi_gpu_marks,
     multi_gpu_only,
     single_gpu_only,
-    wait_for_rocm_memory_to_settle,
 )
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
@@ -452,6 +451,7 @@ def test_speculators_model_integration(
 
 
 def _run_eagle_correctness(
+    vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
@@ -514,29 +514,29 @@ def _run_eagle_correctness(
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
-        ref_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
+            # Preserve LLM defaults; VllmRunner provides lifecycle cleanup.
+            trust_remote_code=False,
             max_model_len=max_model_len,
             # Keep ref/spec batch geometry aligned so exact-output comparison
             # isolates speculative decoding.
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
             tensor_parallel_size=tp_size,
+            block_size=None,
             attention_config=attention_config,
-        )
-        evaluate_llm_for_gsm8k(
-            ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-        del ref_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so the spec engine started right after
-        # does not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle()
+            # Avoid VllmRunner's reduced test-only CUDA graph capture sizes.
+            compilation_config=CompilationConfig(),
+        ) as ref_runner:
+            evaluate_llm_for_gsm8k(
+                ref_runner.llm,
+                expected_accuracy_threshold=expected_accuracy_threshold,
+            )
+            ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
-        spec_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
@@ -548,32 +548,31 @@ def _run_eagle_correctness(
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
+            block_size=None,
             model_impl=model_impl,
             attention_config=attention_config,
-        )
-        # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
-        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-        evaluate_llm_for_gsm8k(
-            spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
+            compilation_config=CompilationConfig(),
+        ) as spec_runner:
+            # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
+            assert (
+                spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+            )
+            evaluate_llm_for_gsm8k(
+                spec_runner.llm,
+                expected_accuracy_threshold=expected_accuracy_threshold,
+            )
+            spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
+            matches = 0
+            misses = 0
+            for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+                if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                    matches += 1
+                else:
+                    misses += 1
+                    print(f"ref_output: {ref_output.outputs[0].text}")
+                    print(f"spec_output: {spec_output.outputs[0].text}")
 
-        assert matches > int(0.6 * len(ref_outputs))
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
-        # not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle()
+            assert matches > int(0.6 * len(ref_outputs))
 
 
 @single_gpu_only
@@ -607,6 +606,7 @@ def _run_eagle_correctness(
 )
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 def test_eagle_correctness_light(
+    vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
@@ -617,6 +617,7 @@ def test_eagle_correctness_light(
     attn_backend: str,
 ):
     _run_eagle_correctness(
+        vllm_runner,
         monkeypatch,
         sampling_config,
         model_setup,
@@ -710,6 +711,7 @@ def test_eagle_correctness_light(
 )
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 def test_eagle_correctness_medium(
+    vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
@@ -720,6 +722,7 @@ def test_eagle_correctness_medium(
     attn_backend: str,
 ):
     _run_eagle_correctness(
+        vllm_runner,
         monkeypatch,
         sampling_config,
         model_setup,
@@ -786,6 +789,7 @@ def test_eagle_correctness_medium(
 )
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 def test_eagle_correctness_heavy(
+    vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
@@ -796,6 +800,7 @@ def test_eagle_correctness_heavy(
     attn_backend: str,
 ):
     _run_eagle_correctness(
+        vllm_runner,
         monkeypatch,
         sampling_config,
         model_setup,
