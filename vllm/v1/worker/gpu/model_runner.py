@@ -351,10 +351,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
-                if self.model_config.enable_return_sampling_mask:
-                    raise ValueError(
-                        "sampling distribution replay does not support custom samplers"
-                    )
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
