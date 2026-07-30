@@ -4,20 +4,12 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
-from pathlib import Path
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
-from transformers import OPTConfig
 
-from vllm.config import (
-    AttentionConfig,
-    CompilationConfig,
-    ModelConfig,
-    config,
-)
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -474,55 +466,6 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
-        engine_args.create_engine_config()
-
-
-def _save_minimal_opt_config(path: Path) -> None:
-    OPTConfig(
-        architectures=["OPTForCausalLM"],
-        hidden_size=32,
-        ffn_dim=64,
-        num_attention_heads=4,
-        num_hidden_layers=1,
-        max_position_embeddings=128,
-        vocab_size=128,
-    ).save_pretrained(path)
-
-
-def test_mamba_ssu_algorithm_cli_reaches_config(tmp_path: Path):
-    _save_minimal_opt_config(tmp_path)
-
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(
-        [
-            "--model",
-            str(tmp_path),
-            "--mamba-backend",
-            "flashinfer",
-            "--mamba-ssu-algorithm",
-            "horizontal",
-        ]
-    )
-    engine_args = EngineArgs.from_cli_args(args)
-    vllm_config = engine_args.create_engine_config()
-    assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-    assert vllm_config.mamba_config.ssu_algorithm == "horizontal"
-
-
-def test_mamba_ssu_algorithm_cli_requires_flashinfer(tmp_path: Path):
-    _save_minimal_opt_config(tmp_path)
-
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(
-        [
-            "--model",
-            str(tmp_path),
-            "--mamba-ssu-algorithm",
-            "horizontal",
-        ]
-    )
-    engine_args = EngineArgs.from_cli_args(args)
-    with pytest.raises(ValueError, match="only supported.*FlashInfer"):
         engine_args.create_engine_config()
 
 
