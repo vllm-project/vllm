@@ -457,11 +457,11 @@ def chunked_prefill_paged_decode(
         else:
             processed_block_table = block_table.to(torch.int32)
 
-        from vllm.platforms.rocm import on_gfx12x
+        from vllm.platforms.rocm import on_gfx1x
 
-        # Split kv is currently only tuned for gfx12x with head dim 256.
+        # Split kv is currently only tuned for gfx1x with head dim 256.
         use_splitkv_decode = (
-            on_gfx12x()
+            on_gfx1x()
             and query.dtype in (torch.float16, torch.bfloat16)
             and head_size == 256
             and not use_alibi_slopes
@@ -796,8 +796,9 @@ def _num_splits_heuristic(
 
     Use FlashAttention's wave-efficiency heuristic: pick the smallest eligible
     split whose wave efficiency (n_waves / ceil(n_waves)) is within 85% of the
-    maximum achievable.  On gfx12 torch reports WGPs while rocprof reports CUs,
-    so target two workgroups per reported processor.
+    maximum achievable.  On gfx1x torch reports WGPs while rocprof reports CUs
+    (gfx1201: 32 vs 64 CUs; gfx1100: 42 vs 84 CUs), so target two workgroups
+    per reported processor.
     """
     target_workgroups = 2 * num_sms
     if batch_nheads_mblocks >= 0.8 * target_workgroups:
