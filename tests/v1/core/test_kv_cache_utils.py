@@ -1413,6 +1413,9 @@ def test_get_max_concurrency_for_kv_cache_config():
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Pin to sync: SWA per-request bounds grow with overlapping batches.
         async_scheduling=False,
+        # Pin to 1 so the amortized in-flight share equals the full in-flight
+        # allowance and the block constants below stay exact.
+        max_num_seqs=1,
     )
 
     vllm_config = VllmConfig(
@@ -1556,6 +1559,9 @@ def test_get_max_concurrency_packed_kv_cache_config():
         max_model_len=model_config.max_model_len,
         is_encoder_decoder=model_config.is_encoder_decoder,
         async_scheduling=False,
+        # Pin to 1 so the amortized in-flight share equals the full in-flight
+        # allowance and the block constants below stay exact.
+        max_num_seqs=1,
     )
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -3052,3 +3058,67 @@ def test_drafter_layer_identification_requires_eagle_family():
         model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 4),
     )
     assert kv_cache_utils._identify_drafter_layers(config_draft_model, specs) == set()
+
+
+def test_sliding_window_pool_sizing_amortizes_in_flight_tokens():
+    """Pool sizing must not charge the global in-flight bound per request.
+
+    `VllmConfig.max_in_flight_tokens` bounds scheduled-but-unsettled tokens
+    across ALL requests, so per-request pool sizing charges
+    `sliding_window - 1` plus the request's share of that global allowance.
+    The admission gate (`max_admission_blocks_per_request`) keeps the full
+    allowance so one large prefill is still admitted.
+    """
+    spec = new_sliding_window_spec(block_size=16, sliding_window=512)
+    max_in_flight = 32768
+    max_num_seqs = 16
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        model_config=SimpleNamespace(max_model_len=65536),
+        max_in_flight_tokens=max_in_flight,
+    )
+
+    amortized_tokens = 512 - 1 + max_in_flight // max_num_seqs
+    expected_blocks = amortized_tokens // 16 + (amortized_tokens % 16 > 0) + 1
+    assert spec.max_memory_usage_bytes(config) == (
+        expected_blocks * spec.page_size_bytes
+    )
+
+    # The admission gate still uses the full allowance.
+    full_tokens = 512 - 1 + max_in_flight
+    assert (
+        spec.max_admission_blocks_per_request(
+            max_in_flight_tokens=max_in_flight, max_model_len=65536
+        )
+        == full_tokens // 16 + (full_tokens % 16 > 0) + 1
+    )
+
+
+def test_chunked_local_pool_sizing_amortizes_in_flight_tokens():
+    """Same amortization contract as SlidingWindowSpec, for chunked local."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float32,
+        attention_chunk_size=512,
+    )
+    max_in_flight = 32768
+    max_num_seqs = 16
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        model_config=SimpleNamespace(max_model_len=65536),
+        max_in_flight_tokens=max_in_flight,
+    )
+
+    amortized_tokens = 512 + max_in_flight // max_num_seqs
+    expected_blocks = amortized_tokens // 16 + (amortized_tokens % 16 > 0)
+    assert spec.max_memory_usage_bytes(config) == (
+        expected_blocks * spec.page_size_bytes
+    )
+
+    full_tokens = 512 + max_in_flight
+    assert spec.max_admission_blocks_per_request(
+        max_in_flight_tokens=max_in_flight, max_model_len=65536
+    ) == full_tokens // 16 + (full_tokens % 16 > 0)
