@@ -68,6 +68,10 @@ class CPUAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
         encoder-only and encoder-decoder attention."""

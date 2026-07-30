@@ -49,6 +49,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         kv_cache = (
             kv_cache.view(self.kv_cache_fp8_dtype) if self.use_fp8_kv else kv_cache
         )
+        k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
+        v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
         # Decode [:nd]: Triton split-K placeholder (no MSA decode yet).
         if main_md.num_decodes > 0:
@@ -64,6 +66,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
@@ -79,8 +83,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             # strided view directly (topK stays innermost-contiguous).
             prefill_topk = topk[nd:num_tokens].transpose(0, 1)
             qp = q[nd:]
-            k_cache = kv_cache[:, 0].transpose(1, 2)
-            v_cache = kv_cache[:, 1].transpose(1, 2)
+            k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             k2q_row_ptr, k2q_q_indices, schedule = build_k2q_csr(
                 prefill_topk,
                 p.cu_seqlens_q,

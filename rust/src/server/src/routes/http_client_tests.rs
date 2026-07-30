@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Integration tests that exercise the OpenAI-compatible HTTP API through a
 //! real TCP connection using the `async-openai` client library, backed by a
 //! mock engine.
@@ -100,6 +103,7 @@ fn request_output(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,

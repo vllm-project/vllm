@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror::Error;
-use thiserror_ext::Macro;
+use thiserror_ext::{AsReport as _, Macro};
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -18,6 +21,8 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error("`{modality}` input is not supported by this model")]
+    UnsupportedModality { modality: String },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -80,8 +85,36 @@ impl Error {
         match self {
             Self::PromptTooLong { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
+            Self::UnsupportedMultimodalRenderer
+            | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedModality { .. } => true,
+
             _ => false,
         }
+    }
+}
+
+impl From<llm_multimodal::MediaConnectorError> for Error {
+    fn from(error: llm_multimodal::MediaConnectorError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::MultiModalError> for Error {
+    fn from(error: llm_multimodal::MultiModalError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::TransformError> for Error {
+    fn from(error: llm_multimodal::TransformError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::registry::ModelRegistryError> for Error {
+    fn from(error: llm_multimodal::registry::ModelRegistryError) -> Self {
+        Self::Multimodal(error.to_report_string())
     }
 }
 
