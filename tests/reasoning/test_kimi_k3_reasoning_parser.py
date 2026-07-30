@@ -9,7 +9,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
-from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.reasoning.kimi_k3_reasoning_parser import (
+    KimiK3ReasoningParser,
+    _hold_back_partial_marker,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -248,3 +251,73 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
+
+
+# The detokenizer renders K3's structural markers with interior spacing
+# ("<|close|> think <|sep|>" rather than "<|close|>think<|sep|>").  The
+# streaming hold-back must tolerate that, otherwise the marker is released
+# into visible text as soon as the space arrives and the already-streamed
+# content is re-derived once the trailing regex finally strips it.
+SPACED_THINK_CLOSE = f"{CLOSE} think {SEP}"
+SPACED_RESPONSE_OPEN = f"{OPEN} response {SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+
+
+def test_hold_back_withholds_spaced_complete_marker():
+    # A complete <|close|> whose <|sep|> has not arrived yet must be withheld
+    # in full, including the section name that follows the space.
+    assert _hold_back_partial_marker("answer <|close|> resp") == "answer "
+    assert _hold_back_partial_marker("answer <|close|>") == "answer "
+    assert _hold_back_partial_marker(f"answer {OPEN} response") == "answer "
+
+
+def test_hold_back_releases_terminated_marker():
+    # Once <|sep|> has arrived the marker is complete and nothing is pending;
+    # removing it is the caller's job, not the hold-back's.
+    text = f"a {SPACED_THINK_CLOSE} b"
+    assert _hold_back_partial_marker(text) == text
+
+
+def test_hold_back_still_buffers_incomplete_prefix():
+    # Original behaviour, preserved: a partial opener is buffered.
+    assert _hold_back_partial_marker("answer <|clo") == "answer "
+    assert _hold_back_partial_marker("answer <|") == "answer "
+
+
+def test_hold_back_leaves_plain_and_marker_like_text_alone():
+    assert _hold_back_partial_marker("hello world") == "hello world"
+    # A literal that merely looks like a marker is not a structural token and
+    # must reach the client untouched.
+    assert _hold_back_partial_marker("see <|test|> here") == "see <|test|> here"
+
+
+def test_streaming_spaced_close_marker_is_not_leaked_into_reasoning():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    previous_text = f"{THINK_OPEN}step"
+    # <|close|> arrives, then " think", then " <|sep|>" -- three deltas.
+    after_close = parser.extract_reasoning_content_streaming(
+        previous_text=previous_text,
+        current_text=previous_text + CLOSE,
+        delta_text=CLOSE,
+        previous_token_ids=[1, 2, 3, 9],
+        current_token_ids=[1, 2, 3, 9, 4],
+        delta_token_ids=[4],
+    )
+    after_name = parser.extract_reasoning_content_streaming(
+        previous_text=previous_text + CLOSE,
+        current_text=previous_text + f"{CLOSE} think",
+        delta_text=" think",
+        previous_token_ids=[1, 2, 3, 9, 4],
+        current_token_ids=[1, 2, 3, 9, 4, 2],
+        delta_token_ids=[2],
+    )
+
+    for delta in (after_close, after_name):
+        if delta is None:
+            continue
+        for field in (delta.content, getattr(delta, "reasoning", None)):
+            if field:
+                assert OPEN not in field
+                assert CLOSE not in field
+                assert SEP not in field

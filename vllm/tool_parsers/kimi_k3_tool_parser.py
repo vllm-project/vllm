@@ -61,7 +61,25 @@ _O, _C, _S = r"<\|open\|>", r"<\|close\|>", r"<\|sep\|>"
 _TEXT_UNTIL_SEP = r"(?:(?!" + _S + r").)*?"
 
 
+_UNTERMINATED_MARKER = re.compile(r"<\|(?:open|close)\|>(?:(?!" + _S + r").)*\Z", re.S)
+
+
 def _partial_tag_overlap(text: str, tag: str) -> int:
+    """Number of trailing characters that must be withheld from streaming.
+
+    The detokenizer renders markers with interior spacing
+    (``"<|close|> response <|sep|>"``), so prefix-matching the space-free
+    literal ``"<|close|>response<|sep|>"`` stops matching once the space
+    arrives and the marker leaks into visible text.  Withhold on two
+    conditions:
+
+    (a) a *complete* ``<|open|>``/``<|close|>`` whose ``<|sep|>`` has not
+        arrived yet -- the section name and separator are still in flight;
+    (b) an *incomplete* tag prefix at the very end (original behaviour).
+    """
+    m = _UNTERMINATED_MARKER.search(text)
+    if m is not None:
+        return len(text) - m.start()
     max_len = min(len(text), len(tag) - 1)
     for n in range(max_len, 0, -1):
         if text.endswith(tag[:n]):

@@ -15,7 +15,10 @@ from vllm.exceptions import VLLMValidationError
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
-from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+from vllm.tool_parsers.kimi_k3_tool_parser import (
+    KimiK3ToolParser,
+    _partial_tag_overlap,  # noqa: F401
+)
 
 OPEN = "<|open|>"
 CLOSE = "<|close|>"
@@ -598,3 +601,26 @@ def test_chat_params_keeps_template_tool_choice_when_api_auto():
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
     assert chat_params.tool_choice == "auto"
+
+
+def test_partial_tag_overlap_withholds_spaced_marker():
+    """The detokenizer spaces marker interiors; the hold-back must cope.
+
+    ``_partial_tag_overlap`` previously prefix-matched the space-free literal
+    ``"<|close|>response<|sep|>"``.  That match survives a bare ``<|close|>``
+    but breaks the moment the space arrives, releasing the marker into the
+    content channel.
+    """
+    response_close = "<|close|>response<|sep|>"
+
+    # Complete <|close|> with the section name in flight: withhold all of it.
+    assert _partial_tag_overlap("a <|close|> resp", response_close) == len(
+        "<|close|> resp"
+    )
+    assert _partial_tag_overlap("a <|close|>", response_close) == len("<|close|>")
+
+    # Terminated by <|sep|>: nothing is pending.
+    assert _partial_tag_overlap("a <|close|> response <|sep|> b", response_close) == 0
+
+    # Plain text is untouched.
+    assert _partial_tag_overlap("plain text", response_close) == 0

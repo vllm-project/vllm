@@ -47,6 +47,34 @@ def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     return -1
 
 
+_PARTIAL_MARKER_OPENERS = ("<|open|>", "<|close|>", "<|sep|>")
+_COMPLETE_OPEN_CLOSE = re.compile(r"<\|(?:open|close)\|>")
+
+
+def _hold_back_partial_marker(text: str) -> str:
+    """Return ``text`` minus any trailing fragment that may still be a marker.
+
+    The detokenizer renders K3's structural markers with interior spacing
+    (``"<|close|> response <|sep|>"``), so prefix-matching the space-free
+    literal ``"<|close|>response<|sep|>"`` stops matching as soon as the space
+    arrives and the marker is released into visible text.  Hold back on two
+    conditions instead:
+
+    (a) a *complete* ``<|open|>``/``<|close|>`` that is not yet terminated by
+        ``<|sep|>`` -- the section name and separator are still in flight;
+    (b) an *incomplete* marker prefix at the very end, which preserves the
+        original behaviour so ``"<|clo"`` is still buffered.
+    """
+    for m in _COMPLETE_OPEN_CLOSE.finditer(text):
+        if "<|sep|>" not in text[m.end() :]:
+            return text[: m.start()]
+    for cand in _PARTIAL_MARKER_OPENERS:
+        for n in range(min(len(cand) - 1, len(text)), 0, -1):
+            if text.endswith(cand[:n]):
+                return text[:-n]
+    return text
+
+
 class KimiK3ReasoningParser(ReasoningParser):
     """Reasoning parser for the Kimi K3 (XTML) think channel."""
 
@@ -253,14 +281,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         m_open = self._think_open_re.search(text)
         if m_open is not None:
             text = text[m_open.end() :]
-        overlap = 0
-        for marker in (self._think_open, self._think_close):
-            max_check = min(len(marker) - 1, len(text))
-            for n in range(max_check, 0, -1):
-                if text.endswith(marker[:n]):
-                    overlap = max(overlap, n)
-                    break
-        return text[:-overlap] if overlap else text
+        return _hold_back_partial_marker(text)
 
     def _content_ready_to_emit(self, text: str) -> str:
         """Return the content prefix that is safe to stream now.
@@ -280,18 +301,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         text = self._message_close_re.sub("", text)
 
         # Hold back partial markers at the end
-        overlap = 0
-        for marker in (
-            self._response_open,
-            self._response_close,
-            self._message_close,
-        ):
-            max_check = min(len(marker) - 1, len(text))
-            for n in range(max_check, 0, -1):
-                if text.endswith(marker[:n]):
-                    overlap = max(overlap, n)
-                    break
-        return text[:-overlap] if overlap else text
+        return _hold_back_partial_marker(text)
 
     def strip_content_streaming(
         self,
