@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 import torch.nn as nn
+from torch.profiler import record_function
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -32,8 +35,16 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.attention.ops.common import (
+    cp_lse_ag_out_rs,
+    cp_lse_vmm_out_gather,
+)
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
 from .kernels import fused_norm_rope, fused_q
+
+logger = init_logger(__name__)
+_logged_query_routes: set[tuple[str, int]] = set()
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -220,6 +231,7 @@ class DeepseekV32Attention(MLAAttention):
         # MTP/nextn layers always build a full indexer (they toggle at runtime).
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
+        dcp_output_vmm_workspace_slot = layer_id % 2
 
         # Build kv_b_proj + indexer first; they are passed to MLAAttention.__init__
         # (which runs nn.Module.__init__ and registers them).
@@ -266,6 +278,7 @@ class DeepseekV32Attention(MLAAttention):
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self._dcp_output_vmm_workspace_slot = dcp_output_vmm_workspace_slot
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -338,6 +351,48 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
+        self._dcp_query_vmm_max_rows = 0
+        if envs.VLLM_DCP_QUERY_VMM:
+            dcp_group = get_dcp_group()
+            if dcp_group.world_size > 1:
+                if not self._fp8_query:
+                    raise NotImplementedError(
+                        "The bounded DCP query VMM experiment requires the "
+                        "FlashInfer sparse FP8-query backend."
+                    )
+                from vllm.v1.attention.ops.dcp_query_vmm import (
+                    DEFAULT_MAX_ROWS,
+                    get_dcp_query_vmm_workspace,
+                )
+
+                get_dcp_query_vmm_workspace(
+                    DEFAULT_MAX_ROWS,
+                    num_local_heads,
+                    kv_lora_rank + qk_rope_head_dim,
+                    dcp_group.cpu_group,
+                    dcp_group.device,
+                )
+                self._dcp_query_vmm_max_rows = DEFAULT_MAX_ROWS
+        self._dcp_output_vmm_max_rows = 0
+        if envs.VLLM_DCP_OUTPUT_VMM:
+            dcp_group = get_dcp_group()
+            if dcp_group.world_size > 1:
+                from vllm.v1.attention.ops.dcp_output_vmm import (
+                    DEFAULT_MAX_ROWS,
+                    get_dcp_output_vmm_workspace,
+                )
+
+                # Consecutive layers alternate two fail-closed receive slots.
+                # Each consumer acquires the producer generation before use.
+                get_dcp_output_vmm_workspace(
+                    DEFAULT_MAX_ROWS,
+                    num_local_heads * dcp_group.world_size,
+                    kv_lora_rank,
+                    dcp_group.cpu_group,
+                    dcp_group.device,
+                    self._dcp_output_vmm_workspace_slot,
+                )
+                self._dcp_output_vmm_max_rows = DEFAULT_MAX_ROWS
 
     def forward(  # type: ignore[override]
         self,
@@ -451,10 +506,22 @@ class DeepseekV32Attention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        query_projection_heads = self.num_local_heads
+        q = self.q_b_proj(q_c)[0].view(
+            -1,
+            query_projection_heads,
+            self.qk_head_dim,
+        )
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = q_nope.transpose(0, 1)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
+        W_UK_T = self.W_UK_T
+        if W_UK_T is None or W_UK_T.shape[0] != query_projection_heads:
+            raise RuntimeError(
+                "NVIDIA DCP query projection and W_UK_T head geometry "
+                f"disagree: projection_heads={query_projection_heads}, "
+                f"W_UK_T_shape={None if W_UK_T is None else tuple(W_UK_T.shape)}."
+            )
+        ql_nope = torch.bmm(q_nope, W_UK_T).transpose(0, 1)
 
         if self.indexer is not None:
             index_q = self.indexer.wq_b(q_c)[0]
@@ -462,21 +529,68 @@ class DeepseekV32Attention(MLAAttention):
         else:
             index_q = None
 
-        index_q_fp8, index_weights_out, mqa_q = fused_q(
-            positions,
-            q_pe,
-            self.rotary_emb.cos_sin_cache,
-            index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
-            ql_nope,
-            self._q_scale,
-            index_weights,
-            indexer_softmax_scale,
-            indexer_n_head_scale,
-            has_indexer=has_indexer,
-            index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_query,
-        )
+        query_workspace = None
+        use_bounded_query_vmm = False
+        num_actual_for_query = 0
+        if attn_metadata is not None:
+            num_actual_for_query = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
+            is_decode_only_for_query = (
+                attn_metadata.num_prefills == 0  # type: ignore[attr-defined]
+                and attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+                == num_actual_for_query
+            )
+            use_bounded_query_vmm = (
+                self.impl.dcp_world_size > 1
+                and envs.VLLM_DCP_QUERY_VMM
+                and is_decode_only_for_query
+                and q_pe.shape[0] <= self._dcp_query_vmm_max_rows
+                and num_actual_for_query <= self._dcp_query_vmm_max_rows
+            )
+
+        mqa_q_out = None
+        if use_bounded_query_vmm:
+            from vllm.v1.attention.ops.dcp_query_vmm import (
+                DEFAULT_MAX_ROWS,
+                get_dcp_query_vmm_workspace,
+            )
+
+            dcp_group = get_dcp_group()
+            query_workspace = get_dcp_query_vmm_workspace(
+                DEFAULT_MAX_ROWS,
+                self.num_local_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                dcp_group.cpu_group,
+                dcp_group.device,
+            )
+            mqa_q_out = query_workspace.begin_publish(q_pe.shape[0])
+
+        with record_function(
+            "dcp.query_vmm.producer_fused_q"
+            if use_bounded_query_vmm
+            else "dcp.query_explicit.producer_fused_q"
+        ):
+            index_q_fp8, index_weights_out, mqa_q = fused_q(
+                positions,
+                q_pe,
+                self.rotary_emb.cos_sin_cache,
+                index_q,
+                self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+                ql_nope,
+                self._q_scale,
+                index_weights,
+                indexer_softmax_scale,
+                indexer_n_head_scale,
+                has_indexer=has_indexer,
+                index_rope_interleave=self._index_rope_interleave,
+                quantize_mqa=self._fp8_query,
+                mqa_q_out=mqa_q_out,
+            )
+        if use_bounded_query_vmm:
+            if query_workspace is None:
+                raise RuntimeError(
+                    "DCP query VMM producer completed without an initialized workspace."
+                )
+            query_workspace.finish_publish()
 
         if self.indexer is not None:
             sparse_attn_indexer(
@@ -500,6 +614,13 @@ class DeepseekV32Attention(MLAAttention):
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
+                # The fused NVIDIA path bypasses SparseAttnIndexer.forward_cuda,
+                # so forward the run-constant DCP geometry explicitly.
+                dcp_rank=self.indexer.indexer_op.dcp_rank,
+                dcp_world_size=self.indexer.indexer_op.dcp_world_size,
+                cp_kv_cache_interleave_size=(
+                    self.indexer.indexer_op.cp_kv_cache_interleave_size
+                ),
             )
 
         if attn_metadata is None:
@@ -519,9 +640,99 @@ class DeepseekV32Attention(MLAAttention):
             # FlashMLA sparse: bf16 (ql_nope, q_pe) tuple. mqa_q is the RoPE'd
             # q_pe; ql_nope is consumed directly.
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
-        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+        if self.impl.dcp_world_size > 1:
+            if self.use_pcp:
+                raise NotImplementedError(
+                    "The NVIDIA DeepSeek-v3.2/GLM-5.2 override does not yet "
+                    "support combined PCP and DCP attention."
+                )
+            if isinstance(mqa_q_arg, tuple):
+                mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
+            if use_bounded_query_vmm:
+                if query_workspace is None:
+                    raise RuntimeError(
+                        "DCP query VMM route selected without an initialized workspace."
+                    )
+                with record_function(
+                    f"dcp.query.route.vmm.decode.rows.{num_actual_for_query}"
+                ):
+                    mqa_q_arg = query_workspace.acquire_local_query(
+                        num_actual_for_query
+                    )
+            else:
+                # Each TP/DCP rank projects only its local query-head shard.
+                # Every DCP rank must evaluate all query heads against its
+                # owner-local KV shard before the output/LSE merge below.
+                route_key = ("explicit_all_gather", num_actual_for_query)
+                if route_key not in _logged_query_routes:
+                    _logged_query_routes.add(route_key)
+                    logger.info(
+                        "Executing DCP query AllGather for decode rows=%d "
+                        "(local_heads=%d, total_heads=%d).",
+                        num_actual_for_query,
+                        self.num_local_heads,
+                        self.num_local_heads * self.impl.dcp_world_size,
+                    )
+                with record_function("dcp.query.route.explicit_all_gather"):
+                    mqa_q_arg = get_dcp_group().all_gather(mqa_q_arg, dim=1)
+
+        attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
+        if use_bounded_query_vmm:
+            if query_workspace is None:
+                raise RuntimeError(
+                    "DCP query VMM consumer completed without an initialized workspace."
+                )
+            query_workspace.acknowledge()
+        if self.impl.dcp_world_size > 1:
+            if lse is None:
+                raise RuntimeError(
+                    "The NVIDIA DCP attention path requires per-head LSE from "
+                    "the sparse MLA backend."
+                )
+            dcp_group = get_dcp_group()
+            is_decode_only = (
+                attn_metadata.num_prefills == 0  # type: ignore[attr-defined]
+                and attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+                == num_actual
+            )
+            use_bounded_vmm = (
+                envs.VLLM_DCP_OUTPUT_VMM
+                and is_decode_only
+                and num_actual <= self._dcp_output_vmm_max_rows
+            )
+            if use_bounded_vmm:
+                with record_function(
+                    f"dcp.output_lse.route.vmm.decode.rows.{num_actual}"
+                ):
+                    attn_out = cp_lse_vmm_out_gather(
+                        attn_out,
+                        lse,
+                        dcp_group,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                        workspace_slot=self._dcp_output_vmm_workspace_slot,
+                    )
+            elif self.dcp_a2a:
+                attn_out = dcp_a2a_lse_reduce(
+                    attn_out,
+                    lse,
+                    dcp_group,
+                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                )
+            else:
+                route = (
+                    "explicit_ag_rs.non_bounded_shape"
+                    if envs.VLLM_DCP_OUTPUT_VMM
+                    else "explicit_ag_rs.baseline"
+                )
+                with record_function(f"dcp.output_lse.route.{route}"):
+                    attn_out = cp_lse_ag_out_rs(
+                        attn_out,
+                        lse,
+                        dcp_group,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                    )
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
