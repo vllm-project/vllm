@@ -13,23 +13,10 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.sampling_mask import SamplingMask
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class SamplingMask:
-    """CSR token support sets aligned with completion token IDs.
-
-    Args:
-        token_ids: Flattened token IDs from every support set.
-        offsets: Start offsets for each support set, including the final end
-            offset.
-    """
-
-    token_ids: GenericSequence[int]
-    offsets: GenericSequence[int]
 
 
 @dataclass
