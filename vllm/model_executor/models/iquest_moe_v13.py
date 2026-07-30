@@ -23,6 +23,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -48,12 +49,15 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -552,21 +556,35 @@ class IquestMoeModel(nn.Module):
 
         self.vocab_size = config.vocab_size
         self.config = config
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
-        self.norm = IquestMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = IquestMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size
+        )
 
         self.use_oe_embedding = vllm_config.model_config.get_enable_oe_embedding()
         if self.use_oe_embedding:
-            self.over_encoding = OEEmbedding(vllm_config.model_config)
+            if get_pp_group().is_first_rank:
+                self.over_encoding = OEEmbedding(vllm_config.model_config)
+            else:
+                self.over_encoding = PPMissingLayer()
         self.enable_sink_attention = getattr(config, "enable_sink_attention", False)
 
     def embed_input_ids(
@@ -582,22 +600,32 @@ class IquestMoeModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         oe_input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # TODO(yxing): support inputs_embeds later
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                assert input_ids is not None
+                hidden_states = self.embed_input_ids(
+                    input_ids, oe_input_ids=oe_input_ids
+                )
         else:
-            hidden_states = self.embed_input_ids(input_ids, oe_input_ids=oe_input_ids)
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
                 positions,
                 hidden_states,
             )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -631,10 +659,12 @@ class IquestMoeModel(nn.Module):
         # ('experts.w2_', 'experts.layer_idx.down_proj.', expert_idx, 'w2'),
         # ('experts.w13_', 'experts.layer_idx.up_proj.', expert_idx, 'w3')
         total_oe_heads = 0
-        if self.use_oe_embedding:
+        if self.use_oe_embedding and not isinstance(self.over_encoding, PPMissingLayer):
             total_oe_heads = self.over_encoding.get_oe_total_heads()
         oe_heads_counter = 0
         for name, loaded_weight in weights:
+            if is_pp_missing_parameter(name, self):
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -790,7 +820,7 @@ class IquestMoeModel(nn.Module):
         return loaded_params
 
 
-class IquestMoeV13ForCausalLM(nn.Module, SupportsLoRA):
+class IquestMoeV13ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -816,29 +846,41 @@ class IquestMoeV13ForCausalLM(nn.Module, SupportsLoRA):
             prefix=maybe_prefix(prefix, "model"),
             layer_type=layer_type,
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        if get_pp_group().is_last_rank:
+            if config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         oe_input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, inputs_embeds, oe_input_ids)
-        return hidden_states
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            oe_input_ids=oe_input_ids,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
