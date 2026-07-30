@@ -337,3 +337,42 @@ def test_extract_tool_calls_streaming_arguments_in_single_delta(jamba_tool_parse
                 streamed_arguments += arguments
 
     assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
+
+
+def test_extract_tool_calls_streaming_arguments_span_multiple_deltas(
+    jamba_tool_parser,
+):
+    """Arguments split across deltas must arrive whole, not truncated.
+
+    partial_json_parser closes the object optimistically, so the quote and brace
+    that end the arguments are produced by an early parse and then treated as
+    already streamed. The concatenated deltas used to stop at `{"city": "Paris`,
+    which is not parseable JSON.
+    """
+    body = '[{"name": "get_current_weather", "arguments": {"city": "Paris"}}]'
+    deltas = (
+        ["<tool_calls>"]
+        + [body[i : i + 6] for i in range(0, len(body), 6)]
+        + ["</tool_calls>"]
+    )
+
+    streamed_arguments = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = jamba_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.tool_calls:
+            arguments = delta_message.tool_calls[0].function.arguments
+            if arguments:
+                streamed_arguments += arguments
+
+    assert json.loads(streamed_arguments) == {"city": "Paris"}
