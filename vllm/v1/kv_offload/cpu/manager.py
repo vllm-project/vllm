@@ -362,30 +362,17 @@ class CPUOffloadingManager(OffloadingManager):
             )
             self.stores_skipped_in_current_batch = 0
 
-        # Per-policy cache effectiveness counters.
-        policy_label = (self._policy_name,)
         stats.increase_counter(
-            CPUOffloadingMetrics.CPU_BLOCK_LOOKUP,
-            self._lookups_delta,
-            labelvalues=policy_label,
+            CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, self._lookups_delta
         )
+        stats.increase_counter(CPUOffloadingMetrics.CPU_BLOCK_HIT, self._hits_delta)
+        stats.increase_counter(CPUOffloadingMetrics.CPU_BLOCK_MISS, self._misses_delta)
         stats.increase_counter(
-            CPUOffloadingMetrics.CPU_BLOCK_HIT,
-            self._hits_delta,
-            labelvalues=policy_label,
-        )
-        stats.increase_counter(
-            CPUOffloadingMetrics.CPU_BLOCK_MISS,
-            self._misses_delta,
-            labelvalues=policy_label,
-        )
-        stats.increase_counter(
-            CPUOffloadingMetrics.BLOCK_EVICTION,
-            self._evictions_delta,
-            labelvalues=policy_label,
+            CPUOffloadingMetrics.BLOCK_EVICTION, self._evictions_delta
         )
         self._lookups_delta = 0
         self._hits_delta = 0
         self._misses_delta = 0
         self._evictions_delta = 0
+
         return stats

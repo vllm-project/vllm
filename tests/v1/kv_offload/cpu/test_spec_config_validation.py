@@ -56,3 +56,17 @@ def test_get_manager_returns_sae_policy_when_selected():
 def test_default_policy_still_lru_when_not_specified():
     spec = CPUOffloadingSpec(_make_offloading_config({}))
     assert spec.eviction_policy == "lru"
+
+
+def test_build_metric_definitions_includes_four_counters():
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    definitions = CPUOffloadingSpec.build_metric_definitions({})
+    for name in (
+        CPUOffloadingMetrics.CPU_BLOCK_LOOKUP,
+        CPUOffloadingMetrics.CPU_BLOCK_HIT,
+        CPUOffloadingMetrics.CPU_BLOCK_MISS,
+        CPUOffloadingMetrics.BLOCK_EVICTION,
+    ):
+        assert name in definitions
+        assert definitions[name].labelnames == ()
