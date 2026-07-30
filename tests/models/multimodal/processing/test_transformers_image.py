@@ -119,7 +119,7 @@ def test_image_cached_apply_gemma3():
 
     image = ImageAsset("cherry_blossom").pil_image
     image_token = mm_processor.info.get_hf_processor().boi_token
-    prompt = f"{image_token}\nWhat is the content of this image?"
+    prompt = f"{image_token} What is the content of this image?"
 
     for _ in range(2):
         result = mm_processor(

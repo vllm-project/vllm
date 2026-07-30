@@ -379,7 +379,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
-        self._add_placeholder_ids(processed_data, mm_data)
+        self._add_placeholder_ids(processed_data)
         images = mm_data.get("images")
         if images is not None and self.info._is_image_model():
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -397,37 +397,20 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
         return processed_data
 
-    def _add_placeholder_ids(
-        self, processed_data: "BatchFeature", mm_data: Mapping[str, object]
-    ) -> None:
-        # We can infer vLLM style placeholders from replacement offsets, or token runs
+    def _add_placeholder_ids(self, processed_data: "BatchFeature") -> None:
         offsets = processed_data.pop("text_replacement_offsets", None)
+        if not offsets:
+            raise RuntimeError(
+                "Expected the processor to return prompt replacement offsets, "
+                "but instead found none! Make sure the implementation of "
+                f"{type(self.info.get_hf_processor()).__name__} supports "
+                "`return_text_replacement_offsets`."
+            )
         tokenizer = self.info.get_tokenizer()
         repl_ids: dict[str, list[list[int]]] = {}
-        if offsets:
-            for off in offsets[0]:
-                ids = tokenizer.encode(off["replacement"], add_special_tokens=False)
-                repl_ids.setdefault(off["type"], []).append(ids)
-        input_ids = processed_data.get("input_ids")
-        processor_keys = {"image": "images", "audio": "audio"}
-        if input_ids is not None:
-            prompt_ids = torch.as_tensor(input_ids[0])
-            for modality, token_id in self._placeholder_token_ids().items():
-                if modality in repl_ids or processor_keys[modality] not in mm_data:
-                    continue
-                runs = self._token_run_lengths(prompt_ids, token_id)
-                if not runs:
-                    continue
-                num_items = len(mm_data[processor_keys[modality]])
-                if len(runs) != num_items:
-                    raise RuntimeError(
-                        f"Expected there to be {num_items} prompt placeholders "
-                        f"corresponding to {num_items} {modality} items, but "
-                        f"instead found {len(runs)} prompt placeholders! "
-                        "Make sure the processor emits replacement offsets; token "
-                        "runs do not map one-to-one to items."
-                    )
-                repl_ids[modality] = [[token_id] * run for run in runs]
+        for off in offsets[0]:
+            ids = tokenizer.encode(off["replacement"], add_special_tokens=False)
+            repl_ids.setdefault(off["type"], []).append(ids)
         for modality, per_item in repl_ids.items():
             processed_data[f"{modality}_placeholder_ids"] = torch.tensor(
                 [i for ids in per_item for i in ids]
@@ -448,17 +431,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         if self.info._is_image_model():
             tokens["image"] = self.info._get_image_token_id()
         return tokens
-
-    @staticmethod
-    def _token_run_lengths(prompt_ids: torch.Tensor, token_id: int) -> list[int]:
-        is_match = prompt_ids == token_id
-        if not is_match.any():
-            return []
-        padded = torch.cat([torch.tensor([False]), is_match, torch.tensor([False])])
-        transitions = padded.int().diff()
-        starts = torch.where(transitions == 1)[0]
-        ends = torch.where(transitions == -1)[0]
-        return (ends - starts).tolist()
 
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
