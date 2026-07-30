@@ -40,6 +40,11 @@ def test_sampling_params_trace_field_rejects_empty_list():
         SamplingParams(trace_decode_token_ids=[])
 
 
+def test_sampling_params_trace_field_requires_single_output():
+    with pytest.raises(ValueError, match="requires n=1"):
+        SamplingParams(n=2, trace_decode_token_ids=[1])
+
+
 @pytest.mark.parametrize("invalid_ids", [[-1, 5], [1, "2"]])
 def test_sampling_params_trace_field_rejects_invalid_token_ids(invalid_ids):
     with pytest.raises(ValueError, match="non-negative integers"):
@@ -72,6 +77,12 @@ def test_validate_trace_decode_token_ids_noop_when_unset():
     params = SamplingParams(max_tokens=4)
     # Should not raise when the field is unset.
     params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+
+
+def test_trace_decode_token_ids_rejects_speculative_decoding():
+    params = SamplingParams(trace_decode_token_ids=[1])
+    with pytest.raises(ValueError, match="not supported with speculative decoding"):
+        params._validate_spec_decode(object())
 
 
 # ---------------------------------------------------------------------------
