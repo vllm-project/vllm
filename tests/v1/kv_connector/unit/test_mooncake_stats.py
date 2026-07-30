@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
+
+from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnector,
@@ -11,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
 
 
@@ -279,3 +284,93 @@ def test_expired_request_bumps_counter():
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
     assert "tid1" not in worker.reqs_need_send
+
+
+class _FakeMetric:
+    def __init__(self, **kwargs: Any):
+        self.kwargs = kwargs
+        self.children: list[_FakeMetric] = []
+        self.observed: list[int | float] = []
+        self.increments: list[int | float] = []
+        self.labelvalues: tuple[object, ...] = ()
+
+    def labels(self, *labelvalues: object) -> "_FakeMetric":
+        child = _FakeMetric(**self.kwargs)
+        child.labelvalues = labelvalues
+        self.children.append(child)
+        return child
+
+    def observe(self, value: int | float) -> None:
+        self.observed.append(value)
+
+    def inc(self, value: int | float = 1) -> None:
+        self.increments.append(value)
+
+
+class _FakeVllmConfig:
+    def __init__(self) -> None:
+        self.kv_transfer_config = SimpleNamespace()
+
+
+def test_mooncake_prom_metrics_observe():
+    prom_metrics = MooncakePromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    prom_metrics.observe(
+        {
+            "transfer_duration": [0.001, 0.002],
+            "bytes_transferred": [1024, 2048],
+            "num_descriptors": [4, 6],
+            "num_failed_transfers": [1],
+            "num_failed_recvs": [0],
+            "num_kv_expired_reqs": [1],
+        },
+        engine_idx=0,
+    )
+
+    assert prom_metrics.mooncake_histogram_xfer_time[0].observed == [0.001, 0.002]
+    assert prom_metrics.mooncake_histogram_bytes_transferred[0].observed == [1024, 2048]
+    assert prom_metrics.mooncake_histogram_num_descriptors[0].observed == [4, 6]
+    assert prom_metrics.counter_mooncake_num_failed_transfers[0].increments == [1]
+    assert prom_metrics.counter_mooncake_num_failed_recvs[0].increments == [0]
+    assert prom_metrics.counter_mooncake_num_kv_expired_reqs[0].increments == [1]
+
+
+def test_mooncake_prom_metrics_observe_empty_data():
+    prom_metrics = MooncakePromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    prom_metrics.observe(
+        {
+            "transfer_duration": [],
+            "bytes_transferred": [],
+            "num_descriptors": [],
+            "num_failed_transfers": [],
+            "num_failed_recvs": [],
+            "num_kv_expired_reqs": [],
+        },
+        engine_idx=0,
+    )
+
+    assert prom_metrics.mooncake_histogram_xfer_time[0].observed == []
+    assert prom_metrics.mooncake_histogram_bytes_transferred[0].observed == []
+    assert prom_metrics.mooncake_histogram_num_descriptors[0].observed == []
+    assert prom_metrics.counter_mooncake_num_failed_transfers[0].increments == []
+    assert prom_metrics.counter_mooncake_num_failed_recvs[0].increments == []
+    assert prom_metrics.counter_mooncake_num_kv_expired_reqs[0].increments == []
