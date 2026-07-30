@@ -4207,7 +4207,22 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                    return make_empty_encoder_model_runner_output(scheduler_output)
+                # Read ec_connector_output only after the context manager's
+                # __exit__ has run: that's what populates
+                # ec_connector_worker_meta (build_connector_worker_meta() is
+                # called in its finally block). Returning from inside the
+                # `with` would exit before that assignment lands, silently
+                # dropping the worker's completion report.
+                output = make_empty_encoder_model_runner_output(scheduler_output)
+                if (
+                    ec_connector_output is not None
+                    and not ec_connector_output.is_empty()
+                ):
+                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                        # Don't mutate the shared singleton in place.
+                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                    output.ec_connector_output = ec_connector_output
+                return output
 
             if not num_scheduled_tokens:
                 if (
