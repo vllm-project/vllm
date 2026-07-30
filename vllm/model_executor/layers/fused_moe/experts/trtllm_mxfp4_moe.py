@@ -15,6 +15,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -133,19 +137,16 @@ class TrtLlmMxfp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in (
             MoEActivation.SWIGLUOAI,
             MoEActivation.SILU,
-            MoEActivation.SITU,
         )
 
     @staticmethod
     def _flashinfer_activation_type(activation: MoEActivation) -> int:
-        from flashinfer.fused_moe.core import ActivationType
-
-        if activation == MoEActivation.SITU:
-            return ActivationType.Situ.value
-        return ActivationType.Swiglu.value
+        return activation_to_flashinfer_int(activation)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
