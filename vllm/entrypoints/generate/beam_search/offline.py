@@ -119,6 +119,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            # The search loop only consumes token IDs and logprob values; the
+            # per-beam text is decoded once at the end. Skipping detokenization
+            # avoids decoding the sampled and logprob-candidate tokens for every
+            # beam at every step (matches the online path).
+            detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
@@ -448,6 +453,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
                     else None
                 ),
+                detokenize=base_params.detokenize,
                 skip_clone=True,
             )
             result.append((beam_params, allowed_ids))
