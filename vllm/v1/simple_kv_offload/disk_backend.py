@@ -9,6 +9,7 @@ staging buffers to avoid contention.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import threading
@@ -62,8 +63,8 @@ class DiskBackend:
         self._load_params: BatchMemcpyParams | None = None
         self._load_stream: torch.cuda.Stream | None = None
         self._store_stream: torch.cuda.Stream | None = None
-        self._store_queue: queue.SimpleQueue | None = None
-        self._load_queue: queue.SimpleQueue | None = None
+        self._store_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._load_queue: queue.SimpleQueue = queue.SimpleQueue()
         self._store_thread: threading.Thread | None = None
         self._load_thread: threading.Thread | None = None
         self._shutdown: bool = False
@@ -143,9 +144,14 @@ class DiskBackend:
         )
 
         os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)
+        # Slot contents never outlive the process, so unlink then O_EXCL rather
+        # than reopening: a pre-existing file would otherwise keep its own
+        # (possibly world-readable) mode, and blocks may encode user prompts.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(disk_path)
         # O_DIRECT by default: page cache would consume the very host DRAM this
         # backend exists to conserve, and doubles the copy on the store path.
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         if not use_page_cache:
             flags |= O_DIRECT
         self._fd = os.open(disk_path, flags, 0o600)
@@ -162,8 +168,6 @@ class DiskBackend:
             use_page_cache,
         )
 
-        self._store_queue = queue.SimpleQueue()
-        self._load_queue = queue.SimpleQueue()
         self._store_thread = threading.Thread(
             target=self._store_loop,
             args=(device, store_stream),
@@ -187,24 +191,35 @@ class DiskBackend:
         wait_event: torch.Event | None = None,
     ) -> None:
         q = self._store_queue if is_store else self._load_queue
-        assert q is not None
         q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
 
     def shutdown(self) -> None:
         if self._shutdown:
             return
         self._shutdown = True
-        if self._store_queue is not None:
-            self._store_queue.put(None)
-        if self._load_queue is not None:
-            self._load_queue.put(None)
+        self._store_queue.put(None)
+        self._load_queue.put(None)
         if self._store_thread is not None:
             self._store_thread.join(timeout=10.0)
         if self._load_thread is not None:
             self._load_thread.join(timeout=10.0)
-        if self._fd >= 0:
-            os.close(self._fd)
-            self._fd = -1
+        if self._fd < 0:
+            return
+        # Closing under a still-running IO thread would let the fd number be
+        # reused by an unrelated open(), turning its next pwritev into a write
+        # into that file. Leaking one fd for the remaining process lifetime is
+        # the cheaper failure.
+        if any(
+            t is not None and t.is_alive()
+            for t in (self._store_thread, self._load_thread)
+        ):
+            logger.warning(
+                "IO thread still running after shutdown timeout; leaking fd %d",
+                self._fd,
+            )
+            return
+        os.close(self._fd)
+        self._fd = -1
 
     def _store_loop(
         self,
@@ -267,26 +282,25 @@ class DiskBackend:
         """GPU -> buffer (DMA) -> disk (pwritev), interleaved double-buffer."""
         assert self._store_params is not None
         n = self._num_buffer_slots
-        dma_events: list[torch.Event | None] = [None] * n
-        pending_writes: list[int | None] = [None] * n
+        # (DMA event, file offset) of the block already staged in each slot.
+        pending: list[tuple[torch.Event, int] | None] = [None] * n
 
         for i, (gpu_blk, disk_slot) in enumerate(zip(gpu_blocks, disk_slots)):
             buf_slot = i % n
-            if dma_events[buf_slot] is not None:
-                dma_events[buf_slot].synchronize()
-            if pending_writes[buf_slot] is not None:
-                self._writev_slot(buf_slot, pending_writes[buf_slot])
+            prev = pending[buf_slot]
+            if prev is not None:
+                prev[0].synchronize()
+                self._writev_slot(buf_slot, prev[1])
 
             copy_blocks([gpu_blk], [buf_slot], self._store_params)
             ev = torch.Event()
             ev.record(stream)
-            dma_events[buf_slot] = ev
-            pending_writes[buf_slot] = disk_slot * self._total_block_bytes
+            pending[buf_slot] = (ev, disk_slot * self._total_block_bytes)
 
-        for slot in range(n):
-            if dma_events[slot] is not None and pending_writes[slot] is not None:
-                dma_events[slot].synchronize()
-                self._writev_slot(slot, pending_writes[slot])
+        for slot, last in enumerate(pending):
+            if last is not None:
+                last[0].synchronize()
+                self._writev_slot(slot, last[1])
 
     def _do_load(
         self,
@@ -301,8 +315,9 @@ class DiskBackend:
 
         for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
             buf_slot = i % n
-            if prev_dma_events[buf_slot] is not None:
-                prev_dma_events[buf_slot].synchronize()
+            prev = prev_dma_events[buf_slot]
+            if prev is not None:
+                prev.synchronize()
 
             self._readv_slot(buf_slot, disk_slot * self._total_block_bytes)
 

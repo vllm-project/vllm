@@ -163,14 +163,15 @@ class SimpleCPUOffloadWorker:
         self.gpu_kv_caches = unique_gpu_caches
 
         if self.disk_mode:
-            self._init_disk_mode(unique_gpu_caches, total_bytes_per_block)
+            self._init_disk_mode(unique_gpu_caches, total_bytes_per_block, self.device)
         else:
-            self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block)
+            self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
 
     def _init_disk_mode(
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
+        device: torch.device,
     ) -> None:
         num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
         self.num_cpu_blocks = num_disk_slots
@@ -183,12 +184,11 @@ class SimpleCPUOffloadWorker:
         )
 
         assert self.disk_path is not None
-        local_rank = self.device.index or 0
-        rank_path = f"{self.disk_path}.rank_{local_rank}"
+        rank_path = f"{self.disk_path}.rank_{device.index or 0}"
         self._backend = DiskBackend()
         self._backend.init(
             unique_gpu_caches,
-            self.device,
+            device,
             self.load_stream,
             self.store_stream,
             rank_path,
@@ -202,6 +202,7 @@ class SimpleCPUOffloadWorker:
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
+        device: torch.device,
     ) -> None:
         logger.info(
             "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks (%.2f GB)",
@@ -229,9 +230,9 @@ class SimpleCPUOffloadWorker:
 
         self._backend = DmaCopyBackend()
         self._backend.init(
-            self.gpu_kv_caches,
+            unique_gpu_caches,
             self.cpu_kv_caches,
-            self.device,
+            device,
             self.load_stream,
             self.store_stream,
         )
@@ -275,8 +276,10 @@ class SimpleCPUOffloadWorker:
         # (1) Submit transfers
         metadata = self._connector_metadata
         if metadata is not None:
+            backend = self._backend
+            assert backend is not None
             if metadata.load_cpu_blocks:
-                self._backend.launch_copy(
+                backend.launch_copy(
                     metadata.load_cpu_blocks,
                     metadata.load_gpu_blocks,
                     is_store=False,
@@ -287,7 +290,7 @@ class SimpleCPUOffloadWorker:
                 if self._store_compute_done is None:
                     self._store_compute_done = torch.Event()
                 self._store_compute_done.record(torch.cuda.current_stream())
-                self._backend.launch_copy(
+                backend.launch_copy(
                     metadata.store_gpu_blocks,
                     metadata.store_cpu_blocks,
                     is_store=True,
