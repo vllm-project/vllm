@@ -33,6 +33,8 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/executor/
+  - vllm/distributed/device_communicators/ray_communicator.py
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
@@ -48,3 +50,4 @@ steps:
     - pytest -v -s -x lora/test_olmoe_tp.py
     - pytest -v -s -x lora/test_gptoss_tp.py
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+    - pytest -v -s -x lora/test_mixtral.py

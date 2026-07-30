@@ -23,3 +23,27 @@ steps:
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
+
+- label: Basic Correctness (Distributed)
+  key: basic-correctness-distributed
+  timeout_in_minutes: 30
+  device: a100
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/config/parallel.py
+  - vllm/distributed/device_communicators/ray_communicator.py
+  - vllm/v1/executor/
+  - vllm/v1/engine/llm_engine.py
+  - tests/basic_correctness/test_basic_correctness.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # NOTE: don't test llama model here, it seems hf implementation is buggy
+  # see https://github.com/vllm-project/vllm/pull/5689 for details
+  - TARGET_TEST_SUITE=A100 pytest -v -s basic_correctness/ -m 'distributed(num_gpus=2)'
+  mirror:
+    amd:
+      device: mi300_2
+      dind: false
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/ -m 'distributed(num_gpus=2)'

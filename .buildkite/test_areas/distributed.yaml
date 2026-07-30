@@ -197,20 +197,30 @@ steps:
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
-- label: Distributed Tests (4xA100)
-  key: distributed-tests-4xa100
+- label: Distributed Custom All-Reduce Tests
+  key: distributed-custom-all-reduce
   device: a100
-  optional: true
-  num_devices: 4
+  num_devices: 2
   source_file_dependencies:
-  - vllm/
+  - vllm/distributed/device_communicators/cuda_communicator.py
+  - vllm/distributed/device_communicators/custom_all_reduce.py
+  - vllm/distributed/device_communicators/aiter_custom_all_reduce.py
+  - vllm/distributed/device_communicators/quick_all_reduce.py
+  - vllm/distributed/device_communicators/all_reduce_utils.py
+  - vllm/distributed/device_communicators/cuda_wrapper.py
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/communication_op.py
+  - csrc/custom_all_reduce.cuh
+  - csrc/libtorch_stable/custom_all_reduce.cu
+  - tests/distributed/test_custom_all_reduce.py
+  - tests/distributed/test_ca_buffer_sharing.py
   commands:
-  # NOTE: don't test llama model here, it seems hf implementation is buggy
-  # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s -x lora/test_mixtral.py
+  mirror:
+    amd:
+      device: mi300_2
+      dind: false
 
 - label: Distributed Tests (2xH100-2xMI300)
   key: distributed-tests-2xh100-2xmi300

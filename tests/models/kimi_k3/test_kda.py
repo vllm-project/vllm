@@ -6,6 +6,8 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -27,6 +29,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 DEVICE = "cuda"
@@ -682,6 +685,38 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
         input_dtype=torch.bfloat16,
         conv_state_dtype=torch.bfloat16,
     )
+
+
+_KDA_PLATFORM = "vllm.models.kimi_k3.nvidia.kda.current_platform"
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "capability_major", "head_dim", "dtype", "lower_bound", "expected"),
+    [
+        # ROCm gfx942 reports major=9, the same value as CUDA SM90. FlashKDA
+        # is CUDA-only, so this must stay False regardless of major matching.
+        (False, 9, 128, torch.bfloat16, -3.0, False),
+        (False, 10, 128, torch.bfloat16, -3.0, False),
+        (True, 9, 128, torch.bfloat16, -3.0, True),
+        (True, 10, 128, torch.bfloat16, -3.0, True),
+        (True, 12, 128, torch.bfloat16, -3.0, True),
+        (True, 8, 128, torch.bfloat16, -3.0, False),
+        (True, 9, 64, torch.bfloat16, -3.0, False),
+        (True, 9, 128, torch.float16, -3.0, False),
+        (True, 9, 128, torch.bfloat16, None, False),
+    ],
+)
+def test_is_flashkda_supported_platform_gate(
+    is_cuda, capability_major, head_dim, dtype, lower_bound, expected
+):
+    with (
+        patch(f"{_KDA_PLATFORM}.is_cuda", return_value=is_cuda),
+        patch(
+            f"{_KDA_PLATFORM}.get_device_capability",
+            return_value=DeviceCapability(major=capability_major, minor=0),
+        ),
+    ):
+        assert is_flashkda_supported(head_dim, dtype, lower_bound) is expected
 
 
 @torch.inference_mode()

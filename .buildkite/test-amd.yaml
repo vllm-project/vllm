@@ -807,22 +807,6 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
   - pytest -v -s tests/distributed/test_packed_tensor.py
 
-- label: Distributed Tests (4xA100-4xMI300) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  commands:
-  - pytest -v -s distributed/test_custom_all_reduce.py
-  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s -x lora/test_mixtral.py
-
 - label: Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1571,7 +1555,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/third_party/flash_linear_attention/ops/kda.py
@@ -1696,6 +1679,7 @@ steps:
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s -x lora/test_mixtral.py
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
