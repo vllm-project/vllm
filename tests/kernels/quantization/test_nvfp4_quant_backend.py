@@ -68,14 +68,14 @@ def test_nvfp4_input_quant_backend_requires_flashinfer(monkeypatch) -> None:
 
     # base.py imports has_flashinfer_cutedsl_nvfp4_quant at module scope, so patch
     # it there (where the resolver looks it up), not on vllm.utils.flashinfer.
-    monkeypatch.setattr(
-        nvfp4_base, "has_flashinfer_cutedsl_nvfp4_quant", lambda: False
-    )
+    monkeypatch.setattr(nvfp4_base, "has_flashinfer_cutedsl_nvfp4_quant", lambda: False)
     layer_config = NvFp4LinearLayerConfig()
 
-    with set_current_vllm_config(_config("flashinfer_cutedsl")):
-        with pytest.raises(ValueError, match="requires SM100"):
-            FlashInferCutlassNvFp4LinearKernel(layer_config)
+    with (
+        set_current_vllm_config(_config("flashinfer_cutedsl")),
+        pytest.raises(ValueError, match="requires SM100"),
+    ):
+        FlashInferCutlassNvFp4LinearKernel(layer_config)
 
 
 @pytest.mark.skipif(
