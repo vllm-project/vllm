@@ -26,6 +26,13 @@ HEAD_DIMS = [
     (32, 32),
     (64, 32),
 ]
+# chunk_gated_delta_rule_cpu (the chunked-prefill kernel) only supports
+# head_dim == head_dim_v in {64, 128}; the decode-path update kernel above
+# has no such restriction and keeps using the wider HEAD_DIMS list.
+CHUNK_HEAD_DIMS = [
+    (64, 64),
+    (128, 128),
+]
 CHUNK_SIZE = 64
 CONV_DIM = 128
 CONV_KERNEL = 4
@@ -258,7 +265,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
 # prefill path
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu(
     seq_lens: list[int],
@@ -307,6 +314,7 @@ def test_chunk_gated_delta_rule_cpu(
         cu_seqlens=cu_seqlens,
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.arange(len(seq_lens), dtype=torch.int32),
     )
 
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
@@ -331,7 +339,7 @@ TWO_CALL_SPLITS = [
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu_two_call_split(
     total_tokens: int,
@@ -370,6 +378,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, total_tokens], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
 
     # Call 1: tokens [0:split], no initial state, capture final state.
@@ -384,6 +393,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, split], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
     # Call 2: tokens [split:T] seeded with call 1's final state and a cu_seqlens
     # rebased to start at 0, as cpu_gdn_attention_core continues a prefill chunk.
@@ -399,6 +409,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, tail], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
 
     out_split = torch.cat([out1, out2], dim=1)
