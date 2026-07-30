@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disk I/O backend for GPU<->NVMe block transfers via pinned double buffer."""
+"""Disk I/O backend for GPU<->NVMe block transfers via pinned staging buffers.
+
+Uses separate IO threads for store and load so that loads (latency-critical)
+never block behind stores (background work). Each thread owns its own pinned
+staging buffers to avoid contention.
+"""
 
 from __future__ import annotations
 
 import os
+import queue
 import threading
-from collections import deque
 
 import torch
 
@@ -41,7 +46,12 @@ def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
 
 
 class DiskBackend:
-    """Async disk offload backend with GPU DMA pipeline and double buffering.
+    """Async disk offload backend with pipelined GPU DMA and interleaved IO.
+
+    Architecture:
+    - Separate coordinator threads for store and load (never block each other)
+    - Interleaved pipeline: DMA slot N while preadv/pwritev slot N-1
+    - O_DIRECT by default; page cache is opt-in via use_page_cache
 
     Same launch_copy interface as DmaCopyBackend so the worker can swap
     backends without changing calling code.
@@ -52,17 +62,17 @@ class DiskBackend:
         self._load_params: BatchMemcpyParams | None = None
         self._load_stream: torch.cuda.Stream | None = None
         self._store_stream: torch.cuda.Stream | None = None
-        # Loads are latency-critical (a request is waiting on them) while stores
-        # are background work, so they get separate queues and loads win.
-        self._load_q: deque = deque()
-        self._store_q: deque = deque()
-        self._cond = threading.Condition()
-        self._thread: threading.Thread | None = None
+        self._store_queue: queue.SimpleQueue | None = None
+        self._load_queue: queue.SimpleQueue | None = None
+        self._store_thread: threading.Thread | None = None
+        self._load_thread: threading.Thread | None = None
         self._shutdown: bool = False
         self._fd: int = -1
         self._total_block_bytes: int = 0
-        self._buffer_caches: dict[str, torch.Tensor] = {}
-        self._slot_views: list[list[memoryview]] = []
+        self._store_buffer_caches: dict[str, torch.Tensor] = {}
+        self._load_buffer_caches: dict[str, torch.Tensor] = {}
+        self._store_slot_views: list[list[memoryview]] = []
+        self._load_slot_views: list[list[memoryview]] = []
         self._per_tensor_bpb: list[int] = []
         self._tensor_names: list[str] = []
 
@@ -76,6 +86,7 @@ class DiskBackend:
         num_disk_slots: int,
         total_block_bytes: int,
         num_buffer_slots: int = 2,
+        use_page_cache: bool = False,
     ) -> None:
         self._load_stream = load_stream
         self._store_stream = store_stream
@@ -90,19 +101,29 @@ class DiskBackend:
             f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
         )
 
-        self._buffer_caches = {}
+        # Separate buffer pools for store and load threads
+        self._store_buffer_caches = {}
+        self._load_buffer_caches = {}
         for name, gpu_t in gpu_caches.items():
             bpb = gpu_t.stride(0) * gpu_t.element_size()
-            buf = _alloc_aligned(num_buffer_slots, bpb)
-            pin_tensor(buf)
-            self._buffer_caches[name] = buf
+            store_buf = _alloc_aligned(num_buffer_slots, bpb)
+            pin_tensor(store_buf)
+            self._store_buffer_caches[name] = store_buf
+            load_buf = _alloc_aligned(num_buffer_slots, bpb)
+            pin_tensor(load_buf)
+            self._load_buffer_caches[name] = load_buf
 
-        # One iovec list per buffer slot, built once. A block spans one segment
-        # per tensor, so rebuilding these per transfer cost len(gpu_caches)
-        # tensor slices plus .numpy() calls on every block.
-        self._slot_views = [
+        # Pre-built iovec views per slot (avoid per-transfer .numpy() calls)
+        self._store_slot_views = [
             [
-                memoryview(self._buffer_caches[name][slot].numpy())
+                memoryview(self._store_buffer_caches[name][slot].numpy())
+                for name in self._tensor_names
+            ]
+            for slot in range(num_buffer_slots)
+        ]
+        self._load_slot_views = [
+            [
+                memoryview(self._load_buffer_caches[name][slot].numpy())
                 for name in self._tensor_names
             ]
             for slot in range(num_buffer_slots)
@@ -110,38 +131,51 @@ class DiskBackend:
 
         self._store_params = build_params(
             gpu_caches,
-            self._buffer_caches,
+            self._store_buffer_caches,
             store_stream,
             src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
         )
         self._load_params = build_params(
-            self._buffer_caches,
+            self._load_buffer_caches,
             gpu_caches,
             load_stream,
             src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
         )
 
         os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)
-        self._fd = os.open(
-            disk_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | O_DIRECT, 0o600
-        )
+        # O_DIRECT by default: page cache would consume the very host DRAM this
+        # backend exists to conserve, and doubles the copy on the store path.
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        if not use_page_cache:
+            flags |= O_DIRECT
+        self._fd = os.open(disk_path, flags, 0o600)
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
-            "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes",
+            "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
+            " (page_cache=%s)",
             disk_path,
             num_disk_slots,
             (num_disk_slots * total_block_bytes) / (1024**3),
             num_buffer_slots,
             total_block_bytes,
+            use_page_cache,
         )
 
-        self._thread = threading.Thread(
-            target=self._io_loop,
-            args=(device, load_stream, store_stream),
+        self._store_queue = queue.SimpleQueue()
+        self._load_queue = queue.SimpleQueue()
+        self._store_thread = threading.Thread(
+            target=self._store_loop,
+            args=(device, store_stream),
             daemon=True,
         )
-        self._thread.start()
+        self._load_thread = threading.Thread(
+            target=self._load_loop,
+            args=(device, load_stream),
+            daemon=True,
+        )
+        self._store_thread.start()
+        self._load_thread.start()
 
     def launch_copy(
         self,
@@ -152,59 +186,46 @@ class DiskBackend:
         events_list: list[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
-        item = (src_blocks, dst_blocks, is_store, event_idx, events_list, wait_event)
-        with self._cond:
-            (self._store_q if is_store else self._load_q).append(item)
-            self._cond.notify()
+        q = self._store_queue if is_store else self._load_queue
+        assert q is not None
+        q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
 
     def shutdown(self) -> None:
         if self._shutdown:
             return
-        with self._cond:
-            self._shutdown = True
-            self._cond.notify_all()
-        if self._thread is not None:
-            self._thread.join(timeout=10.0)
+        self._shutdown = True
+        if self._store_queue is not None:
+            self._store_queue.put(None)
+        if self._load_queue is not None:
+            self._load_queue.put(None)
+        if self._store_thread is not None:
+            self._store_thread.join(timeout=10.0)
+        if self._load_thread is not None:
+            self._load_thread.join(timeout=10.0)
         if self._fd >= 0:
             os.close(self._fd)
             self._fd = -1
 
-    def _io_loop(
+    def _store_loop(
         self,
         device: torch.device,
-        load_stream: torch.cuda.Stream,
-        store_stream: torch.cuda.Stream,
+        stream: torch.cuda.Stream,
     ) -> None:
         current_platform.set_device(device)
         while True:
-            with self._cond:
-                self._cond.wait_for(
-                    lambda: self._shutdown or self._load_q or self._store_q
-                )
-                if self._shutdown:
-                    return
-                q = self._load_q if self._load_q else self._store_q
-                (
-                    src_blocks,
-                    dst_blocks,
-                    is_store,
-                    event_idx,
-                    events_list,
-                    wait_event,
-                ) = q.popleft()
-            stream = store_stream if is_store else load_stream
+            item = self._store_queue.get()
+            if item is None:
+                return
+            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
             if wait_event is not None:
                 stream.wait_event(wait_event)
-            if is_store:
-                self._do_store(src_blocks, dst_blocks, stream)
-            else:
-                self._do_load(src_blocks, dst_blocks, stream)
+            self._do_store(src_blocks, dst_blocks, stream)
             event = torch.Event()
             event.record(stream)
             events_list.append((event_idx, event))
 
     def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
-        written = os.pwritev(self._fd, self._slot_views[buf_slot], file_offset)
+        written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
         if written < self._total_block_bytes:
             raise OSError(
                 f"Short write: expected {self._total_block_bytes} bytes, "
@@ -212,12 +233,30 @@ class DiskBackend:
             )
 
     def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
-        bytes_read = os.preadv(self._fd, self._slot_views[buf_slot], file_offset)
+        bytes_read = os.preadv(self._fd, self._load_slot_views[buf_slot], file_offset)
         if bytes_read < self._total_block_bytes:
             raise OSError(
                 f"Short read: expected {self._total_block_bytes} bytes, "
                 f"read {bytes_read}"
             )
+
+    def _load_loop(
+        self,
+        device: torch.device,
+        stream: torch.cuda.Stream,
+    ) -> None:
+        current_platform.set_device(device)
+        while True:
+            item = self._load_queue.get()
+            if item is None:
+                return
+            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
+            if wait_event is not None:
+                stream.wait_event(wait_event)
+            self._do_load(src_blocks, dst_blocks, stream)
+            event = torch.Event()
+            event.record(stream)
+            events_list.append((event_idx, event))
 
     def _do_store(
         self,
@@ -225,11 +264,7 @@ class DiskBackend:
         disk_slots: list[int],
         stream: torch.cuda.Stream,
     ) -> None:
-        """GPU → buffer (DMA) → disk (writev), double-buffered.
-
-        Pipeline: launch DMA into slot A, then while writing slot B to
-        disk the GPU can DMA into slot A in parallel.
-        """
+        """GPU -> buffer (DMA) -> disk (pwritev), interleaved double-buffer."""
         assert self._store_params is not None
         n = self._num_buffer_slots
         dma_events: list[torch.Event | None] = [None] * n
@@ -259,7 +294,7 @@ class DiskBackend:
         gpu_blocks: list[int],
         stream: torch.cuda.Stream,
     ) -> None:
-        """Disk (preadv) → buffer → GPU (DMA), double-buffered."""
+        """Disk (preadv) -> buffer -> GPU (DMA), interleaved double-buffer."""
         assert self._load_params is not None
         n = self._num_buffer_slots
         prev_dma_events: list[torch.Event | None] = [None] * n

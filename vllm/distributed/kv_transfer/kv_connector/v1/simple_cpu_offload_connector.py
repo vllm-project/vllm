@@ -87,6 +87,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("disk_capacity_bytes", 100 * (1024**3))
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
+        use_page_cache = bool(extra_config.get("use_page_cache", False))
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -132,6 +133,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_path=disk_path,
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
+                use_page_cache=use_page_cache,
             )
 
     # --- Worker-side methods ---
