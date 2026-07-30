@@ -31,6 +31,30 @@ def stable_topk_from_gathered_candidates_cutedsl(
     return out
 
 
+def stable_topk_from_rank_major_candidates_cutedsl(
+    rank_major_candidates: torch.Tensor,
+    topk: int,
+    out: torch.Tensor,
+) -> None:
+    """Select directly from owner-local rank-major candidate storage.
+
+    ``rank_major_candidates`` has shape ``(world, rows, local_candidates, 2)``.
+    Its first-dimension stride may cross CUDA VMM mappings owned by different
+    ranks; this function must not materialize a contiguous gathered tensor.
+    """
+    if rank_major_candidates.ndim != 4 or rank_major_candidates.shape[-1] != 2:
+        raise ValueError(
+            "rank-major candidates must have shape (world, rows, local_candidates, 2)"
+        )
+    world_size = rank_major_candidates.shape[0]
+    local_candidates = rank_major_candidates.shape[2]
+    StableTopKFromRankMajorCandidatesKernel.compile(
+        topk,
+        world_size,
+        local_candidates,
+    )(rank_major_candidates, out)
+
+
 def pack_dcp_topk_candidates_cutedsl(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -414,6 +438,113 @@ class StableTopKFromGatheredCandidatesKernel:
         return cute.compile(
             kernel,
             gathered,
+            out,
+            stream,
+            options="--enable-tvm-ffi",
+        )
+
+
+class StableTopKFromRankMajorCandidatesKernel(StableTopKFromGatheredCandidatesKernel):
+    """Stable top-k whose input remains split across VMM owner segments."""
+
+    def __init__(self, topk: int, world_size: int, local_candidates: int):
+        super().__init__(topk, world_size * local_candidates)
+        self.world_size = world_size
+        self.local_candidates = local_candidates
+
+    @cute.jit
+    def __call__(
+        self,
+        rank_major_candidates: cute.Tensor,
+        out: cute.Tensor,
+        stream: CUstream,
+    ):
+        grid = (rank_major_candidates.shape[1], 1, 1)
+        self.kernel(rank_major_candidates, out).launch(
+            grid=grid,
+            block=(self.tb_size, 1, 1),
+            stream=stream,
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        input: cute.Tensor,
+        out: cute.Tensor,
+    ):
+        row, _, _ = cute.arch.block_idx()
+        tid, _, _ = cute.arch.thread_idx()
+        output_row = out[row, None]
+        keys = cute.make_rmem_tensor((self.keys_per_thread,), Uint64)
+
+        smem = cutlass.utils.SmemAllocator()
+        storage = smem.allocate(self.shared_storage, 8)
+        committed_count_smem = storage.committed_count.data_ptr()
+        prefix_smem = storage.prefix_s.data_ptr()
+        for i in range(tid, self.topk, self.tb_size):
+            output_row[i] = Int32(-1)
+
+        for key_idx in cutlass.range_constexpr(self.keys_per_thread):
+            col = tid + Int32(key_idx * self.tb_size)
+            owner = col // Int32(self.local_candidates)
+            local_col = col - owner * Int32(self.local_candidates)
+            score = Float32(input[owner, row, local_col, 0])
+            token_id = Int32(input[owner, row, local_col, 1])
+            keys[key_idx] = self._stable_key(score, token_id)
+
+        if tid == Int32(0):
+            committed_count_smem.store(Int32(0))
+            prefix_smem.store(Uint64(0))
+        cute.arch.sync_threads()
+
+        step = Int32(0)
+        finished = Int32(0)
+        while finished == Int32(0) and step < Int32(self.radix_passes - 1):
+            finished = self._radix_pass(
+                keys,
+                output_row,
+                storage,
+                tid,
+                step,
+                self.radix_bits,
+                False,
+            )
+            step += Int32(1)
+
+        if finished == Int32(0):
+            self._radix_pass(
+                keys,
+                output_row,
+                storage,
+                tid,
+                Int32(self.radix_passes - 1),
+                self.final_radix_bits,
+                True,
+            )
+
+    @cache
+    @staticmethod
+    def compile(topk: int, world_size: int, local_candidates: int):
+        num_rows = cute.sym_int()
+        rank_stride = cute.sym_int64(divisibility=2)
+
+        rank_major = cute.runtime.make_fake_tensor(
+            Float32,
+            (world_size, num_rows, local_candidates, 2),
+            stride=(rank_stride, local_candidates * 2, 2, 1),
+            assumed_align=8,
+        )
+        out = make_fake_tensor(Int32, (num_rows, topk), divisibility=1)
+
+        kernel = StableTopKFromRankMajorCandidatesKernel(
+            topk,
+            world_size,
+            local_candidates,
+        )
+        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
+        return cute.compile(
+            kernel,
+            rank_major,
             out,
             stream,
             options="--enable-tvm-ffi",
