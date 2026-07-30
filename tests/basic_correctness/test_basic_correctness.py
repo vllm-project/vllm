@@ -78,6 +78,15 @@ def _resolve_target_test_suite() -> str:
 TARGET_TEST_SUITE = _resolve_target_test_suite()
 
 
+# ROCm can occasionally retain the object until fixture teardown. Retry only
+# that assertion after cleanup; collecting cyclic garbage here would mask the
+# reference cycles this test is intended to catch.
+@pytest.mark.flaky(
+    reruns=2,
+    reruns_delay=5,
+    only_rerun="AssertionError",
+    condition=current_platform.is_rocm(),
+)
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
     llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
