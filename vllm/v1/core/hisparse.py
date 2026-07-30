@@ -69,6 +69,7 @@ class HiSparseKVCacheController:
             for group, manager in zip(groups, managers)
         )
         self.host_manager = None
+        self.pages_per_host_block = 0
         if self.resident_entries:
             host_group_ids = [
                 group_id
@@ -81,6 +82,21 @@ class HiSparseKVCacheController:
                     f"found {host_group_ids}."
                 )
             self.host_manager = managers[host_group_ids[0]]
+            resident_block_sizes = {
+                manager.block_size for _, manager in self.resident_entries
+            }
+            if len(resident_block_sizes) != 1:
+                raise ValueError(
+                    "HiSparse resident cache groups must use one block size."
+                )
+            resident_block_size = resident_block_sizes.pop()
+            if self.host_manager.block_size % resident_block_size != 0:
+                raise ValueError(
+                    "HiSparse host and resident block sizes are incompatible."
+                )
+            self.pages_per_host_block = (
+                self.host_manager.block_size // resident_block_size
+            )
 
         self.block_table_updates: set[str] = set()
         self.spills_to_send: list[HiSparseSpill] = []
@@ -161,9 +177,7 @@ class HiSparseKVCacheController:
                         pending = (request_id, block_idx) in self.pending_pages
                         if not pending and spill_plan_budget == 0:
                             continue
-                        if self._mark_or_plan_release(
-                            request_id, block_idx, resident_entries
-                        ):
+                        if self._mark_or_plan_release(request_id, block_idx):
                             eventual += len(resident_entries)
                             if not pending:
                                 spill_plan_budget -= 1
@@ -182,7 +196,7 @@ class HiSparseKVCacheController:
             self.transition_target_pages[request_id] = pages_needed
             for block_idx in pages[:pages_needed]:
                 pending = (request_id, block_idx) in self.pending_pages
-                if self._mark_or_plan_release(request_id, block_idx, resident_entries):
+                if self._mark_or_plan_release(request_id, block_idx):
                     eventual += len(resident_entries)
                     if not pending:
                         spill_plan_budget -= 1
@@ -195,7 +209,6 @@ class HiSparseKVCacheController:
         self,
         request_id: str,
         block_idx: int,
-        resident_entries: Sequence[tuple[int, HiSparseResidentManager]],
     ) -> bool:
         pending_id = self.pending_pages.get((request_id, block_idx))
         if pending_id is not None:
@@ -208,7 +221,6 @@ class HiSparseKVCacheController:
             self._plan_spill(
                 request_id,
                 block_idx,
-                resident_entries,
                 release_after=True,
                 after_forward=False,
             )
@@ -222,14 +234,7 @@ class HiSparseKVCacheController:
             return
         assert self.host_manager is not None
         host_block_size = self.host_manager.block_size
-        resident_block_size = self.resident_entries[0][1].block_size
-        if host_block_size % resident_block_size != 0:
-            raise RuntimeError(
-                "HiSparse host and resident block sizes are incompatible."
-            )
-        num_pages = (num_computed_tokens // host_block_size) * (
-            host_block_size // resident_block_size
-        )
+        num_pages = num_computed_tokens // host_block_size * self.pages_per_host_block
         for page_idx in range(num_pages):
             key = (request_id, page_idx)
             if key in self.pending_pages:
@@ -247,7 +252,6 @@ class HiSparseKVCacheController:
             self._plan_spill(
                 request_id,
                 page_idx,
-                self.resident_entries,
                 release_after=False,
                 after_forward=True,
             )
@@ -256,19 +260,12 @@ class HiSparseKVCacheController:
         self,
         request_id: str,
         page_idx: int,
-        resident_entries: Sequence[tuple[int, HiSparseResidentManager]],
         *,
         release_after: bool,
         after_forward: bool,
     ) -> HiSparseSpill | None:
         assert self.host_manager is not None
-        resident_block_size = resident_entries[0][1].block_size
-        if self.host_manager.block_size % resident_block_size != 0:
-            raise RuntimeError(
-                "HiSparse host and resident block sizes are incompatible."
-            )
-        pages_per_host_block = self.host_manager.block_size // resident_block_size
-        host_block_idx = page_idx // pages_per_host_block
+        host_block_idx = page_idx // self.pages_per_host_block
         host_blocks = self.host_manager.req_to_blocks.get(request_id)
         if host_blocks is None or host_block_idx >= len(host_blocks):
             return None
@@ -277,7 +274,7 @@ class HiSparseKVCacheController:
             return None
 
         blocks: list[tuple[int, HiSparseResidentManager, KVCacheBlock]] = []
-        for group_id, manager in resident_entries:
+        for group_id, manager in self.resident_entries:
             block = manager.get_resident_page(request_id, page_idx)
             if block is None:
                 return None
@@ -293,7 +290,7 @@ class HiSparseKVCacheController:
             request_id=request_id,
             page_index=page_idx,
             host_block_id=host_block.block_id,
-            host_page_offset=page_idx % pages_per_host_block,
+            host_page_offset=page_idx % self.pages_per_host_block,
             resident_block_ids=tuple(
                 (group_id, block.block_id) for group_id, _, block in blocks
             ),
