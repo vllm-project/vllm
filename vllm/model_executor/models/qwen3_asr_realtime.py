@@ -178,6 +178,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
 )
 class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 64
+    realtime_reset_context = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -210,6 +211,14 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
 
         async for audio_chunk in audio_stream:
             buffer.write_audio(audio_chunk)
+
+            # Drain the input_stream to prevent token accumulation
+            # since Qwen3-ASR treats each segment independently.
+            while not input_stream.empty():
+                try:
+                    input_stream.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
             while (segment := buffer.read_audio()) is not None:
                 yield TokensPrompt(
