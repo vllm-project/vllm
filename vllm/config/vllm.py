@@ -560,6 +560,10 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        # PCP runtime support is implemented only by the V2 model runner.
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            return True
+
         # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
         # is not otherwise a default-V2 architecture, so force V2 for it. If V2
         # is unsupported for the rest of the config, _validate_v2_model_runner
@@ -1463,6 +1467,11 @@ class VllmConfig:
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
+        elif self.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "Prefill context parallelism requires Model Runner V2. "
+                "Remove VLLM_USE_V2_MODEL_RUNNER=0."
+            )
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
