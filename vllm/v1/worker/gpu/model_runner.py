@@ -1467,12 +1467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
 
         if not dummy_run and self.hisparse_runtime is not None:
-            self.hisparse_runtime.post_forward(
-                backup_in_graph=(
-                    batch_desc.cg_mode == CUDAGraphMode.FULL
-                    and batch_desc.uniform_token_count == 1
-                )
-            )
+            self.hisparse_runtime.post_forward()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:

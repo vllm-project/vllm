@@ -55,7 +55,6 @@ class HiSparseRuntime:
         cache_pairs: list[tuple[torch.Tensor, torch.Tensor]],
         coordinators: list[HiSparseCoordinator],
         hot_backing: torch.Tensor,
-        backup_dst_slots: torch.Tensor,
         max_num_reqs: int,
         max_model_len: int,
         max_concurrent_batches: int,
@@ -75,7 +74,6 @@ class HiSparseRuntime:
         self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
         self.coordinators = coordinators
         self.hot_backing = hot_backing
-        self.backup_dst_slots = backup_dst_slots
         self._post_forward_spills: list[HiSparseSpill] = []
         self._enqueued_spill_ids: list[int] = []
         self.fully_resident_batch = False
@@ -251,8 +249,7 @@ class HiSparseRuntime:
         )
         self._enqueued_spill_ids.extend(spill.spill_id for spill in spills)
 
-    def post_forward(self, backup_in_graph: bool = False) -> None:
-        del backup_in_graph
+    def post_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
         self._enqueue_spills(self._post_forward_spills)
         self._post_forward_spills = []
@@ -469,7 +466,6 @@ def init_hisparse_runtime(
         cache_pairs,
         coordinators,
         hot_backing,
-        block_tables.slot_mappings[source_group_id],
         max_num_reqs,
         max_model_len,
         max_concurrent_batches,

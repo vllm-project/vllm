@@ -170,7 +170,7 @@ def test_hisparse_runtime_post_forward_enqueues_deferred_spills(monkeypatch):
         torch.accelerator, "current_stream", lambda device: current_stream
     )
 
-    runtime.post_forward(backup_in_graph=True)
+    runtime.post_forward()
 
     assert calls == [[spill]]
     assert runtime._post_forward_spills == []
