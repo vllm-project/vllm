@@ -73,6 +73,162 @@ def _has_cuda_quest(mod: Any | None) -> bool:
     )
 
 
+def _has_cuda_rerank(mod: Any | None) -> bool:
+    return mod is not None and all(
+        hasattr(mod, name)
+        for name in ("partial_chunk_density_scores", "mask_from_topk")
+    )
+
+
+_DIRECT_PHYSICAL_SYMBOLS = (
+    "quest_chunk_score_physical",
+    "quest_parent_score_physical",
+    "quest_sub_score_physical",
+    "density_score_physical",
+    "kivi_physical",
+    "float_topk_values_3d",
+    "quest_map_back",
+    "mask_from_topk",
+)
+
+
+def direct_physical_retrieval_available() -> bool:
+    """Whether the unified extension has the no-materialization fast path."""
+    mod = try_load_zoomkv_c()
+    return mod is not None and all(
+        hasattr(mod, name) for name in _DIRECT_PHYSICAL_SYMBOLS
+    )
+
+
+def quest_chunk_score_physical(
+    raw_q: torch.Tensor,
+    physical_ids: torch.Tensor,
+    chunk_min: torch.Tensor,
+    chunk_max: torch.Tensor,
+    valid: torch.Tensor,
+    scores: torch.Tensor,
+    n_chunks: int,
+) -> None:
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "quest_chunk_score_physical"):
+        raise RuntimeError("ZoomKV direct physical Quest kernel unavailable")
+    mod.quest_chunk_score_physical(
+        raw_q, physical_ids, chunk_min, chunk_max, valid, scores, int(n_chunks)
+    )
+
+
+def quest_parent_score_physical(
+    raw_q: torch.Tensor,
+    physical_ids: torch.Tensor,
+    chunk_min: torch.Tensor,
+    chunk_max: torch.Tensor,
+    valid: torch.Tensor,
+    scores: torch.Tensor,
+    n_chunks: int,
+    factor: int,
+) -> None:
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "quest_parent_score_physical"):
+        raise RuntimeError("ZoomKV direct physical parent Quest kernel unavailable")
+    mod.quest_parent_score_physical(
+        raw_q,
+        physical_ids,
+        chunk_min,
+        chunk_max,
+        valid,
+        scores,
+        int(n_chunks),
+        int(factor),
+    )
+
+
+def quest_sub_score_physical(
+    raw_q: torch.Tensor,
+    physical_ids: torch.Tensor,
+    chunk_min: torch.Tensor,
+    chunk_max: torch.Tensor,
+    valid: torch.Tensor,
+    large_ids: torch.Tensor,
+    scores: torch.Tensor,
+    n_selected: int,
+    factor: int,
+    n_chunks: int,
+) -> None:
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "quest_sub_score_physical"):
+        raise RuntimeError("ZoomKV direct physical sub-Quest kernel unavailable")
+    mod.quest_sub_score_physical(
+        raw_q,
+        physical_ids,
+        chunk_min,
+        chunk_max,
+        valid,
+        large_ids,
+        scores,
+        int(n_selected),
+        int(factor),
+        int(n_chunks),
+    )
+
+
+def density_score_physical(
+    chunk_ids: torch.Tensor,
+    physical_ids: torch.Tensor,
+    centroid: torch.Tensor,
+    valid: torch.Tensor,
+    raw_q: torch.Tensor,
+    scores: torch.Tensor,
+    n_chunks: int,
+) -> None:
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "density_score_physical"):
+        raise RuntimeError("ZoomKV direct physical density kernel unavailable")
+    mod.density_score_physical(
+        chunk_ids,
+        physical_ids,
+        centroid,
+        valid,
+        raw_q,
+        scores,
+        int(n_chunks),
+    )
+
+
+def kivi_physical(
+    chunk_ids: torch.Tensor,
+    dense_mask: torch.Tensor,
+    physical_ids: torch.Tensor,
+    packed: torch.Tensor,
+    chunk_min: torch.Tensor,
+    chunk_max: torch.Tensor,
+    valid: torch.Tensor,
+    raw_q: torch.Tensor,
+    dense_topk: int,
+    sparse_topk: int,
+    token_offset: int,
+    out_scores: torch.Tensor,
+    out_indices: torch.Tensor,
+) -> None:
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "kivi_physical"):
+        raise RuntimeError("ZoomKV direct physical KIVI kernel unavailable")
+    mod.kivi_physical(
+        chunk_ids,
+        dense_mask,
+        physical_ids,
+        packed,
+        chunk_min,
+        chunk_max,
+        valid,
+        raw_q,
+        int(dense_topk),
+        int(sparse_topk),
+        int(token_offset),
+        out_scores,
+        out_indices,
+    )
+
+
 def _make_quest_fallback(prefer_triton: bool, strict: bool):
     if prefer_triton:
         try:
@@ -111,6 +267,9 @@ def _try_load_float_topk_cuda() -> Any | None:
 @lru_cache
 def _try_load_rerank_cuda() -> Any | None:
     """JIT-load fused CDS density/mask kernels."""
+    mod = try_load_zoomkv_c()
+    if _has_cuda_rerank(mod):
+        return mod
     source = Path(__file__).with_name("cuda") / "rerank_topk.cu"
     if not source.exists():
         return None
@@ -313,10 +472,32 @@ def float_topk_3d(
     return scores.topk(k, dim=-1, largest=True).indices
 
 
+def float_topk_values_3d(
+    scores: torch.Tensor,
+    values: torch.Tensor,
+    k: int,
+    strict: bool | None = None,
+) -> torch.Tensor:
+    """Select Top-K scores and return their associated int64 values."""
+    strict = _want_strict() if strict is None else strict
+    mod = try_load_zoomkv_c()
+    if mod is not None and hasattr(mod, "float_topk_values_3d"):
+        return mod.float_topk_values_3d(scores, values, int(k))
+    if scores.is_cuda:
+        topk_mod = _try_load_float_topk_cuda()
+        if topk_mod is not None and hasattr(topk_mod, "float_topk_values_3d"):
+            return topk_mod.float_topk_values_3d(scores, values, int(k))
+    if strict:
+        raise RuntimeError("ZoomKV strict mode: value-returning CUDA Top-K required")
+    positions = scores.topk(k, dim=-1, largest=True).indices
+    return torch.gather(values, -1, positions)
+
+
 def chunk_density_scores(
     chunk_ids: torch.Tensor,
     centroids: torch.Tensor,
     raw_q: torch.Tensor,
+    out: torch.Tensor | None = None,
     strict: bool | None = None,
 ) -> torch.Tensor:
     """Score selected chunk centroids without materializing a gather."""
@@ -324,7 +505,8 @@ def chunk_density_scores(
     if chunk_ids.is_cuda:
         mod = _try_load_rerank_cuda()
         if mod is not None:
-            out = torch.empty_like(chunk_ids, dtype=torch.float32)
+            if out is None:
+                out = torch.empty_like(chunk_ids, dtype=torch.float32)
             mod.partial_chunk_density_scores(
                 chunk_ids,
                 centroids,
@@ -336,22 +518,28 @@ def chunk_density_scores(
         raise RuntimeError("ZoomKV strict mode: CDS density CUDA required")
     idx = chunk_ids.clamp(min=0).unsqueeze(-1).expand(-1, -1, -1, centroids.shape[-1])
     selected = torch.gather(centroids, 2, idx)
-    return (selected.to(torch.float32) * raw_q.unsqueeze(2).to(torch.float32)).sum(-1)
+    scores = (
+        selected.to(torch.float32) * raw_q.unsqueeze(2).to(torch.float32)
+    ).sum(-1)
+    if out is not None:
+        out.copy_(scores)
+        return out
+    return scores
 
 
 def dense_mask_from_topk(
     positions: torch.Tensor,
     num_chunks: int,
+    out: torch.Tensor | None = None,
     strict: bool | None = None,
 ) -> torch.Tensor:
     """Build the CDS dense mask with one fused CUDA launch."""
     strict = _want_strict() if strict is None else strict
-    mask = torch.empty(
-        *positions.shape[:2],
-        int(num_chunks),
-        dtype=torch.bool,
-        device=positions.device,
-    )
+    mask_shape = (*positions.shape[:2], int(num_chunks))
+    if out is not None and tuple(out.shape) == mask_shape:
+        mask = out
+    else:
+        mask = torch.empty(mask_shape, dtype=torch.bool, device=positions.device)
     if positions.is_cuda:
         mod = _try_load_rerank_cuda()
         if mod is not None:

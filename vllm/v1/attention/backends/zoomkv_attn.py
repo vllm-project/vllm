@@ -40,9 +40,13 @@ from vllm.v1.attention.ops.zoomkv import recall_probe as _zoomkv_recall
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.paged import (
     assemble_sparse_context_indices,
+    assemble_sparse_context_indices_batch,
     gather_kv_by_logical_indices,
+    gather_kv_by_logical_indices_batch,
+    gather_kv_from_topk_batch,
     gather_kv_hybrid,
     sparse_decode_attention,
+    sparse_decode_attention_batch,
 )
 from vllm.v1.attention.ops.zoomkv.retriever import (
     ZoomKVRetriever,
@@ -56,6 +60,29 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+def _needs_summary_update(
+    *,
+    num_prefills: int,
+    max_query_len: int,
+    num_decodes: int,
+    seq_lens_cpu: torch.Tensor | None,
+    num_reqs: int,
+    block_size: int,
+) -> bool:
+    """Return whether this scheduler step can complete a summary block."""
+    if (
+        num_prefills != 0
+        or max_query_len != 1
+        or num_decodes <= 0
+        or seq_lens_cpu is None
+    ):
+        return True
+    return any(
+        int(seq_len) > 0 and int(seq_len) % block_size == 0
+        for seq_len in seq_lens_cpu[:num_reqs].tolist()
+    )
 
 
 def _load_zoomkv_runtime_config(vllm_config: VllmConfig | None) -> ZoomKVRuntimeConfig:
@@ -103,6 +130,9 @@ class ZoomKVMetadata(TritonAttentionMetadata):
     zoomkv: ZoomKVRuntimeConfig | None = None
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
+    # True when at least one request completes a physical block this step.
+    # Pure decode skips summary updates on the other 15/16 tokens.
+    need_summary_update: bool = True
     # Preallocated physical Top-K / context index buffers (MLA-style).
     # Shape: [max_num_seqs, num_kv_heads, final_topk]
     topk_indices_buffer: torch.Tensor | None = None
@@ -169,6 +199,19 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             common_attn_metadata,
             decode_threshold=1,
         )
+        # Host-side block-boundary check: after writing the new token,
+        # seq_len % block_size == 0 means a child chunk just completed.
+        seq_cpu = common_attn_metadata.seq_lens_cpu
+        need_summary_update = _needs_summary_update(
+            num_prefills=num_prefills,
+            max_query_len=common_attn_metadata.max_query_len,
+            num_decodes=num_decodes,
+            seq_lens_cpu=seq_cpu,
+            num_reqs=common_attn_metadata.num_reqs,
+            block_size=int(self.kv_cache_spec.block_size),
+        )
+        # do_kv_cache_update runs without metadata; publish for this step.
+        ZoomKVAttentionImpl._step_need_summary_update = need_summary_update
         # Reconstruct from base fields that exist on this vLLM version.
         fields = {
             "num_actual_tokens": base.num_actual_tokens,
@@ -202,6 +245,7 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             # geometry.
             "query_start_loc_cpu": common_attn_metadata.query_start_loc_cpu,
             "seq_lens_cpu": common_attn_metadata.seq_lens_cpu,
+            "need_summary_update": need_summary_update,
             "topk_indices_buffer": self.topk_indices_buffer,
             "context_indices_buffer": self.context_indices_buffer,
         }
@@ -287,6 +331,10 @@ class ZoomKVAttentionBackend(AttentionBackend):
 
 
 class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
+    # Published by ZoomKVMetadataBuilder.build() each step so
+    # do_kv_cache_update (which has no metadata) can skip empty summary updates.
+    _step_need_summary_update: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -400,11 +448,12 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
         )
         slots = slot_mapping.flatten()
-        # The decode fast path launches one conditional Triton kernel and never
-        # evaluates a CUDA predicate on the host. Prefill retains the batched
-        # PyTorch path for throughput.
-        with _zt.Stage("block_summary.update"):
-            block_summary.update_completed_slots(key_cache, slots)
+        # Pure decode: metadata builder publishes whether any request just
+        # completed a physical block (seq_len % block_size == 0). Skip the
+        # conditional Triton launch on the other 15/16 decode steps.
+        if self._step_need_summary_update:
+            with _zt.Stage("block_summary.update"):
+                block_summary.update_completed_slots(key_cache, slots)
 
         # K+V offload: after block_summaries are built for completed blocks,
         # async D2H the Key and Value pages. GPU pages are NOT zeroed here —
@@ -466,7 +515,14 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 output_scale=output_scale,
                 output_block_scale=output_block_scale,
             )
-        return self._sparse_decode_forward(
+        # GPU-only long-context decode uses the batched sparse fast path.
+        # K+V offload keeps the per-request loop (hybrid gather / cold-page
+        # bookkeeping is still serial in the first release).
+        if cfg.enable_offload:
+            return self._sparse_decode_forward(
+                layer, query, kv_cache, attn_metadata, output, cfg
+            )
+        return self._sparse_decode_forward_batched(
             layer, query, kv_cache, attn_metadata, output, cfg
         )
 
@@ -796,15 +852,9 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                         key_cache, value_cache, bt, ctx_idx, self.block_size
                     )
             with _zt.Stage("sparse.attn"):
-                # Invalid context slots (topk padding = -1, or overlap gaps)
-                # are gathered as zeroed K/V but would still take softmax
-                # weight and skew the output -- this bites short / near-
-                # threshold sequences whose retrieval zone yields fewer than
-                # final_topk tokens. Mask them out. The fast unmasked
-                # FlashAttention path is kept whenever every slot is valid
-                # (the common long-context case). This is an eager-only
-                # backend, so the scalar validity check is acceptable; the
-                # future batched CUDA-graph path must mask in-kernel instead.
+                # The serial/materialized compatibility path has no host-side
+                # validity guarantee. Keep its safe mask fallback; only the
+                # explicit batched direct result may skip this synchronization.
                 valid_mask = None if bool(_ctx_valid.all()) else _ctx_valid
                 out = sparse_decode_attention(
                     q,
@@ -814,4 +864,151 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                     valid_mask=valid_mask,
                 )
             output[q0:q1].copy_(out)
+        return output
+
+    def _sparse_decode_forward_batched(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: ZoomKVMetadata,
+        output: torch.Tensor,
+        cfg: ZoomKVRuntimeConfig,
+    ) -> torch.Tensor:
+        """GPU-only batched sparse decode: one retrieve/gather/attn per layer.
+
+        Requires pure single-token decode with every request above the full-
+        attention threshold (already gated by ``_should_sparse_decode``).
+        Different sequence lengths are represented via block_table padding and
+        chunk_valid masks inside the retriever; the paged KV layout is unchanged.
+        """
+        with _zt.Stage("sparse.setup"):
+            logger.info_once(
+                "ZoomKV GPU-only batched sparse decode path is active"
+            )
+            layer_name = self._layer_name or getattr(
+                layer, "layer_name", f"zoomkv_{id(layer)}"
+            )
+            num_blocks = kv_cache.shape[0]
+            key_cache, value_cache = self._split_kv_cache(kv_cache)
+            dtype = query.dtype
+            block_summary = get_or_create_block_summary(
+                layer_name=str(layer_name),
+                num_blocks=num_blocks,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_size,
+                block_size=self.block_size,
+                device=kv_cache.device,
+                dtype=dtype
+                if dtype in (torch.float16, torch.bfloat16)
+                else torch.bfloat16,
+                blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
+            )
+            retriever = self._get_retriever(cfg)
+            q_start = (
+                attn_metadata.query_start_loc_cpu
+                if attn_metadata.query_start_loc_cpu is not None
+                else attn_metadata.query_start_loc
+            )
+            seq_lens_cpu = (
+                attn_metadata.seq_lens_cpu
+                if attn_metadata.seq_lens_cpu is not None
+                else attn_metadata.seq_lens.cpu()
+            )
+            block_table = attn_metadata.block_table
+            num_reqs = attn_metadata.num_reqs
+
+        q_start_list = q_start.tolist()
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
+        # Pure single-token decode packs tokens contiguously as [0..B).
+        # Fall back to gather if the pack layout is somehow non-contiguous.
+        contiguous = all(int(q_start_list[i]) == i for i in range(num_reqs)) and int(q_start_list[num_reqs]) == num_reqs
+        if contiguous:
+            q_batch = query[:num_reqs]
+        else:
+            starts = [int(q_start_list[i]) for i in range(num_reqs)]
+            q_batch = query[starts]
+
+        with _zt.Stage("sparse.prep_q"):
+            raw_q = prepare_retrieval_query(
+                q_batch, self.num_kv_heads, per_query_head=cfg.per_query_head
+            )
+
+        seq_lens_t = seq_lens_cpu[:num_reqs]
+        with _zt.Stage("sparse.retrieve"):
+            retrieval = retriever.retrieve_topk_tokens_batch_result(
+                raw_q,
+                block_summary,
+                block_table[:num_reqs],
+                seq_lens_t,
+                # Production sparse decode only exposes fully-completed
+                # retrieval blocks. Summary lifecycle finalizes those blocks
+                # before they enter the retrieval zone and preserves state on
+                # CoW remaps; invalid-summary tests deliberately omit this.
+                summaries_guaranteed_valid=True,
+            )
+
+        # Eager-only: pass the retrieve tensor directly. Avoid fill_+copy_
+        # into the MLA-style buffer on the hot path.
+        topk_logical = retrieval.topk
+        fully_valid = retrieval.context_fully_valid
+
+        # Device seq_lens for Triton fused gather / assemble kernels.
+        seq_lens_dev = attn_metadata.seq_lens[:num_reqs]
+        if fully_valid:
+            # Direct fully-valid path: fuse sink/local/topk assembly into the
+            # paged gather and skip materializing ctx_idx / _ctx_valid.
+            with _zt.Stage("sparse.gather"):
+                gk, gv = gather_kv_from_topk_batch(
+                    key_cache,
+                    value_cache,
+                    block_table[:num_reqs],
+                    seq_lens_dev,
+                    topk_logical,
+                    self.block_size,
+                    cfg.sink_size,
+                    cfg.local_size,
+                )
+            valid_mask = None
+        else:
+            ctx_buf = attn_metadata.context_indices_buffer
+            ctx_out = (
+                ctx_buf[:num_reqs]
+                if ctx_buf is not None and ctx_buf.shape[0] >= num_reqs
+                else None
+            )
+            with _zt.Stage("sparse.assemble"):
+                ctx_idx, _ctx_valid = assemble_sparse_context_indices_batch(
+                    seq_lens_dev,
+                    topk_logical,
+                    cfg.sink_size,
+                    cfg.local_size,
+                    out=ctx_out,
+                )
+            with _zt.Stage("sparse.gather"):
+                gk, gv = gather_kv_by_logical_indices_batch(
+                    key_cache,
+                    value_cache,
+                    block_table[:num_reqs],
+                    ctx_idx,
+                    self.block_size,
+                )
+            # Safe fallback for short / padded contexts: one host sync.
+            valid_mask = None if bool(_ctx_valid.all()) else _ctx_valid
+
+        with _zt.Stage("sparse.attn"):
+            out = sparse_decode_attention_batch(
+                q_batch,
+                gk,
+                gv,
+                self.scale,
+                valid_mask=valid_mask,
+            )
+
+        if contiguous:
+            output[:num_reqs].copy_(out)
+        else:
+            for i in range(num_reqs):
+                q0 = int(q_start_list[i])
+                output[q0 : q0 + 1].copy_(out[i : i + 1])
         return output

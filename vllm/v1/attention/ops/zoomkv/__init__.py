@@ -15,8 +15,10 @@ from vllm.v1.attention.ops.zoomkv.offload import (
 )
 from vllm.v1.attention.ops.zoomkv.paged import (
     gather_kv_by_logical_indices,
+    gather_kv_by_logical_indices_batch,
     gather_kv_hybrid,
     sparse_decode_attention,
+    sparse_decode_attention_batch,
 )
 from vllm.v1.attention.ops.zoomkv.quant_pack import pack_kcache_4bit
 from vllm.v1.attention.ops.zoomkv.quest import QuestTorchOps
@@ -39,6 +41,7 @@ __all__ = [
     "clear_block_summaries",
     "copy_block_summaries_for_block_pairs",
     "gather_kv_by_logical_indices",
+    "gather_kv_by_logical_indices_batch",
     "gather_kv_hybrid",
     "get_cpu_key_pool",
     "get_quest_ops",
@@ -47,5 +50,6 @@ __all__ = [
     "partial_chunk_kivi_qk",
     "set_cpu_key_pool",
     "sparse_decode_attention",
+    "sparse_decode_attention_batch",
     "try_load_zoomkv_c",
 ]

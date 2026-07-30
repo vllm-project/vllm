@@ -86,6 +86,114 @@ def gather_kv_by_logical_indices(
     return out_k, out_v
 
 
+def gather_kv_by_logical_indices_batch(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    logical_token_ids: torch.Tensor,
+    block_size: int,
+    out_k: torch.Tensor | None = None,
+    out_v: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched gather from paged KV cache.
+
+    Args:
+        key_cache / value_cache: [num_blocks, block_size, Hkv, D]
+        block_table: [B, max_blocks]
+        logical_token_ids: [B, Hkv, n_tok]
+    Returns:
+        gathered_k/v: [B, Hkv, n_tok, D]
+    """
+    if logical_token_ids.dim() != 3:
+        raise ValueError(
+            "batched gather expects logical_token_ids [B, Hkv, n_tok], "
+            f"got {tuple(logical_token_ids.shape)}"
+        )
+    if key_cache.is_cuda:
+        from vllm.v1.attention.ops.zoomkv.paged_triton import paged_gather_kv_batch
+
+        return paged_gather_kv_batch(
+            key_cache,
+            value_cache,
+            block_table,
+            logical_token_ids,
+            block_size,
+            out_k=out_k,
+            out_v=out_v,
+        )
+    batch, kv_heads, n_tok = logical_token_ids.shape
+    outs_k = []
+    outs_v = []
+    for i in range(batch):
+        gk, gv = gather_kv_by_logical_indices(
+            key_cache,
+            value_cache,
+            block_table[i],
+            logical_token_ids[i],
+            block_size,
+        )
+        outs_k.append(gk)
+        outs_v.append(gv)
+    return torch.stack(outs_k, dim=0), torch.stack(outs_v, dim=0)
+
+
+def gather_kv_from_topk_batch(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    topk_logical: torch.Tensor,
+    block_size: int,
+    sink_size: int,
+    local_size: int,
+    out_k: torch.Tensor | None = None,
+    out_v: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused sink/local/topk assembly + paged gather for a decode batch.
+
+    Direct fully-valid path uses this to avoid materializing ``ctx_idx`` /
+    ``_ctx_valid`` and launching a separate assemble kernel.
+    """
+    if topk_logical.dim() != 3:
+        raise ValueError(
+            "gather_kv_from_topk_batch expects topk [B, Hkv, K], "
+            f"got {tuple(topk_logical.shape)}"
+        )
+    if key_cache.is_cuda:
+        from vllm.v1.attention.ops.zoomkv.paged_triton import (
+            paged_gather_kv_from_topk_batch,
+        )
+
+        return paged_gather_kv_from_topk_batch(
+            key_cache,
+            value_cache,
+            block_table,
+            seq_lens,
+            topk_logical,
+            block_size,
+            sink_size,
+            local_size,
+            out_k=out_k,
+            out_v=out_v,
+        )
+    # CPU / reference fallback: assemble then gather.
+    ctx_idx, _ = assemble_sparse_context_indices_batch(
+        seq_lens,
+        topk_logical,
+        sink_size,
+        local_size,
+    )
+    return gather_kv_by_logical_indices_batch(
+        key_cache,
+        value_cache,
+        block_table,
+        ctx_idx,
+        block_size,
+        out_k=out_k,
+        out_v=out_v,
+    )
+
+
 def build_sink_local_indices(
     seq_len: int,
     sink_size: int,
@@ -256,6 +364,80 @@ def sparse_decode_attention(
     return out.squeeze(2)  # [1, Hq, D]
 
 
+def sparse_decode_attention_batch(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale: float,
+    valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Batched non-causal sparse decode attention.
+
+    Args:
+        query: [B, Hq, D]
+        key / value: [B, Hkv, n_ctx, D]
+        valid_mask: [B, Hkv, n_ctx] bool (optional). When provided and not
+            all-True, falls back to per-request SDPA. The common long-context
+            path has a fully-valid context and skips this.
+    Returns:
+        out: [B, Hq, D]
+    """
+    batch, hq, d = query.shape
+    hkv = key.shape[1]
+    n_ctx = key.shape[2]
+    assert hq % hkv == 0
+    # Avoid GPU sync: if the caller knows the mask is fully valid it passes
+    # valid_mask=None (the common long-context path used by the batched
+    # backend). Otherwise fall through to masked SDPA.
+    if query.is_cuda and valid_mask is None:
+        try:
+            from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+            cu_q, cu_k = _flash_cu_seqlens_batch(query.device, batch, n_ctx)
+            # Flash varlen wants packed [total_q, Hq, D] / [total_k, Hkv, D].
+            q_flat = query.contiguous()
+            k_flat = (
+                key.permute(0, 2, 1, 3).reshape(batch * n_ctx, hkv, d).contiguous()
+            )
+            v_flat = (
+                value.permute(0, 2, 1, 3).reshape(batch * n_ctx, hkv, d).contiguous()
+            )
+            return flash_attn_varlen_func(
+                q_flat,
+                k_flat,
+                v_flat,
+                max_seqlen_q=1,
+                cu_seqlens_q=cu_q,
+                max_seqlen_k=n_ctx,
+                cu_seqlens_k=cu_k,
+                dropout_p=0.0,
+                softmax_scale=scale,
+                causal=False,
+            )
+        except (ImportError, RuntimeError):
+            if os.environ.get("VLLM_ZOOMKV_STRICT_KERNELS", "0") == "1":
+                raise
+
+    # Reference / masked path: one SDPA call with GQA.
+    repeats = hq // hkv
+    q = query.unsqueeze(2)  # [B, Hq, 1, D]
+    attn_mask = None
+    if valid_mask is not None:
+        m = valid_mask.repeat_interleave(repeats, dim=1)  # [B, Hq, T]
+        attn_mask = m.unsqueeze(2)
+    out = F.scaled_dot_product_attention(
+        q,
+        key,
+        value,
+        attn_mask=attn_mask,
+        dropout_p=0.0,
+        is_causal=False,
+        scale=scale,
+        enable_gqa=hq != hkv,
+    )
+    return out.squeeze(2)
+
+
 @lru_cache(maxsize=128)
 def _flash_cu_seqlens(
     device: torch.device, n_ctx: int
@@ -263,6 +445,18 @@ def _flash_cu_seqlens(
     """Cache tiny varlen descriptors; steady-state decode performs no alloc."""
     cu_q = torch.tensor([0, 1], dtype=torch.int32, device=device)
     cu_k = torch.tensor([0, int(n_ctx)], dtype=torch.int32, device=device)
+    return cu_q, cu_k
+
+
+@lru_cache(maxsize=128)
+def _flash_cu_seqlens_batch(
+    device: torch.device, batch: int, n_ctx: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Varlen descriptors for B independent q_len=1 / k_len=n_ctx sequences."""
+    cu_q = torch.arange(0, batch + 1, dtype=torch.int32, device=device)
+    cu_k = torch.arange(
+        0, (batch + 1) * int(n_ctx), step=int(n_ctx), dtype=torch.int32, device=device
+    )
     return cu_q, cu_k
 
 
@@ -316,4 +510,56 @@ def assemble_sparse_context_indices(
     toks = topk_logical
     indices[:, sink_local.numel() :] = toks
     valid[:, sink_local.numel() :] = toks >= 0
+    return indices, valid
+
+
+def assemble_sparse_context_indices_batch(
+    seq_lens: torch.Tensor,
+    topk_logical: torch.Tensor,
+    sink_size: int,
+    local_size: int,
+    out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched assemble of sink + local + topk indices.
+
+    Args:
+        seq_lens: [B]
+        topk_logical: [B, Hkv, final_topk]
+        out: optional [B, Hkv, sink+local+final_topk]
+    Returns:
+        indices: [B, Hkv, n_ctx]
+        valid_mask: [B, Hkv, n_ctx]
+    """
+    if topk_logical.is_cuda:
+        from vllm.v1.attention.ops.zoomkv.paged_triton import assemble_context_batch
+
+        return assemble_context_batch(
+            seq_lens,
+            topk_logical,
+            sink_size,
+            local_size,
+            out=out,
+        )
+    batch, kv, tk = topk_logical.shape
+    device = topk_logical.device
+    n_ctx = int(sink_size) + int(local_size) + tk
+    if out is None or out.shape != (batch, kv, n_ctx):
+        indices = torch.full(
+            (batch, kv, n_ctx), -1, dtype=torch.int64, device=device
+        )
+    else:
+        indices = out
+        indices.fill_(-1)
+    valid = torch.zeros(batch, kv, n_ctx, dtype=torch.bool, device=device)
+    seq_list = [int(x) for x in seq_lens.tolist()]
+    for i, seq_len in enumerate(seq_list):
+        sink_local = build_sink_local_indices(
+            seq_len, sink_size, local_size, device
+        )
+        sl = sink_local.numel()
+        if sl:
+            indices[i, :, :sl] = sink_local.view(1, -1).expand(kv, -1)
+            valid[i, :, :sl] = True
+        indices[i, :, sl : sl + tk] = topk_logical[i]
+        valid[i, :, sl : sl + tk] = topk_logical[i] >= 0
     return indices, valid

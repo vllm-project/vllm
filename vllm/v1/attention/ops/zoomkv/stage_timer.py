@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Optional stage timer for ZoomKV sparse-decode localization.
+"""Optional stage timer and NVTX ranges for ZoomKV localization.
 
 Enable with ``VLLM_ZOOMKV_STAGE_TIMER=1``.  CUDA-event timings are accumulated
 per stage; call ``dump_and_reset()`` after a decode-heavy generate to print a
-report.  Disabled by default so production paths stay untouched.
+report. Set ``VLLM_ZOOMKV_NVTX=1`` to emit the same stage names as NVTX ranges
+without enabling the higher-overhead CUDA-event timer. Disabled by default so
+production paths stay untouched.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any
 import torch
 
 _ENABLED = os.environ.get("VLLM_ZOOMKV_STAGE_TIMER", "0") == "1"
+_NVTX_ENABLED = os.environ.get("VLLM_ZOOMKV_NVTX", "0") == "1"
 
 # stage -> accumulated GPU ms / CPU wall ms / call count
 _gpu_ms: dict[str, float] = defaultdict(float)
@@ -30,17 +33,21 @@ def enabled() -> bool:
 
 
 class Stage:
-    """CUDA-event + host wall timer for one named stage."""
+    """Optional CUDA-event timer and NVTX range for one named stage."""
 
-    __slots__ = ("name", "start_evt", "end_evt", "t0")
+    __slots__ = ("name", "start_evt", "end_evt", "t0", "nvtx_pushed")
 
     def __init__(self, name: str) -> None:
         self.name = name
         self.start_evt: Any | None = None
         self.end_evt: Any | None = None
         self.t0 = 0.0
+        self.nvtx_pushed = False
 
     def __enter__(self) -> Stage:
+        if _NVTX_ENABLED and torch.cuda.is_available():
+            torch.cuda.nvtx.range_push(self.name)
+            self.nvtx_pushed = True
         if not _ENABLED:
             return self
         self.t0 = time.perf_counter()
@@ -51,15 +58,19 @@ class Stage:
         return self
 
     def __exit__(self, *exc) -> None:
-        if not _ENABLED:
-            return
-        t1 = time.perf_counter()
-        if self.start_evt is not None and self.end_evt is not None:
-            self.end_evt.record()
-            _pending.append((self.name, self.start_evt, self.end_evt, self.t0, t1))
-        else:
-            _cpu_ms[self.name] += (t1 - self.t0) * 1e3
-            _counts[self.name] += 1
+        if _ENABLED:
+            t1 = time.perf_counter()
+            if self.start_evt is not None and self.end_evt is not None:
+                self.end_evt.record()
+                _pending.append(
+                    (self.name, self.start_evt, self.end_evt, self.t0, t1)
+                )
+            else:
+                _cpu_ms[self.name] += (t1 - self.t0) * 1e3
+                _counts[self.name] += 1
+        if self.nvtx_pushed:
+            torch.cuda.nvtx.range_pop()
+            self.nvtx_pushed = False
 
 
 def _flush_pending() -> None:

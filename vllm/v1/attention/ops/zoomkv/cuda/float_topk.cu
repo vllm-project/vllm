@@ -33,11 +33,22 @@ __device__ __forceinline__ uint8_t extract_byte(uint32_t x, int byte_offset) {
 }
 
 // Naive topk for length <= k
-__device__ void naive_topk(int64_t* __restrict__ indices, int32_t length,
+__device__ __forceinline__ int64_t map_topk_index(
+    const int64_t* __restrict__ values, int64_t values_stride, int bid,
+    int idx) {
+  return values == nullptr ? static_cast<int64_t>(idx)
+                           : values[static_cast<int64_t>(bid) * values_stride +
+                                    idx];
+}
+
+__device__ void naive_topk(int64_t* __restrict__ indices,
+                           const int64_t* __restrict__ values,
+                           int64_t values_stride, int bid, int32_t length,
                            int32_t k) {
   const int tid = threadIdx.x;
   for (int i = tid; i < k; i += BLOCK_SIZE) {
-    indices[i] = (i < length) ? i : -1;
+    indices[i] =
+        (i < length) ? map_topk_index(values, values_stride, bid, i) : -1;
   }
 }
 
@@ -51,8 +62,10 @@ __device__ void naive_topk(int64_t* __restrict__ indices, int32_t length,
  * to avoid sentinel corruption during double-buffered cumsum.
  */
 __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
+                                  const int64_t* __restrict__ values,
                                   int64_t* __restrict__ indices,    // [B, k]
-                                  int64_t input_stride, int32_t length,
+                                  int64_t input_stride,
+                                  int64_t values_stride, int32_t length,
                                   int32_t k) {
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
@@ -76,7 +89,7 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
   // Early exit for length <= k
   if (length <= k) {
-    naive_topk(out, length, k);
+    naive_topk(out, values, values_stride, bid, length, k);
     return;
   }
 
@@ -149,7 +162,8 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
       uint8_t bin = extract_byte(ordered, 24);
       if (bin > threshold_bin_r0) {
         int pos = atomicAdd(&s_counter, 1);
-        if (pos < k) out[pos] = idx;
+        if (pos < k)
+          out[pos] = map_topk_index(values, values_stride, bid, idx);
       }
     }
     return;
@@ -170,7 +184,8 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
     if (bin > threshold_bin_r0) {
       int pos = atomicAdd(&s_counter, 1);
-      if (pos < k) out[pos] = idx;
+      if (pos < k)
+        out[pos] = map_topk_index(values, values_stride, bid, idx);
     } else if (bin == threshold_bin_r0) {
       int pos = atomicAdd(&s_num_input[0], 1);
       if (pos < smem_idx_size) {
@@ -227,7 +242,8 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
         uint8_t bin = extract_byte(ordered, byte_offset);
         if (bin > threshold_bin) {
           int pos = atomicAdd(&s_counter, 1);
-          if (pos < k) out[pos] = idx;
+          if (pos < k)
+            out[pos] = map_topk_index(values, values_stride, bid, idx);
         }
       }
       return;
@@ -249,13 +265,15 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
       if (bin > threshold_bin) {
         int pos = atomicAdd(&s_counter, 1);
-        if (pos < k) out[pos] = idx;
+          if (pos < k)
+            out[pos] = map_topk_index(values, values_stride, bid, idx);
       } else if (bin == threshold_bin) {
         if (round == 3) {
           // Last round: fill remaining slots
           int pos = atomicAdd(&s_last_remain, -1);
           if (pos > 0) {
-            out[k - pos] = idx;
+            out[k - pos] =
+                map_topk_index(values, values_stride, bid, idx);
           }
         } else {
           int pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
@@ -277,7 +295,8 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 // Python Interface
 // =====================================================================
 
-torch::Tensor float_topk_cuda(torch::Tensor input, int64_t k) {
+torch::Tensor float_topk_cuda_impl(torch::Tensor input,
+                                   const torch::Tensor* values, int64_t k) {
   TORCH_CHECK(input.is_cuda(), "input must be on CUDA");
   TORCH_CHECK(input.dim() == 2, "input must be 2D [B, L]");
   TORCH_CHECK(k > 0, "k must be positive");
@@ -300,6 +319,20 @@ torch::Tensor float_topk_cuda(torch::Tensor input, int64_t k) {
 
   c10::cuda::CUDAGuard device_guard(input.device());
   auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const int64_t* values_ptr = nullptr;
+  int64_t values_stride = 0;
+  torch::Tensor values_contiguous;
+  if (values != nullptr) {
+    TORCH_CHECK(values->is_cuda() && values->device() == input.device(),
+                "values must be CUDA on the same device as input");
+    TORCH_CHECK(values->scalar_type() == torch::kInt64,
+                "values must be int64");
+    TORCH_CHECK(values->dim() == 2 && values->sizes() == input.sizes(),
+                "values shape must match input");
+    values_contiguous = values->contiguous();
+    values_ptr = values_contiguous.data_ptr<int64_t>();
+    values_stride = values_contiguous.stride(0);
+  }
 
   // Dynamic shared memory: candidate index double buffer (extern __shared__
   // s_input_idx). sm_80 default cap is 48KB; request 64KB before launch (same
@@ -314,14 +347,18 @@ torch::Tensor float_topk_cuda(torch::Tensor input, int64_t k) {
       cudaGetErrorString(err_attr));
 
   float_topk_kernel<<<B, BLOCK_SIZE, smem, stream>>>(
-      input_float.data_ptr<float>(), indices.data_ptr<int64_t>(),
-      input_float.stride(0), L, k);
+      input_float.data_ptr<float>(), values_ptr, indices.data_ptr<int64_t>(),
+      input_float.stride(0), values_stride, L, k);
 
   auto err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
               "float_topk kernel failed: ", cudaGetErrorString(err));
 
   return indices;
+}
+
+torch::Tensor float_topk_cuda(torch::Tensor input, int64_t k) {
+  return float_topk_cuda_impl(input, nullptr, k);
 }
 
 torch::Tensor float_topk_3d_cuda(torch::Tensor input, int64_t k) {
@@ -336,6 +373,21 @@ torch::Tensor float_topk_3d_cuda(torch::Tensor input, int64_t k) {
   return indices_2d.reshape({bs, kv_heads, k});
 }
 
+torch::Tensor float_topk_values_3d_cuda(torch::Tensor input,
+                                       torch::Tensor values, int64_t k) {
+  TORCH_CHECK(input.dim() == 3 && values.dim() == 3,
+              "input and values must be 3D [bs, kv_heads, kv_len]");
+  TORCH_CHECK(input.sizes() == values.sizes(),
+              "input and values shapes must match");
+  const int bs = input.size(0);
+  const int kv_heads = input.size(1);
+  const int kv_len = input.size(2);
+  auto input_2d = input.reshape({bs * kv_heads, kv_len});
+  auto values_2d = values.reshape({bs * kv_heads, kv_len});
+  auto selected_2d = float_topk_cuda_impl(input_2d, &values_2d, k);
+  return selected_2d.reshape({bs, kv_heads, k});
+}
+
 #ifndef ZOOMKV_UNIFIED_EXTENSION
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("float_topk", &float_topk_cuda,
@@ -344,5 +396,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("float_topk_3d", &float_topk_3d_cuda,
         "Float Top-K with multi-round radix select (3D input)",
         py::arg("input"), py::arg("k"));
+  m.def("float_topk_values_3d", &float_topk_values_3d_cuda,
+        "Float Top-K returning associated int64 values", py::arg("input"),
+        py::arg("values"), py::arg("k"));
 }
 #endif

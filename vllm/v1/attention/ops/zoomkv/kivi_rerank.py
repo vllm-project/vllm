@@ -115,13 +115,11 @@ def partial_chunk_kivi_qk_ref(
 @lru_cache
 def _try_load_kivi_cuda() -> Any | None:
     """Best-effort JIT load of the KIVI CUDA extension (D in {128,256})."""
-    try:
-        import vllm._zoomkv_C as kernel
+    from vllm.v1.attention.ops.zoomkv.kernels import try_load_zoomkv_c
 
-        if hasattr(kernel, "partial_chunk_kivi_qk_dense_sparse"):
-            return kernel
-    except ImportError:
-        pass
+    kernel = try_load_zoomkv_c()
+    if kernel is not None and hasattr(kernel, "partial_chunk_kivi_qk_dense_sparse"):
+        return kernel
     try:
         from torch.utils.cpp_extension import load
     except ImportError:

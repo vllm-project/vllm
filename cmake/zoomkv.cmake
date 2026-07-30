@@ -21,6 +21,7 @@ set(
 set(VLLM_ZOOMKV_SRCS
   ${ZOOMKV_SRC_DIR}/cuda/bindings.cpp
   ${ZOOMKV_SRC_DIR}/cuda/quest_chunk_score.cu
+  ${ZOOMKV_SRC_DIR}/cuda/physical_retrieval.cu
   ${ZOOMKV_SRC_DIR}/kivi_qk_dot.cu
   ${ZOOMKV_SRC_DIR}/cuda/rerank_topk.cu
   ${ZOOMKV_SRC_DIR}/cuda/float_topk.cu
@@ -39,4 +40,18 @@ if(VLLM_BUILD_ZOOMKV_EXT AND VLLM_GPU_LANG STREQUAL "CUDA")
     WITH_SOABI
   )
   target_compile_definitions(_zoomkv_C PRIVATE ZOOMKV_UNIFIED_EXTENSION=1)
+  # Some development environments carry a stale libtorch C++ API include in
+  # TorchConfig.cmake while linking the active Python torch package. Put the
+  # active package headers first so CUDA/C++ objects use one ABI consistently.
+  get_filename_component(
+    ZOOMKV_TORCH_PACKAGE_DIR
+    "${Torch_DIR}/../../.."
+    ABSOLUTE
+  )
+  target_include_directories(
+    _zoomkv_C
+    BEFORE PRIVATE
+    "${ZOOMKV_TORCH_PACKAGE_DIR}/include"
+    "${ZOOMKV_TORCH_PACKAGE_DIR}/include/torch/csrc/api/include"
+  )
 endif()

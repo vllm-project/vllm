@@ -77,6 +77,34 @@ class ZoomKVBlockSummary:
         )
         self.valid = torch.zeros(num_blocks, device=device, dtype=torch.bool)
         self._request_block_summary_cache: dict[tuple, tuple[torch.Tensor, ...]] = {}
+        self._compact_slots_scratch: torch.Tensor | None = None
+        self._compact_count_scratch: torch.Tensor | None = None
+
+    def _get_compact_scratch(
+        self,
+        slots: torch.Tensor,
+        capacity: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self._compact_slots_scratch is None
+            or self._compact_slots_scratch.shape[0] < capacity
+            or self._compact_slots_scratch.dtype != slots.dtype
+            or self._compact_slots_scratch.device != slots.device
+        ):
+            self._compact_slots_scratch = torch.empty(
+                capacity, dtype=slots.dtype, device=slots.device
+            )
+        if (
+            self._compact_count_scratch is None
+            or self._compact_count_scratch.device != slots.device
+        ):
+            self._compact_count_scratch = torch.empty(
+                (), dtype=torch.int32, device=slots.device
+            )
+        return (
+            self._compact_slots_scratch[:capacity],
+            self._compact_count_scratch,
+        )
 
     def invalidate_blocks(self, block_ids: list[int] | torch.Tensor) -> None:
         """Mark physical blocks invalid (reuse / zero / free)."""
@@ -175,13 +203,23 @@ class ZoomKVBlockSummary:
             )
 
             finalize_slots = slots
+            finalize_count = None
             if slots.numel() > 256:
                 # Prefill: compact to block-ending slots before launching the
                 # D=256 finalizer. This avoids 64 masked programs per ordinary
                 # token while retaining the sync-free one-token decode path.
-                finalize_slots = compact_completed_slots(slots, self.block_size)
+                capacity = min(
+                    slots.numel(),
+                    (slots.numel() + self.block_size - 1) // self.block_size + 1024,
+                )
+                scratch, count = self._get_compact_scratch(slots, capacity)
+                finalize_slots, finalize_count = compact_completed_slots(
+                    slots, self.block_size, out=scratch, count=count
+                )
                 self._request_block_summary_cache.clear()
-            finalize_completed_slots(key_cache, finalize_slots, self)
+            finalize_completed_slots(
+                key_cache, finalize_slots, self, slot_count=finalize_count
+            )
             return
         # A large update is prefill/admission for a new batch; previously
         # cached logical request views can no longer be reused.
@@ -234,34 +272,56 @@ class ZoomKVBlockSummary:
             chunk_min/max/centroid: [1, kv, n_chunks, D]
             valid: [1, kv, n_chunks] bool
         """
-        ids = physical_block_ids.to(torch.int64).clamp(0, self.num_blocks - 1)
-        n = ids.numel()
-        packed = (
-            self.packed.index_select(0, ids)
-            .permute(1, 0, 2, 3)
-            .unsqueeze(0)
-            .contiguous()
+        ids = physical_block_ids.to(torch.int64).reshape(1, -1)
+        return self.gather_batch_block_summaries(ids)
+
+    def gather_batch_block_summaries(
+        self,
+        physical_block_ids: torch.Tensor,
+        chunk_valid: torch.Tensor | None = None,
+        assume_valid_ids: bool = False,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Gather child-chunk block_summaries for a batch of requests.
+
+        Args:
+            physical_block_ids: [B, n_chunks] physical block ids in logical
+                order. Padding slots may use any id; pass ``chunk_valid`` to
+                mark them invalid.
+            chunk_valid: optional [B, n_chunks] bool mask of real retrieval
+                chunks. Combined with the physical ``self.valid`` bit.
+            assume_valid_ids: when true, skip the defensive clamp. The batched
+                decode hot path passes a block-table slice that is already in
+                range.
+        Returns:
+            packed: [B, kv, n_chunks, n_pack, g]
+            chunk_min/max/centroid: [B, kv, n_chunks, D]
+            valid: [B, kv, n_chunks] bool
+        """
+        if physical_block_ids.dim() != 2:
+            raise ValueError(
+                "gather_batch_block_summaries expects [B, n_chunks] ids, "
+                f"got shape={tuple(physical_block_ids.shape)}"
+            )
+        ids = physical_block_ids.to(device=self.device, dtype=torch.int64)
+        if not assume_valid_ids:
+            ids = ids.clamp(0, self.num_blocks - 1)
+        batch, n = ids.shape
+        packed = self.packed[ids].permute(0, 2, 1, 3, 4).contiguous()
+        chunk_min = self.chunk_min[ids].permute(0, 2, 1, 3).contiguous()
+        chunk_max = self.chunk_max[ids].permute(0, 2, 1, 3).contiguous()
+        centroid = self.centroid[ids].permute(0, 2, 1, 3).contiguous()
+        valid = self.valid[ids]
+        if chunk_valid is not None:
+            valid = valid & chunk_valid.to(device=self.device, dtype=torch.bool)
+        valid = (
+            valid.unsqueeze(1).expand(batch, self.num_kv_heads, n).contiguous()
         )
-        chunk_min = (
-            self.chunk_min.index_select(0, ids)
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        chunk_max = (
-            self.chunk_max.index_select(0, ids)
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        centroid = (
-            self.centroid.index_select(0, ids)
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        valid = self.valid.index_select(0, ids)
-        valid = valid.view(1, 1, n).expand(1, self.num_kv_heads, n).contiguous()
         return packed, chunk_min, chunk_max, centroid, valid
 
     def build_parent_minmax(
@@ -274,19 +334,15 @@ class ZoomKVBlockSummary:
         """Aggregate child chunks into parent chunks for hierarchical Quest."""
         del physical_block_ids
         factor = self.blocks_per_parent
-        n_chunks = chunk_min.shape[2]
+        batch, kv_heads, n_chunks, head_dim = chunk_min.shape
         n_parent = n_chunks // factor
         if n_parent <= 0:
             empty = chunk_min[:, :, :0, :]
             return empty, empty.clone(), valid[:, :, :0]
         usable = n_parent * factor
-        cmin = chunk_min[:, :, :usable, :].reshape(
-            1, self.num_kv_heads, n_parent, factor, self.head_dim
-        )
-        cmax = chunk_max[:, :, :usable, :].reshape(
-            1, self.num_kv_heads, n_parent, factor, self.head_dim
-        )
-        v = valid[:, :, :usable].reshape(1, self.num_kv_heads, n_parent, factor)
+        cmin = chunk_min[:, :, :usable, :].reshape(batch, kv_heads, n_parent, factor, head_dim)
+        cmax = chunk_max[:, :, :usable, :].reshape(batch, kv_heads, n_parent, factor, head_dim)
+        v = valid[:, :, :usable].reshape(batch, kv_heads, n_parent, factor)
         neg = torch.full_like(cmin, float("-inf"))
         pos = torch.full_like(cmax, float("inf"))
         cmin_m = torch.where(v.unsqueeze(-1), cmin, pos)
@@ -294,12 +350,8 @@ class ZoomKVBlockSummary:
         parent_min = cmin_m.amin(dim=3)
         parent_max = cmax_m.amax(dim=3)
         parent_valid = v.any(dim=3)
-        parent_min = torch.where(
-            parent_valid.unsqueeze(-1), parent_min, torch.zeros_like(parent_min)
-        )
-        parent_max = torch.where(
-            parent_valid.unsqueeze(-1), parent_max, torch.zeros_like(parent_max)
-        )
+        parent_min = torch.where(parent_valid.unsqueeze(-1), parent_min, torch.zeros_like(parent_min))
+        parent_max = torch.where(parent_valid.unsqueeze(-1), parent_max, torch.zeros_like(parent_max))
         return parent_min, parent_max, parent_valid
 
 
@@ -317,6 +369,10 @@ def get_or_create_block_summary(
     dtype: torch.dtype,
     blocks_per_parent: int = 16,
 ) -> ZoomKVBlockSummary:
+    # Normalize so ``cuda`` and ``cuda:0`` (current device) compare equal.
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
     sc = _LAYER_BLOCK_SUMMARIES.get(layer_name)
     if (
         sc is None

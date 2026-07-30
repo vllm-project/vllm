@@ -1,9 +1,11 @@
-#include <torch/extension.h>
+#include <torch/python.h>
 
 #include <optional>
 
-torch::Tensor float_topk_cuda(torch::Tensor input, int64_t k);
-torch::Tensor float_topk_3d_cuda(torch::Tensor input, int64_t k);
+at::Tensor float_topk_cuda(at::Tensor input, int64_t k);
+at::Tensor float_topk_3d_cuda(at::Tensor input, int64_t k);
+at::Tensor float_topk_values_3d_cuda(at::Tensor input, at::Tensor values,
+                                    int64_t k);
 
 void quest_chunk_score_cuda(at::Tensor q, at::Tensor chunk_min,
                             at::Tensor chunk_max, at::Tensor scores,
@@ -25,6 +27,30 @@ void partial_chunk_density_scores_interface(at::Tensor chunk_ids,
 
 void mask_from_topk_interface(at::Tensor positions, at::Tensor mask);
 
+void quest_chunk_score_physical_cuda(
+    at::Tensor q, at::Tensor physical_ids, at::Tensor global_min,
+    at::Tensor global_max, at::Tensor global_valid, at::Tensor scores,
+    int64_t n_chunks);
+void quest_parent_score_physical_cuda(
+    at::Tensor q, at::Tensor physical_ids, at::Tensor global_min,
+    at::Tensor global_max, at::Tensor global_valid, at::Tensor scores,
+    int64_t n_chunks, int64_t factor);
+void quest_sub_score_physical_cuda(
+    at::Tensor q, at::Tensor physical_ids, at::Tensor global_min,
+    at::Tensor global_max, at::Tensor global_valid, at::Tensor large_ids,
+    at::Tensor scores, int64_t n_selected, int64_t factor,
+    int64_t n_chunks);
+void density_score_physical_cuda(
+    at::Tensor chunk_ids, at::Tensor physical_ids, at::Tensor global_centroid,
+    at::Tensor global_valid, at::Tensor q, at::Tensor scores,
+    int64_t n_chunks);
+void kivi_physical_cuda(
+    at::Tensor chunk_ids, at::Tensor dense_mask, at::Tensor physical_ids,
+    at::Tensor global_packed, at::Tensor global_min, at::Tensor global_max,
+    at::Tensor global_valid, at::Tensor q, int64_t dense_topk,
+    int64_t sparse_topk, int64_t token_offset, at::Tensor out_scores,
+    at::Tensor out_indices);
+
 void partial_chunk_kivi_qk_dense_sparse_interface(
     at::Tensor chunk_ids, at::Tensor dense_mask, at::Tensor packed_k,
     at::Tensor chunk_min, at::Tensor chunk_max, at::Tensor raw_q,
@@ -45,6 +71,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   namespace py = pybind11;
   m.def("float_topk", &float_topk_cuda);
   m.def("float_topk_3d", &float_topk_3d_cuda);
+  m.def("float_topk_values_3d", &float_topk_values_3d_cuda);
   m.def("quest_chunk_score", &quest_chunk_score_cuda, py::arg("q"),
         py::arg("chunk_min"), py::arg("chunk_max"), py::arg("scores"),
         py::arg("n_chunks"), py::arg("chunk_valid") = std::nullopt);
@@ -53,6 +80,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("partial_chunk_density_scores",
         &partial_chunk_density_scores_interface);
   m.def("mask_from_topk", &mask_from_topk_interface);
+  m.def("quest_chunk_score_physical", &quest_chunk_score_physical_cuda);
+  m.def("quest_parent_score_physical", &quest_parent_score_physical_cuda);
+  m.def("quest_sub_score_physical", &quest_sub_score_physical_cuda);
+  m.def("density_score_physical", &density_score_physical_cuda);
+  m.def("kivi_physical", &kivi_physical_cuda);
   m.def("partial_chunk_kivi_qk_dense_sparse",
         &partial_chunk_kivi_qk_dense_sparse_interface);
   m.def("h2d_gather_keys", &h2d_gather_keys);
