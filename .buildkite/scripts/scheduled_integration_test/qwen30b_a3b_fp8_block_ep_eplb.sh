@@ -43,7 +43,6 @@ cleanup() {
 trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
-  VLLM_COMPUTE_NANS_IN_LOGITS=1 \
   VLLM_DEEP_GEMM_WARMUP=skip \
   vllm serve "$MODEL" \
     --enforce-eager \
@@ -61,7 +60,7 @@ for BACK in "${BACKENDS[@]}"; do
 
   TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
   OUT="${OUT_DIR}/${TAG}_${BACK}.json"
-  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}" --check-nan-logits
+  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
   python3 - <<PY
 import json; acc=json.load(open('${OUT}'))['accuracy']
 print(f"${MODEL} ${BACK}: accuracy {acc:.3f}")

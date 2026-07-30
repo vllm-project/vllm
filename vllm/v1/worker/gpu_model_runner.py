@@ -230,7 +230,7 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -3739,6 +3739,8 @@ class GPUModelRunner(
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(

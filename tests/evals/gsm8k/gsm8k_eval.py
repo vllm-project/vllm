@@ -10,22 +10,15 @@ import ast
 import asyncio
 import json
 import os
-import sys
 import tempfile
 import time
 from collections.abc import Generator
-from pathlib import Path
-
-if __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import aiohttp
 import numpy as np
 import regex as re
 import requests
 from tqdm.asyncio import tqdm
-
-from tests.evals.metrics import assert_no_nan_logits
 
 INVALID = -9999999
 
@@ -364,11 +357,6 @@ def main() -> None:
         help="Maximum number of concurrent requests",
     )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
-    parser.add_argument(
-        "--check-nan-logits",
-        action="store_true",
-        help="Fail if the server reports requests with NaNs in logits",
-    )
 
     args = parser.parse_args()
 
@@ -397,9 +385,6 @@ def main() -> None:
         with open(args.save_results, "w") as f:
             json.dump(result, f, indent=2)
         print(f"Results saved to {args.save_results}")
-
-    if args.check_nan_logits:
-        assert_no_nan_logits(f"{args.host}:{args.port}/metrics")
 
 
 if __name__ == "__main__":

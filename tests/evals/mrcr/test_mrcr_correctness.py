@@ -12,7 +12,6 @@ import shlex
 
 import yaml
 
-from tests.evals.metrics import assert_no_nan_logits
 from tests.utils import RemoteOpenAIServer
 
 from .mrcr_eval import evaluate_mrcr
@@ -33,8 +32,6 @@ def test_mrcr_correctness(config_filename):
 
     server_args = shlex.split(cfg.get("server_args", ""))
     server_args += ["--trust-remote-code", "--disable-uvicorn-access-log"]
-    server_env = dict(cfg.get("env") or {})
-    server_env["VLLM_COMPUTE_NANS_IN_LOGITS"] = "1"
 
     print(
         f"MRCR eval for {cfg['model_name']} (threshold {cfg['match_ratio_threshold']})"
@@ -43,7 +40,7 @@ def test_mrcr_correctness(config_filename):
     with RemoteOpenAIServer(
         cfg["model_name"],
         server_args,
-        env_dict=server_env,
+        env_dict=cfg.get("env"),
         max_wait_seconds=cfg.get("startup_max_wait_seconds", 600),
     ) as server:
         host, port = _split_host_port(server.url_for("v1"))
@@ -58,7 +55,6 @@ def test_mrcr_correctness(config_filename):
             concurrency=cfg.get("concurrency", 8),
             extra_body=cfg.get("extra_body"),
         )
-        assert_no_nan_logits(server.url_for("metrics"))
 
     threshold = cfg["match_ratio_threshold"]
     tol = cfg.get("tolerance", 0.05)

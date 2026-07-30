@@ -14,45 +14,12 @@ import shlex
 import pytest
 import yaml
 
-from tests.evals.metrics import assert_no_nan_logits
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
 DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
-
-
-@pytest.mark.parametrize(
-    ("metrics", "error"),
-    [
-        ('vllm:corrupted_requests_total{engine="0"} 0\n', None),
-        (
-            'vllm:corrupted_requests_total{engine="0"} 1\n'
-            'vllm:corrupted_requests_total{engine="1"} 2\n',
-            "Detected 3 requests",
-        ),
-        ("vllm:prompt_tokens_total 42\n", "metric is missing"),
-    ],
-)
-def test_assert_no_nan_logits(monkeypatch, metrics: str, error: str | None):
-    class MetricsResponse:
-        text = metrics
-
-        @staticmethod
-        def raise_for_status():
-            pass
-
-    monkeypatch.setattr(
-        "tests.evals.metrics.requests.get",
-        lambda *_args, **_kwargs: MetricsResponse(),
-    )
-
-    if error is None:
-        assert_no_nan_logits("http://localhost/metrics")
-    else:
-        with pytest.raises(AssertionError, match=error):
-            assert_no_nan_logits("http://localhost/metrics")
 
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
@@ -156,7 +123,6 @@ def test_gsm8k_correctness(config_filename):
     )
     env_dict = dict(eval_config.get("env") or {})
     env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
-    env_dict["VLLM_COMPUTE_NANS_IN_LOGITS"] = "1"
 
     print(f"Starting GSM8K evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
@@ -183,7 +149,6 @@ def test_gsm8k_correctness(config_filename):
         print(f"Server started at: {server_url}")
 
         results = run_gsm8k_eval(eval_config, server_url)
-        assert_no_nan_logits(remote_server.url_for("metrics"))
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
