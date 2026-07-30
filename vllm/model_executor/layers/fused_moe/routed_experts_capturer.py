@@ -367,7 +367,7 @@ class RoutedExpertsManager:
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
             hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+            num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
         )
 
