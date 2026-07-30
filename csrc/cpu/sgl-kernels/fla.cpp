@@ -87,20 +87,55 @@ inline void fill_stub(scalar_t* __restrict__ out, float val) {
 }
 
 // Portable fallback for non-AVX512 builds (ARM/NEON, old x86 without
-// AVX512BF16). Mirrors the AVX512 specialization's math with plain scalar
-// loops; correctness over throughput since this path never runs on hardware
-// the AMX/AVX512 fast path already covers.
+// AVX512BF16), vectorized via at::vec::Vectorized<T> (portable across
+// AVX2/NEON/generic) mirroring the idioms used elsewhere in this file (see
+// l2norm_fwd_kernel_impl's predecessor and fused_gdn_gating_kernel_impl):
+// bVec/fVec pairs with convert_to_float/convert_from_float for bf16<->float,
+// plain scalar tails for remainders. Two kernels (cumsum_kernel,
+// update_key_kernel) write a transposed layout relative to their vectorized
+// read axis; those vectorize the load/compute and unpack lanes for the
+// (unavoidably strided) store.
 template <typename scalar_t, int D, bool has_scale>
 struct l2norm_kernel {
   static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input, float eps) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int bVecSize = bVec::size();
     constexpr float scale = 1.f / std::sqrt(static_cast<float>(D));
-    float sqsum = 0.f;
-    for (int d = 0; d < D; ++d) {
+
+    fVec sum_fvec0(0.f), sum_fvec1(0.f);
+    int d = 0;
+    for (; d <= D - bVecSize; d += bVecSize) {
+      bVec in_bvec = bVec::loadu(input + d);
+      fVec in0, in1;
+      std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+      sum_fvec0 = sum_fvec0 + in0 * in0;
+      sum_fvec1 = sum_fvec1 + in1 * in1;
+    }
+    float sqsum = vec_reduce_sum(sum_fvec0 + sum_fvec1);
+    for (; d < D; ++d) {
       float v = static_cast<float>(input[d]);
       sqsum += v * v;
     }
+
     float rscale = 1.f / std::sqrt(sqsum + eps);
-    for (int d = 0; d < D; ++d) {
+    fVec rscale_fvec(rscale);
+    fVec scale_fvec(scale);
+    d = 0;
+    for (; d <= D - bVecSize; d += bVecSize) {
+      bVec in_bvec = bVec::loadu(input + d);
+      fVec in0, in1;
+      std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+      in0 = in0 * rscale_fvec;
+      in1 = in1 * rscale_fvec;
+      if constexpr (has_scale) {
+        in0 = in0 * scale_fvec;
+        in1 = in1 * scale_fvec;
+      }
+      bVec out_bvec = at::vec::convert_from_float<scalar_t>(in0, in1);
+      out_bvec.store(out + d);
+    }
+    for (; d < D; ++d) {
       float v = static_cast<float>(input[d]) * rscale;
       if constexpr (has_scale) {
         v *= scale;
@@ -166,7 +201,25 @@ struct cumsum_kernel {
       int ld_dst) {
     // out: [hb_size valid rows, CHUNK_SIZE] within a [BLOCK_H, ld_dst] buffer
     // input: [mb_size valid rows, hb_size] within a [CHUNK_SIZE(padded), ld_src] buffer
-    for (int j = 0; j < hb_size; ++j) {
+    // input is contiguous along j (vectorize the load/accumulate); out is
+    // contiguous along i instead (transposed), so the store is per-lane.
+    using Vec = at::vec::Vectorized<scalar_t>;
+    constexpr int VecSize = Vec::size();
+    alignas(64) scalar_t lane_buf[VecSize];
+    int j = 0;
+    for (; j <= hb_size - VecSize; j += VecSize) {
+      Vec running(static_cast<scalar_t>(0));
+      for (int i = 0; i < CHUNK_SIZE; ++i) {
+        if (i < mb_size) {
+          running = running + Vec::loadu(input + i * ld_src + j);
+        }
+        running.store(lane_buf);
+        for (int lane = 0; lane < VecSize; ++lane) {
+          out[(j + lane) * ld_dst + i] = lane_buf[lane];
+        }
+      }
+    }
+    for (; j < hb_size; ++j) {
       float running = 0.f;
       for (int i = 0; i < CHUNK_SIZE; ++i) {
         if (i < mb_size) {
@@ -220,12 +273,25 @@ template <typename scalar_t, int CHUNK_SIZE>
 struct decay_mask_kernel {
   // decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
   static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input) {
+    using Vec = at::vec::Vectorized<scalar_t>;
+    constexpr int VecSize = Vec::size();
+    const Vec zero(static_cast<scalar_t>(0));
     for (int row = 0; row < CHUNK_SIZE; ++row) {
-      float g_row = static_cast<float>(input[row]);
-      for (int col = 0; col < CHUNK_SIZE; ++col) {
+      Vec g_row(input[row]);
+      Vec limit_vec(static_cast<scalar_t>(row));
+      int col = 0;
+      for (; col <= CHUNK_SIZE - VecSize; col += VecSize) {
+        Vec g_col = Vec::loadu(input + col);
+        Vec vc = (g_row - g_col).exp_u20();
+        Vec idx = Vec::arange(static_cast<scalar_t>(col), static_cast<scalar_t>(1));
+        Vec result = Vec::blendv(zero, vc, idx <= limit_vec);
+        result.store(out + row * CHUNK_SIZE + col);
+      }
+      for (; col < CHUNK_SIZE; ++col) {
         out[row * CHUNK_SIZE + col] =
-            col <= row ? static_cast<scalar_t>(std::exp(g_row - static_cast<float>(input[col])))
-                       : static_cast<scalar_t>(0);
+            col <= row
+                ? static_cast<scalar_t>(std::exp(static_cast<float>(input[row]) - static_cast<float>(input[col])))
+                : static_cast<scalar_t>(0);
       }
     }
   }
@@ -288,13 +354,35 @@ struct apply_mask_kernel {
       const float* __restrict__ d,
       int size,
       int b_stride = 0) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+    const fVec zero(0.f);
     for (int row = 0; row < size; ++row) {
       int col_limit = has_beta ? row : row + 1;
       float beta_val = 1.f;
       if constexpr (has_beta) {
         beta_val = -static_cast<float>(beta[row * b_stride]);
       }
-      for (int col = 0; col < CHUNK_SIZE; ++col) {
+      fVec beta_fvec(beta_val);
+      fVec limit_fvec(static_cast<float>(col_limit));
+      int col = 0;
+      for (; col <= CHUNK_SIZE - bVecSize; col += bVecSize) {
+        fVec a0 = fVec::loadu(attn + row * CHUNK_SIZE + col);
+        fVec a1 = fVec::loadu(attn + row * CHUNK_SIZE + col + fVecSize);
+        fVec d0 = fVec::loadu(d + row * CHUNK_SIZE + col);
+        fVec d1 = fVec::loadu(d + row * CHUNK_SIZE + col + fVecSize);
+        fVec v0 = a0 * beta_fvec * d0;
+        fVec v1 = a1 * beta_fvec * d1;
+        fVec idx0 = fVec::arange(static_cast<float>(col), 1.f);
+        fVec idx1 = fVec::arange(static_cast<float>(col + fVecSize), 1.f);
+        v0 = fVec::blendv(zero, v0, idx0 < limit_fvec);
+        v1 = fVec::blendv(zero, v1, idx1 < limit_fvec);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(v0, v1);
+        out_bvec.store(attn2 + row * CHUNK_SIZE + col);
+      }
+      for (; col < CHUNK_SIZE; ++col) {
         float v = 0.f;
         if (col < col_limit) {
           v = attn[row * CHUNK_SIZE + col] * beta_val * d[row * CHUNK_SIZE + col];
@@ -363,22 +451,63 @@ template <typename scalar_t, int CHUNK_SIZE>
 struct solve_tril_kernel {
   // (I + L)^{-1} via forward substitution, L = strict-lower part of attn2.
   static inline void apply(scalar_t* __restrict__ attn2, int size) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
     // for len == 0 and row < size, we don't have to write back zero again
     // as in `apply_mask_kernel`, we already set zero for the upper-triangular region
     for (int i = 1; i < size; ++i) {
       scalar_t* __restrict__ row_ptr = attn2 + i * CHUNK_SIZE;
       float vsum[CHUNK_SIZE];
-      for (int j = 0; j < i; ++j) {
+      int j = 0;
+      for (; j <= i - bVecSize; j += bVecSize) {
+        bVec row_bvec = bVec::loadu(row_ptr + j);
+        fVec f0, f1;
+        std::tie(f0, f1) = at::vec::convert_to_float(row_bvec);
+        f0.store(vsum + j);
+        f1.store(vsum + j + fVecSize);
+      }
+      for (; j < i; ++j) {
         vsum[j] = static_cast<float>(row_ptr[j]);
       }
+
+      // row = attn[..., i, :i].clone()
+      // sub = attn[..., :i, :i].clone()
+      // vsum = row + (row.unsqueeze(-1) * sub).sum(-2)
       for (int k = 0; k < i; ++k) {
+        // read BEFORE row_ptr is written back below (row k was finalized in
+        // an earlier outer iteration; row i itself is untouched until the
+        // final write-back after this loop)
         float va = static_cast<float>(row_ptr[k]);
+        fVec va_vec(va);
         const scalar_t* __restrict__ row_k_ptr = attn2 + k * CHUNK_SIZE;
-        for (int j = 0; j < k; ++j) {
-          vsum[j] += va * static_cast<float>(row_k_ptr[j]);
+        int jj = 0;
+        for (; jj <= k - bVecSize; jj += bVecSize) {
+          bVec rk_bvec = bVec::loadu(row_k_ptr + jj);
+          fVec rk0, rk1;
+          std::tie(rk0, rk1) = at::vec::convert_to_float(rk_bvec);
+          fVec vsum0 = fVec::loadu(vsum + jj);
+          fVec vsum1 = fVec::loadu(vsum + jj + fVecSize);
+          vsum0 = vsum0 + va_vec * rk0;
+          vsum1 = vsum1 + va_vec * rk1;
+          vsum0.store(vsum + jj);
+          vsum1.store(vsum + jj + fVecSize);
+        }
+        for (; jj < k; ++jj) {
+          vsum[jj] += va * static_cast<float>(row_k_ptr[jj]);
         }
       }
-      for (int j = 0; j < i; ++j) {
+
+      j = 0;
+      for (; j <= i - bVecSize; j += bVecSize) {
+        fVec f0 = fVec::loadu(vsum + j);
+        fVec f1 = fVec::loadu(vsum + j + fVecSize);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(f0, f1);
+        out_bvec.store(row_ptr + j);
+      }
+      for (; j < i; ++j) {
         row_ptr[j] = static_cast<scalar_t>(vsum[j]);
       }
     }
@@ -461,6 +590,11 @@ struct apply_beta_kernel {
       int ld_src,
       int ld_dst,
       int b_stride) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
     for (int i = 0; i < size; ++i) {
       float scale = 1.f;
       if constexpr (has_beta) {
@@ -469,7 +603,18 @@ struct apply_beta_kernel {
       if constexpr (has_g) {
         scale *= std::exp(g[i]);
       }
-      for (int d = 0; d < D; ++d) {
+      fVec scale_fvec(scale);
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec in_bvec = bVec::loadu(input + i * ld_src + d);
+        fVec in0, in1;
+        std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+        in0 = in0 * scale_fvec;
+        in1 = in1 * scale_fvec;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(in0, in1);
+        out_bvec.store(out + i * ld_dst + d);
+      }
+      for (; d < D; ++d) {
         out[i * ld_dst + d] = static_cast<scalar_t>(static_cast<float>(input[i * ld_src + d]) * scale);
       }
     }
@@ -537,8 +682,20 @@ template <typename scalar_t, int D>
 struct update_kernel {
   static inline void
   apply(scalar_t* __restrict__ out, const float* __restrict__ input, int size, int ld_src, int ld_dst) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
     for (int i = 0; i < size; ++i) {
-      for (int d = 0; d < D; ++d) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        fVec f0 = fVec::loadu(input + i * ld_src + d);
+        fVec f1 = fVec::loadu(input + i * ld_src + d + fVecSize);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(f0, f1);
+        out_bvec.store(out + i * ld_dst + d);
+      }
+      for (; d < D; ++d) {
         out[i * ld_dst + d] = static_cast<scalar_t>(input[i * ld_src + d]);
       }
     }
@@ -576,16 +733,38 @@ struct update_value_kernel {
       int size,
       int padded_size,
       int v_strideT) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
     // v2' = v - v'
     for (int i = 0; i < size; ++i) {
-      for (int d = 0; d < D; ++d) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec v_bvec = bVec::loadu(v + i * v_strideT + d);
+        fVec v0, v1;
+        std::tie(v0, v1) = at::vec::convert_to_float(v_bvec);
+        fVec vp0 = fVec::loadu(v_prime + i * D + d);
+        fVec vp1 = fVec::loadu(v_prime + i * D + d + fVecSize);
+        v0 = v0 - vp0;
+        v1 = v1 - vp1;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(v0, v1);
+        out_bvec.store(v_prime2 + i * D + d);
+      }
+      for (; d < D; ++d) {
         float val = static_cast<float>(v[i * v_strideT + d]) - v_prime[i * D + d];
         v_prime2[i * D + d] = static_cast<scalar_t>(val);
       }
     }
     // pad the last chunk
+    const bVec zero_bvec(static_cast<scalar_t>(0));
     for (int i = size; i < padded_size; ++i) {
-      for (int d = 0; d < D; ++d) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        zero_bvec.store(v_prime2 + i * D + d);
+      }
+      for (; d < D; ++d) {
         v_prime2[i * D + d] = static_cast<scalar_t>(0);
       }
     }
@@ -645,16 +824,46 @@ struct update_key_kernel {
       const float* __restrict__ g,
       int size,
       int k_strideT) {
-    // k_updated is transposed: [D, CHUNK_SIZE], k_updated[d, t] = k[t, d] * exp(g_last - g[t])
+    // k_updated is transposed: [D, CHUNK_SIZE], k_updated[d, t] = k[t, d] * exp(g_last - g[t]).
+    // k's D dim is contiguous (vectorize load/compute); k_updated's D dim is
+    // strided (CHUNK_SIZE apart), so the store is unpacked per lane.
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+    alignas(64) scalar_t lane_buf[bVecSize];
+
     const float g_last = g[size - 1];
     for (int t = 0; t < size; ++t) {
       float scale = std::exp(g_last - g[t]);
-      for (int d = 0; d < D; ++d) {
+      fVec scale_fvec(scale);
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec k_bvec = bVec::loadu(k + t * k_strideT + d);
+        fVec k0, k1;
+        std::tie(k0, k1) = at::vec::convert_to_float(k_bvec);
+        k0 = k0 * scale_fvec;
+        k1 = k1 * scale_fvec;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(k0, k1);
+        out_bvec.store(lane_buf);
+        for (int lane = 0; lane < bVecSize; ++lane) {
+          k_updated[(d + lane) * CHUNK_SIZE + t] = lane_buf[lane];
+        }
+      }
+      for (; d < D; ++d) {
         k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(static_cast<float>(k[t * k_strideT + d]) * scale);
       }
     }
+    const bVec zero_bvec(static_cast<scalar_t>(0));
     for (int t = size; t < CHUNK_SIZE; ++t) {
-      for (int d = 0; d < D; ++d) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        zero_bvec.store(lane_buf);
+        for (int lane = 0; lane < bVecSize; ++lane) {
+          k_updated[(d + lane) * CHUNK_SIZE + t] = lane_buf[lane];
+        }
+      }
+      for (; d < D; ++d) {
         k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(0);
       }
     }
@@ -710,6 +919,7 @@ struct update_key_kernel<at::BFloat16, CHUNK_SIZE, D> {
   }
 };
 #endif
+
 
 // template head_dim here to reduce extra read
 //   * normal approach: read inputs 2 times:
