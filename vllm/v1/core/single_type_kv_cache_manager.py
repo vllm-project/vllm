@@ -805,7 +805,45 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         return num_common_blocks
 
 
-class HiSparseHotManager(SingleTypeKVCacheManager):
+class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
+    """Base for ephemeral groups whose host source owns prefix caching."""
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        return None
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        return None
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+
+class HiSparseHotManager(_HiSparseAuxiliaryManager):
     """Allocate a hot region only after a request acquires CPU-only history."""
 
     def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
@@ -851,14 +889,6 @@ class HiSparseHotManager(SingleTypeKVCacheManager):
         assert not new_computed_blocks
         self.num_cached_block[request_id] = 0
 
-    def allocate_external_computed_blocks(
-        self,
-        request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        return None
-
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
@@ -876,34 +906,8 @@ class HiSparseHotManager(SingleTypeKVCacheManager):
         self.hot_required.discard(request_id)
         return super().pop_blocks_for_free(request_id)
 
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-    ) -> None:
-        return None
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
-
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        return tuple([] for _ in kv_cache_group_ids), 0
-
-
-class HiSparseResidentManager(SingleTypeKVCacheManager):
+class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track reclaimable resident pages for otherwise host-backed KV."""
 
     def __init__(self, *args, **kwargs) -> None:
@@ -947,14 +951,6 @@ class HiSparseResidentManager(SingleTypeKVCacheManager):
         self.num_cpu_only_pages[request_id] = num_host_pages
         self.num_cached_block[request_id] = 0
 
-    def allocate_external_computed_blocks(
-        self,
-        request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        return None
-
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
@@ -966,17 +962,6 @@ class HiSparseResidentManager(SingleTypeKVCacheManager):
         new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(new_blocks)
         return new_blocks
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-    ) -> None:
-        return None
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
 
     def reclaimable_pages(
         self, *, host_valid: bool | None = None
@@ -1031,21 +1016,6 @@ class HiSparseResidentManager(SingleTypeKVCacheManager):
         self.host_valid_pages.pop(request_id, None)
         self.num_cpu_only_pages.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
-
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        return tuple([] for _ in kv_cache_group_ids), 0
 
 
 class RSWAManager(FullAttentionManager):
