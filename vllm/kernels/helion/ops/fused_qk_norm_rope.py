@@ -281,23 +281,7 @@ def fused_qk_norm_rope(
     for tile_m, tile_gn, tile_n in hl.tile(
         [num_tokens, qk_heads, head_dim], block_size=[1, None, head_dim]
     ):
-        x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
-
-        rms = x_blk.pow(2).sum(dim=-1)
-        rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)
-
         use_q_weight = (tile_gn.index < num_heads_q)[None, :, None]
-        w_blk = torch.where(
-            use_q_weight, q_weight[None, None, tile_n], k_weight[None, None, tile_n]
-        )
-
-        x_blk = (x_blk * rms[:, :, None]).to(qkv.dtype) * w_blk
-
-        qkv[tile_m, tile_gn, tile_n] = x_blk
-
-        pos_id = position_ids[tile_m]
-        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)]
-        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim]
 
         if is_neox:
             x1_offset = hl.arange(embed_dim)
@@ -306,8 +290,39 @@ def fused_qk_norm_rope(
             x1_offset = hl.arange(embed_dim) * 2
             x2_offset = x1_offset + 1
 
-        x1_blk = qkv[tile_m, tile_gn, x1_offset]
-        x2_blk = qkv[tile_m, tile_gn, x2_offset]
+        if rotary_dim < head_dim:
+            x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
+            rms = torch.rsqrt(x_blk.pow(2).sum(dim=-1) * (1.0 / head_dim) + eps)
+            weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, tile_n],
+                k_weight[None, None, tile_n],
+            )
+            x_blk = (x_blk * rms[:, :, None]).to(qkv.dtype) * weight
+            qkv[tile_m, tile_gn, tile_n] = x_blk
+            x1_blk = qkv[tile_m, tile_gn, x1_offset]
+            x2_blk = qkv[tile_m, tile_gn, x2_offset]
+        else:
+            x1_blk = qkv[tile_m, tile_gn, x1_offset].to(dtype=torch.float32)
+            x2_blk = qkv[tile_m, tile_gn, x2_offset].to(dtype=torch.float32)
+            rms = x1_blk.pow(2).sum(dim=-1) + x2_blk.pow(2).sum(dim=-1)
+            rms = torch.rsqrt(rms * (1.0 / head_dim) + eps)
+            x1_weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, x1_offset],
+                k_weight[None, None, x1_offset],
+            )
+            x2_weight = torch.where(
+                use_q_weight,
+                q_weight[None, None, x2_offset],
+                k_weight[None, None, x2_offset],
+            )
+            x1_blk = (x1_blk * rms[:, :, None]).to(qkv.dtype) * x1_weight
+            x2_blk = (x2_blk * rms[:, :, None]).to(qkv.dtype) * x2_weight
+
+        pos_id = position_ids[tile_m]
+        cos_blk = cos_sin_cache[pos_id, hl.arange(embed_dim)]
+        sin_blk = cos_sin_cache[pos_id, hl.arange(embed_dim) + embed_dim]
 
         o1_blk = x1_blk * cos_blk[:, None, :] - x2_blk * sin_blk[:, None, :]
         o2_blk = x2_blk * cos_blk[:, None, :] + x1_blk * sin_blk[:, None, :]
