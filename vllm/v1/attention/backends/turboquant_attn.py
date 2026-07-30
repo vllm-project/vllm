@@ -19,7 +19,6 @@ Per-head per-position slot layout:
 import contextlib
 import functools
 import math
-import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -50,6 +49,15 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+
+# FlyDSL TurboQuant decode (AMD gfx950). Auto-selected when FlyDSL is available
+# for eligible layers (SoA store + FlyDSL decode + SoA-aware continuation);
+# non-gfx950 or ineligible layers use the SoA Triton decode.
+from vllm.v1.attention.ops.flydsl_turboquant_decode import (
+    flydsl_turboquant_decode_attention,
+    is_flydsl_available,
+    is_flydsl_gqa6_available,
+)
 from vllm.v1.attention.ops.triton_turboquant_decode import (
     _tq_full_dequant_kv,
     _use_fp8_e4b15,
@@ -73,38 +81,6 @@ if _HAS_FLASH_ATTN:
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
 _CONTINUATION_DECODE_THRESHOLD = 128
-
-
-# --------------------------------------------------------------------------- #
-#  FlyDSL TurboQuant decode (opt-in; AMD MI355X / gfx950).                     #
-#                                                                             #
-#  Enabled with VLLM_ROCM_TQ_FLYDSL_DECODE=1. When OFF (default) NONE of the below #
-#  branches execute and the upstream TurboQuant v1 path runs byte-for-byte    #
-#  unchanged. When ON, the whole self-consistent SoA pipeline is used:        #
-#    * SoA Triton store (write)                                               #
-#    * FlyDSL decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
-#    * SoA-aware continuation/dequant for chunked prefill                     #
-#    * SoA Triton decode fallback for FlyDSL-ineligible layers               #
-#  The FlyDSL framework is a separate runtime dependency; if it is unavailable #
-#  while opted in, init raises. Per-layer ineligible cases use the SoA path.   #
-# --------------------------------------------------------------------------- #
-_USE_TQ_FLYDSL = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
-if _USE_TQ_FLYDSL:
-    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
-        flydsl_turboquant_decode_attention,
-    )
-    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
-        is_flydsl_available as _flydsl_available,
-    )
-    from vllm.v1.attention.ops.flydsl_turboquant_decode import (
-        is_flydsl_gqa6_available as _flydsl_gqa6_available,
-    )
-
-    if not _flydsl_available():
-        raise ValueError(
-            "VLLM_ROCM_TQ_FLYDSL_DECODE=1 is set but FlyDSL is not available. "
-            "Install FlyDSL (gfx950) or unset VLLM_ROCM_TQ_FLYDSL_DECODE."
-        )
 
 
 def _soa_imports():
@@ -389,17 +365,16 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
-        # ---- FlyDSL (opt-in) state. Inert unless VLLM_ROCM_TQ_FLYDSL_DECODE=1. ----
+        # FlyDSL decode state. Auto-enabled on gfx950 when FlyDSL is available.
         self.sliding_window = sliding_window
         self.sinks = kwargs.get("sinks")
         # Cache max_model_len now (config is available at __init__ but NOT
         # during CUDA-graph capture when _ensure_on_device is re-entered).
         self._max_model_len = vllm_config.model_config.max_model_len
-        # The SoA cache layout is integral to the FlyDSL pipeline (the SoA
-        # decode kernel and SoA-aware continuation both read it), so the SoA
-        # store is always on whenever FlyDSL is enabled. There is no separate
-        # toggle: the single VLLM_ROCM_TQ_FLYDSL_DECODE flag drives the whole pipeline.
-        self._soa_store = _USE_TQ_FLYDSL
+        # SoA store is required by the FlyDSL decode/continuation path, so it
+        # tracks FlyDSL availability (single switch for the whole pipeline).
+        self._use_flydsl = is_flydsl_available()
+        self._soa_store = self._use_flydsl
 
     def _flash_attn_varlen(
         self,
@@ -865,7 +840,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
                     if self._soa_store:
                         # The cache was written in SoA layout (always, for FlyDSL),
-                        # so it MUST be read with the SoA-aware v3 decode. The
+                        # so it MUST be read with the SoA-aware decode. The
                         # default AoS decode mis-addresses k_norm/v_scale/v_zero
                         # in a SoA cache -> garbage cached-prefix output ->
                         # accuracy collapse on every multi-turn / prefix-cached
@@ -1152,13 +1127,13 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 )
             )
 
-        if _USE_TQ_FLYDSL:
-            # FlyDSL decode (MI355X/gfx950, MSE-key, HEAD_SIZE=128,
-            # GQA in {6, 8, 16}). GQA-6 routes to the MiniMax sibling kernel.
-            # Ineligible layers / missing FlyDSL fall back to SoA Triton decode.
+        if self._use_flydsl:
+            # FlyDSL decode (gfx950, MSE-key, HEAD_SIZE=128, GQA in {6, 8, 16}).
+            # GQA-6 routes to the MiniMax sibling kernel. Ineligible layers fall
+            # back to SoA Triton decode.
             _gqa = self.num_kv_groups
             flydsl_gqa_ok = (_gqa in (8, 16)) or (
-                _gqa == 6 and _flydsl_gqa6_available()
+                _gqa == 6 and is_flydsl_gqa6_available()
             )
             flydsl_eligible = (
                 not self.tq_config.key_fp8

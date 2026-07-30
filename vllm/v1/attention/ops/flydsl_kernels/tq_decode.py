@@ -102,7 +102,6 @@ def build_tq_decode_module(
     kv_block_size: int = KV_BLOCK_SIZE,
     use_hw_v_transpose: bool = False,
     tile_groups_per_partition: int = 1,
-    use_wht_butterfly: bool = False,
 ):
     """Build a TQ decode kernel module.
 
@@ -136,14 +135,6 @@ def build_tq_decode_module(
     block_size=32 / num_partitions=32, G=5 covers 32*5*256 = 40 960
     tokens of worst-case context with grid.z=32 instead of 256.
     Behavior at G=1 is bit-identical to the single-partition kernel.
-
-    ``use_wht_butterfly`` (default False) replaces the STEP B HBM load of
-    the externally-rotated ``q_rot`` tensor with an in-register 7-stage
-    Walsh-Hadamard butterfly that computes ``H @ q`` directly (H = the
-    normalised Hadamard matrix = PiT for TurboQuant).  The launcher must
-    pass the raw ``query`` tensor instead of ``q_rot`` when this is True.
-    Currently never enabled by the launcher (kept for future use); see
-    ``_wht_butterfly_enabled`` in ``flydsl_turboquant_decode.py``.
     """
     assert query_group_size in (8, 16), (
         f"query_group_size must be 8 or 16; got {query_group_size}"
@@ -257,7 +248,7 @@ def build_tq_decode_module(
         LOG2E_C = arith.constant(LOG2E, type=T.f32)
         QK_SCALE = arith.constant(_qk_scale, type=T.f32)
 
-        # Helper: unwrap fx wrapper → raw ir.Value (used in STEP B' and STEP F)
+        # Helper: unwrap fx wrapper → raw ir.Value (used in STEP F)
         def _ival(v):
             return v.ir_value() if hasattr(v, "ir_value") else v
 
@@ -267,120 +258,27 @@ def build_tq_decode_module(
         cent_lds.store(c_val, [arith.index_cast(T.index, c_idx_safe)])
         gpu.barrier()
 
-        # ===== STEP B / B': Load Q → row-major LDS [query_row, head_dim] ===
-        # Two paths controlled by the use_wht_butterfly compile-time flag:
-        #
-        # STEP B  (use_wht_butterfly=False, default):
-        #   q_rsrc points to the externally-rotated q_rot tensor.  Load 8 bf16
-        #   per lane per iter (vec_width=4 i32) in QG_LOAD_ITERS iterations.
-        #
-        # STEP B' (use_wht_butterfly=True):
-        #   q_rsrc points to the RAW query tensor.  For each GQA head h, lane i
-        #   loads elements [2*i, 2*i+1], applies a 7-stage Hadamard butterfly
-        #   (1 intra-lane + 6 cross-lane shuffle_xor) to compute H @ q in
-        #   register, scales by 1/sqrt(D), and writes the rotated pair to Q_LDS.
-        #   No external GEMM or HBM q_rot tensor needed.
-        if not use_wht_butterfly:
-            # --- STEP B: load pre-rotated q_rot → Q_LDS ---
-            for c in range_constexpr(QG_LOAD_ITERS):
-                row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..QG*16-1
-                row = row_chunk >> fx.Int32(4)  # 0..QG-1
-                col_b = row_chunk & fx.Int32(15)  # 0..15
-                col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
-                q_off_elem = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
-                q_v = buffer_ops.buffer_load(
-                    q_rsrc,
-                    q_off_elem // fx.Int32(2),
-                    vec_width=4,
-                    dtype=T.i32,
-                )
-                q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
-                vector.store(
-                    q_v,
-                    q_lds_i32,
-                    [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
-                )
-        else:
-            # --- STEP B': in-register FWHT → Q_LDS ---
-            # PiT = H (pure normalised Hadamard, symmetric) so H @ q = q @ H.
-            # Lane i holds elements [2*i, 2*i+1] of one head at a time.
-            # After all QG heads + barrier, Q_LDS is identical to what STEP B
-            # would have produced from an externally pre-rotated q_rot tensor.
-            _WHT_SCALE = arith.constant(1.0 / (HEAD_SIZE**0.5), type=T.f32)
-            _ONE_F32_I32 = arith.constant(0x3F800000, type=T.i32)  # +1.0 bits
-            _C16 = arith.constant(16, type=T.i32)
-            _C31 = arith.constant(31, type=T.i32)
-            _q_lds_smem = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,))
-
-            for h in range_constexpr(QG):
-                # -- Load 2 packed bf16 (= 1 i32) for this lane / head --
-                _q_elem_off = (
-                    seq * c_sq + (kv_h * c_qg + fx.Int32(h)) * c_qh + lane * fx.Int32(2)
-                )
-                _q_raw = buffer_ops.buffer_load(
-                    q_rsrc,
-                    _q_elem_off // fx.Int32(2),
-                    vec_width=1,
-                    dtype=T.i32,
-                )
-                # Unpack i32 → 2 × bf16 → 2 × f32
-                _lo_i16 = arith.trunci(T.i16, _q_raw)
-                _hi_i16 = arith.trunci(T.i16, arith.shrui(_q_raw, _C16))
-                _q_lo = arith.extf(T.f32, arith.bitcast(T.bf16, _lo_i16))
-                _q_hi = arith.extf(T.f32, arith.bitcast(T.bf16, _hi_i16))
-
-                # Stage 0: intra-lane butterfly (no shuffle required)
-                _a = _q_lo + _q_hi
-                _b = _q_lo - _q_hi
-                _q_lo = _a
-                _q_hi = _b
-
-                # Stages 1-6: cross-lane butterfly (shuffle_xor + branchless ±)
-                # Sylvester-Hadamard core [[1,1],[1,-1]] per pair:
-                #   low  (lane_bit=0):  y = self + other
-                #   high (lane_bit=1):  y = other - self
-                # i.e. result = sign * self + other  where sign ∈ {+1, -1}.
-                # The sign MUST be applied to `self`, not `other`; applying it
-                # to `other` gives high = self - other = -(correct), flipping
-                # the transform by a per-coordinate sign vs. the pure Hadamard
-                # PiT used to rotate K -> decorrelated Q·K scores -> garbage.
-                # sign = bitcast_f32(float_bits(1.0) XOR (lane_bit << 31))
-                for _log2m in range_constexpr(6):  # masks 1, 2, 4, 8, 16, 32
-                    _mask = 1 << _log2m
-                    _other_lo = _q_lo.shuffle_xor(fx.Int32(_mask), c_w)
-                    _other_hi = _q_hi.shuffle_xor(fx.Int32(_mask), c_w)
-                    # lane_bit = 0 if this lane is "low" in the pair, else 1
-                    _lane_bit = _ival((lane >> fx.Int32(_log2m)) & fx.Int32(1))
-                    _sign_f32 = arith.bitcast(
-                        T.f32,
-                        arith.xori(
-                            _ONE_F32_I32,
-                            arith.shli(_lane_bit, _C31),
-                        ),
-                    )
-                    _q_lo = _sign_f32 * _q_lo + _other_lo
-                    _q_hi = _sign_f32 * _q_hi + _other_hi
-
-                # Scale by 1/sqrt(HEAD_SIZE)
-                _q_lo = _q_lo * _WHT_SCALE
-                _q_hi = _q_hi * _WHT_SCALE
-
-                # Pack 2 × f32 → 2 × bf16 → 1 × i32
-                _lo_bf16_out = arith.truncf(T.bf16, _ival(_q_lo))
-                _hi_bf16_out = arith.truncf(T.bf16, _ival(_q_hi))
-                _lo_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _lo_bf16_out))
-                _hi_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _hi_bf16_out))
-                _packed = arith.ori(
-                    _lo_i32_out,
-                    arith.shli(_hi_i32_out, _C16),
-                )
-
-                # Write to Q_LDS: row h, cols [2*lane, 2*lane+1]
-                _lds_i32_idx = fx.Int32(h * HEAD_SIZE // 2) + lane
-                _q_lds_smem.store(
-                    _packed,
-                    [arith.index_cast(T.index, _ival(_lds_i32_idx))],
-                )
+        # ===== STEP B: Load pre-rotated q_rot → row-major LDS ============
+        # q_rsrc points to the externally-rotated q_rot tensor. Load 8 bf16
+        # per lane per iter (vec_width=4 i32) in QG_LOAD_ITERS iterations.
+        for c in range_constexpr(QG_LOAD_ITERS):
+            row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..QG*16-1
+            row = row_chunk >> fx.Int32(4)  # 0..QG-1
+            col_b = row_chunk & fx.Int32(15)  # 0..15
+            col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
+            q_off_elem = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
+            q_v = buffer_ops.buffer_load(
+                q_rsrc,
+                q_off_elem // fx.Int32(2),
+                vec_width=4,
+                dtype=T.i32,
+            )
+            q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
+            vector.store(
+                q_v,
+                q_lds_i32,
+                [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
+            )
         gpu.barrier()
 
         # ===== STEP C: Pre-load Q operands for QK_K_CHUNKS = 4 K-chunks ===

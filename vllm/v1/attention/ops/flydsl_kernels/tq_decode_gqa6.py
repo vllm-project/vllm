@@ -120,7 +120,6 @@ def build_tq_decode_gqa6_module(
     kv_block_size: int = KV_BLOCK_SIZE,
     use_hw_v_transpose: bool = False,
     tile_groups_per_partition: int = 1,
-    use_wht_butterfly: bool = False,
 ):
     """Build a TQ decode GQA-6 kernel module (MiniMax-M2.5).
 
@@ -301,97 +300,29 @@ def build_tq_decode_gqa6_module(
         # for QG ∈ {8, 16} the (kv_h, row) iteration covers exactly the
         # real heads; QG=6 is the only case where
         # ``QG_LOAD_ITERS * 4 != QG``.
-        # Two paths controlled by the use_wht_butterfly compile-time flag
-        # (mirrors the canonical tq_decode kernel).  When OFF (default) the
-        # code below is bit-identical to the original GQA-6 STEP B, so the
-        # non-butterfly flow / accuracy is completely unchanged.
-        if not use_wht_butterfly:
-            for c in range_constexpr(QG_LOAD_ITERS):
-                row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..127
-                row = row_chunk >> fx.Int32(4)  # 0..7
-                col_b = row_chunk & fx.Int32(15)  # 0..15
-                col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
-                q_off_real = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
-                row_in_qg = row < fx.Int32(QG)
-                q_off_elem = row_in_qg.select(q_off_real, col_elem)
-                q_v = buffer_ops.buffer_load(
-                    q_rsrc,
-                    q_off_elem // fx.Int32(2),
-                    vec_width=4,
-                    dtype=T.i32,
-                )
-                q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
-                vector.store(
-                    q_v,
-                    q_lds_i32,
-                    [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
-                )
-        else:
-            # --- STEP B': in-register FWHT → Q_LDS (GQA-6 sibling) ---
-            # PiT = H (pure normalised Hadamard, symmetric) so H @ q = q @ H.
-            # Lane i holds elements [2*i, 2*i+1] of one head at a time. The
-            # loop runs only over the QG (=6) REAL heads, so unlike STEP B it
-            # never over-reads Q (no OOB redirect needed). Rows 6..15 of Q_LDS
-            # stay stale but are gated out downstream by the mfma_row < QG
-            # predicate (identical treatment to STEP B's garbage rows 8..15).
-            # Sign convention matches the corrected canonical kernel:
-            #   low  (lane_bit=0):  y = self + other
-            #   high (lane_bit=1):  y = other - self   (= sign*self + other)
-            def _ival(v):
-                return v.ir_value() if hasattr(v, "ir_value") else v
-
-            _WHT_SCALE = arith.constant(1.0 / (HEAD_SIZE**0.5), type=T.f32)
-            _ONE_F32_I32 = arith.constant(0x3F800000, type=T.i32)  # +1.0 bits
-            _C16b = arith.constant(16, type=T.i32)
-            _C31b = arith.constant(31, type=T.i32)
-            _q_lds_smem = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,))
-            for h in range_constexpr(QG):
-                _q_elem_off = (
-                    seq * c_sq + (kv_h * c_qg + fx.Int32(h)) * c_qh + lane * fx.Int32(2)
-                )
-                _q_raw = buffer_ops.buffer_load(
-                    q_rsrc,
-                    _q_elem_off // fx.Int32(2),
-                    vec_width=1,
-                    dtype=T.i32,
-                )
-                _lo_i16 = arith.trunci(T.i16, _q_raw)
-                _hi_i16 = arith.trunci(T.i16, arith.shrui(_q_raw, _C16b))
-                _q_lo = arith.extf(T.f32, arith.bitcast(T.bf16, _lo_i16))
-                _q_hi = arith.extf(T.f32, arith.bitcast(T.bf16, _hi_i16))
-
-                # Stage 0: intra-lane butterfly
-                _a = _q_lo + _q_hi
-                _b = _q_lo - _q_hi
-                _q_lo = _a
-                _q_hi = _b
-
-                # Stages 1-6: cross-lane butterfly (result = sign*self + other)
-                for _log2m in range_constexpr(6):  # masks 1,2,4,8,16,32
-                    _mask = 1 << _log2m
-                    _other_lo = _q_lo.shuffle_xor(fx.Int32(_mask), c_w)
-                    _other_hi = _q_hi.shuffle_xor(fx.Int32(_mask), c_w)
-                    _lane_bit = _ival((lane >> fx.Int32(_log2m)) & fx.Int32(1))
-                    _sign_f32 = arith.bitcast(
-                        T.f32,
-                        arith.xori(_ONE_F32_I32, arith.shli(_lane_bit, _C31b)),
-                    )
-                    _q_lo = _sign_f32 * _q_lo + _other_lo
-                    _q_hi = _sign_f32 * _q_hi + _other_hi
-
-                _q_lo = _q_lo * _WHT_SCALE
-                _q_hi = _q_hi * _WHT_SCALE
-
-                _lo_bf16_out = arith.truncf(T.bf16, _ival(_q_lo))
-                _hi_bf16_out = arith.truncf(T.bf16, _ival(_q_hi))
-                _lo_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _lo_bf16_out))
-                _hi_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _hi_bf16_out))
-                _packed = arith.ori(_lo_i32_out, arith.shli(_hi_i32_out, _C16b))
-                _lds_i32_idx = fx.Int32(h * HEAD_SIZE // 2) + lane
-                _q_lds_smem.store(
-                    _packed,
-                    [arith.index_cast(T.index, _ival(_lds_i32_idx))],
-                )
+        # STEP B: load pre-rotated q_rot → Q_LDS. QG=6 over-reads
+        # (QG_LOAD_ITERS * 4 != QG), so rows >= QG redirect to a safe
+        # in-bounds offset to avoid faulting past the real Q rows.
+        for c in range_constexpr(QG_LOAD_ITERS):
+            row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..127
+            row = row_chunk >> fx.Int32(4)  # 0..7
+            col_b = row_chunk & fx.Int32(15)  # 0..15
+            col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
+            q_off_real = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
+            row_in_qg = row < fx.Int32(QG)
+            q_off_elem = row_in_qg.select(q_off_real, col_elem)
+            q_v = buffer_ops.buffer_load(
+                q_rsrc,
+                q_off_elem // fx.Int32(2),
+                vec_width=4,
+                dtype=T.i32,
+            )
+            q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
+            vector.store(
+                q_v,
+                q_lds_i32,
+                [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
+            )
         gpu.barrier()
 
         # ===== STEP C: Pre-load Q operands for QK_K_CHUNKS = 4 K-chunks ===

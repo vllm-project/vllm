@@ -10,13 +10,13 @@ Per-GQA kernel dispatch:
   * GQA group ∈ {8, 16} → canonical kernels.tq_decode (Qwen-class)
   * GQA group == 6      → kernels.tq_decode_gqa6 sibling (MiniMax-M2.5)
 
-Opt-in via ``VLLM_ROCM_TQ_FLYDSL_DECODE=1``. Falls back to v3 if FlyDSL is not
-importable (e.g. wrong arch, missing build tree). The GQA-6 sibling is
-imported best-effort: missing it does not affect Qwen GQA-{8,16} paths.
+Auto-selected on gfx950 when FlyDSL is importable; falls back to the SoA Triton
+decode otherwise (wrong arch, missing build tree). The GQA-6 sibling is imported
+best-effort: missing it does not affect Qwen GQA-{8,16} paths.
 
 Architecture:
-    1. Q rotation: ``q_rot = (query.float() @ PiT).bfloat16()`` — same
-       launcher-side rocBLAS GEMM v3 uses with ``VLLM_TQ_FUSE_Q_ROT=0``.
+    1. Q rotation: ``q_rot = (query.float() @ PiT).bfloat16()`` — the same
+       launcher-side rocBLAS GEMM the SoA Triton decode uses.
     2. FlyDSL kernel writes per-partition outputs into
        ``[N, Hk, P, QG, D]`` bf16 + ``[N, Hk, P, QG]`` fp32 max/sum buffers.
     3. A small Triton reducer combines partitions in the kernel's native layout
@@ -55,7 +55,7 @@ _IR = None
 
 
 def is_flydsl_available() -> bool:
-    """Return True iff FlyDSL imports + canonical kernel module load successfully.
+    """Return True iff on gfx950 and FlyDSL imports + kernel module load.
 
     The GQA-6 sibling kernel (``kernels.tq_decode_gqa6``) is imported
     best-effort: if it's missing (older FlyDSL checkout that pre-dates
@@ -67,6 +67,12 @@ def is_flydsl_available() -> bool:
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
+        # gfx950-only kernel (CDNA4 intrinsics); gate before importing FlyDSL.
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            _FLYDSL_AVAILABLE = False
+            return _FLYDSL_AVAILABLE
         import flydsl.compiler as flyc  # noqa: F401
         import flydsl.expr as fx  # noqa: F401
         from flydsl._mlir import ir
@@ -332,19 +338,6 @@ _SEGM_POOL = _SegmBufPool()
 _HW_TR_CACHED: bool | None = None
 
 
-def _wht_butterfly_enabled() -> bool:
-    """Whether the in-kernel WHT butterfly path (STEP B') is used.
-
-    Hardwired to ``False``. The butterfly path (skip the external
-    ``q @ PiT`` GEMM and compute ``H @ q`` in-register) is kept in the
-    kernels (see STEP B' in ``tq_decode.py`` / ``tq_decode_gqa6.py``) but is
-    intentionally never taken: it has known correctness issues and is not
-    validated. Left as a single switch point so it can be re-enabled in the
-    future once the STEP B' path is fixed and validated.
-    """
-    return False
-
-
 def _hw_tr_enabled() -> bool:
     """Resolve the HW V-transpose build flag.
 
@@ -381,7 +374,6 @@ def _get_kernel(
     use_hw_v_transpose: bool = False,
     num_seqs_hint: int = 1,
     tile_groups_per_partition: int = 1,
-    use_wht_butterfly: bool = False,
 ):
     # ``num_seqs_hint`` (= runtime B) is forwarded to the build for shape
     # awareness; it does NOT participate in the cache key because the
@@ -399,7 +391,6 @@ def _get_kernel(
         int(kv_block_size),
         bool(use_hw_v_transpose),
         int(tile_groups_per_partition),
-        bool(use_wht_butterfly),
     )
     cached = _KERN_CACHE.get(key)
     if cached is not None:
@@ -433,7 +424,6 @@ def _get_kernel(
             kv_block_size=int(kv_block_size),
             use_hw_v_transpose=bool(use_hw_v_transpose),
             tile_groups_per_partition=int(tile_groups_per_partition),
-            use_wht_butterfly=bool(use_wht_butterfly),
         )
     else:
         kmod = _TQ_MOD
@@ -447,7 +437,6 @@ def _get_kernel(
             kv_block_size=int(kv_block_size),
             use_hw_v_transpose=bool(use_hw_v_transpose),
             tile_groups_per_partition=int(tile_groups_per_partition),
-            use_wht_butterfly=bool(use_wht_butterfly),
         )
     al = kmod.allocator
     block_threads = kmod.BLOCK_THREADS
@@ -591,7 +580,7 @@ def flydsl_turboquant_decode_attention(
     max_num_kv_splits: int = 32,
     sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """v3-compatible launcher backed by the FlyDSL decode kernel.
+    """SoA-decode-compatible launcher backed by the FlyDSL decode kernel.
 
     Constraints:
       * key_fp8 == False
@@ -610,9 +599,8 @@ def flydsl_turboquant_decode_attention(
     del mid_o_buf, lse_buf, key_packed_size, value_packed_size
     if not is_flydsl_available():
         raise RuntimeError(
-            "VLLM_ROCM_TQ_FLYDSL_DECODE requested but FlyDSL is not available; "
-            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0, or install FlyDSL "
-            "(pip / PYTHONPATH) to use the FlyDSL decode."
+            "FlyDSL decode requested but FlyDSL is not available (needs gfx950 "
+            "+ importable FlyDSL); the SoA Triton decode is the fallback."
         )
     assert not key_fp8, "FlyDSL supports MSE-key path only"
     assert mse_bits == 4, f"FlyDSL expects mse_bits=4, got {mse_bits}"
@@ -633,8 +621,8 @@ def flydsl_turboquant_decode_attention(
         raise RuntimeError(
             "FlyDSL launcher: GQA-6 requested (MiniMax-class) but the "
             "tq_decode_gqa6 sibling module is not available. Update your "
-            "FlyDSL checkout (must include kernels/tq_decode_gqa6.py) or "
-            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 to fall back to SoA Triton decode."
+            "FlyDSL checkout (must include kernels/tq_decode_gqa6.py); "
+            "otherwise the SoA Triton decode is the fallback."
         )
     assert centroids.numel() == _TQ_MOD.N_CENTROIDS, (
         f"centroids.numel={centroids.numel()} != {_TQ_MOD.N_CENTROIDS}"
@@ -777,31 +765,20 @@ def flydsl_turboquant_decode_attention(
     else:
         output = output_buf[:B] if output_buf.shape[0] != B else output_buf
 
-    # ---- q rotation -----------------------------------
-    # Only the normal path is used: GEMM q @ PiT via stable pooled buffers.
-    # The alternative butterfly path (skip the GEMM; compute H @ q in-register
-    # via STEP B') is kept in the kernels (GQA-{8,16} and GQA-6) but is never
-    # taken here -- ``_wht_butterfly_enabled()`` is hardwired to False. See its
-    # docstring for the rationale and how to re-enable it in the future.
-    use_wht_bf = _wht_butterfly_enabled()
-    if not use_wht_bf:
-        _q_float = pool_bufs["q_float"]  # [B, Hq, D] fp32, stable
-        _q_rot_f32 = pool_bufs["q_rot_fp32"]  # [B, Hq, D] fp32, stable mm output
-        _q_rot_out = pool_bufs["q_rot"]  # [B, Hq, D] query.dtype, stable
-        _q_float.copy_(query)  # bf16 → fp32 in-place, no alloc
-        # mm into stable fp32 buffer via out= to avoid fresh allocations.
-        # PiT_f32 is cached on buf_holder (stable ptr since first layer warmup).
-        torch.mm(
-            _q_float.view(B * Hq, D),
-            PiT_f32,
-            out=_q_rot_f32.view(B * Hq, D),  # in-place into pool buffer
-        )
-        _q_rot_out.copy_(_q_rot_f32)  # fp32 → bf16, into stable buf
-        q_for_kernel = _q_rot_out  # stable ptr for kernel launch
-    else:
-        # Butterfly: pass raw query directly.  query is [B, Hq, D] bf16,
-        # contiguous (guaranteed by the attention backend).
-        q_for_kernel = query
+    # ---- q rotation: GEMM q @ PiT via stable pooled buffers -------------
+    _q_float = pool_bufs["q_float"]  # [B, Hq, D] fp32, stable
+    _q_rot_f32 = pool_bufs["q_rot_fp32"]  # [B, Hq, D] fp32, stable mm output
+    _q_rot_out = pool_bufs["q_rot"]  # [B, Hq, D] query.dtype, stable
+    _q_float.copy_(query)  # bf16 → fp32 in-place, no alloc
+    # mm into stable fp32 buffer via out= to avoid fresh allocations.
+    # PiT_f32 is cached on buf_holder (stable ptr since first layer warmup).
+    torch.mm(
+        _q_float.view(B * Hq, D),
+        PiT_f32,
+        out=_q_rot_f32.view(B * Hq, D),  # in-place into pool buffer
+    )
+    _q_rot_out.copy_(_q_rot_f32)  # fp32 → bf16, into stable buf
+    q_for_kernel = _q_rot_out  # stable ptr for kernel launch
 
     # ---- FlyDSL kernel launch -------------------------------------------
     max_bps = int(block_table.shape[1])
@@ -816,7 +793,6 @@ def flydsl_turboquant_decode_attention(
         use_hw_v_transpose=use_hw_tr,
         num_seqs_hint=int(B),
         tile_groups_per_partition=int(tile_groups_per_partition),
-        use_wht_butterfly=use_wht_bf,
     )
     # Zero-overhead one-shot info log (replaces logger.info_once which
     # hashes its format string on every call to dedup).
@@ -827,8 +803,7 @@ def flydsl_turboquant_decode_attention(
             "FlyDSL launcher invoked (UNIFORM_BATCH cudagraph): "
             "B=%d Hk=%d Hq=%d D=%d QG=%d num_partitions=%d (actual=%d, "
             "cap=%d) TGPP=%d max_bps=%d block_size=%d max_seq_len=%d "
-            "hw_v_transpose=%s wht_butterfly=%s "
-            "(coverage=%d tokens, worst_case=%d tokens)",
+            "hw_v_transpose=%s (coverage=%d tokens, worst_case=%d tokens)",
             B,
             Hk,
             Hq,
@@ -842,7 +817,6 @@ def flydsl_turboquant_decode_attention(
             int(block_size),
             int(max_seq_len),
             use_hw_tr,
-            use_wht_bf,
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
         )
@@ -896,6 +870,6 @@ def flydsl_turboquant_decode_attention(
         logger.info(
             "FlyDSL launcher: norm_correction honored implicitly via "
             "pre-folded stored K-norm (cf. triton_turboquant_store step 3); "
-            "no decode-time work required, identical to v3 behavior."
+            "no decode-time work required, identical to the SoA decode behavior."
         )
     return output
