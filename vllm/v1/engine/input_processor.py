@@ -336,6 +336,10 @@ class InputProcessor:
                     raise ValueError(
                         "sampling distribution replay requires temperature > 0"
                     )
+                if sampling_params.top_k <= 0:
+                    raise ValueError(
+                        "sampling distribution replay requires top_k > 0 to bound sampling mask size"
+                    )
         else:
             pooling_params = params.clone()
 
