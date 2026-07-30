@@ -1037,8 +1037,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # batch_idx -> req_id
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        # Drafts-first ordering is only required by adaptive verification
+        # (compact_batch assumes verification requests lead); keep main's
+        # ordering untouched otherwise.
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
+            num_tokens_per_req,
+            draft_tokens if self.adaptive_verification is not None else {},
+            self.decode_query_len,
         )
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
