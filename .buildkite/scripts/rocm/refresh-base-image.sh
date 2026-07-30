@@ -7,9 +7,6 @@
 
 set -euo pipefail
 
-ROCM_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "${ROCM_SCRIPT_DIR}/buildx-history-logs.sh"
-
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CI_IMAGE_REPO="${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}"
@@ -363,13 +360,10 @@ build_base_image() {
     local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
-    local build_metadata_file=""
-    local build_rc=0
     local -a tags=()
     local -a no_cache_args=()
     local -a sccache_args=()
     local -a content_paths=()
-    local -a build_metadata_args=()
 
     if [[ ! -f "${DOCKERFILE}" ]]; then
         echo "Error: ROCm base Dockerfile not found: ${DOCKERFILE}" >&2
@@ -435,15 +429,10 @@ build_base_image() {
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
 
-    if build_metadata_file=$(buildx_history_metadata_file "refresh-rocm-base"); then
-        build_metadata_args=(--metadata-file "${build_metadata_file}")
-        snapshot_buildx_history_refs "${build_metadata_file}" || true
-    fi
     docker buildx build \
         "${no_cache_args[@]}" \
         --pull \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
-        "${build_metadata_args[@]}" \
         --file "${DOCKERFILE}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
         "${sccache_args[@]}" \
@@ -475,15 +464,7 @@ build_base_image() {
         --label "vllm.rocm_base.pytorch_rocm_arch=${pytorch_rocm_arch_arg}" \
         "${tags[@]}" \
         --push \
-        . || build_rc=$?
-
-    if [[ -n "${build_metadata_file}" ]]; then
-        capture_buildx_history_logs \
-            "${build_metadata_file}" "refresh-rocm-base" "${build_rc}" || true
-    fi
-    if ((build_rc != 0)); then
-        return "${build_rc}"
-    fi
+        .
 
     docker buildx imagetools inspect "${descriptive_tag}" >/dev/null
 

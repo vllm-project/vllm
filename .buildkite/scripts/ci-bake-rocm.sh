@@ -13,9 +13,6 @@
 
 set -euo pipefail
 
-CI_BAKE_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "${CI_BAKE_SCRIPT_DIR}/rocm/buildx-history-logs.sh"
-
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
@@ -2122,31 +2119,6 @@ verify_dependency_cache_ref() {
     return 1
 }
 
-run_bake_with_history() {
-    local step_name="$1"
-    shift
-    local build_rc=0
-    local metadata_file=""
-    local -a metadata_args=()
-
-    if metadata_file=$(buildx_history_metadata_file "${step_name}"); then
-        metadata_args=(--metadata-file "${metadata_file}")
-        snapshot_buildx_history_refs "${metadata_file}" || true
-    fi
-
-    docker buildx bake \
-        "${BAKE_FILES[@]}" \
-        "${metadata_args[@]}" \
-        --progress "${BUILDKIT_PROGRESS:-plain}" \
-        "$@" || build_rc=$?
-
-    if [[ -n "${metadata_file}" ]]; then
-        capture_buildx_history_logs \
-            "${metadata_file}" "${step_name}" "${build_rc}" || true
-    fi
-    return "${build_rc}"
-}
-
 seed_dependency_caches_if_needed() {
     local target=""
     local cache_ref=""
@@ -2171,7 +2143,10 @@ seed_dependency_caches_if_needed() {
 
         echo "--- :docker: Seeding ${target}"
         echo "Expected cache ref: ${cache_ref}"
-        run_bake_with_history "seed-${target}" "${target}"
+        docker buildx bake \
+            "${BAKE_FILES[@]}" \
+            --progress "${BUILDKIT_PROGRESS:-plain}" \
+            "${target}"
         verify_dependency_cache_ref "${cache_ref}"
     done
 }
@@ -2199,7 +2174,10 @@ run_bake() {
     local build_rc=0
 
     echo "--- :docker: Building ${TARGET}"
-    run_bake_with_history "${TARGET}" "${BAKE_TARGETS[@]}" || build_rc=$?
+    docker buildx bake \
+        "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        "${BAKE_TARGETS[@]}" || build_rc=$?
 
     if [[ ${build_rc} -eq 0 ]]; then
         echo "--- :white_check_mark: Build complete"

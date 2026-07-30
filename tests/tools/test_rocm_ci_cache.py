@@ -238,22 +238,6 @@ printf 'Digest: {digest}\\n'
     assert "status 1" in rejected.stderr
 
 
-def test_bake_wrapper_captures_logs_and_preserves_failure() -> None:
-    result = run_sourced(
-        CI_BAKE,
-        "BAKE_FILES=()\n"
-        'buildx_history_metadata_file() { printf "/tmp/metadata\\n"; }\n'
-        "snapshot_buildx_history_refs() { :; }\n"
-        'capture_buildx_history_logs() { printf "capture=%s:%s:%s\\n" "$@"; }\n'
-        "docker() { return 37; }\n"
-        "run_bake_with_history test-step test-target",
-        check=False,
-    )
-
-    assert result.returncode == 37
-    assert "capture=/tmp/metadata:test-step:37" in result.stdout
-
-
 def test_stable_tag_requires_authorized_build_and_content_hash() -> None:
     command = (
         'TARGET="ci-base-rocm-ci"\n'
