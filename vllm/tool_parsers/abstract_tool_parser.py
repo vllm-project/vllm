@@ -11,11 +11,13 @@ from typing import Any
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
+    ToolChoiceFunction,
 )
 from openai.types.responses.function_tool import FunctionTool
 
 import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -131,6 +133,20 @@ class ToolParser:
         if (
             structured_outputs is not None
             and structured_outputs.structural_tag is not None
+        ):
+            return request
+
+        # Parsers that opt out of the standard JSON-based required/named
+        # handling emit a native, non-JSON tool-call syntax. Forcing the tool
+        # JSON schema would constrain decoding to output their
+        # extract_tool_calls cannot read, so leave the request unconstrained
+        # and let the serving layer fall back to auto parsing.
+        if not self.supports_required_and_named and (
+            request.tool_choice == "required"
+            or isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
         ):
             return request
 
