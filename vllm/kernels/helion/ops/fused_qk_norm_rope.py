@@ -290,6 +290,8 @@ def fused_qk_norm_rope(
             x1_offset = hl.arange(embed_dim) * 2
             x2_offset = x1_offset + 1
 
+        # Partial RoPE still requires RMSNorm over the full head, including the
+        # unrotated tail, so retain the full-head normalization path.
         if rotary_dim < head_dim:
             x_blk = qkv[tile_m, tile_gn, tile_n].to(dtype=torch.float32)
             rms = torch.rsqrt(x_blk.pow(2).sum(dim=-1) * (1.0 / head_dim) + eps)
@@ -303,6 +305,8 @@ def fused_qk_norm_rope(
             x1_blk = qkv[tile_m, tile_gn, x1_offset]
             x2_blk = qkv[tile_m, tile_gn, x2_offset]
         else:
+            # Full RoPE covers the entire head. Keep both rotary halves in
+            # registers through RMSNorm and RoPE to avoid a store/reload round trip.
             x1_blk = qkv[tile_m, tile_gn, x1_offset].to(dtype=torch.float32)
             x2_blk = qkv[tile_m, tile_gn, x2_offset].to(dtype=torch.float32)
             rms = x1_blk.pow(2).sum(dim=-1) + x2_blk.pow(2).sum(dim=-1)
