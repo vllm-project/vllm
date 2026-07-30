@@ -567,7 +567,7 @@ def notify_authorized(
     github.add_comment(
         pr["number"],
         (
-            f"@{author}, CI is now available for this PR. Comment `/ci run` "
+            f"✅ @{author}, CI is now available for this PR. Comment `/ci run` "
             "to run full CI or `/ci retry` to retry failed jobs.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
@@ -745,7 +745,7 @@ def run(
         if pr["state"] != "open":
             github.add_comment(
                 issue_number,
-                "CI commands require an open PR.\n\n"
+                "❌ CI commands require an open PR.\n\n"
                 f"{command_comment_marker(comment_id)}",
             )
             return
@@ -773,7 +773,7 @@ def run(
         if not allowed:
             github.add_comment(
                 issue_number,
-                f"@{actor}, {reason}\n\n{command_comment_marker(comment_id)}",
+                f"❌ @{actor}, {reason}\n\n{command_comment_marker(comment_id)}",
             )
             return
 
@@ -795,7 +795,7 @@ def run(
                 pr=pr,
             )
         add_reaction_safely(github, comment_id, "rocket")
-        github.add_comment(issue_number, message)
+        github.add_comment(issue_number, f"✅ {message}")
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise

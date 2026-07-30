@@ -315,7 +315,7 @@ class RunCiCommandTest(unittest.TestCase):
             },
         )
 
-    def test_ci_run_dispatches_build_with_current_pr_metadata(self) -> None:
+    def test_write_reviewer_runs_ci_without_delegation(self) -> None:
         github = FakeGitHub()
         buildkite = FakeBuildkite([[], []])
         run(make_event(COMMAND_RUN_CI), github, buildkite)
@@ -326,6 +326,7 @@ class RunCiCommandTest(unittest.TestCase):
             "PR #42 /ci run by @reviewer",
         )
         self.assertEqual(github.reactions, ["eyes", "rocket"])
+        self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
     def test_unapproved_authors_are_denied_without_buildkite(self) -> None:
@@ -339,6 +340,7 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.list_calls, [])
         self.assertEqual(github.reactions, ["eyes"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
         self.assertIn("approve the PR", github.comments[0])
 
         run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
@@ -357,7 +359,7 @@ class RunCiCommandTest(unittest.TestCase):
         notify_authorized(event, github)
 
         self.assertEqual(len(github.comments), 1)
-        self.assertIn("@author", github.comments[0])
+        self.assertTrue(github.comments[0].startswith("✅ @author"))
         self.assertIn("`/ci run`", github.comments[0])
         self.assertIn("`/ci retry`", github.comments[0])
         self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, github.comments[0])
