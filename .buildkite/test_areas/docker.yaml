@@ -6,23 +6,11 @@ steps:
   timeout_in_minutes: 20
   device: cpu-small
   source_file_dependencies:
-    - .buildkite/hardware_tests/amd.yaml
     - .buildkite/release-pipeline.yaml
-    - .buildkite/scripts/ci-bake-rocm.sh
     - .buildkite/scripts/docker-build-metadata-args.sh
-    - .buildkite/scripts/rocm/build-test-image.sh
-    - .buildkite/scripts/rocm/buildx-history-logs.sh
-    - .buildkite/scripts/rocm/cache-utils.sh
-    - .buildkite/scripts/rocm/refresh-base-image.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
-    - docker/Dockerfile.rocm
-    - docker/Dockerfile.rocm_base
-    - docker/ci-rocm.hcl
     - docker/docker-bake.hcl
-    - docker/docker-bake-rocm.hcl
-    - tests/tools/test_buildx_history_logs.py
     - tests/tools/test_docker_build_metadata_args.py
-    - tests/tools/test_rocm_ci_cache.py
   commands:
-    - pytest -v -s tools/test_buildx_history_logs.py tools/test_docker_build_metadata_args.py tools/test_rocm_ci_cache.py
+    - pytest -v -s tools/test_docker_build_metadata_args.py
