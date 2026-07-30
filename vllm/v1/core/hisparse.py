@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
 @dataclass
 class _PendingSpill:
     plan: HiSparseSpill
-    host_manager: SingleTypeKVCacheManager
     host_block: KVCacheBlock
     resident_entries: tuple[tuple[int, HiSparseResidentManager, KVCacheBlock], ...]
     release_after: bool
@@ -38,46 +37,42 @@ class HiSparseKVCacheController:
         managers: tuple[SingleTypeKVCacheManager, ...],
         max_model_len: int,
     ) -> None:
-        self.groups = kv_cache_config.kv_cache_groups
-        self.managers = managers
         self.max_model_len = max_model_len
+        groups = kv_cache_config.kv_cache_groups
 
-        resident_entries_by_pool: dict[
-            int, list[tuple[int, HiSparseResidentManager]]
-        ] = {}
-        hot_managers_by_pool: dict[int, list[HiSparseHotManager]] = {}
-        growing_managers_by_pool: dict[int, int] = {}
-        for group_id, (group, manager) in enumerate(zip(self.groups, managers)):
+        resident_entries: list[tuple[int, HiSparseResidentManager]] = []
+        hot_entries: list[tuple[int, HiSparseHotManager]] = []
+        for group_id, (group, manager) in enumerate(zip(groups, managers)):
             pool_id = group.block_pool_id
             if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
                 if not isinstance(manager, HiSparseResidentManager):
                     raise TypeError(
                         "HiSparse resident specs require resident cache managers."
                     )
-                resident_entries_by_pool.setdefault(pool_id, []).append(
-                    (group_id, manager)
-                )
+                resident_entries.append((group_id, manager))
             if isinstance(manager, HiSparseHotManager):
-                hot_managers_by_pool.setdefault(pool_id, []).append(manager)
-            else:
-                growing_managers_by_pool[pool_id] = (
-                    growing_managers_by_pool.get(pool_id, 0) + 1
-                )
+                hot_entries.append((pool_id, manager))
 
-        self.resident_entries_by_pool = {
-            pool_id: tuple(entries)
-            for pool_id, entries in resident_entries_by_pool.items()
-        }
-        self.resident_entries = tuple(
-            entry
-            for entries in self.resident_entries_by_pool.values()
-            for entry in entries
+        hisparse_pool_ids = {
+            groups[group_id].block_pool_id for group_id, _ in resident_entries
+        } | {pool_id for pool_id, _ in hot_entries}
+        if len(hisparse_pool_ids) > 1:
+            raise ValueError(
+                "HiSparse resident and hot groups must share one GPU block pool."
+            )
+        self.block_pool_id = next(iter(hisparse_pool_ids), None)
+        self.resident_entries = tuple(resident_entries)
+        self.hot_managers = tuple(manager for _, manager in hot_entries)
+        self.num_growing_managers = sum(
+            group.block_pool_id == self.block_pool_id
+            and not isinstance(manager, HiSparseHotManager)
+            for group, manager in zip(groups, managers)
         )
         self.host_manager = None
         if self.resident_entries:
             host_group_ids = [
                 group_id
-                for group_id, group in enumerate(self.groups)
+                for group_id, group in enumerate(groups)
                 if group.role is KVCacheGroupRole.HISPARSE_SOURCE
             ]
             if len(host_group_ids) != 1:
@@ -86,16 +81,6 @@ class HiSparseKVCacheController:
                     f"found {host_group_ids}."
                 )
             self.host_manager = managers[host_group_ids[0]]
-        self.hot_managers_by_pool = {
-            pool_id: tuple(managers)
-            for pool_id, managers in hot_managers_by_pool.items()
-        }
-        self.hot_managers = tuple(
-            manager
-            for managers in self.hot_managers_by_pool.values()
-            for manager in managers
-        )
-        self.growing_managers_by_pool = growing_managers_by_pool
 
         self.block_table_updates: set[str] = set()
         self.spills_to_send: list[HiSparseSpill] = []
@@ -120,9 +105,13 @@ class HiSparseKVCacheController:
 
     def reclaim_resident_blocks(self, block_pool_id: int, num_blocks: int) -> int:
         """Reclaim host-valid pages and enqueue copies for GPU-only pages."""
-        resident_entries = self.resident_entries_by_pool.get(block_pool_id, ())
-        if not resident_entries or num_blocks <= 0:
+        if (
+            block_pool_id != self.block_pool_id
+            or not self.resident_entries
+            or num_blocks <= 0
+        ):
             return 0
+        resident_entries = self.resident_entries
         resident_managers = tuple(manager for _, manager in resident_entries)
         spill_plan_budget = max(
             self.max_model_len // resident_managers[0].block_size
@@ -133,13 +122,13 @@ class HiSparseKVCacheController:
         for manager in resident_managers[1:]:
             candidates.intersection_update(manager.reclaimable_pages())
 
-        hot_managers = self.hot_managers_by_pool.get(block_pool_id, ())
+        hot_managers = self.hot_managers
         by_request: dict[str, list[int]] = {}
         for request_id, block_idx in candidates:
             by_request.setdefault(request_id, []).append(block_idx)
         num_blocks = max(
             num_blocks,
-            len(by_request) * self.growing_managers_by_pool[block_pool_id],
+            len(by_request) * self.num_growing_managers,
         )
 
         reclaimed = 0
@@ -312,7 +301,6 @@ class HiSparseKVCacheController:
         )
         self.pending_spills[spill_id] = _PendingSpill(
             plan=plan,
-            host_manager=self.host_manager,
             host_block=host_block,
             resident_entries=tuple(blocks),
             release_after=release_after,
@@ -407,7 +395,8 @@ class HiSparseKVCacheController:
                     assert released is block
                     table_changed = True
             manager.block_pool.free_blocks([block])
-        pending.host_manager.block_pool.free_blocks([pending.host_block])
+        assert self.host_manager is not None
+        self.host_manager.block_pool.free_blocks([pending.host_block])
         if table_changed:
             self.block_table_updates.add(plan.request_id)
 
