@@ -530,6 +530,10 @@ class Qwen2VisionTransformer(nn.Module):
         }
     )
 
+    image_mean = Qwen2VLImageProcessor.image_mean
+    image_std = Qwen2VLImageProcessor.image_std
+    rescale_factor = Qwen2VLImageProcessor.rescale_factor
+
     def __init__(
         self,
         vision_config: Qwen2VLVisionConfig,
@@ -596,6 +600,10 @@ class Qwen2VisionTransformer(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
+
+        # mm_device_do_normalize
+        self.image_mean_tensor = torch.tensor(self.image_mean) * (1.0 / self.rescale_factor)
+        self.image_std_tensor = torch.tensor(self.image_std) * (1.0 /  self.rescale_factor)
 
     @property
     def dtype(self) -> torch.dtype:
