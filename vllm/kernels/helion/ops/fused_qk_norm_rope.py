@@ -104,18 +104,20 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     return inputs
 
 
-_pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
+_pick_cache: dict[tuple[int, int, int, int], CaseKey | None] = {}
 
 
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
 
     Selection strategy:
-      1. Find the closest q_heads among available configs
+      1. Prefer configs tuned for the exact head_dim. If none exist, use
+         configs without a head_dim key, then fall back to the closest head_dim.
+      2. Find the closest q_heads among available configs
          (exact match preferred).
-      2. Find the closest kv_heads among available configs
+      3. Find the closest kv_heads among available configs
          (exact match preferred).
-      3. Among the num_tokens values tuned for that q_heads and q_heads, pick
+      4. Among the num_tokens values tuned for that q_heads and kv_heads, pick
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
@@ -123,18 +125,31 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if not config_keys:
         return None
 
-    qkv, q_heads, kv_heads, *_ = args
+    qkv, q_heads, kv_heads, _, head_dim, *_ = args
     num_tokens = qkv.shape[0]
 
-    cache_key = (num_tokens, q_heads, kv_heads)
+    cache_key = (num_tokens, q_heads, kv_heads, head_dim)
     cached = _pick_cache.get(cache_key)
     if cached is not None:
         return cached
 
+    non_default_keys = [key for key in config_keys if not key.is_default()]
+    candidate_keys = [
+        key for key in non_default_keys if key.get("head_dim") == head_dim
+    ]
+    if not candidate_keys:
+        candidate_keys = [key for key in non_default_keys if "head_dim" not in key]
+    if not candidate_keys and non_default_keys:
+        best_head_dim = min(
+            {key["head_dim"] for key in non_default_keys},
+            key=lambda value: abs(value - head_dim),
+        )
+        candidate_keys = [
+            key for key in non_default_keys if key["head_dim"] == best_head_dim
+        ]
+
     configs: dict[int, dict[int, list[int]]] = {}
-    for key in config_keys:
-        if key.is_default():
-            continue
+    for key in candidate_keys:
         configs.setdefault(key["q_heads"], {}).setdefault(key["kv_heads"], []).append(
             key["num_tokens"]
         )
@@ -149,12 +164,12 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         (n for n in available_num_tokens if n >= num_tokens), available_num_tokens[-1]
     )
 
-    result = CaseKey(
-        {
-            "q_heads": best_q_heads,
-            "kv_heads": best_kv_heads,
-            "num_tokens": best_num_tokens,
-        }
+    result = next(
+        key
+        for key in candidate_keys
+        if key["q_heads"] == best_q_heads
+        and key["kv_heads"] == best_kv_heads
+        and key["num_tokens"] == best_num_tokens
     )
     _pick_cache[cache_key] = result
     return result
