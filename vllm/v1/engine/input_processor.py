@@ -100,6 +100,21 @@ class InputProcessor:
                 self.tokenizer,
             )
 
+            if self.model_config.enable_return_sampling_mask:
+                if params.output_kind != RequestOutputKind.FINAL_ONLY:
+                    raise ValueError(
+                        "sampling distribution replay requires output_kind=FINAL_ONLY"
+                    )
+                if params.temperature <= 0:
+                    raise ValueError(
+                        "sampling distribution replay requires temperature > 0"
+                    )
+                if params.top_k <= 0:
+                    raise ValueError(
+                        "sampling distribution replay requires top_k > 0 to "
+                        "bound sampling mask size, reduce transfer overhead, "
+                        "and avoid potential OOMs"
+                    )
             if params.thinking_token_budget is not None:
                 if (
                     self.vllm_config.reasoning_config is None
@@ -327,21 +342,6 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
-            if self.model_config.enable_return_sampling_mask:
-                if sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
-                    raise ValueError(
-                        "sampling distribution replay requires output_kind=FINAL_ONLY"
-                    )
-                if sampling_params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
-                    )
-                if sampling_params.top_k <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to "
-                        "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
-                    )
         else:
             pooling_params = params.clone()
 
