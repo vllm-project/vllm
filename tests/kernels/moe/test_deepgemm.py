@@ -381,6 +381,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
 FP4_MNKs = [
     (128, 4096, 4096),  # DeepSeek V4 shape
     (256, 2048, 2048),  # Half-size variant
+    (128, 384, 3584),  # Kimi-K3 TP8 latent-MoE shape
 ]
 
 FP4_TOPKS = [2]
