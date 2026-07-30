@@ -257,7 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.is_last_pp_rank
             and not self.is_pooling_model
             and self.speculative_config is not None
-            and self.speculative_config.use_confidence_based_verification
+            and self.speculative_config.use_adaptive_verification
         )
 
         # General request states.
@@ -518,13 +518,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if (
             self.speculative_config is not None
-            and self.speculative_config.use_confidence_based_verification
+            and self.speculative_config.use_adaptive_verification
         ):
             self.adaptive_verification = AdaptiveVerificationManager(
                 self.req_states,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
-                self.speculative_config.dspark_confidence_ema_alpha,
+                self.speculative_config.adaptive_verification_ema_alpha,
             )
             self.step_timing.consumer = self.adaptive_verification.consume_step_timing
         self.block_tables = BlockTables(

@@ -79,8 +79,8 @@ class DSparkSpeculator(DFlashSpeculator):
         self.draft_token_confidence_probs = torch.empty_like(
             self.draft_tokens, dtype=torch.float32
         )
-        self.use_confidence_based_verification = (
-            self.speculative_config.use_confidence_based_verification
+        self.use_adaptive_verification = (
+            self.speculative_config.use_adaptive_verification
         )
 
     def load_draft_model(
@@ -165,7 +165,7 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            if self.use_confidence_based_verification:
+            if self.use_adaptive_verification:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
@@ -212,7 +212,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.use_confidence_based_verification:
+        if self.use_adaptive_verification:
             torch.sigmoid(
                 self.model.compute_confidence(
                     sample_hidden,

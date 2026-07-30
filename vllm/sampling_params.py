@@ -894,7 +894,7 @@ class SamplingParams(
         # Adaptive verification compacts logits after the forward pass, while
         # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
         if (
-            speculative_config.use_confidence_based_verification
+            speculative_config.use_adaptive_verification
             and self.num_logprobs is not None
         ):
             raise ValueError(
