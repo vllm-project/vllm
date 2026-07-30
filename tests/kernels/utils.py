@@ -871,6 +871,7 @@ def torch_experts(
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
     activation: MoEActivation = MoEActivation.SILU,
+    activation_kwargs: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
@@ -914,6 +915,7 @@ def torch_experts(
     f32 = torch.float32
 
     act = op_registry[activation.custom_op_name]
+    activation_kwargs = activation_kwargs or {}
 
     for i in range(num_experts):
         mask = topk_ids == i
@@ -922,7 +924,7 @@ def torch_experts(
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = act()(tmp1)
+                tmp2 = act(**activation_kwargs)(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
@@ -970,7 +972,7 @@ def torch_experts(
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
 
-                tmp2 = act()(tmp1).to(out.dtype)
+                tmp2 = act(**activation_kwargs)(tmp1).to(out.dtype)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
@@ -1004,6 +1006,7 @@ def torch_moe(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     activation: MoEActivation = MoEActivation.SILU,
+    activation_kwargs: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
@@ -1018,6 +1021,7 @@ def torch_moe(
         b_bias2,
         expert_map,
         activation=activation,
+        activation_kwargs=activation_kwargs,
     )
 
 

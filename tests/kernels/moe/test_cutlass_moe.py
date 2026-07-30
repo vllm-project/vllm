@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 from math import prod
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -26,7 +27,15 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
+    select_nvfp4_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -53,10 +62,38 @@ MNK_FACTORS = [
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
 
 
-def test_cutlass_moe_supports_gelu_tanh_activation_metadata():
+def test_cutlass_moe_supports_activation_metadata():
     assert CutlassExpertsFp8._supports_activation(MoEActivation.GELU_TANH)
     assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH)
     assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH_NO_MUL)
+    assert CutlassExpertsFp4._supports_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+
+
+def test_clamped_nvfp4_can_select_vllm_cutlass():
+    moe_config = dataclasses.replace(
+        make_dummy_moe_config(
+            hidden_dim=16,
+            activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ),
+        moe_backend="cutlass",
+        swiglu_limit=7.0,
+        swiglu_alpha=1.702,
+        swiglu_beta=1.0,
+    )
+
+    with patch.object(
+        CutlassExpertsFp4,
+        "_supports_current_device",
+        return_value=True,
+    ):
+        backend, experts_cls = select_nvfp4_moe_backend(
+            moe_config,
+            weight_key=kNvfp4Static,
+            activation_key=kNvfp4Dynamic,
+        )
+
+    assert backend is NvFp4MoeBackend.VLLM_CUTLASS
+    assert experts_cls is CutlassExpertsFp4
 
 
 @dataclasses.dataclass

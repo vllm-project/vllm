@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
+import itertools
+
 import pytest
 import torch
 
@@ -44,14 +47,44 @@ MNK_FACTORS = [
     (224, 1024, 1536),
 ]
 
+CUTLASS_FP4_CASES = [
+    (*mnk, e, topk, torch.bfloat16, MoEActivation.SILU, None, 1.0, 0.0)
+    for mnk, e, topk in itertools.product(MNK_FACTORS, [40, 64, 256], [1, 6, 8])
+]
+CUTLASS_FP4_CASES.append(
+    pytest.param(
+        16,
+        256,
+        256,
+        8,
+        2,
+        torch.bfloat16,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        7.0,
+        1.702,
+        1.0,
+        id="minimax-m3-swiglu",
+    )
+)
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("e", [40, 64, 256])
-@pytest.mark.parametrize("topk", [1, 6, 8])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+
+@pytest.mark.parametrize(
+    "m,n,k,e,topk,dtype,activation,clamp_limit,alpha,beta",
+    CUTLASS_FP4_CASES,
+)
 @torch.inference_mode()
 def test_cutlass_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, workspace_init
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    activation: MoEActivation,
+    clamp_limit: float | None,
+    alpha: float,
+    beta: float,
+    workspace_init,
 ):
     set_random_seed(7)
     with set_current_vllm_config(
@@ -91,8 +124,20 @@ def test_cutlass_fp4_moe_no_graph(
             a2_gscale=a2_gs,
             w1_scale=w1_blockscale,
             w2_scale=w2_blockscale,
+            gemm1_clamp_limit=clamp_limit,
         )
-        moe_config = make_dummy_moe_config()
+        moe_config = dataclasses.replace(
+            make_dummy_moe_config(
+                num_experts=e,
+                experts_per_token=topk,
+                hidden_dim=k,
+                intermediate_size=n,
+                activation=activation,
+            ),
+            swiglu_limit=clamp_limit,
+            swiglu_alpha=alpha,
+            swiglu_beta=beta,
+        )
 
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
@@ -114,7 +159,7 @@ def test_cutlass_fp4_moe_no_graph(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             global_num_experts=e,
-            activation=mk.MoEActivation.SILU,
+            activation=activation,
             apply_router_weight_on_input=False,
             expert_map=None,
         )
@@ -155,7 +200,24 @@ def test_cutlass_fp4_moe_no_graph(
                 block_size=quant_blocksize,
             )
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
+        activation_kwargs = (
+            {
+                "swiglu_limit": clamp_limit,
+                "alpha": alpha,
+                "beta": beta,
+            }
+            if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+            else None
+        )
+        torch_output = torch_moe(
+            a_in_dtype,
+            w1_d,
+            w2_d,
+            score,
+            topk,
+            activation=activation,
+            activation_kwargs=activation_kwargs,
+        )
 
         torch.testing.assert_close(torch_output, cutlass_output, atol=1e-1, rtol=1e-1)
 
