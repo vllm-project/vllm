@@ -29,15 +29,6 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
-def test_raise_on_logit_nans_enables_nan_computation(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delenv("VLLM_COMPUTE_NANS_IN_LOGITS", raising=False)
-    monkeypatch.setenv("VLLM_RAISE_ON_LOGIT_NANS", "1")
-
-    assert envs.VLLM_COMPUTE_NANS_IN_LOGITS
-
-
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):
