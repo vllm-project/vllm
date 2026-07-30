@@ -28,13 +28,46 @@ SUPPORTED_HC_PRENORM_GEMM_K_VALUES = frozenset((5120, 7168, 7680, 16384, 28672))
 class HCPrenormGemm:
     """Warp-specialized SM100 TF32 GEMM with fused BF16 prenormalization.
 
+    This kernel computes ``D[M, 24] = A[M, K] @ B[24, K]^T`` and the
+    per-row square sum of A. With split-K, each CTA writes independent
+    ``D[num_splits, M, 24]`` and square-sum ``[num_splits, M]`` partials
+    for a later reduction.
+
     Warp 0 stages A and B with TMA, warps 4-7 convert A to TF32 in TMEM while
     accumulating row square sums, and warp 1 issues UMMA. Warps 0-3 move the
     accumulator through registers and shared memory to a TMA store; split-K
     CTAs produce independent GEMM and square-sum partials.
+
+    Args:
+        k: Compile-time K dimension specialized into the generated kernel.
+        num_splits: Number of CTAs used to partition the K dimension.
+
+    Supported data types:
+        - A: BFloat16
+        - B: TFloat32, passed as a Float32 tensor by the public wrapper
+        - Accumulator, D, and square sums: Float32
+
+    Constraints:
+        - The kernel requires an SM100 GPU.
+        - B has 24 rows and K must be one of the supported specialization
+          values.
+
+    Compile key:
+        ``(K, num_splits)`` selects the hidden size and split-K
+        specialization; M remains dynamic.
     """
 
     def __init__(self, k: int, num_splits: int):
+        """Initialize the prenormalization GEMM configuration.
+
+        This configuration fixes the MMA tile, load and transform pipeline
+        depths, split-K partition, and TMEM allocation used by the generated
+        kernel.
+
+        Args:
+            k: Hidden size K used to specialize the K-tile decomposition.
+            num_splits: Number of CTAs used to partition the K dimension.
+        """
         self.mma_tiler = (64, 32, 64)
         self.num_load_stages = 12
         self.num_transform_stages = 2
@@ -52,6 +85,25 @@ class HCPrenormGemm:
         sqr_sum: cute.Tensor,
         stream: cuda.CUstream,
     ):
+        """Execute the fused prenormalization GEMM in steps:
+
+        - Build single-split or split-K views of D and the row square sums.
+        - Build SMEM and TMEM layouts plus TMA copy atoms for A, B, and D.
+        - Allocate staged pipeline barriers and the shared storage layout.
+        - Launch one 256-thread CTA per 64-row M tile and K split.
+        - Stage A/B, convert A to TF32 while accumulating square sums, issue
+          UMMA, and store the GEMM and square-sum partials.
+
+        Args:
+            a: BF16 input tensor A with shape ``[M, K]``.
+            b: Float32 input tensor B with shape ``[24, K]``, consumed as
+                TFloat32.
+            d: Float32 GEMM output with shape ``[M, 24]`` when
+                ``num_splits == 1`` or ``[num_splits, M, 24]`` otherwise.
+            sqr_sum: Float32 row square sums with shape ``[M]`` when
+                ``num_splits == 1`` or ``[num_splits, M]`` otherwise.
+            stream: CUDA stream for asynchronous execution.
+        """
         if cutlass.const_expr(self.num_splits == 1):
             d_mnl = cute.make_tensor(
                 d.iterator,
