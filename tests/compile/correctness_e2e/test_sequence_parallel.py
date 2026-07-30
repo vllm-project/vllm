@@ -348,10 +348,14 @@ def test_tp_sp_generation(
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
-    # Skip FP8 SP-only test on sm89 (compute capability 8.9)
+    # Skip FP8 SP-only test on sm89 (compute capability 8.9).
+    # An unknown capability (None) is left to fail in the test body rather than
+    # being silently skipped here.
+    capability = current_platform.get_device_capability()
     if (
         "fp8" in model_id.lower()
-        and current_platform.get_device_capability() < (9, 0)
+        and capability is not None
+        and capability < (9, 0)
         and (not fuse_gemm_comms)
     ):
         pytest.skip("FP8 reduction support begins with sm90 capable devices.")

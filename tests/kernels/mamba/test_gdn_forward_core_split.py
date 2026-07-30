@@ -174,7 +174,9 @@ def test_forward_core_split_matches_unified(
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
 
     builder = GDNAttentionMetadataBuilder(
-        kv_cache_spec=MambaSpec(
+        # GDNAttentionMetadataBuilder declares kv_cache_spec as AttentionSpec but
+        # asserts isinstance(kv_cache_spec, MambaSpec). MambaSpec is correct here.
+        kv_cache_spec=MambaSpec(  # type: ignore[arg-type]
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
         ),
         layer_names=[PREFIX],
@@ -198,6 +200,7 @@ def test_forward_core_split_matches_unified(
     # Full-batch chunk metadata for the unified reference path, built the same
     # way the builder would for a non-split batch (backend-matched).
     cu_full = meta_split.non_spec_query_start_loc
+    assert cu_full is not None
     if builder.gdn_prefill_backend == "cutedsl":
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             prepare_metadata_cutedsl,
@@ -227,6 +230,7 @@ def test_forward_core_split_matches_unified(
     )
 
     # Size the state pools from the indices the builder actually produced.
+    assert meta_split.non_spec_state_indices_tensor is not None
     pool_size = int(meta_split.non_spec_state_indices_tensor.max().item()) + 1
     conv_state_shape, temporal_state_shape = (
         MambaStateShapeCalculator.gated_delta_net_state_shape(

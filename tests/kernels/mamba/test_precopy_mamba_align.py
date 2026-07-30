@@ -21,7 +21,9 @@ The kernel must also no-op when ``src_col < 0`` (fresh request) or
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import torch
@@ -30,6 +32,8 @@ from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
 from vllm.v1.worker.mamba_utils import precopy_mamba_align_fused_kernel
+
+_parametrize: Callable[..., Callable[[Any], Any]]
 
 try:
     import pytest
@@ -40,16 +44,17 @@ try:
     )
     _parametrize = pytest.mark.parametrize
 except ModuleNotFoundError:  # allow running directly as ``python <thisfile>``
-    pytest = None
 
     def _cuda_required(fn):
         return fn
 
-    def _parametrize(_name, _values):
+    def _no_parametrize(_name, _values):
         def _deco(fn):
             return fn
 
         return _deco
+
+    _parametrize = _no_parametrize
 
 
 NUM_LAYERS = 3
@@ -308,8 +313,10 @@ def _make_preprocess_case(token_bias):
 def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bias):
     block_size = 4
     mamba_spec = SimpleNamespace(block_size=block_size, num_speculative_blocks=1)
-    cache_config = SimpleNamespace(enable_prefix_caching=True)
-    kv_cache_config = SimpleNamespace()
+    # Fakes stand in for real config/context objects. The fused path tests
+    # below only touch the attributes preprocess_mamba actually reads.
+    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
+    kv_cache_config: Any = SimpleNamespace()
     scalar_copy_calls = []
 
     def fake_collect(
@@ -340,7 +347,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
     scalar_case = _make_preprocess_case(token_bias)
     fused_case = _make_preprocess_case(token_bias)
 
-    scalar_copy_bufs = SimpleNamespace(
+    scalar_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
         offset=0,
@@ -357,8 +364,8 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
         copy_bufs=scalar_copy_bufs,
     )
 
-    ctx = _FakePrecopyContext(len(fused_case[1].req_ids))
-    fused_copy_bufs = SimpleNamespace(
+    ctx: Any = _FakePrecopyContext(len(fused_case[1].req_ids))
+    fused_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
         offset=0,
