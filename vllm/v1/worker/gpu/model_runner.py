@@ -1377,13 +1377,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and scheduler_output.scheduled_spec_decode_tokens
             and not dummy_run
         ):
-            num_toks = self.adaptive_verification.get_num_tokens(
-                scheduler_output.num_scheduled_tokens,
-                scheduler_output.scheduled_spec_decode_tokens,
-                scheduler_output.has_structured_output_requests,
-            )
-            # Trimming drafts makes the batch non-uniform.
-            uniform_tok_count = None
+            if self.adaptive_verification.cost_tables is None:
+                # No FULL graphs were captured (enforce_eager, or the attention
+                # backend lacks varlen support), so step costs could not be
+                # profiled. Consistent across ranks: TP shares curves via
+                # broadcast and PP is rejected at config time.
+                logger.warning_once(
+                    "DSpark adaptive verification disabled: no cudagraph cost "
+                    "profile is available. Falling back to fixed-length "
+                    "verification."
+                )
+                self.adaptive_verification = None
+            else:
+                num_toks = self.adaptive_verification.get_num_tokens(
+                    scheduler_output.num_scheduled_tokens,
+                    scheduler_output.scheduled_spec_decode_tokens,
+                    scheduler_output.has_structured_output_requests,
+                )
+                # Trimming drafts makes the batch non-uniform.
+                uniform_tok_count = None
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
