@@ -325,6 +325,20 @@ def has_flashinfer_b12x_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_bf16_fp4_gemm() -> bool:
+    """Return True if the installed FlashInfer provides the bf16 x nvfp4
+    weight-only GEMM (mm_bf16_fp4 and prepare_bf16_fp4_weights)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer")
+    return (
+        mod is not None
+        and hasattr(mod, "mm_bf16_fp4")
+        and hasattr(mod, "prepare_bf16_fp4_weights")
+    )
+
+
+@functools.cache
 def has_flashinfer_b12x_moe() -> bool:
     """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
     if not has_flashinfer_moe():
@@ -612,6 +626,33 @@ if has_flashinfer():
         return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mm_bf16_fp4",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mm_bf16_fp4(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        B_scale: torch.Tensor,
+        alpha: torch.Tensor,
+    ) -> torch.Tensor:
+        from flashinfer import mm_bf16_fp4 as flashinfer_mm_bf16_fp4_
+
+        return flashinfer_mm_bf16_fp4_(A, B, B_scale, alpha, backend="cute-dsl")
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mm_bf16_fp4",
+    )
+    def flashinfer_mm_bf16_fp4_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        B_scale: torch.Tensor,
+        alpha: torch.Tensor,
+    ) -> torch.Tensor:
+        # Prepared weight is (K // 16, N * 2) int32.
+        return torch.empty(A.shape[0], B.shape[1] // 2, dtype=A.dtype, device=A.device)
+
+    @torch.library.custom_op(
         "vllm::flashinfer_mxfp4_quantize",
         mutates_args=[],
         device_types="cuda",
@@ -861,6 +902,21 @@ def flashinfer_scaled_fp4_mm_out(
     return out
 
 
+def flashinfer_scaled_bf16_fp4_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    b_descale: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    """W4A16 GEMM: bf16 activations x prepared nvfp4 weight.
+
+    ``b``, ``b_descale``, and ``alpha`` must come from
+    ``flashinfer.prepare_bf16_fp4_weights(..., backend="cute-dsl")``.
+    """
+    assert a.ndim == 2 and a.dtype == torch.bfloat16
+    return flashinfer_mm_bf16_fp4(a, b, b_descale, alpha)
+
+
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1046,12 +1102,14 @@ __all__ = [
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
+    "has_flashinfer_bf16_fp4_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_mxfp4_quantize",
+    "flashinfer_scaled_bf16_fp4_mm",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
