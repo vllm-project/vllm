@@ -441,6 +441,37 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
+    """Config handler for Jina Embeddings V5 embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Reject checkpoints whose backbone is not the Qwen3 decoder.
+
+        The V5 family ships more than one backbone under a single
+        `architectures` entry: the `-small` variants are Qwen3 decoders, while
+        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
+        `configuration_*.py` per repository, so the config carries no backbone
+        field and the encoder variants are only identifiable by
+        `is_decoder=False`. `JinaEmbeddingsV5Model` extends `Qwen3ForCausalLM`
+        and has no path to an encoder backbone, so without this check such a
+        checkpoint fails later with every `q_norm` and `k_norm` weight reported
+        as uninitialized, which does not point at the actual problem.
+
+        Raises:
+            NotImplementedError: If the checkpoint uses an encoder backbone.
+        """
+        if getattr(model_config.hf_config, "is_decoder", True):
+            return
+
+        raise NotImplementedError(
+            "This jina-embeddings-v5 checkpoint uses a bidirectional encoder "
+            "backbone (is_decoder=False). JinaEmbeddingsV5Model is built on "
+            "Qwen3 and cannot serve it, so only the Qwen3-based decoder "
+            "variants are supported, such as jina-embeddings-v5-text-small."
+        )
+
+
 class JinaForRankingConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -882,6 +913,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
