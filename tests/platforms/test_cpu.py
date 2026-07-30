@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
+from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 
 
@@ -222,3 +224,32 @@ def test_cpu_conv_state_layout_selection(
 
     CpuPlatform.check_and_update_config(config)
     assert os.environ.get(layout_env) == expected_layout
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU configuration required")
+@pytest.mark.parametrize(
+    "tp_size,dp_size,enable_ep,nnodes",
+    [(2, 3, True, 1), (1, 2, False, 2), (1, 1, True, 2)],
+    ids=["single-node-hybrid-ep", "multi-node-dp", "multi-node-ep"],
+)
+def test_cpu_dp_ep_single_node_only(monkeypatch, tp_size, dp_size, enable_ep, nnodes):
+    monkeypatch.setenv("VLLM_CPU_KVCACHE_SPACE", "")
+    expected = (
+        nullcontext()
+        if nnodes == 1
+        else pytest.raises(NotImplementedError, match="CPU DP/EP is single-node only")
+    )
+    with expected:
+        config = VllmConfig(
+            cache_config=CacheConfig(block_size=128),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=tp_size,
+                data_parallel_size=dp_size,
+                enable_expert_parallel=enable_ep,
+                data_parallel_master_ip="127.0.0.1",
+                _data_parallel_master_port_list=[26001],
+                distributed_executor_backend="mp",
+                nnodes=nnodes,
+            ),
+        )
+        CpuPlatform.check_and_update_config(config)

@@ -54,7 +54,6 @@ tests/v1/ec_connector/integration/test_nixl_failure.py  # 2-GPU + NIXL E/PD inte
 tests/v1/kv_connector/nixl_integration/test_disagg_accuracy.py  # run by intel_jobs/misc_intel.yaml's run_xpu_disagg_accuracy_test.sh, which names it via $EXP_ROOT (the script's own dir) - not statically resolvable
 
 # tests/platforms/
-tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platforms/
 
 # tests/tools/
 tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job
