@@ -25,6 +25,8 @@ def make_manager(
         prefill_len=SimpleNamespace(np=np.ones(num_reqs, dtype=np.int32)),
     )
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
+    manager._max_total_logits = 1 << 30
+    manager.num_bonus_tokens = 1
     return manager
 
 
@@ -130,3 +132,19 @@ def test_compact_batch_preserves_totals_and_bounds():
     num_steps = manager.num_speculative_steps
     assert (compacted[:2] <= 1 + num_steps).all()
     assert compacted[2] == 40
+
+
+def test_budget_caps_at_one_rejection_sampler_chunk():
+    # The chunked verification path cannot address the compacted logits
+    # layout, so the budget must keep total logits within a single chunk.
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32),
+        np.ones(7),
+    )
+    manager._max_total_logits = 3  # 2 bonus logits + at most 1 draft
+    manager.get_num_tokens(
+        {"low": 3, "high": 3},
+        {"low": [1, 2], "high": [3, 4]},
+    )
+    _, _, draft_budget = manager._batch_budget
+    assert draft_budget <= 1

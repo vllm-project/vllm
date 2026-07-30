@@ -130,7 +130,10 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+    RejectionSampler,
+    max_chunk_logits,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
@@ -525,6 +528,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
                 self.speculative_config.adaptive_verification_ema_alpha,
+                max_total_logits=max_chunk_logits(self.vocab_size),
             )
             self.step_timing.consumer = self.adaptive_verification.consume_step_timing
         self.block_tables = BlockTables(

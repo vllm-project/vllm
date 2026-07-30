@@ -156,6 +156,7 @@ class AdaptiveVerificationManager:
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
         confidence_ema_alpha: float,
+        max_total_logits: int,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -164,6 +165,10 @@ class AdaptiveVerificationManager:
 
         self.num_bonus_tokens = num_bonus_tokens
         self.confidence_ema_alpha = confidence_ema_alpha
+        # Rejection sampling verifies logits in one contiguous chunk; the
+        # chunked path indexes by scheduled (untrimmed) offsets and cannot
+        # address the compacted layout, so the budget must fit one chunk.
+        self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -353,7 +358,11 @@ class AdaptiveVerificationManager:
         valid = steps[None, :] < valid_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
-        max_draft_budget = int(valid_drafts.sum())
+        max_draft_budget = min(
+            int(valid_drafts.sum()),
+            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+        )
+        scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
             self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
