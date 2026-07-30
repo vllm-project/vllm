@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
-from vllm.platforms.rocm import RocmPlatform
+from vllm.platforms.rocm import RocmPlatform, on_mi3xx
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
@@ -344,5 +344,139 @@ def test_mha_attn_varlen_forward_flashinfer(
             ref_output.append(output_i)
         ref_output = torch.cat(ref_output, dim=1)
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+    finally:
+        vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not on_mi3xx(),
+    reason="AITER FP8 attention requires MI300/MI350",
+)
+@pytest.mark.parametrize("var_seq_len", [[128, 193], [256, 384, 511]])
+@pytest.mark.parametrize("head_size", [64, 72, 80])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
+def test_mha_attn_varlen_forward_aiter_fp8(
+    default_vllm_config,
+    var_seq_len: list[int],
+    head_size: int,
+    dtype: torch.dtype,
+):
+    """Compare packed AITER FP8 ViT attention with a BF16/FP16 reference."""
+    aiter = pytest.importorskip("aiter")
+    if not hasattr(aiter, "flash_attn_varlen_fp8_pertensor_func"):
+        pytest.skip("Installed AITER does not provide varlen FP8 attention")
+
+    num_heads = 4
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+
+    vllm_config = get_current_vllm_config()
+    old_model_config = getattr(vllm_config, "model_config", None)
+    minimal_model_config = type(
+        "MinimalModelConfig",
+        (),
+        {
+            "multimodal_config": MultiModalConfig(
+                mm_encoder_attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+                mm_encoder_attn_dtype="fp8",
+            ),
+        },
+    )()
+    vllm_config.model_config = minimal_model_config
+    try:
+        total_len = sum(var_seq_len)
+        # Keep Q/K/V as non-contiguous views, matching interleaved ViT QKV.
+        qkv = torch.randn(1, total_len, 3, num_heads, head_size)
+        q, k, v = qkv.unbind(dim=2)
+        cu_seqlens = torch.tensor(
+            [0] + list(itertools.accumulate(var_seq_len)), dtype=torch.int32
+        )
+        max_seqlen = torch.tensor(max(var_seq_len), dtype=torch.int32)
+        scale = 1.0 / head_size**0.5
+
+        attn = MMEncoderAttention(num_heads, head_size, scale=scale)
+        assert attn.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
+        assert attn.fp8_enabled
+        output = attn(
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        ref_output = torch.cat(
+            [
+                ref_attention(q_i, k_i, v_i, scale=scale)
+                for q_i, k_i, v_i in zip(
+                    torch.split(q, var_seq_len, dim=1),
+                    torch.split(k, var_seq_len, dim=1),
+                    torch.split(v, var_seq_len, dim=1),
+                )
+            ],
+            dim=1,
+        )
+        diff = (output.float() - ref_output.float()).abs()
+        cosine = torch.nn.functional.cosine_similarity(
+            output.float().flatten(),
+            ref_output.float().flatten(),
+            dim=0,
+        )
+
+        assert output.shape == ref_output.shape
+        assert output.dtype == dtype
+        assert cosine.item() >= 0.99
+        assert diff.mean().item() <= 0.03
+        assert diff.max().item() <= 0.30
+    finally:
+        vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="AITER FP8 attention requires ROCm"
+)
+def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
+    vllm_config = get_current_vllm_config()
+    old_model_config = getattr(vllm_config, "model_config", None)
+    vllm_config.model_config = type(
+        "MinimalModelConfig",
+        (),
+        {
+            "multimodal_config": MultiModalConfig(
+                mm_encoder_attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+                mm_encoder_attn_dtype="fp8",
+            ),
+        },
+    )()
+    try:
+        with (
+            patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+            pytest.raises(ValueError, match="gfx942 or gfx950"),
+        ):
+            MMEncoderAttention(4, 64)
+    finally:
+        vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="AITER FP8 attention requires ROCm"
+)
+def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
+    vllm_config = get_current_vllm_config()
+    old_model_config = getattr(vllm_config, "model_config", None)
+    vllm_config.model_config = type(
+        "MinimalModelConfig",
+        (),
+        {
+            "multimodal_config": MultiModalConfig(
+                mm_encoder_attn_backend=AttentionBackendEnum.FLASH_ATTN,
+                mm_encoder_attn_dtype="fp8",
+            ),
+        },
+    )()
+    try:
+        with pytest.raises(ValueError, match="requires either"):
+            MMEncoderAttention(4, 64)
     finally:
         vllm_config.model_config = old_model_config
