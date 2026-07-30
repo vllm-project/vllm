@@ -177,14 +177,21 @@ def init_attn_backend(
                         variant_builder.set_workspace_buffer(attn_backend_workspace)
             backends = group.backend.get_backend_variants()
             assert len(builders) == len(backends)
-            for variant_builder, backend in zip(builders, backends):
-                cg_support = variant_builder.get_cudagraph_support(
-                    vllm_config,
-                    cast(AttentionSpec, group.kv_cache_spec),
-                )
-                if cg_support.value < min_cg_support.value:
-                    min_cg_support = cg_support
-                    min_cg_attn_backend = backend.__name__
+            cg_support = builder.get_cudagraph_support(
+                vllm_config,
+                cast(AttentionSpec, group.kv_cache_spec),
+            )
+            if cg_support.value < min_cg_support.value:
+                min_cg_support = cg_support
+                min_cg_attn_backend = group.backend.__name__
+                for variant_builder, backend in zip(builders, backends):
+                    variant_support = variant_builder.get_cudagraph_support(
+                        vllm_config,
+                        cast(AttentionSpec, group.kv_cache_spec),
+                    )
+                    if variant_support == cg_support:
+                        min_cg_attn_backend = backend.__name__
+                        break
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend

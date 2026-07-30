@@ -191,15 +191,22 @@ def create_composite_attention_backend(
             )
 
         def fused_qk_norm_rope_kvcache_supported(self):
-            return all(
-                impl.fused_qk_norm_rope_kvcache_supported()
-                for impl in self.get_impl_variants()
-            )
+            return self.general_impl.fused_qk_norm_rope_kvcache_supported()
+
+        def do_qk_norm_rope_kvcache_update(self, *args, **kwargs):
+            method = self.general_impl.do_qk_norm_rope_kvcache_update
+            return method(*args, **kwargs)
 
         def fused_rope_kvcache_supported(self):
-            return all(
-                impl.fused_rope_kvcache_supported() for impl in self.get_impl_variants()
-            )
+            return self.general_impl.fused_rope_kvcache_supported()
+
+        def do_rope_and_kv_cache_update(self, *args, **kwargs):
+            method = self.general_impl.do_rope_and_kv_cache_update
+            return method(*args, **kwargs)
+
+        def do_kv_cache_update(self, *args, **kwargs):
+            method = self.general_impl.do_kv_cache_update  # type: ignore[attr-defined]
+            return method(*args, **kwargs)
 
     class CompositeAttentionMetadataBuilder(AttentionMetadataBuilder):
         supports_update_block_table = (

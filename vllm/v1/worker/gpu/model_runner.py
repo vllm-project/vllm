@@ -504,7 +504,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            capture_attention_backend_variants=(self.has_distinct_decode_attn_backend),
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -610,8 +609,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
-                attention_backend_variant=int(
-                    self.has_distinct_decode_attn_backend and uniform_decode
+                has_prefill=(
+                    self.has_distinct_decode_attn_backend and not uniform_decode
                 ),
             )
         self.kv_connector.set_disabled(False)
@@ -1194,7 +1193,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
-        attention_backend_variant: int | None = None,
+        has_prefill: bool | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1214,23 +1213,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-        if attention_backend_variant is None:
-            attention_backend_variant = 0
-            if self.has_distinct_decode_attn_backend:
-                req_indices = np.fromiter(
-                    map(
-                        self.req_states.req_id_to_index.get,
-                        scheduler_output.num_scheduled_tokens,
-                    ),
-                    dtype=np.int32,
-                    count=num_reqs,
+        if has_prefill is None and self.has_distinct_decode_attn_backend:
+            req_indices = np.fromiter(
+                map(
+                    self.req_states.req_id_to_index.get,
+                    scheduler_output.num_scheduled_tokens,
+                ),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+            has_prefill = bool(
+                np.any(
+                    self.req_states.num_computed_prefill_tokens[req_indices]
+                    < self.req_states.prefill_len.np[req_indices]
                 )
-                attention_backend_variant = int(
-                    not np.any(
-                        self.req_states.num_computed_prefill_tokens[req_indices]
-                        < self.req_states.prefill_len.np[req_indices]
-                    )
-                )
+            )
+        if has_prefill:
+            uniform_tok_count = None
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1254,15 +1253,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            attention_backend_variant=attention_backend_variant,
         )
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
-
-        assert batch_desc.attention_backend_variant == attention_backend_variant
 
         if not dummy_run:
             # Common case.
@@ -1295,6 +1291,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
             )
+            if has_prefill:
+                input_batch.is_prefilling_np.fill(True)
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:

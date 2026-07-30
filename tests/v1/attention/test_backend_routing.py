@@ -517,10 +517,18 @@ class _UniformDecodeLayer(AttentionLayerBase):
         return _attention_spec()
 
 
-def _init_uniform_decode_backend():
+class _AlwaysDecodeLayer(AttentionLayerBase):
+    def get_attn_backend(self):
+        return create_composite_attention_backend(_GeneralBackend, _DecodeBackend)
+
+    def get_kv_cache_spec(self, vllm_config):
+        return _attention_spec()
+
+
+def _init_routed_backend(layer):
     spec = _attention_spec()
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
-    config.compilation_config.static_forward_context["layer"] = _UniformDecodeLayer()
+    config.compilation_config.static_forward_context["layer"] = layer
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
@@ -529,12 +537,24 @@ def _init_uniform_decode_backend():
     return init_attn_backend(kv_cache_config, config, torch.device("cpu"))
 
 
+def _init_uniform_decode_backend():
+    return _init_routed_backend(_UniformDecodeLayer())
+
+
 def test_decode_backend_limits_cudagraph_support():
     """The weaker child must bound graph support and identify the culprit."""
     _, cg_support, _ = _init_uniform_decode_backend()
 
     assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert cg_support.min_cg_attn_backend == "_UniformDecodeBackend"
+
+
+def test_routing_limits_cudagraph_support_to_uniform_batches():
+    """Mixed FULL graphs cannot switch between otherwise capable backends."""
+    _, cg_support, _ = _init_routed_backend(_AlwaysDecodeLayer())
+
+    assert cg_support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert cg_support.min_cg_attn_backend.startswith("Composite[")
 
 
 class _SingleTokenDecodeBuilder(_DecodeBuilder):
@@ -595,6 +615,43 @@ def test_composite_impl_defaults_untagged_metadata_to_general():
     impl = backend.get_impl_cls()(8, 128, 0.1)
 
     assert impl.get_impl_for_metadata(SimpleNamespace()) is impl.general_impl
+
+
+def test_composite_cache_updates_use_general_impl():
+    """Cache updates must be batch-agnostic so one piecewise graph is reusable."""
+    calls = []
+
+    class GeneralImpl(_RoutingImpl):
+        def fused_rope_kvcache_supported(self):
+            return True
+
+        def fused_qk_norm_rope_kvcache_supported(self):
+            return True
+
+        def do_kv_cache_update(self, value):
+            calls.append(("kv", value))
+
+        def do_rope_and_kv_cache_update(self, value):
+            calls.append(("rope", value))
+
+        def do_qk_norm_rope_kvcache_update(self, value):
+            calls.append(("qk_rope", value))
+
+    class GeneralBackend(_GeneralBackend):
+        @staticmethod
+        def get_impl_cls():
+            return GeneralImpl
+
+    backend = create_composite_attention_backend(GeneralBackend, _DecodeBackend)
+    impl = backend.get_impl_cls()(8, 128, 0.1)
+
+    assert impl.fused_rope_kvcache_supported()
+    assert impl.fused_qk_norm_rope_kvcache_supported()
+    impl.do_kv_cache_update(1)
+    impl.do_rope_and_kv_cache_update(2)
+    impl.do_qk_norm_rope_kvcache_update(3)
+
+    assert calls == [("kv", 1), ("rope", 2), ("qk_rope", 3)]
 
 
 def test_composite_impl_reports_decode_argument_mismatch():

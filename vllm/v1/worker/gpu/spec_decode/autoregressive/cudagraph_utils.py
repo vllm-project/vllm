@@ -57,7 +57,6 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                attention_backend_variant=desc.attention_backend_variant,
             )
 
             return lambda cg_mode: forward_fn(
@@ -67,7 +66,6 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 slot_mappings,
                 num_tokens_across_dp,
                 cg_mode,
-                attention_backend_variant=desc.attention_backend_variant,
             )
 
         super().capture(create_forward_fn, progress_bar_desc)

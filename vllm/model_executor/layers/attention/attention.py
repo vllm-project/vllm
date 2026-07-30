@@ -877,15 +877,12 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
-        layer_name
-    )
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        impl = attn_layer.impl.get_impl_for_metadata(attn_metadata)
-        assert hasattr(impl, "do_kv_cache_update"), (
-            f"{impl.__class__.__name__} does not support kv cache update"
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
-        impl.do_kv_cache_update(  # type: ignore[attr-defined]
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             attn_layer,
             key,
             value,

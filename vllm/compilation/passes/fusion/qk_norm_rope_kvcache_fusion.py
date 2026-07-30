@@ -53,12 +53,9 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     is_neox: bool,
     layer_name: str = "",
 ) -> torch.Tensor:
-    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
-        layer_name
-    )
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        impl = attn_layer.impl.get_impl_for_metadata(attn_metadata)
-        impl.do_qk_norm_rope_kvcache_update(  # type: ignore[attr-defined]
+        attn_layer.impl.do_qk_norm_rope_kvcache_update(
             attn_layer,
             qkv,
             q_out,
