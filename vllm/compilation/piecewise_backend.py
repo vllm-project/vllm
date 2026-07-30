@@ -51,6 +51,46 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
         expr = sym_val.node.expr
         return int(expr.subs({s: size for s in expr.free_symbols}))
 
+    def concretize_layout(sym_val: Any, size_symbols: set) -> int:
+        """Concretize a stride/storage-offset expression for single-size compile.
+
+        Symbols that appear in the tensor's shape (the dynamic size dim) are
+        specialized to ``size``. Any other symbol -- e.g. a persistent-buffer
+        row pitch that is independent of the token count, as in the sliced
+        M-RoPE positions buffer -- must be a value that is constant for this
+        specialization, so we bind it to its backed value; the compiled graph
+        then asserts the true input stride instead of a fabricated contiguous
+        one.
+
+        A non-size stride/offset symbol with no backed value is not amenable to
+        single-size specialization; we fail loudly rather than guess (guessing
+        the compile ``size`` is exactly the bug this replaces).
+        """
+        if not is_symbolic(sym_val):
+            return int(sym_val)
+        node = sym_val.node
+        expr = node.expr
+        shape_env = node.shape_env
+        var_to_val = getattr(shape_env, "backed_var_to_val", None)
+        if var_to_val is None:
+            var_to_val = shape_env.var_to_val
+        subs: dict[Any, int] = {}
+        for s in expr.free_symbols:
+            if s in size_symbols:
+                subs[s] = size
+                continue
+            hint = var_to_val.get(s)
+            if hint is None:
+                raise RuntimeError(
+                    "Cannot statically concretize input stride/offset for "
+                    f"single-size compilation (size={size}): symbol '{s}' in "
+                    f"'{expr}' is independent of the input shape and has no "
+                    "backed value, so it cannot be specialized to a constant. "
+                    "This input is not amenable to single-size compilation."
+                )
+            subs[s] = int(hint)
+        return int(expr.subs(subs))
+
     fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
     args: list[Any] = []
@@ -63,8 +103,16 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
                 args.append(concretize(val))
             elif isinstance(val, torch.Tensor):
                 new_shape = tuple(concretize(d) for d in val.shape)
-                new_strides = tuple(concretize(s) for s in val.stride())
-                new_storage_offset = concretize(val.storage_offset())
+                size_symbols: set = set()
+                for d in val.shape:
+                    if is_symbolic(d):
+                        size_symbols |= d.node.expr.free_symbols
+                new_strides = tuple(
+                    concretize_layout(s, size_symbols) for s in val.stride()
+                )
+                new_storage_offset = concretize_layout(
+                    val.storage_offset(), size_symbols
+                )
                 needed_size = compute_required_storage_length(
                     new_shape, new_strides, new_storage_offset
                 )
