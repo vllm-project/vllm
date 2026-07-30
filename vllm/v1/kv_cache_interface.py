@@ -426,12 +426,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
-        non_causal_decode_set = {spec.non_causal_multi_token_decode for spec in specs}
-        assert len(non_causal_decode_set) == 1, (
-            "All attention layers in the same KV cache group must agree on the "
-            "non-causal decode mode, since it configures the shared metadata "
-            "builder (e.g. its reorder batch threshold)."
-        )
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
@@ -453,7 +447,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
-            non_causal_multi_token_decode=non_causal_decode_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
