@@ -75,7 +75,8 @@ def test_hisparse_selects_flashmla_sparse():
     )
 
 
-def test_hisparse_rejects_incompatible_backend():
+def test_hisparse_preserves_explicit_sparse_mla_backend():
+    sentinel = object()
     with (
         patch(
             "vllm.config.get_current_vllm_config",
@@ -83,15 +84,24 @@ def test_hisparse_rejects_incompatible_backend():
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE
             ),
         ),
-        pytest.raises(ValueError, match="requires the FLASHMLA_SPARSE"),
+        patch(
+            "vllm.v1.attention.selector._cached_get_attn_backend",
+            return_value=sentinel,
+        ) as select_backend,
     ):
-        get_attn_backend(
+        result = get_attn_backend(
             576,
             torch.bfloat16,
             "fp8_ds_mla",
             use_mla=True,
             use_sparse=True,
         )
+
+    assert result is sentinel
+    assert (
+        select_backend.call_args.kwargs["backend"]
+        == AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+    )
 
 
 # Define MLA and non-MLA backends separately

@@ -168,15 +168,13 @@ def get_attn_backend(
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
-    if attention_config.hisparse_config is not None and use_mla and use_sparse:
-        hisparse_backend = AttentionBackendEnum.FLASHMLA_SPARSE
-        if backend is None:
-            backend = hisparse_backend
-        elif backend != hisparse_backend:
-            raise ValueError(
-                "HiSparse requires the FLASHMLA_SPARSE attention backend, "
-                f"but {backend.name} was selected."
-            )
+    if (
+        attention_config.hisparse_config is not None
+        and use_mla
+        and use_sparse
+        and backend is None
+    ):
+        backend = AttentionBackendEnum.FLASHMLA_SPARSE
 
     return _cached_get_attn_backend(
         backend=backend,
