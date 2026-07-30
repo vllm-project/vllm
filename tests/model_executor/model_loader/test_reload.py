@@ -444,10 +444,17 @@ def test_marlin_act_order_layerwise_reload_accounting(monkeypatch, dist_init):
     assert torch.equal(layer.g_idx_sort_indices.data, expected_sort_indices)
 
 
-def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
-    """Machete's act-order permutation is baked into captured CUDA graphs via
-    `self.act_perm`; reload must recompute it into the same storage (#48312)."""
+def _stub_machete_ops(monkeypatch):
     from vllm import _custom_ops as ops
+
+    monkeypatch.setattr(
+        ops,
+        "machete_prepack_B",
+        lambda x, a_type, b_type, group_scales_type: torch.zeros_like(x),
+    )
+
+
+def _make_act_order_machete_kernel():
     from vllm.model_executor.kernels.linear.mixed_precision.machete import (
         MacheteLinearKernel,
     )
@@ -456,14 +463,8 @@ def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
     )
     from vllm.scalar_type import scalar_types
 
-    monkeypatch.setattr(
-        ops,
-        "machete_prepack_B",
-        lambda x, a_type, b_type, group_scales_type: torch.zeros_like(x),
-    )
-
-    # Machete consumes the same GPTQ checkpoint format as Marlin, so reuse the
-    # marlin checkpoint helpers (identical sizes and dtypes).
+    # Machete consumes the same GPTQ checkpoint format as Marlin, so the
+    # marlin checkpoint helpers apply (identical sizes and dtypes).
     kernel = object.__new__(MacheteLinearKernel)
     kernel.config = MPLinearLayerConfig(
         full_weight_shape=(_MARLIN_SIZE_K, _MARLIN_SIZE_N),
@@ -478,6 +479,14 @@ def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
     kernel.w_s_name = "scales"
     kernel.w_zp_name = None
     kernel.w_gidx_name = "g_idx"
+    return kernel
+
+
+def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
+    """Machete's act-order permutation is baked into captured CUDA graphs via
+    `self.act_perm`; reload must recompute it into the same storage (#48312)."""
+    _stub_machete_ops(monkeypatch)
+    kernel = _make_act_order_machete_kernel()
 
     generator = torch.Generator().manual_seed(0)
     first_g_idx = _random_g_idx(generator)
@@ -503,6 +512,64 @@ def test_machete_post_load_preserves_act_perm_address(monkeypatch, dist_init):
     # inside a kernel-held callable (the pre-fix act_perm pattern).
     assert isinstance(layer.g_idx_sort_indices, torch.nn.Parameter)
     assert not hasattr(kernel, "act_perm")
+
+
+def test_machete_act_order_layerwise_reload_accounting(monkeypatch, dist_init):
+    """`g_idx_sort_indices` is generated during weight processing and never
+    loaded from checkpoints. Registering it as a Parameter must not count it
+    toward `load_numel_total`: reload restores the construction-time tensor
+    set before sizing, so act-order layers still process during streaming
+    instead of deferring (and buffering weights) until finalization."""
+    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+    _stub_machete_ops(monkeypatch)
+    kernel = _make_act_order_machete_kernel()
+
+    class _KernelQuantMethod(QuantizeMethodBase):
+        def create_weights(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def apply(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def process_weights_after_loading(self, layer):
+            kernel.process_weights_after_loading(layer)
+
+    generator = torch.Generator().manual_seed(0)
+    layer = torch.nn.Module()
+    layer.quant_method = _KernelQuantMethod()
+    _load_marlin_checkpoint_format_weights(layer, _random_g_idx(generator))
+
+    # Metadata is recorded at model construction, before any processing
+    record_metadata_for_reloading(layer)
+    checkpoint_numel = sum(t.numel() for t in get_layer_tensors(layer).values())
+
+    kernel.process_weights_after_loading(layer)
+    sort_indices = layer.g_idx_sort_indices
+
+    initialize_layerwise_reload(layer)
+    info = get_layerwise_info(layer)
+    assert info.load_numel_total == checkpoint_numel
+
+    # Stream a new checkpoint; the layer must process as soon as its last
+    # tensor arrives
+    new_g_idx = _random_g_idx(generator)
+    checkpoint = {
+        "qweight": torch.zeros(_MARLIN_SIZE_K // 8, _MARLIN_SIZE_N, dtype=torch.int32),
+        "scales": torch.ones(
+            _MARLIN_SIZE_K // _MARLIN_GROUP_SIZE, _MARLIN_SIZE_N, dtype=torch.float16
+        ),
+        "g_idx": new_g_idx,
+    }
+    for name, weight in checkpoint.items():
+        param = getattr(layer, name)
+        param.weight_loader(param, weight)
+
+    assert not info.can_load()
+    assert not info.loaded_weights
+    assert layer.g_idx_sort_indices is sort_indices
+    expected_perm = torch.argsort(new_g_idx).to(torch.int)
+    assert torch.equal(layer.g_idx_sort_indices.data, expected_perm)
 
 
 def test_model_cleanup(dist_init, default_vllm_config):
