@@ -13,6 +13,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
@@ -45,15 +46,25 @@ class MLAPrefillSelectorConfig(NamedTuple):
         )
 
 
+def _supports_query_quantization(backend: MLAPrefillBackendEnum) -> bool:
+    try:
+        return backend.get_class().supports_query_quantization
+    except (ImportError, ValueError):
+        return False
+
+
 def _get_mla_prefill_backend_priorities(
     device_capability: DeviceCapability,
     mla_dimensions: MLADimensions,
+    prefer_query_quantization: bool = False,
 ) -> list[MLAPrefillBackendEnum]:
     """Get MLA prefill backend priorities based on device capability.
 
     Args:
         device_capability: The device's compute capability.
         mla_dimensions: The model's MLA head dimensions.
+        prefer_query_quantization: Whether to prioritize backends that can
+            consume an FP8-quantized query.
 
     Returns:
         List of backends in priority order (highest priority first).
@@ -61,33 +72,40 @@ def _get_mla_prefill_backend_priorities(
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return [
+        priorities = [
             MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
-
-    if device_capability.major == 10:  # Blackwell
+    elif device_capability.major == 10:  # Blackwell
         if mla_dimensions == MLADimensions(
             qk_nope_head_dim=192,
             qk_rope_head_dim=64,
             v_head_dim=256,
         ):
-            return [
+            priorities = [
                 MLAPrefillBackendEnum.TRTLLM_RAGGED,
                 MLAPrefillBackendEnum.FLASH_ATTN,
                 MLAPrefillBackendEnum.FLASHINFER,
                 MLAPrefillBackendEnum.TOKENSPEED_MLA,
             ]
-        return [
-            MLAPrefillBackendEnum.FLASH_ATTN,
-            MLAPrefillBackendEnum.TRTLLM_RAGGED,
-            MLAPrefillBackendEnum.FLASHINFER,
-            MLAPrefillBackendEnum.TOKENSPEED_MLA,
-        ]
+        else:
+            priorities = [
+                MLAPrefillBackendEnum.FLASH_ATTN,
+                MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                MLAPrefillBackendEnum.FLASHINFER,
+                MLAPrefillBackendEnum.TOKENSPEED_MLA,
+            ]
     else:  # Hopper (SM90) and older
-        return [
+        priorities = [
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
+
+    if prefer_query_quantization:
+        # Stable partition: backends that can consume an FP8 query first,
+        # otherwise the request for FP8 prefill attention is silently dropped.
+        priorities.sort(key=lambda backend: not _supports_query_quantization(backend))
+
+    return priorities
 
 
 def get_mla_prefill_backend(
@@ -115,6 +133,12 @@ def get_mla_prefill_backend(
         return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
 
     attention_config = vllm_config.attention_config
+    cache_config = vllm_config.cache_config
+    prefer_query_quantization = (
+        attention_config.use_prefill_query_quantization
+        and cache_config is not None
+        and is_quantized_kv_cache(cache_config.cache_dtype)
+    )
 
     model_config = vllm_config.model_config
     if model_config is None:
@@ -153,6 +177,7 @@ def get_mla_prefill_backend(
     return _auto_select_mla_prefill_backend(
         device_capability,
         selector_config,
+        prefer_query_quantization,
     )
 
 
@@ -160,12 +185,15 @@ def get_mla_prefill_backend(
 def _auto_select_mla_prefill_backend(
     device_capability: DeviceCapability,
     selector_config: MLAPrefillSelectorConfig,
+    prefer_query_quantization: bool = False,
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
 
     Args:
         device_capability: The device's compute capability.
         selector_config: Hashable configuration for backend selection.
+        prefer_query_quantization: Whether to prioritize backends that can
+            consume an FP8-quantized query.
 
     Returns:
         The selected prefill backend class.
@@ -173,6 +201,7 @@ def _auto_select_mla_prefill_backend(
     priorities = _get_mla_prefill_backend_priorities(
         device_capability,
         selector_config.mla_dimensions,
+        prefer_query_quantization,
     )
     all_invalid_reasons: dict[str, list[str]] = {}
 

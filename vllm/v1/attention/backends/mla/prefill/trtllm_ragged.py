@@ -36,6 +36,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=256,
         ),
     ]
+    supports_query_quantization: ClassVar[bool] = True
 
     @staticmethod
     def get_name() -> str:
