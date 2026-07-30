@@ -490,15 +490,6 @@ def prepare_humming_linear_layer_config(
 
     layer.weight_schema = weight_schema
 
-    for name, _ in list(layer.named_parameters()):
-        delattr(layer, name)
-
-    for name, tensor in tensors.items():
-        if isinstance(tensor, torch.nn.Parameter):
-            tensor = tensor.data
-        param = torch.nn.Parameter(tensor, requires_grad=False)
-        setattr(layer, name, param)
-
     # Step 2: transform weight (humming standard format) for forwarding.
     config = prepare_layer_config(
         shape_n=sum(layer.output_partition_sizes),
@@ -510,11 +501,12 @@ def prepare_humming_linear_layer_config(
         has_bias=layer.has_bias,
         torch_dtype=layer.params_dtype,
     )
-    tensors = transform_humming_tensors(config, dict(layer.named_parameters()))
+    tensors = transform_humming_tensors(config, tensors)
     for name, _ in list(layer.named_parameters()):
         delattr(layer, name)
     for name, tensor in tensors.items():
-        setattr(layer, name, torch.nn.Parameter(tensor, requires_grad=False))
+        param = torch.nn.Parameter(tensor, requires_grad=False)
+        setattr(layer, name, param)
 
     return config
 
