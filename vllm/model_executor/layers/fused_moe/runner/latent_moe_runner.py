@@ -206,10 +206,15 @@ class LatentMoERunner(MoERunner):
                 shared_output = tensor_model_parallel_all_reduce(shared_output)
             result = torch.mm(fused_latent, transform.up_proj.weight.t())
             main.wait_stream(shared_expert_stream)
+            result.add_(shared_output)
         else:
             shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = torch.mm(fused_latent, transform.up_proj.weight.t())
-        result.add_(shared_output)
+            result = torch.addmm(
+                shared_output,
+                fused_latent,
+                transform.up_proj.weight.t(),
+                out=shared_output,
+            )
 
         # Output is already fully reduced; this only strips padding.
         result = self._maybe_reduce_final_output(
