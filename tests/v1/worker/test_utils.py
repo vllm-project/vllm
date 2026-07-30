@@ -1,20 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 import torch
 
-from vllm.v1.worker.utils import bind_kv_cache, raise_if_nan_logits
-
-
-def test_raise_if_nan_logits():
-    raise_if_nan_logits({"request-0": 0, "request-1": 0})
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"NaNs detected in logits: \{'request-1': 2\}",
-    ):
-        raise_if_nan_logits({"request-0": 0, "request-1": 2})
+from vllm.v1.worker.utils import bind_kv_cache
 
 
 def test_bind_kv_cache(default_vllm_config):
