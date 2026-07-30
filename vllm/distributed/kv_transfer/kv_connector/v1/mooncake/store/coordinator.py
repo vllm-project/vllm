@@ -14,6 +14,8 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
+    truncate_downward_closed_groups,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -376,14 +378,18 @@ class MooncakeStoreCoordinator:
         # Truncate full-attention hit_blocks to final converged length;
         # other specs already trim themselves inside their hit logic. cdiv keeps
         # the partial tail block when hit_length is not block-aligned.
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            num_blocks = cdiv(hit_length, first_group.spec.block_size)
-            for group_id in first_group.group_ids:
-                full_blks = hit_blocks_by_group[group_id]
-                assert full_blks is not None
-                del full_blks[num_blocks:]
-                hit_length_by_group[group_id] = hit_length
+        # Every full-attention group, not just the first: a DFlash drafter
+        # booking its sliding-window layers as full attention keeps the
+        # sliding-window block size, so a model can carry two full-attention
+        # groups at different block sizes. Mirrors the core coordinator, which
+        # must not disagree with this one.
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in self.attention_groups),
+            hit_length,
+            hit_blocks_by_group,
+            hit_length_by_group,
+            lambda gid: self.kv_cache_groups[gid].kv_cache_spec.block_size,
+        )
 
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
@@ -395,18 +401,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
-) -> bool:
-    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
-    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
-    Single copy on purpose — scheduler and coordinator must not disagree.
-    """
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and spec.block_size > hash_block_size
-        for g in kv_cache_groups
-    )
