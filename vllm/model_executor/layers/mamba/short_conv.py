@@ -81,8 +81,6 @@ class ShortConv(MambaBase, CustomOp):
         )
 
         vllm_config = get_current_vllm_config()
-        # Capture here (config context is set during model build); get_state_shape
-        # runs later outside that context. Widens conv state for spec-decode rollback.
         self.num_spec = vllm_config.num_speculative_tokens
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -238,9 +236,6 @@ class ShortConv(MambaBase, CustomOp):
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
-            # Speculative-decode metadata (verify step has >1 query token per
-            # decode request). Provided by BaseMambaAttentionMetadata; None /
-            # trivial when spec decoding is off. Mirrors mamba_mixer2.
             num_accepted_tokens = attn_metadata.num_accepted_tokens
             query_start_loc_d = attn_metadata.query_start_loc_d
 
@@ -323,7 +318,7 @@ class ShortConv(MambaBase, CustomOp):
                     max_query_len=state_indices_tensor_d.size(-1),
                 )
             else:
-                # Non-spec decode (1 token/request): unchanged original path.
+                # Non-spec decode
                 Bx = causal_conv1d_update(
                     Bx_d,
                     conv_state,
@@ -350,8 +345,6 @@ class ShortConv(MambaBase, CustomOp):
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...]]:
-        # num_spec widens the conv state for speculative-decode rollback
-        # (see short_conv_state_shape / mamba2 parity). Captured in __init__.
         return MambaStateShapeCalculator.short_conv_state_shape(
             tp_world_size=get_tensor_model_parallel_world_size(),
             intermediate_size=self.conv_dim,
