@@ -1987,6 +1987,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
 
     coordinator = _make_hisparse_coordinator(block_size=block_size)
     assert coordinator.hot_cache is not None
+    coordinator.eager_host_mirror = True
 
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
     resident_slots = torch.tensor([4, -1], dtype=torch.int64, device=device)

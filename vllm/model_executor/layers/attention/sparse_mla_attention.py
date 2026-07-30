@@ -31,7 +31,6 @@ from vllm.v1.attention.backends.mla.hisparse import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_coordinator,
-    is_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -402,11 +401,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             self.hisparse_coordinator.set_request_state_indices(indices)
         self._hisparse_decode_batch = (
             self.hisparse_coordinator is not None
-            and is_hisparse_decode_batch(
-                max_query_len=attn_metadata.max_query_len,
-                num_reqs=attn_metadata.num_reqs,
-                num_actual_tokens=attn_metadata.num_actual_tokens,
-            )
+            and attn_metadata.max_query_len == 1
+            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
         )
 
     def _hisparse_swap_in(

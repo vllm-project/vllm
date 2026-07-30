@@ -44,15 +44,6 @@ FP8_DS_MLA_ROW_BYTES = 656
 HISPARSE_KERNEL_BLOCK_SIZE = 64
 
 
-def is_hisparse_decode_batch(
-    *,
-    max_query_len: int,
-    num_reqs: int,
-    num_actual_tokens: int,
-) -> bool:
-    return max_query_len == 1 and num_reqs == num_actual_tokens
-
-
 @dataclass(frozen=True)
 class ResolvedHiSparseConfig:
     top_k: int
@@ -517,10 +508,6 @@ class HiSparseCoordinator:
         self._host_cache: torch.Tensor | None = None
         self._host_write_event: torch.Event | None = None
         self.eager_host_mirror = False
-        # Standalone coordinators retain eager backup behavior. The GPU runtime
-        # switches it off unless an outbound KV connector needs every active
-        # host page to remain immediately exportable.
-        self.defer_newest_backup = False
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
         if indices.numel() > self.max_num_reqs:
@@ -765,12 +752,11 @@ class HiSparseCoordinator:
             dst_slots,
         )
 
-    def prepare_deferred_backup(
+    def backup_caches(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the static tensors needed by the all-layer backup plan."""
         assert self.hot_cache is not None and self._host_cache is not None
-        self.defer_newest_backup = not self.eager_host_mirror
         return self.hot_cache, self._host_cache
 
     # ------------------------------------------------------- newest-token path
@@ -814,7 +800,7 @@ class HiSparseCoordinator:
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-        if not self.defer_newest_backup:
+        if self.eager_host_mirror:
             self._backup_rows(
                 self.hot_cache,
                 resident_slots,
