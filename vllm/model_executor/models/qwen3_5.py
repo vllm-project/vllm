@@ -408,11 +408,14 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = WeightsMapper(
+            orig_to_new_substr={"language_model.": ""},
+        )
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
