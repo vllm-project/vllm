@@ -131,6 +131,7 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
+    is_uniform_query_len,
 )
 
 logger = init_logger(__name__)
@@ -1244,6 +1245,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         if dummy_run:
             return get_uniform_token_count(num_reqs, num_tokens, max_query_len)
+        # Shape first. This is the same test get_uniform_decode_token_count
+        # runs before it looks at any request state, and it rejects every
+        # mixed prefill/decode batch, which is most of them. Checking it here
+        # keeps the gather below off the hot path in that case.
+        if not is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+            return None
         idx_mapping_np = np.fromiter(
             map(
                 self.req_states.req_id_to_index.__getitem__,
