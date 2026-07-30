@@ -652,8 +652,8 @@ class ReLUSquaredActivation(CustomOp):
 
     # --8<-- [end:relu2]
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.relu_squared
 
