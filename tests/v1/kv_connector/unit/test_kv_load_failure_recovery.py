@@ -14,6 +14,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 
@@ -32,6 +33,18 @@ def _make_get_num_new_matched_tokens(
 def scheduler():
     vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     return create_scheduler(vllm_config)
+
+
+@pytest.fixture
+def hybrid_scheduler():
+    """Scheduler for a hybrid model: full attention plus a Mamba group."""
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size,
+        mamba_enabled=True,
+        num_blocks=10000,
+    )
+    return create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 
 
 @pytest.mark.parametrize(
@@ -337,3 +350,94 @@ def test_async_progressive_load_failure(
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert scheduler.failed_recving_kv_req_ids == {request.request_id}
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
+
+
+def _schedule_hybrid_async_load(
+    scheduler: Scheduler, num_prompt_blocks: int, num_external_computed_blocks: int
+) -> Request:
+    """Put one request into an async external load on a hybrid model."""
+    request = create_request(num_tokens=num_prompt_blocks * scheduler.block_size)
+    scheduler.add_request(request=request)
+
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: num_external_computed_blocks * scheduler.block_size},
+            async_load=True,
+        )
+    )
+    scheduler.connector.take_events.return_value = ()
+    return request
+
+
+def _report_invalid_blocks(
+    scheduler: Scheduler, scheduler_output, invalid_block_ids: set[int]
+) -> None:
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            reqs=[],
+            finished_recving=set(),
+            invalid_block_ids=invalid_block_ids,
+            use_eos=True,
+        ),
+    )
+
+
+@pytest.mark.parametrize("failed_group_idx", [0, 1])
+def test_hybrid_load_failure_recomputes_whole_request(
+    hybrid_scheduler: Scheduler, failed_group_idx: int
+):
+    """A hybrid model must recover, not crash.
+
+    Its groups sit on different block grids, so there is no single truncation
+    point; the request restarts from scratch instead.
+    """
+    num_prompt_blocks, num_external_computed_blocks = 10, 9
+    request = _schedule_hybrid_async_load(
+        hybrid_scheduler, num_prompt_blocks, num_external_computed_blocks
+    )
+    scheduler_output = hybrid_scheduler.schedule()
+
+    block_ids_per_group = hybrid_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    assert len(block_ids_per_group) == 2, "expected a hybrid (multi-group) layout"
+    null_block_id = hybrid_scheduler.kv_cache_manager.block_pool.null_block.block_id
+    # The Mamba group backs only its aligned snapshot with a real block, so
+    # pick a block that actually belongs to this request.
+    failed_block = next(
+        block_id
+        for block_id in block_ids_per_group[failed_group_idx]
+        if block_id != null_block_id
+    )
+
+    _report_invalid_blocks(hybrid_scheduler, scheduler_output, {failed_block})
+
+    assert request.num_computed_tokens == 0
+    assert hybrid_scheduler.failed_recving_kv_req_ids == {request.request_id}
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_hybrid_load_failure_ignores_null_block(hybrid_scheduler: Scheduler):
+    """The null block is shared by every request and holds no KV, so reporting
+    it must not restart anyone."""
+    num_prompt_blocks, num_external_computed_blocks = 10, 9
+    request = _schedule_hybrid_async_load(
+        hybrid_scheduler, num_prompt_blocks, num_external_computed_blocks
+    )
+    scheduler_output = hybrid_scheduler.schedule()
+
+    null_block_id = hybrid_scheduler.kv_cache_manager.block_pool.null_block.block_id
+    _, mamba_block_ids = hybrid_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    # The Mamba group parks its unaligned positions on the null block, so a
+    # request that never failed would otherwise be restarted by this report.
+    assert mamba_block_ids[0] == null_block_id
+
+    num_computed_tokens = request.num_computed_tokens
+    _report_invalid_blocks(hybrid_scheduler, scheduler_output, {null_block_id})
+
+    assert request.num_computed_tokens == num_computed_tokens
+    assert not hybrid_scheduler.failed_recving_kv_req_ids
