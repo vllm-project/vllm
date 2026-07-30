@@ -1253,3 +1253,6 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
+
+# Optional ZoomKV CUDA extension (enable with -DVLLM_BUILD_ZOOMKV_EXT=ON).
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/zoomkv.cmake)
