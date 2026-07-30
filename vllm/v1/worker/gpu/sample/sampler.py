@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
-from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -27,8 +26,6 @@ from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.sampling_mask import compact_sampling_mask
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
-
-logger = init_logger(__name__)
 
 
 class Sampler:
@@ -56,10 +53,6 @@ class Sampler:
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
         self.enable_return_sampling_mask = enable_return_sampling_mask
-        if enable_return_sampling_mask and self.use_flashinfer:
-            logger.info_once(
-                "FlashInfer sampling is disabled when returning sampling masks."
-            )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
