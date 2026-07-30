@@ -445,6 +445,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
+        # Book this layer's KV as full attention while still masking to the
+        # window at compute time -- the same trade `unify_hybrid_kv_cache_specs`
+        # makes, but per layer instead of for the whole model. Opt-in; set by
+        # the model after construction (see `qwen3_dflash`).
+        self.book_sliding_window_as_full_attention = False
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -628,7 +633,25 @@ class Attention(nn.Module, AttentionLayerBase):
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend, sw_per_token, shared_page, block_size
             )
-            return SlidingWindowSpec(
+            # Booking as full attention routes the layer to
+            # FullAttentionManager, which supports fine-grained (partial)
+            # prefix-cache hits where SlidingWindowManager asserts against
+            # them. Only the block bookkeeping changes: `sliding_window` is
+            # carried either way and the metadata builder reads the window off
+            # the spec, so the kernel still masks to it. The block size stays
+            # the sliding-window one so page unification can scale it by an
+            # integer ratio.
+            #
+            # One constructor on purpose. The fields must stay identical
+            # between the two, and the window in particular is load-bearing --
+            # dropping it would not merely fail to enforce the window, it would
+            # override the impl's correct one with "no window at all".
+            spec_cls = (
+                FullAttentionSpec
+                if self.book_sliding_window_as_full_attention
+                else SlidingWindowSpec
+            )
+            return spec_cls(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,

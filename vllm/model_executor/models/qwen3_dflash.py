@@ -408,6 +408,41 @@ class DFlashQwen3Model(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
+        # An all-sliding drafter makes the model's prefix-cache hash granularity
+        # unsatisfiable: it has to divide the target's block size and be a whole
+        # multiple of the drafter's at the same time, because
+        # SlidingWindowManager refuses partial hits. Booking the drafter's KV as
+        # full attention routes it to FullAttentionManager instead, which does
+        # support them. The window stays on the spec and is still applied by the
+        # kernel; only the block accounting changes.
+        #
+        # Derived rather than flagged, on two conditions. A drafter that *mixes*
+        # sliding and full attention is already handled by
+        # `_dflash_needs_multi_kv_group`; this is the case that gate excludes.
+        # And with prefix caching off there is nothing to gain, while the
+        # conversion still costs KV capacity -- a full-attention group is
+        # budgeted at max_model_len rather than at the window.
+        swa_layers = [
+            layer.self_attn.attn
+            for layer in self.layers
+            if layer.self_attn.attn.sliding_window is not None
+        ]
+        if (
+            swa_layers
+            and len(swa_layers) == len(self.layers)
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            for attn in swa_layers:
+                attn.book_sliding_window_as_full_attention = True
+            logger.info(
+                "DFlash drafter: booking %d sliding-window layers as full "
+                "attention for KV cache accounting, so the drafter can take "
+                "part in prefix caching (window still enforced at compute "
+                "time). This budgets the drafter's KV at max_model_len rather "
+                "than at its %d-token window.",
+                len(swa_layers),
+                swa_layers[0].sliding_window,
+            )
         if self.use_aux_hidden_state:
             self.fc = ReplicatedLinear(
                 input_size=_get_dflash_fc_input_size(
