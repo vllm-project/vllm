@@ -337,10 +337,10 @@ def get_conv_copy_spec(
     src_block_id = block_ids[cur_block_idx]
     offset = num_accepted_tokens - 1
     if is_conv_state_dim_first():
-        # DS offset > 0 is handled by the fused postprocess kernel.
+        # DS offset > 0 is handled by the fused state-copy kernels.
         assert offset == 0, (
             "DS conv state with num_accepted_tokens > 1 must be handled by "
-            "the fused postprocess kernel, not get_conv_copy_spec"
+            "the fused state-copy kernels, not get_conv_copy_spec"
         )
         src_state = state[src_block_id]
     else:

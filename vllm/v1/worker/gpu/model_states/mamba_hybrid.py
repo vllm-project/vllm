@@ -9,10 +9,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    get_conv_copy_spec,
-    is_conv_state_dim_first,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -133,14 +129,6 @@ class MambaHybridModelState(DefaultModelState):
     ) -> MambaSpecDecodeGPUContext:
         if self._mamba_ctx is None:
             copy_funcs = self.model.get_mamba_state_copy_func()
-            # The fused copy kernels shift conv windows assuming the SD layout;
-            # the DS layout cannot express a >0 spec-decode shift as a single
-            # contiguous copy (mirrors get_conv_copy_spec's NotImplementedError).
-            if get_conv_copy_spec in copy_funcs and is_conv_state_dim_first():
-                assert self.vllm_config.speculative_config is None, (
-                    "DS conv state layout does not support mamba align state "
-                    "copies with speculative decoding"
-                )
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,

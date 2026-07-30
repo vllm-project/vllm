@@ -16,7 +16,10 @@ from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    get_conv_state_layout,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -909,13 +912,17 @@ def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
 
 
 def _run_mamba_prefix_cache_mrv2(
-    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+    monkeypatch: pytest.MonkeyPatch,
+    async_scheduling: bool,
+    conv_state_layout: str = "SD",
 ):
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", conv_state_layout)
     envs.disable_envs_cache()
+    get_conv_state_layout.cache_clear()
 
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -1175,3 +1182,12 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_ds_async(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(
+        monkeypatch,
+        async_scheduling=True,
+        conv_state_layout="DS",
+    )
