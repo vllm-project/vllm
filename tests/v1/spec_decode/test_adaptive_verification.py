@@ -118,3 +118,28 @@ def test_profiled_batches_seed_cost_curves_via_consumer():
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
     assert manager._profile_samples == []
+
+
+def test_compact_batch_preserves_totals_and_bounds():
+    # The CPU placeholder layout must keep the batch total equal to the GPU
+    # total and every verification row within decode_query_len, or downstream
+    # CPU metadata desyncs from the reallocated GPU boundaries.
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
+        np.array([1.0] * 44 + [100.0] * 3),
+    )
+    manager.req_states.req_id_to_index["prefill"] = 2
+    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
+    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
+    num_tokens = manager.get_num_tokens(
+        {"low": 3, "high": 3, "prefill": 40},
+        {"low": [1, 2], "high": [3, 4]},
+    )
+    scheduled = np.array([3, 3, 40], dtype=np.int32)
+    drafts = np.array([2, 2, 0], dtype=np.int32)
+    compacted = manager.compact_batch(drafts, scheduled)
+
+    assert int(compacted.sum()) == num_tokens
+    num_steps = manager.num_speculative_steps
+    assert (compacted[:2] <= 1 + num_steps).all()
+    assert compacted[2] == 40
