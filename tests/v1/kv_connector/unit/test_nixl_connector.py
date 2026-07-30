@@ -479,8 +479,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
-        # Mock register_kv_caches attribute needed for tests that do not call it.
+        # Mock register_kv_caches attributes needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
+        self.src_blocks_data = np.empty((0, 3), dtype=np.uint64)
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
@@ -765,8 +766,9 @@ class TestNixlHandshake:
             assert remote_info.remote_tp_size == remote_tp_size
             assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
             # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
-            assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
-            assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
+            split_key = (-tp_ratio, worker.block_size)
+            assert split_key in worker.src_xfer_handles_by_tp_ratio
+            assert len(worker.src_xfer_handles_by_tp_ratio[split_key]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
             assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
                 range(tp_ratio)
@@ -1394,6 +1396,53 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_connector_stats()
     assert stats_after_reset is None
+
+
+def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist_init):
+    """reqs_to_send deadlines are stamped with the scheduler process's
+    perf_counter, whose epoch differs across processes and (by boot-time
+    deltas) across nodes. Without rebasing, a P worker on a node whose
+    monotonic clock is ahead of the scheduler's by more than the TTL
+    expires the lease on arrival and reports done_sending before D has
+    read the blocks — the freed blocks can then be reallocated and the
+    remote read pulls another request's data (silent accuracy corruption).
+    The worker must anchor the remaining TTL to its own clock.
+    """
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+
+    req_id = "req-lease-clock"
+    ttl = 480.0
+    # Simulate a scheduler whose monotonic clock is 10,000 s behind this
+    # worker's (e.g. its node booted much later): the raw deadline is
+    # then already far in the past in this worker's clock domain.
+    scheduler_clock = time.perf_counter() - 10_000.0
+
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {req_id}
+    metadata.reqs_to_send = {req_id: scheduler_clock + ttl}
+    metadata.scheduler_clock = scheduler_clock
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    remaining = worker._reqs_to_send[req_id] - time.perf_counter()
+    assert ttl - 5.0 < remaining <= ttl + 5.0
+
+    # The expiry sweep must not release the request.
+    done_sending, _ = worker.get_finished()
+    assert req_id not in done_sending
+    assert req_id in worker._reqs_to_process
 
 
 def test_kv_connector_stats_aggregation():
@@ -2091,7 +2140,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         # Mock register_kv_cache which registers local handle
         worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
-        worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
+        worker.src_xfer_handles_by_tp_ratio = {(-2, 16): [456, 457]}
         worker.dst_xfer_side_handles = {"engine1": {0: 789}}
         worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         # _cleanup_remote_engine (called by shutdown) also clears these:
