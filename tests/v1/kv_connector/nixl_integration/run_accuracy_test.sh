@@ -227,9 +227,12 @@ run_tests_for_model() {
     # Calculate side channel port
     SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
     INTERNAL_PORT=$((DECODER_INTERNAL_PORT_BASE + i * INTERNAL_PORT_STRIDE))
-    DECODER_INTERNAL_PORT_ENV=
+    # For non-DP mode, set VLLM_PORT to pin the internal port;
+    # For DP mode, set VLLM_DP_MASTER_PORT instead to avoid race condition.
     if [[ -z "${DP_EP:-}" ]]; then
       DECODER_INTERNAL_PORT_ENV="VLLM_PORT=$INTERNAL_PORT"
+    else
+      DECODER_INTERNAL_PORT_ENV="VLLM_DP_MASTER_PORT=$INTERNAL_PORT"
     fi
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
