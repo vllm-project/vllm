@@ -585,13 +585,14 @@ COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_work
 RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
     > /tmp/ep_kernels_workspace/dist/wheels.sha256
 
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
+# Check the size of the CUDA 13 wheel uploaded to PyPI
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && \
+        [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         python3 check-wheel-size.py dist; \
     else \
         echo "Skipping wheel size check."; \
