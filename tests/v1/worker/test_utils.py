@@ -95,7 +95,10 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime.spill_src_gpu = torch.empty((2, 8), dtype=torch.int64)
     runtime.spill_dst_gpu = torch.empty(8, dtype=torch.int64)
     runtime._spill_staging_index = 0
-    runtime._spill_staging_events = [None]
+    staging_recorded_streams: list[object] = []
+    runtime._spill_staging_events = [
+        SimpleNamespace(query=lambda: True, record=staging_recorded_streams.append)
+    ]
     runtime.spill_src_indices_ptrs = object()
     runtime.coordinators = [
         SimpleNamespace(resident_group_id=2),
@@ -111,17 +114,13 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime.backup_src_rows = 6
     current_stream = object()
     recorded_streams: list[object] = []
-    staging_recorded_streams: list[object] = []
     runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
     calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
-    monkeypatch.setattr(
-        worker_hisparse.torch,
-        "Event",
-        lambda: SimpleNamespace(record=staging_recorded_streams.append),
-    )
+    created_events: list[object] = []
+    monkeypatch.setattr(worker_hisparse.torch, "Event", created_events.append)
     monkeypatch.setattr(
         worker_hisparse.torch,
         "ops",
@@ -151,6 +150,7 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     assert runtime.spill_src_gpu.dtype == torch.int64
     assert runtime.spill_dst_gpu.dtype == torch.int64
     assert runtime._enqueued_spill_ids == [7]
+    assert created_events == []
     assert staging_recorded_streams == [current_stream]
     assert recorded_streams == [current_stream]
 

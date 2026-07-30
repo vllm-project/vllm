@@ -161,9 +161,7 @@ class HiSparseRuntime:
             device=device,
         )
         self._spill_staging_index = 0
-        self._spill_staging_events: list[torch.Event | None] = [
-            None
-        ] * spill_staging_count
+        self._spill_staging_events = [torch.Event() for _ in range(spill_staging_count)]
 
     def pre_step(self, scheduler_output: SchedulerOutput) -> None:
         self.set_fully_resident_batch(scheduler_output.hisparse_fully_resident)
@@ -201,7 +199,7 @@ class HiSparseRuntime:
             )
         staging_idx = self._spill_staging_index
         staging_event = self._spill_staging_events[staging_idx]
-        if staging_event is not None and not staging_event.query():
+        if not staging_event.query():
             raise RuntimeError(
                 "HiSparse exceeded its preallocated in-flight spill staging."
             )
@@ -225,9 +223,7 @@ class HiSparseRuntime:
             src_staging[:, :num_rows], non_blocking=True
         )
         self.spill_dst_gpu[:num_rows].copy_(dst_staging[:num_rows], non_blocking=True)
-        staging_event = torch.Event()
         staging_event.record(torch.accelerator.current_stream(self.hot_backing.device))
-        self._spill_staging_events[staging_idx] = staging_event
         self._spill_staging_index = (staging_idx + 1) % len(self._spill_staging_events)
         torch.ops._C_cache_ops.hisparse_backup_layers(
             self.hot_backing,
