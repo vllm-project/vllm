@@ -6,6 +6,7 @@ import pickle
 import random
 import threading
 import time
+from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 from unittest import mock
 
@@ -600,6 +601,71 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             reader._spin_condition.write_cancel_socket,
         ):
             socket.close(linger=0)
+
+
+def test_dequeue_serializes_concurrent_consumers():
+    """Concurrent consumers must not race the reader cursor or duplicate slots."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=2,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    metadata_barrier = threading.Barrier(2)
+    data_barrier = threading.Barrier(2)
+    received = []
+    errors = []
+
+    original_get_metadata = reader.buffer.get_metadata
+    original_get_data = reader.buffer.get_data
+
+    @contextmanager
+    def synchronized_get_metadata(current_idx):
+        with original_get_metadata(current_idx) as metadata_buffer:
+            with suppress(threading.BrokenBarrierError):
+                metadata_barrier.wait(timeout=0.1)
+            yield metadata_buffer
+
+    @contextmanager
+    def synchronized_get_data(current_idx):
+        with original_get_data(current_idx) as data_buffer:
+            with suppress(threading.BrokenBarrierError):
+                data_barrier.wait(timeout=0.1)
+            yield data_buffer
+
+    def consume_one():
+        try:
+            received.append(reader.dequeue(timeout=1))
+        except Exception as exc:
+            errors.append(exc)
+
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue(0)
+        writer.enqueue(1)
+
+        with (
+            mock.patch.object(
+                reader.buffer, "get_metadata", side_effect=synchronized_get_metadata
+            ),
+            mock.patch.object(
+                reader.buffer, "get_data", side_effect=synchronized_get_data
+            ),
+        ):
+            threads = [threading.Thread(target=consume_one) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert not errors
+        assert sorted(received) == [0, 1]
+    finally:
+        writer.shutdown()
+        reader.shutdown()
 
 
 def test_acquire_read_releases_slot_when_reader_raises():

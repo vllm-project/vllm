@@ -482,6 +482,9 @@ class MessageQueue:
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
         self.shutting_down = False
+        # Protect per-reader cursor and socket state when dequeue is called
+        # concurrently from multiple threads.
+        self._dequeue_lock = threading.Lock()
         context = Context()
 
         if n_local_reader > 0:
@@ -603,6 +606,7 @@ class MessageQueue:
             self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
+        self._dequeue_lock = threading.Lock()
         return self
 
     def wait_until_ready(self):
@@ -885,27 +889,40 @@ class MessageQueue:
         timeout: float | None = None,
         indefinite: bool = False,
     ):
-        """Read from message queue with optional timeout (in seconds)"""
-        if self._is_local_reader:
-            with self.acquire_read(timeout, indefinite) as buf:
-                overflow = buf[0] == 1
-                if not overflow:
-                    offset = 3
-                    buf_count = from_bytes_big(buf[1:offset])
-                    all_buffers = []
-                    for i in range(buf_count):
-                        buf_offset = offset + 4
-                        buf_len = from_bytes_big(buf[offset:buf_offset])
-                        offset = buf_offset + buf_len
-                        all_buffers.append(buf[buf_offset:offset])
-                    obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
-            if overflow:
-                obj = MessageQueue.recv(self.local_socket, timeout)
-        elif self._is_remote_reader:
-            obj = MessageQueue.recv(self.remote_socket, timeout)
-        else:
-            raise RuntimeError("Only readers can dequeue")
-        return obj
+        """Read from message queue with optional timeout (in seconds).
+
+        Dequeue is serialized per reader because the ring-buffer cursor and
+        receive sockets are shared mutable state.
+        """
+        if not self._dequeue_lock.acquire(blocking=False):
+            if timeout is None:
+                self._dequeue_lock.acquire()
+            elif not self._dequeue_lock.acquire(timeout=max(0, timeout)):
+                raise TimeoutError
+
+        try:
+            if self._is_local_reader:
+                with self.acquire_read(timeout, indefinite) as buf:
+                    overflow = buf[0] == 1
+                    if not overflow:
+                        offset = 3
+                        buf_count = from_bytes_big(buf[1:offset])
+                        all_buffers = []
+                        for i in range(buf_count):
+                            buf_offset = offset + 4
+                            buf_len = from_bytes_big(buf[offset:buf_offset])
+                            offset = buf_offset + buf_len
+                            all_buffers.append(buf[buf_offset:offset])
+                        obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
+                if overflow:
+                    obj = MessageQueue.recv(self.local_socket, timeout)
+            elif self._is_remote_reader:
+                obj = MessageQueue.recv(self.remote_socket, timeout)
+            else:
+                raise RuntimeError("Only readers can dequeue")
+            return obj
+        finally:
+            self._dequeue_lock.release()
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
