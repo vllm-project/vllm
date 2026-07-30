@@ -224,7 +224,6 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_limits = {k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0}
 
         start_time = time.perf_counter()
-
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=model_config.max_model_len,
             mm_counts=dict.fromkeys(mm_limits, 1),
