@@ -1584,3 +1584,93 @@ def test_two_dense_groups_agree_still_detects_genuine_sparse_lag():
         "genuinely has not cached the shared prefix both full-attention "
         "groups agree on."
     )
+
+
+def test_connector_fast_path_trims_the_deeper_dense_group():
+    """The connector fast path must trim its block lists, not just lower the
+    length it reports.
+
+    ``get_computed_blocks_for_connector`` looks each group up independently
+    and then reports ``min`` over the full-attention groups, because that is
+    the only length every dense group's blocks actually cover. The blocks
+    themselves still come back at each group's own, possibly deeper, hit.
+    Scheduler hands the pair to ``add_local_computed_blocks`` unchanged, so an
+    untrimmed deeper group extends the request's block table past the reported
+    boundary with blocks it does not own -- the same defect the reconciling
+    path's truncation exists to prevent.
+
+    Needs two dense groups at different block sizes: with one, ``min`` is that
+    group's own hit and its list is trimmed by construction.
+    """
+    hash_block_size = 2
+    block_size = 2 * hash_block_size  # fine dense group + mamba: 4
+    coarse_block_size = 2 * block_size  # 8
+    kv_cache_config = _two_dense_groups_plus_mamba_config(
+        hash_block_size, block_size, coarse_block_size
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    pool = manager.block_pool
+    req = make_request("0", [i // 2 for i in range(16)], hash_block_size, sha256)
+
+    # Fine dense group reaches 12 tokens; coarse reaches 8. The reported hit
+    # is therefore 8, and the fine group's three blocks cover 12 -- one more
+    # block than the report admits to.
+    fine_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=fine_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    coarse_blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=coarse_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=coarse_block_size,
+        kv_cache_group_id=1,
+    )
+    mamba_blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=2,
+    )
+
+    blocks, num_local, _boundary, _diverged = manager.get_computed_blocks_for_connector(
+        req
+    )
+
+    assert num_local == 8, (
+        f"expected the reported hit to be min over the dense groups (8), "
+        f"got {num_local}"
+    )
+    # Asserted over the full-attention groups only. A block count is the right
+    # invariant for them because their lists are dense and downward-closed, so
+    # a prefix of the list is exactly what a shorter lookup returns. It is the
+    # wrong invariant for a mamba group, whose list is null-padded with only
+    # the tail carrying the state: looked up at 12 it returns
+    # [null, null, state@12] and at 8 it returns [null, state@8], so dropping
+    # the tail entry would discard the state rather than shorten the hit.
+    # That is why the shared truncation skips groups that are not
+    # downward-closed, and why widening it here would be a bug.
+    for group_id in manager.coordinator.full_attention_group_ids:
+        group_blocks = blocks.blocks[group_id]
+        group_block_size = manager.coordinator.single_type_managers[group_id].block_size
+        allowed = -(-num_local // group_block_size)
+        assert len(group_blocks) <= allowed, (
+            f"group {group_id} returned {len(group_blocks)} blocks of "
+            f"{group_block_size} tokens, past the reported hit of "
+            f"{num_local} tokens ({allowed} blocks)"
+        )

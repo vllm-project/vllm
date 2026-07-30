@@ -646,6 +646,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_group_id: int | None = (
             first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
+        # Every full-attention group, not just the first. A model can carry
+        # more than one at different block sizes -- a DFlash drafter booking
+        # its sliding-window layers as full attention keeps the smaller
+        # sliding-window block size -- and a finer-grained group reports a
+        # legitimately deeper per-group hit whenever the reconciled hit is not
+        # a multiple of the coarser group's block size. Taking the first alone
+        # as the dense reference reads that as eviction.
+        self.full_attention_group_ids: list[int] = [
+            group_id
+            for group in self.attention_groups
+            if isinstance(group.spec, FullAttentionSpec)
+            for group_id in group.group_ids
+        ]
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
