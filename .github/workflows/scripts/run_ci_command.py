@@ -25,6 +25,11 @@ ACTIVE_BUILD_STATES = {
     "waiting_failed",
 }
 RETRY_STATES = "failed,timed_out,expired"
+SETUP_STEP_KEYS = {
+    "ensure-ci-base-amd",
+    "pre-commit",
+    "refresh-rocm-base-amd",
+}
 
 
 class ApiError(RuntimeError):
@@ -207,6 +212,35 @@ class BuildkiteClient:
             f"{organization}/pipelines/{pipeline}/builds"
         )
 
+    def _headers(self) -> dict[str, str]:
+        if not self.token:
+            raise RuntimeError("The BUILDKITE_API_TOKEN repository secret is not set.")
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "User-Agent": "vllm-ci-command",
+        }
+
+    def _request_url(
+        self,
+        url: str,
+        *,
+        body: Mapping[str, Any] | None = None,
+        method: str = "GET",
+    ) -> Any:
+        if (
+            url != self.base_url
+            and not url.startswith(f"{self.base_url}?")
+            and not url.startswith(f"{self.base_url}/")
+        ):
+            raise ApiError(None, "Buildkite API returned an invalid pagination URL.")
+        return self.transport.request(
+            url,
+            body=body,
+            headers=self._headers(),
+            method=method,
+        )
+
     def _request(
         self,
         *,
@@ -215,34 +249,24 @@ class BuildkiteClient:
         path: str = "",
         query: Sequence[tuple[str, str]] = (),
     ) -> Any:
-        if not self.token:
-            raise RuntimeError("The BUILDKITE_API_TOKEN repository secret is not set.")
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{urllib.parse.urlencode(query)}"
-        return self.transport.request(
-            url,
-            body=body,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-                "User-Agent": "vllm-ci-command",
-            },
-            method=method,
-        )
+        return self._request_url(url, body=body, method=method)
 
     def list_builds(
         self,
-        commit: str,
+        commit: str | None,
         *,
         metadata: tuple[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         query = [
-            ("commit", commit),
             ("exclude_jobs", "true"),
             ("exclude_pipeline", "true"),
             ("per_page", "100"),
         ]
+        if commit:
+            query.append(("commit", commit))
         if metadata:
             key, value = metadata
             query.append((f"meta_data[{key}]", value))
@@ -265,6 +289,34 @@ class BuildkiteClient:
             method="PUT",
             path=f"/{number}/retry_failed_jobs",
         )
+
+    def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        query = [
+            ("state[]", "failed"),
+            ("state[]", "timed_out"),
+            ("state[]", "expired"),
+            ("include_retried_jobs", "false"),
+            ("per_page", "100"),
+        ]
+        url = f"{self.base_url}/{number}/jobs?{urllib.parse.urlencode(query)}"
+        jobs: list[dict[str, Any]] = []
+        while url:
+            response = self._request_url(url)
+            if not isinstance(response, Mapping):
+                raise ApiError(None, "Buildkite API returned an invalid job list.")
+            items = response.get("items")
+            links = response.get("links")
+            if not isinstance(items, list) or not isinstance(links, Mapping):
+                raise ApiError(None, "Buildkite API returned an invalid job list.")
+            jobs.extend(items)
+            next_url = links.get("next")
+            if next_url is not None and not isinstance(next_url, str):
+                raise ApiError(
+                    None, "Buildkite API returned an invalid pagination URL."
+                )
+            url = next_url
+        return jobs
 
 
 def parse_command(body: str) -> str | None:
@@ -394,6 +446,33 @@ def create_build_payload(
     }
 
 
+def create_retry_build_payload(
+    *,
+    actor: str,
+    comment_id: int,
+    pr: Mapping[str, Any],
+    source_build: Mapping[str, Any],
+    step_keys: Sequence[str],
+) -> dict[str, Any]:
+    payload = create_build_payload(
+        actor=actor,
+        comment_id=comment_id,
+        pr=pr,
+    )
+    source_number = str(source_build["number"])
+    payload["message"] = f"PR #{pr['number']} {COMMAND_RETRY_FAILED} by @{actor}"
+    payload["env"]["VLLM_CI_ONLY_STEP_KEYS"] = json.dumps(
+        step_keys, separators=(",", ":")
+    )
+    payload["meta_data"].update(
+        {
+            "github-retry-source-build": source_number,
+            "github-retry-source-commit": str(source_build.get("commit", "")),
+        }
+    )
+    return payload
+
+
 def add_reaction_safely(
     github: GitHubClient,
     comment_id: int,
@@ -462,24 +541,100 @@ def handle_run_ci(
 
 def handle_retry_failed(
     *,
+    actor: str,
     buildkite: BuildkiteClient,
+    comment_id: int,
+    github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
     builds = buildkite.list_builds(pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
-    if not build:
-        return "No CI build exists for the current PR commit. Use `/ci run` first."
-    if not build.get("finished_at") or is_active_build(build):
-        return f"CI is still running for this commit: {build['web_url']}"
+    if build:
+        metadata = build.get("meta_data") or {}
+        if str(metadata.get("github-comment-id")) == str(comment_id):
+            return f"CI was already requested by this comment: {build['web_url']}"
+        if not build.get("finished_at") or is_active_build(build):
+            return f"CI is still running for this commit: {build['web_url']}"
 
-    retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
-    if retried["retried_jobs_count"] == 0:
+        retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
+        if retried["retried_jobs_count"] == 0:
+            return (
+                "No failed, timed-out, or expired jobs need retrying: "
+                f"{build['web_url']}"
+            )
         return (
-            f"No failed, timed-out, or expired jobs need retrying: {build['web_url']}"
+            f"Queued {retried['retried_jobs_count']} failed job(s) for retry in "
+            f"[Buildkite CI #{build['number']}]({build['web_url']})."
         )
+
+    previous_builds = buildkite.list_builds(
+        None,
+        metadata=("github-pr-number", str(pr["number"])),
+    )
+    previous_builds = [
+        candidate
+        for candidate in previous_builds
+        if candidate.get("commit") != pr["head"]["sha"]
+    ]
+    source_build = select_latest_build(previous_builds, pr["number"])
+    if not source_build:
+        return "No earlier CI build exists for this PR. Use `/ci run` first."
+    if not source_build.get("finished_at") or is_active_build(source_build):
+        return f"The previous CI build is still running: {source_build['web_url']}"
+
+    failed_jobs = buildkite.list_failed_jobs(source_build["number"])
+    failed_script_jobs = [job for job in failed_jobs if job.get("type") == "script"]
+    missing_step_keys = [job for job in failed_script_jobs if not job.get("step_key")]
+    if missing_step_keys:
+        return (
+            f"[Buildkite CI #{source_build['number']}]"
+            f"({source_build['web_url']}) has failed jobs without stable step "
+            "keys, so they cannot be retried on a new commit. Use `/ci run`."
+        )
+
+    failed_step_keys = {str(job["step_key"]) for job in failed_script_jobs}
+    setup_failures = sorted(
+        step_key
+        for step_key in failed_step_keys
+        if step_key.startswith("image-build") or step_key in SETUP_STEP_KEYS
+    )
+    if setup_failures:
+        return (
+            f"[Buildkite CI #{source_build['number']}]"
+            f"({source_build['web_url']}) failed during CI setup, so its test "
+            "failure set is incomplete. Use `/ci run` for the new commit."
+        )
+
+    step_keys = sorted(failed_step_keys)
+    if not step_keys:
+        return (
+            "No failed, timed-out, or expired jobs need retrying in "
+            f"[Buildkite CI #{source_build['number']}]"
+            f"({source_build['web_url']})."
+        )
+
+    current_pr = github.get_pr(pr["number"])
+    if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
+        return (
+            "The PR head changed while processing the command. "
+            "Comment `/ci retry` again."
+        )
+
+    retry_build = buildkite.create_build(
+        create_retry_build_payload(
+            actor=actor,
+            comment_id=comment_id,
+            pr=current_pr,
+            source_build=source_build,
+            step_keys=step_keys,
+        )
+    )
     return (
-        f"Queued {retried['retried_jobs_count']} failed job(s) for retry in "
-        f"[Buildkite CI #{build['number']}]({build['web_url']})."
+        f"Triggered [Buildkite CI #{retry_build['number']}]"
+        f"({retry_build['web_url']}) for commit "
+        f"`{current_pr['head']['sha'][:12]}`, running {len(step_keys)} failed "
+        f"step(s) from [Buildkite CI #{source_build['number']}]"
+        f"({source_build['web_url']})."
     )
 
 
@@ -544,7 +699,13 @@ def run(
                 pr=pr,
             )
         else:
-            message = handle_retry_failed(buildkite=buildkite, pr=pr)
+            message = handle_retry_failed(
+                actor=actor,
+                buildkite=buildkite,
+                comment_id=comment_id,
+                github=github,
+                pr=pr,
+            )
         add_reaction_safely(github, comment_id, "rocket")
         github.add_comment(issue_number, message)
     except Exception:
