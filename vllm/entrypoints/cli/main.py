@@ -9,15 +9,17 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
-from vllm.entrypoints.snapshot import maybe_restore_serve
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def main():
-    # Must run before the eager subcommand imports below: they pull the serve
-    # graph (torch + v1 engine), which is exactly the bill a restore replaces.
+    # Lazy, per this module's import rule, but first: the subcommand imports
+    # below pull the serve graph (torch + v1 engine), which is exactly the bill
+    # a restore replaces, so the hook has to run before them.
+    from vllm.entrypoints.snapshot import maybe_restore_serve
+
     maybe_restore_serve()
 
     import vllm.entrypoints.cli.benchmark.main
