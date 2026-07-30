@@ -17,8 +17,7 @@ def make_manager(
     num_reqs, num_steps = confidences.shape
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.num_speculative_steps = num_steps
-    manager._stale_idx = 0
-    manager._stale_confidences = [SimpleNamespace(np=confidences)]
+    manager._confidence_ema = confidences
     manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),

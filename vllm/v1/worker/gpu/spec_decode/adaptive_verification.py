@@ -159,7 +159,8 @@ class AdaptiveVerificationManager:
         self._profile_samples: list[StepTimingSample] = []
         self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
         max_num_reqs = req_states.max_num_reqs
-        self._confidence_ema = torch.empty(
+        # Current per-slot confidences
+        self._confidence_probs = torch.empty(
             (max_num_reqs, self.num_speculative_steps),
             dtype=torch.float32,
             device=device,
@@ -185,6 +186,11 @@ class AdaptiveVerificationManager:
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+        # Smoothed copy, CPU-only: batch-level sizing averages over requests, so
+        # it benefits from less noise and tolerates the lag.
+        self._confidence_ema = np.ones(
+            (max_num_reqs, self.num_speculative_steps), dtype=np.float32
+        )
 
     def consume_step_timing(self, sample: StepTimingSample) -> None:
         """Collect startup profiling timings; only profiling steps are timed."""
@@ -193,7 +199,8 @@ class AdaptiveVerificationManager:
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
         self._pending_resets.append(req_idx)
-        self._confidence_ema[req_idx].fill_(1.0)
+        self._confidence_ema[req_idx] = 1.0
+        self._confidence_probs[req_idx].fill_(1.0)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
@@ -268,8 +275,8 @@ class AdaptiveVerificationManager:
         confidence_probs: torch.Tensor,
         input_batch: "InputBatch",
     ) -> None:
-        """Fold this step's confidences into the EMA and start copying them to
-        the CPU, where a later step's budget reads them as stale inputs."""
+        """Publish this step's raw confidences for the ranking kernel and start
+        copying them to the CPU, where a later step's budget smooths them."""
         num_reqs = input_batch.num_reqs
         ready_idx = self._stale_idx ^ 1
         with gpu_sync_allowed():
@@ -280,16 +287,19 @@ class AdaptiveVerificationManager:
         # Last step's copy has landed: budgets read it, this step overwrites the
         # slot they were reading before.
         self._stale_idx, write_idx = ready_idx, self._stale_idx
+        # Fold the freshly-readable raw scores into the CPU-side EMA. New
+        # requests blend with the optimistic 1.0 seed, which washes out within
+        # a couple of steps.
+        alpha = self.confidence_ema_alpha
+        np.add(
+            alpha * self._stale_confidences[ready_idx].np,
+            (1.0 - alpha) * self._confidence_ema,
+            out=self._confidence_ema,
+        )
 
-        # Fold this step's scores into the per-request EMA in place. New
-        # requests blend with the optimistic 1.0 seed, which washes out of the
-        # average within a couple of steps.
-        idx_mapping = input_batch.idx_mapping
-        ema = self._confidence_ema[idx_mapping]
-        ema.lerp_(confidence_probs[:num_reqs], self.confidence_ema_alpha)
-        self._confidence_ema[idx_mapping] = ema
+        self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
         write_slot = self._stale_confidences[write_idx]
-        write_slot.gpu.copy_(self._confidence_ema)
+        write_slot.gpu.copy_(self._confidence_probs)
 
         current_stream = torch.cuda.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
@@ -324,7 +334,7 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=len(req_ids),
         )
-        stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        stale_confidences = self._confidence_ema[slots]
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
@@ -420,8 +430,8 @@ class AdaptiveVerificationManager:
                     num_reqs * self.num_speculative_steps
                 )
                 _assign_draft_token_budget_kernel[(1,)](
-                    self._confidence_ema,
-                    self._confidence_ema.stride(0),
+                    self._confidence_probs,
+                    self._confidence_probs.stride(0),
                     idx_mapping,
                     capacities,
                     num_reqs,
