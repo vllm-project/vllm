@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+import vllm.envs as envs
+
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -62,13 +64,20 @@ async def init_generate_state(
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
     from vllm.entrypoints.chat_utils import load_chat_template
 
-    try:
-        from vllm.entrypoints.cohere.serving import CohereServingChatV2
-    except ImportError:
-        # The Cohere serving handler depends on the optional `cohere` SDK
-        # for its wire-format protocol models. When it isn't installed,
-        # `register_cohere_api_router` already skips registering the route,
-        # so we simply leave `cohere_serving_chat_v2` unset.
+    # The Cohere serving handler depends on the optional `cohere` SDK for
+    # its wire-format protocol models, and is additionally gated on the
+    # `VLLM_ENABLE_COHERE_API` env flag (see
+    # `vllm.entrypoints.cohere.api_router.attach_router`). Skip the import
+    # entirely when the endpoint isn't going to be exposed, both because
+    # the SDK may not be installed and because the serving object holds
+    # nontrivial state (chat handler, warmup) that would otherwise be
+    # unused.
+    if envs.VLLM_ENABLE_COHERE_API:
+        try:
+            from vllm.entrypoints.cohere.serving import CohereServingChatV2
+        except ImportError:
+            CohereServingChatV2 = None  # type: ignore[assignment,misc]
+    else:
         CohereServingChatV2 = None  # type: ignore[assignment,misc]
 
     from vllm.entrypoints.mcp.tool_server import (

@@ -9,6 +9,12 @@ itself - are gated on a one-shot probe at module load. If the SDK isn't
 installed, :func:`attach_router` becomes a no-op (with an info log) and
 vLLM continues to boot normally.
 
+Even when the SDK is installed, :func:`attach_router` also requires
+``VLLM_ENABLE_COHERE_API=1`` in the environment before it will expose
+the route. This keeps non-Cohere deployments that pull in the SDK for
+unrelated reasons (e.g. test dependencies) from accidentally exposing
+the api.
+
 Note: the handler must live at module scope (not inside
 ``attach_router``) so that FastAPI's ``typing.get_type_hints`` resolves
 the ``CohereChatV2Request`` body annotation against the module's
@@ -25,6 +31,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -204,13 +211,33 @@ if _SDK_AVAILABLE:
 def attach_router(app: FastAPI) -> None:
     """Register ``POST /cohere/v2/chat`` on ``app``.
 
-    No-op (with an info log) when the optional ``cohere`` SDK isn't
-    installed, since the v2 protocol models live there.
+    No-op when either:
+
+    * the ``VLLM_ENABLE_COHERE_API`` env var isn't set to ``1``. The
+      Cohere v2 endpoint is opt-in because it carries Cohere-specific
+      request/response semantics (grounding citations, tool_plan,
+      PLAN/THINKING_CONTENT blocks) that are only meaningful when
+      serving a Cohere Command-family model.
+    * the optional ``cohere`` SDK isn't installed (the v2 protocol
+      models live there)
+
+    The two skip paths log at different levels: an operator who set
+    ``VLLM_ENABLE_COHERE_API=1`` but forgot to install ``cohere`` sees
+    a WARNING (they explicitly asked for the endpoint and it's silently
+    absent), whereas the default-off skip logs at debug.
     """
+    enabled = envs.VLLM_ENABLE_COHERE_API
+    if not enabled:
+        logger.debug(
+            "VLLM_ENABLE_COHERE_API is not set; /cohere/v2/chat endpoint "
+            "disabled. Set VLLM_ENABLE_COHERE_API=1 to enable it."
+        )
+        return
     if not _SDK_AVAILABLE:
-        logger.info(
-            "cohere SDK not installed; /cohere/v2/chat endpoint disabled. "
-            "Install with `pip install cohere` to enable it."
+        logger.warning(
+            "VLLM_ENABLE_COHERE_API=1 but the `cohere` SDK is not "
+            "installed; /cohere/v2/chat will not be exposed. Install "
+            "with `pip install cohere` to enable the endpoint."
         )
         return
     app.include_router(router)

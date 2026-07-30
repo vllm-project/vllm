@@ -6,6 +6,8 @@ Covers:
 
 * The optional-import guard: ``attach_router`` is a no-op when the
   ``cohere`` SDK isn't installed.
+* The env-var opt-in gate: ``attach_router`` is a no-op unless
+  ``VLLM_ENABLE_COHERE_API=1`` is set.
 * The router wiring: response shapes (JSON + SSE), error translation,
   and the ``cohere_serving_chat_v2 is None`` fallback (501 Not
   Implemented).
@@ -16,6 +18,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
@@ -31,6 +34,19 @@ from vllm.entrypoints.serve.utils.server_utils import (
     http_exception_handler,
     validation_exception_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enable_cohere_api(monkeypatch):
+    """Auto-enable the Cohere API gate for every test in this module.
+
+    The endpoint is opt-in in production (``VLLM_ENABLE_COHERE_API=1``);
+    every test in this file exercises the enabled path *except* the
+    dedicated gate test in :class:`TestEnvVarGate`, which unsets the
+    flag inside the test body.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_COHERE_API", "1")
+
 
 # ----------------------------------------------------------------------
 # Fakes
@@ -94,28 +110,115 @@ def _minimal_request_body() -> dict:
 
 
 class TestOptionalCohereImport:
-    def test_attach_router_noop_when_cohere_missing(self, monkeypatch, caplog):
-        # ``api_router`` probes for the SDK once at module load (because
-        # the route handler closes over types imported from ``cohere``)
-        # and stashes the result in ``_SDK_AVAILABLE``. We can't undo the
-        # original import, so simulate the "SDK missing" state by
-        # flipping that flag for the duration of the test. This is what
-        # ``attach_router`` actually checks at call time.
+    """``attach_router`` probes for the SDK once at module load (because
+    the route handler uses types imported from ``cohere``) and stashes
+     the result in ``_SDK_AVAILABLE``. Tests simulate the "SDK missing"
+    state by flipping that flag for the duration of the test.
+
+    ``attach_router`` checks the env-var gate before the SDK probe, so
+    the SDK-missing branch is only reachable when the operator opts in
+    via ``VLLM_ENABLE_COHERE_API=1``. The flag-off-and-SDK-missing case
+    below exists to pin down that ordering — the flag-off short-circuits
+    """
+
+    def test_flag_off_and_sdk_missing_stays_silent_about_sdk(
+        self, monkeypatch, caplog
+    ):
+        """Flag off doesn't do SDK-missing check.
+
+        When the operator hasn't opted in, ``attach_router`` must not
+        warn about the ``cohere`` SDK being missing: they never asked
+        for the endpoint, so surfacing the SDK gap is misleading noise.
+        Only the flag-off DEBUG message should fire.
+        """
+        monkeypatch.delenv("VLLM_ENABLE_COHERE_API", raising=False)
         monkeypatch.setattr(api_router_mod, "_SDK_AVAILABLE", False)
 
-        with caplog.at_level("INFO", logger="vllm.entrypoints.cohere.api_router"):
+        with caplog.at_level("DEBUG", logger="vllm.entrypoints.cohere.api_router"):
             app = FastAPI()
             attach_router(app)
 
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat" not in paths
-        assert any("cohere SDK not installed" in rec.message for rec in caplog.records)
+        # The flag-off short-circuit ran; the SDK check never did.
+        assert not any(
+            "SDK is not installed" in rec.message for rec in caplog.records
+        ), "SDK-missing log leaked despite the flag being off"
+
+    def test_flag_on_but_sdk_missing_logs_warning(self, monkeypatch, caplog):
+        """Misconfiguration path: the operator explicitly opted into the
+        endpoint via ``VLLM_ENABLE_COHERE_API=1`` (already set by the
+        autouse fixture) but forgot to install ``cohere``.
+        """
+        monkeypatch.setattr(api_router_mod, "_SDK_AVAILABLE", False)
+
+        with caplog.at_level("DEBUG", logger="vllm.entrypoints.cohere.api_router"):
+            app = FastAPI()
+            attach_router(app)
+
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat" not in paths
+        warn_sdk_records = [
+            rec
+            for rec in caplog.records
+            if "VLLM_ENABLE_COHERE_API=1" in rec.message
+            and "SDK is not installed" in rec.message
+        ]
+        assert warn_sdk_records, (
+            "expected a WARNING that pairs the opt-in flag with the "
+            "missing SDK so operators notice the misconfiguration"
+        )
+        assert all(rec.levelname == "WARNING" for rec in warn_sdk_records)
 
     def test_attach_router_registers_route_when_cohere_present(self):
         app = _build_app(handler=None)
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat" in paths
 
+
+# ----------------------------------------------------------------------
+# VLLM_ENABLE_COHERE_API gate
+# ----------------------------------------------------------------------
+
+
+class TestEnvVarGate:
+    """The Cohere v2 endpoint is opt-in via ``VLLM_ENABLE_COHERE_API``.
+
+    Even with the SDK installed, :func:`attach_router` must skip route
+    registration and middleware installation unless the env flag is
+    set. The autouse fixture on this module enables the flag by
+    default, so each test here explicitly disables it.
+    """
+
+    def test_attach_router_noop_when_flag_unset(self, monkeypatch, caplog):
+        monkeypatch.delenv("VLLM_ENABLE_COHERE_API", raising=False)
+
+        # The flag-off skip logs at DEBUG on purpose: this is the default
+        # state for every non-Cohere vLLM deployment, so an INFO log on
+        # every server startup would be pointless noise. The test raises
+        # caplog's level accordingly.
+        with caplog.at_level("DEBUG", logger="vllm.entrypoints.cohere.api_router"):
+            app = FastAPI()
+            attach_router(app)
+
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat" not in paths
+        debug_flag_records = [
+            rec
+            for rec in caplog.records
+            if "VLLM_ENABLE_COHERE_API is not set" in rec.message
+        ]
+        assert debug_flag_records, "expected a DEBUG message that the cohere flag is off"
+        assert all(rec.levelname == "DEBUG" for rec in debug_flag_records)
+
+    def test_attach_router_noop_when_flag_zero(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENABLE_COHERE_API", "0")
+
+        app = FastAPI()
+        attach_router(app)
+
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat" not in paths
 
 # ----------------------------------------------------------------------
 # Endpoint behavior

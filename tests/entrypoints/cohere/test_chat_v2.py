@@ -62,7 +62,15 @@ def server():
     # startup. The default (4 GB) trips Mac's RAM check on smaller
     # machines; 1 GB is more than enough for max_model_len=1024 and
     # max_num_seqs=4.
-    env_dict = {"VLLM_CPU_KVCACHE_SPACE": "1"}
+    # ``VLLM_ENABLE_COHERE_API=1`` flips the opt-in gate that
+    # ``vllm.entrypoints.cohere.api_router.attach_router`` reads to
+    # decide whether to register ``POST /cohere/v2/chat`` at server
+    # startup. Without it the fixture would boot a server that returns
+    # 404 for every request the tests below make.
+    env_dict = {
+        "VLLM_CPU_KVCACHE_SPACE": "1",
+        "VLLM_ENABLE_COHERE_API": "1",
+    }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
