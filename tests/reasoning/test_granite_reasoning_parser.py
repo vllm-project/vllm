@@ -163,6 +163,53 @@ def test_reasoning(
     assert content == param_dict["content"]
 
 
+# Every joiner here makes BPE merge the marker's ":" with it into a single token,
+# so the delta that closes the start of reasoning sequence also opens the
+# reasoning. Whitespace, "." and letters do not merge, which is why the fixtures
+# above never exercised this.
+STRADDLING_JOINERS = [
+    ",",
+    "]",
+    '"',
+    "'",
+    ")",
+    "(",
+    "*",
+    "-",
+    "_",
+    "/",
+    ":",
+    ";",
+    "!",
+    "?",
+    "#",
+    "0",
+]
+
+
+@pytest.mark.parametrize("joiner", STRADDLING_JOINERS)
+def test_streaming_matches_non_streaming_across_straddling_joiners(joiner):
+    output = f"{START_REASONING}{joiner}thinking{joiner}{START_RESPONSE}{joiner}answer"
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        tokenizer
+    )
+    output_tokens: list[str] = [
+        tokenizer.convert_tokens_to_string([token])
+        for token in tokenizer.tokenize(output)
+    ]
+
+    expected_reasoning = f"{joiner}thinking{joiner}"
+    expected_content = f"{joiner}answer"
+    assert run_reasoning_extraction(parser, [output], streaming=False) == (
+        expected_reasoning,
+        expected_content,
+    )
+    assert run_reasoning_extraction(parser, output_tokens, streaming=True) == (
+        expected_reasoning,
+        expected_content,
+    )
+
+
 # Additional tests for verifying the correctness of granite streaming; this
 # is complicated because granite uses multiple tokens to indicate when thinking
 # is starting / when it's starting its response, so skipping special tokens
