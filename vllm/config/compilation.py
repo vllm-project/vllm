@@ -700,10 +700,14 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is capped at 512 by default,
-    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
-    scenarios with small max_num_seqs, and limits capture of large graphs that
-    increase startup time and memory usage.
+    If not specified, max_cudagraph_capture_size is set to
+    min(max_num_seqs*decode_query_len*2, size_ceiling) by default, where
+    size_ceiling is the platform default of 512, or 1024 on data center
+    Blackwell GPUs, converted from a token count into a request count by
+    decode_query_len. Without speculation decode_query_len is 1, so this
+    reduces to the prior platform-dependent default. This avoids OOM in tight
+    memory scenarios with small max_num_seqs and limits capture of large graphs
+    that increase startup time and memory usage.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
