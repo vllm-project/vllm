@@ -857,6 +857,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        layer.w13_weight.is_shuffled = True
+        layer.w2_weight.is_shuffled = True
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+
     def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
         # gfx942 has no native MXFP4 matmul. Convert the weights to groupwise
         # int4 once at load time for AITER's existing bf16 x int4 FlyDSL path.
