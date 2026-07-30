@@ -399,6 +399,34 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
+template <bool resolve_reserved>
+__device__ __forceinline__ int64_t resolve_mla_cache_slot(
+    const int64_t token_idx, const int64_t* __restrict__ slot_mapping,
+    const int32_t* __restrict__ hot_block_table,
+    const int16_t* __restrict__ reserved_slots,
+    const int32_t* __restrict__ request_state_indices,
+    int64_t* __restrict__ resolved_slots, const int64_t hot_table_stride,
+    const int block_size, int64_t* shared_slot) {
+  if constexpr (!resolve_reserved) {
+    return slot_mapping[token_idx];
+  }
+
+  if (threadIdx.x == 0) {
+    const int32_t state_row = request_state_indices[token_idx];
+    if (state_row < 0) {
+      *shared_slot = -1;
+    } else {
+      const int64_t logical_slot = reserved_slots[state_row];
+      const int64_t block = hot_block_table[token_idx * hot_table_stride +
+                                            logical_slot / block_size];
+      *shared_slot = block * block_size + logical_slot % block_size;
+    }
+    resolved_slots[token_idx] = *shared_slot;
+  }
+  __syncthreads();
+  return *shared_slot;
+}
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           bool resolve_reserved>
 __global__ void concat_and_cache_mla_kernel(
@@ -422,25 +450,10 @@ __global__ void concat_and_cache_mla_kernel(
 ) {
   const int64_t token_idx = blockIdx.x;
   __shared__ int64_t s_slot_idx;
-  int64_t slot_idx;
-  if constexpr (resolve_reserved) {
-    if (threadIdx.x == 0) {
-      const int32_t state_row = request_state_indices[token_idx];
-      if (state_row < 0) {
-        s_slot_idx = -1;
-      } else {
-        const int64_t logical_slot = reserved_slots[state_row];
-        const int64_t block = hot_block_table[token_idx * hot_table_stride +
-                                              logical_slot / block_size];
-        s_slot_idx = block * block_size + logical_slot % block_size;
-      }
-      resolved_slots[token_idx] = s_slot_idx;
-    }
-    __syncthreads();
-    slot_idx = s_slot_idx;
-  } else {
-    slot_idx = slot_mapping[token_idx];
-  }
+  const int64_t slot_idx = resolve_mla_cache_slot<resolve_reserved>(
+      token_idx, slot_mapping, hot_block_table, reserved_slots,
+      request_state_indices, resolved_slots, hot_table_stride, block_size,
+      &s_slot_idx);
   // NOTE: slot_idx can be -1 if the token is padded
   if (slot_idx < 0) {
     return;
@@ -490,25 +503,10 @@ __global__ void concat_and_cache_ds_mla_kernel(
 ) {
   const int64_t token_idx = blockIdx.x;
   __shared__ int64_t s_slot_idx;
-  int64_t slot_idx;
-  if constexpr (resolve_reserved) {
-    if (threadIdx.x == 0) {
-      const int32_t state_row = request_state_indices[token_idx];
-      if (state_row < 0) {
-        s_slot_idx = -1;
-      } else {
-        const int64_t logical_slot = reserved_slots[state_row];
-        const int64_t block = hot_block_table[token_idx * hot_table_stride +
-                                              logical_slot / block_size];
-        s_slot_idx = block * block_size + logical_slot % block_size;
-      }
-      resolved_slots[token_idx] = s_slot_idx;
-    }
-    __syncthreads();
-    slot_idx = s_slot_idx;
-  } else {
-    slot_idx = slot_mapping[token_idx];
-  }
+  const int64_t slot_idx = resolve_mla_cache_slot<resolve_reserved>(
+      token_idx, slot_mapping, hot_block_table, reserved_slots,
+      request_state_indices, resolved_slots, hot_table_stride, block_size,
+      &s_slot_idx);
   // NOTE: slot_idx can be -1 if the token is padded
   if (slot_idx < 0) {
     return;
