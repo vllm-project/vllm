@@ -11,6 +11,8 @@ Conversely, a prompt chunk of exactly decode_query_len tokens has a decode
 batch's shape, and must not be classified as a uniform decode batch.
 """
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -242,4 +244,38 @@ def test_non_uniform_shape_is_rejected_without_request_state():
             prefill_lens,
         )
         is None
+    )
+
+
+def test_no_speculator_dispatches_on_query_length_alone():
+    """No speculator may pick its cudagraph from a shape test.
+
+    `get_uniform_token_count` and `is_uniform_query_len` both answer a question
+    about batch shape, which a prompt chunk satisfies by coincidence whenever it
+    happens to be `1 + num_speculative_tokens` tokens wide. Dispatching on
+    either replays a decode-captured graph over prompt tokens.
+
+    This is written over the whole package rather than over the one speculator
+    that had the bug, because speculators are added by copying an existing one:
+    the shape-only call reappeared verbatim, comment included, in a speculator
+    added after the original two call sites were fixed. A per-file test would
+    pass again the next time that happens.
+    """
+    import vllm.v1.worker.gpu.spec_decode as spec_decode
+
+    shape_only = {"get_uniform_token_count", "is_uniform_query_len"}
+    root = Path(spec_decode.__file__).parent
+    offenders = []
+    for path in sorted(root.rglob("speculator.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name in shape_only:
+                offenders.append(f"{path.relative_to(root)}:{node.lineno} {name}")
+
+    assert not offenders, (
+        "these speculators classify a decode batch by query length alone; use "
+        f"get_uniform_decode_token_count instead: {offenders}"
     )
