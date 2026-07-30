@@ -407,7 +407,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
     def _hisparse_swap_in(
         self,
-        kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: Any,
         num_decode_tokens: int | None = None,
@@ -428,13 +427,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             )
         if self.hisparse_coordinator.leader is not None:
             return self.hisparse_coordinator.apply_plan(
-                kv_cache=kv_cache,
                 block_size=attn_metadata.block_size,
                 num_tokens=n,
                 return_valid_counts=return_valid_counts,
             )
         return self.hisparse_coordinator.swap_in(
-            kv_cache=kv_cache,
             req_id_per_token=attn_metadata.req_id_per_token[:n],
             block_table=attn_metadata.block_table,
             topk_indices=topk_indices[:n],
@@ -476,7 +473,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 "HiSparse MQA prefill is not implemented by this sparse MLA backend."
             )
         return self._hisparse_swap_in(
-            kv_cache,
             topk_indices,
             attn_metadata,
             num_decode_tokens=(
@@ -527,7 +523,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             coordinator.write_newest_rows(
                 kv_c_normed,
                 k_pe,
-                kv_cache,
                 slot_mapping,
                 kv_cache_dtype,
                 k_scale,
@@ -536,7 +531,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             coordinator.write_rows_to_host(
                 kv_c_normed,
                 k_pe,
-                kv_cache,
                 slot_mapping,
                 kv_cache_dtype,
                 k_scale,

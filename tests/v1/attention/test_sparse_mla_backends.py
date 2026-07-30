@@ -1511,7 +1511,6 @@ def test_hisparse_resident_rows_bypass_hot_lru():
     assert resident_indices.tolist() == [[block_size + 1, 66, 67, 68]]
 
     cache, indices = coordinator.swap_in(
-        kv_cache=host,
         req_id_per_token=request_ids,
         block_table=source_table,
         topk_indices=topk,
@@ -1574,7 +1573,6 @@ def test_hisparse_kernel_matches_fallback():
         topk[:, -1] = -1
 
         hot_k, idx_k, valid_counts = kernel_c.swap_in(
-            kv_cache=kv_pool,
             req_id_per_token=req_ids,
             block_table=block_table,
             topk_indices=topk.clone(),
@@ -1668,7 +1666,6 @@ def test_hisparse_apply_plan_matches_independent():
         )
         topk[:, -1] = -1
         kw = dict(
-            kv_cache=kv_pool,
             req_id_per_token=req_ids,
             block_table=block_table,
             block_size=block_size,
@@ -1677,9 +1674,7 @@ def test_hisparse_apply_plan_matches_independent():
             topk_indices=topk.clone(), produce_plan=True, **kw
         )
         _, idx_indep = indep.swap_in(topk_indices=topk.clone(), **kw)
-        _, idx_shared = shared.apply_plan(
-            kv_cache=kv_pool, block_size=block_size, num_tokens=num_reqs
-        )
+        _, idx_shared = shared.apply_plan(block_size=block_size, num_tokens=num_reqs)
         torch.accelerator.synchronize()
         torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
         torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
@@ -1715,11 +1710,11 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
     slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
     kv_c = torch.randn(8, row_width - 2, device=device)
     k_pe = torch.randn(8, 1, 2, device=device)
+    coordinator.bind_source_cache(kv_pool)
 
     coordinator.write_rows_to_host(
         kv_c,
         k_pe,
-        kv_pool,
         slots,
         "auto",
         torch.tensor(1.0, device=device),
@@ -1763,8 +1758,8 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         .view(8, block_size, row_width)
         .pin_memory()
     )
+    coordinator.bind_source_cache(source)
     _, attention_indices = coordinator.swap_in(
-        kv_cache=source,
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.arange(8, dtype=torch.int32, device=device).view(1, 8),
         topk_indices=torch.tensor([[0, 1, 2, 3]], dtype=torch.int32, device=device),
@@ -2014,10 +2009,10 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
 
     kv_c = torch.randn(3, row_width - 2, device=device)
     k_pe = torch.randn(3, 1, 2, device=device)
+    coordinator.bind_source_cache(kv_pool)
     coordinator.write_newest_rows(
         kv_c,
         k_pe,
-        kv_pool,
         slot_mapping,
         "auto",
         torch.tensor(1.0, device=device),
@@ -2031,7 +2026,6 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
 
     topk = torch.tensor([[0, -1, -1, -1]], dtype=torch.int32, device=device)
     _, hot_indices = coordinator.swap_in(
-        kv_cache=kv_pool,
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
@@ -2044,7 +2038,6 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     flat_pool[8] += 1000
     coordinator.invalidate_slots(torch.tensor([8], device=device))
     _, hot_indices = coordinator.swap_in(
-        kv_cache=kv_pool,
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
@@ -2276,6 +2269,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.cpu().pin_memory()
+    coordinator.bind_source_cache(kv_pool)
 
     staging_calls = []
     original_stage = coordinator.stage_prefill_cache
@@ -2425,7 +2419,7 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     topk = torch.zeros(2, 4, dtype=torch.int32)
     expected = torch.randn_like(q)
 
-    def swap_in(self, cache, indices, metadata, **kwargs):
+    def swap_in(self, indices, metadata, **kwargs):
         return torch.empty(1), indices, torch.full((2,), 4, dtype=torch.int32)
 
     def run_kernel(self, query, cache, indices, lengths):

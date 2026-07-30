@@ -598,12 +598,6 @@ class HiSparseCoordinator:
 
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         flat = kv_cache.view(-1, kv_cache.shape[-1])
-        if self._host_cache is not None and (
-            self._host_cache.data_ptr() == flat.data_ptr()
-            and self._host_cache.shape == flat.shape
-        ):
-            return
-
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
                 "HiSparse coordinator bound to a KV cache with mismatched "
@@ -760,7 +754,6 @@ class HiSparseCoordinator:
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
@@ -770,9 +763,6 @@ class HiSparseCoordinator:
         Writes the newest token into its ordinary resident GPU page. The runtime
         materializes sealed pages in the host pool only when required.
         """
-        if kv_cache.numel() == 0:
-            return
-        self.bind_source_cache(kv_cache)
         assert self.hot_cache is not None and self.resident_slot_mapping is not None
         # Pad clamp: the forward can run more rows than the scheduler
         # produced (DP alignment pads to a peer's batch, eager/PIECEWISE pads
@@ -810,7 +800,6 @@ class HiSparseCoordinator:
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
@@ -824,9 +813,6 @@ class HiSparseCoordinator:
         Recycled-slot hygiene is handled at block-assignment time by the
         KV connector lifecycle, so no hot-copy invalidation is needed here.
         """
-        if kv_cache.numel() == 0:
-            return
-        self.bind_source_cache(kv_cache)
         # CUDA graph padding can make kv_c_normed/k_pe longer than slot_mapping.
         # Only rows represented by slot_mapping correspond to real KV writes.
         flat_slots = slot_mapping.flatten()[: kv_c_normed.shape[0]]
@@ -853,7 +839,6 @@ class HiSparseCoordinator:
     def swap_in(
         self,
         *,
-        kv_cache: torch.Tensor,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -871,8 +856,11 @@ class HiSparseCoordinator:
         MLA KV cache; ``hot_indices`` are global token ids within it.
         """
         num_tokens = topk_indices.shape[0]
-        self.bind_source_cache(kv_cache)
-        assert self.hot_cache is not None and self.hot_block_table is not None
+        assert (
+            self._host_cache is not None
+            and self.hot_cache is not None
+            and self.hot_block_table is not None
+        )
 
         relative_indices = topk_indices[:num_tokens].contiguous()
 
@@ -955,7 +943,6 @@ class HiSparseCoordinator:
     def apply_plan(
         self,
         *,
-        kv_cache: torch.Tensor,
         block_size: int,
         num_tokens: int,
         return_valid_counts: bool = False,
@@ -979,7 +966,6 @@ class HiSparseCoordinator:
             )
             self._prefetch_event = None
         else:
-            self.bind_source_cache(kv_cache)
             self._gather_plan_into(num_tokens)
         if return_valid_counts:
             return (

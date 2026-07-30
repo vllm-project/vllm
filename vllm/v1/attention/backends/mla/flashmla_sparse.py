@@ -606,7 +606,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices, topk_length = self._hisparse_swap_in(
-                kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
                 return_valid_counts=True,
@@ -627,7 +626,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
                 hot_cache, decode_topk, decode_topk_length = self._hisparse_swap_in(
-                    kv_c_and_k_pe_cache,
                     topk_indices,
                     attn_metadata,
                     num_decode_tokens=num_decode_tokens,
@@ -688,7 +686,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         use_hisparse = self.hisparse_coordinator is not None
         if use_hisparse and num_decode_tokens > 0:
             decode_cache, decode_topk = self._hisparse_swap_in(
-                kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
                 num_decode_tokens=(
@@ -825,7 +822,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         """
         if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices = self._hisparse_swap_in(
-                kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
             )
@@ -862,7 +858,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
                 decode_cache, decode_topk = self._hisparse_swap_in(
-                    kv_c_and_k_pe_cache,
                     topk_indices,
                     attn_metadata,
                     num_decode_tokens=num_decode_tokens,
