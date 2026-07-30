@@ -584,7 +584,7 @@ void launchFusedMiniMaxM3(
         reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
         rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
         kv_s_head, kv_s_token, kv_s_dim)
-    // clang-format on
+  // clang-format on
 #endif
 
   if (has_index) {
