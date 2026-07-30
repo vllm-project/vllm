@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -33,6 +34,36 @@ class RankSegment:
     @property
     def num_tokens(self) -> int:
         return self.global_batch_slice.stop - self.global_batch_slice.start
+
+
+class PCPRowPlan(NamedTuple):
+    """Per-step row-level attention plan for the sharded PCP+DCP path.
+
+    Every rank-local row is a (cached prefix, new-token span) pair. The suffix
+    (new tokens) attends the write-gathered K/V -- the same all-gather the
+    cache write already performs -- so it needs no collective. The prefix
+    (cached context) attends this rank's DCP cache shard with the
+    PCP-gathered prefix-row queries and LSE-combines (all-reduce) across the
+    group, which requires every rank to hold the same prefix-row queries.
+    """
+
+    # Suffix attention (rank-local rows vs the stashed write-gathered K/V).
+    suffix_kv_idx: torch.Tensor  # [total_suffix_k] int64, into stashed K/V
+    suffix_cu_k: torch.Tensor  # [num_local_rows + 1] int32
+    suffix_max_k: int
+    # Prefix attention (gathered rows vs the local DCP cache shard).
+    has_prefix: bool  # rank-invariant: some global row has cached context
+    num_local_prefix_tokens: int
+    padded_num_prefix_tokens: int  # all-gather slab size (rank-invariant)
+    prefix_q_local_idx: torch.Tensor  # [padded_num_prefix_tokens] int64
+    prefix_q_restore_idx: torch.Tensor  # [total_global_prefix_tokens] int64
+    prefix_cu_q: torch.Tensor  # [num_global_prefix_rows + 1] int32
+    prefix_max_q: int
+    prefix_dcp_ctx_lens: torch.Tensor  # [num_global_prefix_rows] int32
+    prefix_max_ctx: int
+    prefix_block_table: torch.Tensor  # [num_global_prefix_rows, max_num_blocks]
+    prefix_local_token_idx: torch.Tensor  # [num_local_prefix_tokens] int64
+    prefix_local_out_idx: torch.Tensor  # [num_local_prefix_tokens] int64
 
 
 class PCPManager:
@@ -79,34 +110,35 @@ class PCPManager:
         self._global_has_decode: bool = False
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
-        # Global-context attention metadata for the sharded PCP+DCP prefill path
-        # (extend/prefix-caching support). Built once per step in
-        # build_global_context_metadata(); consumed by _forward_dcp_mrv2 to run
-        # context attention on the replicated gathered q_g against this rank's
-        # DCP shard of the cached prefix.
-        self._global_ctx_block_tables: tuple[torch.Tensor, ...] | None = (
+        # Per-step row-plan state for the sharded PCP+DCP attention path.
+        # ``_segments_by_rank``/``_hidden_restore_idx_np`` are captured at
+        # partition time; ``build_cp_row_plan`` derives the plan consumed by
+        # FlashAttentionImpl._forward_pcp_dcp (see PCPRowPlan).
+        self._segments_by_rank: list[list[RankSegment]] | None = None
+        self._hidden_restore_idx_np: np.ndarray | None = None
+        # Global prefix rows are decode rows plus every extend chunk row, so a
+        # request contributes up to 2*pcp rows. Size the gather buffers for the
+        # worst case.
+        max_num_prefix_rows = (
+            2 * pcp_world_size * max_num_reqs if max_num_reqs is not None else None
+        )
+        self._prefix_block_tables: tuple[torch.Tensor, ...] | None = (
             tuple(
-                table.new_zeros((max_num_reqs, table.shape[1]))
+                table.new_zeros((max_num_prefix_rows, table.shape[1]))
                 for table in block_tables.input_block_tables
             )
-            if block_tables is not None and max_num_reqs is not None
+            if block_tables is not None and max_num_prefix_rows is not None
             else None
         )
-        self._global_ctx_block_table_ptrs: torch.Tensor | None = (
+        self._prefix_block_table_ptrs: torch.Tensor | None = (
             torch.tensor(
-                [t.data_ptr() for t in self._global_ctx_block_tables],
+                [t.data_ptr() for t in self._prefix_block_tables],
                 dtype=torch.uint64,
                 device=device,
             )
-            if self._global_ctx_block_tables is not None
+            if self._prefix_block_tables is not None
             else None
         )
-        self._global_ctx_kv_lens: torch.Tensor | None = (
-            torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
-            if max_num_reqs is not None
-            else None
-        )
-        self._global_num_reqs: int = 0
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
@@ -344,6 +376,7 @@ class PCPManager:
                     dtype=np.int64,
                 )
 
+        self._hidden_restore_idx_np = hidden_restore_idx
         self._hidden_restore_idx = async_copy_to_gpu(
             hidden_restore_idx, device=self.device
         )
@@ -379,6 +412,7 @@ class PCPManager:
             is_prefilling,
             global_batch.query_start_loc_np,
         )
+        self._segments_by_rank = segments_by_rank
 
         local_segments = segments_by_rank[self.pcp_rank]
         if not local_segments:
@@ -664,108 +698,215 @@ class PCPManager:
         """Stash all PCP metadata the attention forward / kv-cache update need.
 
         Centralized here so the model runner stays a single call. Populates:
-          - ``pcp_prefill_gather``: gather/restore indices for the sharded
-            prefill-KV all-gather attention (None when no prefill ran).
           - ``pcp_global_flags``: rank-invariant (has_prefill, has_decode) for
-            consistent mixed-batch routing.
-          - ``pcp_global_ctx``: global block table + per-rank DCP shard context
-            lengths for extend (prefix-caching) support in the prefill path.
+            consistent mixed-batch routing and cache-write gather decisions.
+          - ``pcp_row_plan``: per-step :class:`PCPRowPlan` for the sharded
+            PCP+DCP attention path (None for warmup or pure-decode steps).
         """
         kwargs = get_forward_context().additional_kwargs
-        prefill_gather = self.prefill_gather_indices()
-        if prefill_gather is not None:
-            kwargs["pcp_prefill_gather"] = prefill_gather
         kwargs["pcp_global_flags"] = self.global_batch_flags()
-        global_ctx = self.build_global_context_metadata()
-        if global_ctx is not None:
-            kwargs["pcp_global_ctx"] = global_ctx
+        kwargs["pcp_row_plan"] = self.build_cp_row_plan()
 
-    def build_global_context_metadata(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, int, bool] | None:
-        """Build per-global-request context-attention metadata for the extend
-        (prefix-caching) case in the sharded PCP+DCP prefill path.
+    def build_cp_row_plan(self) -> "PCPRowPlan | None":
+        """Build the per-step row plan for the sharded PCP+DCP attention path.
 
-        Returns (global_block_table, global_dcp_context_kv_lens,
-        max_global_dcp_context_kv_len, has_extend) for the CURRENT step, aligned
-        with the pre-partition global batch (so the gathered, replicated q_g can
-        attend this rank's DCP shard of each request's cached prefix). Returns
-        None when no prefill was partitioned this step.
-
-        ``global_dcp_context_kv_lens`` is this rank's shard count of the prefix
-        (rank-specific), indexed by global request -- the LSE-combine then
-        merges the shards for the shared (replicated) q_g. ``has_extend`` is
-        rank-invariant (True iff some global request has a cached prefix) so the
-        prefill path can skip the context collective for pure first-prefills.
+        Returns None when the plan is not needed: no global batch (warmup),
+        the cache is not DCP-sharded, or the global batch has no prefill
+        (decode rows are replicated across ranks, so the local-metadata path
+        handles them without any gather). Derived entirely from partition-time
+        CPU state; rank-invariant except the DCP-sharded context lengths.
         """
         gb = self._global_batch
+        segments_by_rank = self._segments_by_rank
+        hidden_restore_idx = self._hidden_restore_idx_np
         if (
             gb is None
-            or self._global_ctx_block_tables is None
-            or self._global_ctx_kv_lens is None
-            or self._block_tables is None
+            or segments_by_rank is None
+            or hidden_restore_idx is None
+            or self.dcp_world_size <= 1
+            or not self._global_has_prefill
         ):
             return None
-        block_tables = self._block_tables
-        global_ctx_kv_lens = self._global_ctx_kv_lens
+        assert self._block_tables is not None
+        assert self._prefix_block_tables is not None
+        assert self._prefix_block_table_ptrs is not None
+
+        pcp = self.pcp_world_size
+        num_chunks = 2 * pcp
+        rank = self.pcp_rank
+        num_computed = gb.num_computed_tokens_np
+        is_prefilling = gb.is_prefilling_np
+        query_start_loc = gb.query_start_loc_np
+        num_scheduled = gb.num_scheduled_tokens
         num_reqs = gb.num_reqs
-        self._global_num_reqs = num_reqs
-        # Per-global-request FULL prefix length, then this rank's shard count.
-        qsl = gb.query_start_loc
-        query_lens = qsl[1 : num_reqs + 1] - qsl[:num_reqs]
-        context_kv_lens = gb.seq_lens[:num_reqs] - query_lens
-        has_extend = num_reqs > 0 and bool(context_kv_lens.max().item() > 0)
-        dcp_ctx_kv_lens = get_dcp_local_seq_lens(
-            context_kv_lens,
+
+        def chunk_size(j: int) -> int:
+            return -(-int(num_scheduled[j]) // num_chunks)
+
+        def seg_chunk_idx(seg: RankSegment) -> int:
+            j = seg.global_batch_req_idx
+            if not bool(is_prefilling[j]):
+                return -1
+            chunk_offset = seg.global_batch_slice.start - int(query_start_loc[j])
+            return chunk_offset // chunk_size(j)
+
+        def is_prefix_seg(seg: RankSegment) -> bool:
+            # Prefix rows are exactly the rows with a cached context.
+            return (
+                seg.num_tokens > 0 and int(num_computed[seg.global_batch_req_idx]) > 0
+            )
+
+        local_segments = segments_by_rank[rank] or [
+            RankSegment(0, slice(0, 0), slice(0, 0))
+        ]
+
+        # -- Suffix: per local row, the request's new tokens up to the row end,
+        # addressed into the stashed write-gathered K/V (padded-slab layout).
+        suffix_idx_parts = []
+        suffix_lens = []
+        for seg in local_segments:
+            j = seg.global_batch_req_idx
+            req_start = int(query_start_loc[j])
+            row_end = seg.global_batch_slice.stop
+            suffix_lens.append(row_end - req_start)
+            suffix_idx_parts.append(hidden_restore_idx[req_start:row_end])
+        suffix_kv_idx_np = (
+            np.concatenate(suffix_idx_parts)
+            if suffix_idx_parts
+            else np.empty(0, dtype=np.int64)
+        )
+        suffix_cu_np = np.zeros(len(local_segments) + 1, dtype=np.int32)
+        np.cumsum(np.asarray(suffix_lens, dtype=np.int32), out=suffix_cu_np[1:])
+        suffix_max_k = max(suffix_lens, default=0)
+
+        # -- Prefix rows: slab offsets of every rank's gather contribution.
+        # Each rank gathers its prefix-row tokens in local-row order; slab r
+        # starts at r * padded_num_prefix_tokens in the gathered buffer.
+        slab_offsets: list[dict[tuple[int, int], int]] = []
+        per_rank_prefix_tokens = []
+        for r in range(pcp):
+            offsets = {}
+            offset = 0
+            for seg in segments_by_rank[r]:
+                if not is_prefix_seg(seg):
+                    continue
+                offsets[(seg.global_batch_req_idx, seg_chunk_idx(seg))] = offset
+                offset += seg.num_tokens
+            slab_offsets.append(offsets)
+            per_rank_prefix_tokens.append(offset)
+        padded_num_prefix = max(per_rank_prefix_tokens, default=0)
+
+        # Canonical global prefix-row order: decode rows (request order), then
+        # extend chunk rows (request order, chunk index order).
+        global_prefix_rows: list[tuple[int, int, int]] = []  # (req, chunk, len)
+        for j in range(num_reqs):
+            if not bool(is_prefilling[j]) and int(num_computed[j]) > 0:
+                global_prefix_rows.append((j, -1, int(num_scheduled[j])))
+        for j in range(num_reqs):
+            if bool(is_prefilling[j]) and int(num_computed[j]) > 0:
+                cs = chunk_size(j)
+                for c in range(num_chunks):
+                    chunk_len = min(cs, int(num_scheduled[j]) - c * cs)
+                    if chunk_len > 0:
+                        global_prefix_rows.append((j, c, chunk_len))
+        has_prefix = len(global_prefix_rows) > 0
+
+        restore_parts = []
+        prefix_cu_np = np.zeros(len(global_prefix_rows) + 1, dtype=np.int32)
+        row_req_np = np.zeros(len(global_prefix_rows), dtype=np.int64)
+        row_ctx_np = np.zeros(len(global_prefix_rows), dtype=np.int32)
+        for i, (j, c, row_len) in enumerate(global_prefix_rows):
+            # Chunk c lives on the rank r with r == c or r == num_chunks-1-c.
+            holding_rank = 0 if c < 0 else min(c, num_chunks - 1 - c)
+            slab_start = slab_offsets[holding_rank][(j, c)]
+            flat_start = holding_rank * padded_num_prefix + slab_start
+            restore_parts.append(
+                np.arange(flat_start, flat_start + row_len, dtype=np.int64)
+            )
+            prefix_cu_np[i + 1] = prefix_cu_np[i] + row_len
+            row_req_np[i] = j
+            row_ctx_np[i] = num_computed[j]
+        prefix_q_restore_np = (
+            np.concatenate(restore_parts)
+            if restore_parts
+            else np.empty(0, dtype=np.int64)
+        )
+        prefix_max_q = max((row_len for _, _, row_len in global_prefix_rows), default=0)
+        dcp_ctx_np = get_dcp_local_seq_lens(
+            torch.from_numpy(row_ctx_np),
             self.dcp_world_size,
             self.dcp_rank,
             self.cp_interleave,
-        )
-        global_ctx_kv_lens[:num_reqs] = dcp_ctx_kv_lens
-        # Gather this rank's block-table rows for the global requests.
-        global_bt = block_tables.gather_block_tables(
-            gb.idx_mapping,
-            num_reqs,
-            out=self._global_ctx_block_tables,
-            out_ptrs=self._global_ctx_block_table_ptrs,
-        )
-        num_partitions = self.dcp_world_size * self.cp_interleave
-        max_ctx_kv = (
-            ((int(context_kv_lens.max().item()) + num_partitions - 1) // num_partitions)
-            * self.cp_interleave
-            if num_reqs > 0
-            else 0
-        )
-        return global_bt[0], global_ctx_kv_lens[:num_reqs], max_ctx_kv, has_extend
+        ).numpy()
+        prefix_max_ctx = int(dcp_ctx_np.max()) if len(dcp_ctx_np) else 0
 
-    def prefill_gather_indices(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int] | None:
-        """Indices for the SHARDED-cache prefill KV-gather attention.
+        # Local prefix rows: where their tokens sit in the local batch and in
+        # the combined (global prefix-token order) prefix attention output.
+        row_out_start = {
+            (j, c): int(prefix_cu_np[i])
+            for i, (j, c, _) in enumerate(global_prefix_rows)
+        }
+        local_token_parts = []
+        local_out_parts = []
+        for seg in local_segments:
+            if not is_prefix_seg(seg):
+                continue
+            out_start = row_out_start[(seg.global_batch_req_idx, seg_chunk_idx(seg))]
+            local_token_parts.append(
+                np.arange(
+                    seg.rank_local_batch_slice.start,
+                    seg.rank_local_batch_slice.stop,
+                    dtype=np.int64,
+                )
+            )
+            local_out_parts.append(
+                np.arange(out_start, out_start + seg.num_tokens, dtype=np.int64)
+            )
+        prefix_local_token_np = (
+            np.concatenate(local_token_parts)
+            if local_token_parts
+            else np.empty(0, dtype=np.int64)
+        )
+        prefix_local_out_np = (
+            np.concatenate(local_out_parts)
+            if local_out_parts
+            else np.empty(0, dtype=np.int64)
+        )
+        num_local_prefix = len(prefix_local_token_np)
+        prefix_q_local_np = np.zeros(padded_num_prefix, dtype=np.int64)
+        prefix_q_local_np[:num_local_prefix] = prefix_local_token_np
 
-        Returns (restore_idx, gather_idx, global_cu_seqlens, padded_num_tokens)
-        for the current prefill step, or None for decode / when PCP did not
-        partition a prefill. ``restore_idx`` maps a global-position index to its
-        slot in the PCP all-gathered tensor (``global = gathered[restore_idx]``);
-        ``gather_idx`` is the inverse (``gathered = global[gather_idx]``);
-        ``global_cu_seqlens`` is the pre-partition (global) batch's per-request
-        cumulative query lengths.
-        """
-        if self._hidden_restore_idx is None or self._global_batch is None:
-            return None
-        if self._padded_gather_idx is None:
-            return None
-        global_cu_seqlens = self._global_batch.query_start_loc
-        if not isinstance(global_cu_seqlens, torch.Tensor):
-            return None
-        # _padded_gather_idx has length padded_num_tokens * pcp_world_size for
-        # the current step (set in _build_batch_layout).
-        padded_num_tokens = self._padded_gather_idx.shape[0] // self.pcp_world_size
-        return (
-            self._hidden_restore_idx,
-            self._padded_gather_idx,
-            global_cu_seqlens,
-            padded_num_tokens,
+        row_req_gpu = async_copy_to_gpu(row_req_np, device=self.device)
+        num_prefix_rows = len(global_prefix_rows)
+        prefix_block_table = self._block_tables.gather_block_tables(
+            torch.index_select(gb.idx_mapping, 0, row_req_gpu),
+            num_prefix_rows,
+            out=self._prefix_block_tables,
+            out_ptrs=self._prefix_block_table_ptrs,
+        )[0]
+
+        return PCPRowPlan(
+            suffix_kv_idx=async_copy_to_gpu(suffix_kv_idx_np, device=self.device),
+            suffix_cu_k=async_copy_to_gpu(suffix_cu_np, device=self.device),
+            suffix_max_k=suffix_max_k,
+            has_prefix=has_prefix,
+            num_local_prefix_tokens=num_local_prefix,
+            padded_num_prefix_tokens=padded_num_prefix,
+            prefix_q_local_idx=async_copy_to_gpu(prefix_q_local_np, device=self.device),
+            prefix_q_restore_idx=async_copy_to_gpu(
+                prefix_q_restore_np, device=self.device
+            ),
+            prefix_cu_q=async_copy_to_gpu(prefix_cu_np, device=self.device),
+            prefix_max_q=prefix_max_q,
+            prefix_dcp_ctx_lens=async_copy_to_gpu(dcp_ctx_np, device=self.device),
+            prefix_max_ctx=prefix_max_ctx,
+            prefix_block_table=prefix_block_table,
+            prefix_local_token_idx=async_copy_to_gpu(
+                prefix_local_token_np, device=self.device
+            ),
+            prefix_local_out_idx=async_copy_to_gpu(
+                prefix_local_out_np, device=self.device
+            ),
         )
 
     def restore_for_sampling(
