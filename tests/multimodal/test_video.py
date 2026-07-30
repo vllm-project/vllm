@@ -14,13 +14,13 @@ from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     GLM46VVideoBackend,
-    MiniMaxM3VideoBackend,
     Molmo2VideoBackend,
     PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackend,
