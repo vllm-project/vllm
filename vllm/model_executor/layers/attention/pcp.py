@@ -58,69 +58,28 @@ def _gather_prefill_cache_inputs(
     return cache_inputs, cache_slot_mapping
 
 
-def maybe_gather_mla_latent_cache_inputs(
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
+def maybe_gather_cache_inputs(
+    tensors: tuple[torch.Tensor, ...],
     slot_mapping: torch.Tensor | None,
     num_decode_tokens: int | None,
     use_pcp: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    if not use_pcp or num_decode_tokens is None:
-        return kv_c_normed, k_pe, slot_mapping
-    assert slot_mapping is not None
-    num_tokens = kv_c_normed.shape[0]
-    k_pe_flat = k_pe.reshape(num_tokens, -1)
-    (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = _gather_prefill_cache_inputs(
-        (kv_c_normed, k_pe_flat),
-        slot_mapping,
-        num_decode_tokens,
-    )
-    cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
-    return cache_kv_c, cache_k_pe, cache_slot_mapping
+) -> tuple[tuple[torch.Tensor, ...], torch.Tensor | None]:
+    """PCP cache-write gather.
 
+    All-gather the prefill portion of ``tensors`` (K/V for GQA, latent KV and
+    k_pe for MLA, k for the sparse indexer) across PCP ranks so every rank can
+    write the full prefill contents to its cache, while keeping decode writes
+    local. Returns the gathered tensors and the gathered cache slot mapping.
+    No-op when PCP is off.
 
-def maybe_gather_kv_cache_inputs(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    slot_mapping: torch.Tensor | None,
-    num_decode_tokens: int | None,
-    use_pcp: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """GQA/MHA PCP KV-cache gather.
-
-    All-gather the prefill portion of K/V across PCP ranks so every rank can
-    write the full prefill KV to its (replicated, ``dcp=1``) cache, while
-    keeping decode writes local. Returns contiguous K, V and the gathered
-    cache slot mapping ready for ``reshape_and_cache_flash``. No-op when PCP
-    is off.
-
-    Gathering K and V separately (rather than ``cat``-then-``split``) keeps
-    each output contiguous, so the cache kernel's ``head stride == head_size``
+    Gathering each tensor separately (rather than ``cat``-then-``split``)
+    keeps each output contiguous, so the cache kernel's head-stride
     assumption holds.
     """
     if not use_pcp or num_decode_tokens is None:
-        return key, value, slot_mapping
+        return tensors, slot_mapping
     assert slot_mapping is not None
-    (cache_key, cache_value), cache_slot_mapping = _gather_prefill_cache_inputs(
-        (key, value),
-        slot_mapping,
-        num_decode_tokens,
-    )
-    return cache_key, cache_value, cache_slot_mapping
-
-
-def maybe_gather_indexer_k(
-    k: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    num_decode_tokens: int,
-    use_pcp: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if not use_pcp:
-        return k, slot_mapping
-    (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
-        (k,), slot_mapping, num_decode_tokens
-    )
-    return cache_k, cache_slot_mapping
+    return _gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
 
 
 def _dcp_q_gather_group(

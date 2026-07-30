@@ -228,7 +228,7 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 from vllm.model_executor.layers.attention.pcp import (
     cp_reconcile_heads,
     maybe_all_gather_q_for_dcp,
-    maybe_gather_mla_latent_cache_inputs,
+    maybe_gather_cache_inputs,
     resolve_dcp_combine_fn,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -340,6 +340,24 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     ):
         return "fp8_ds_mla"
     return kv_cache_dtype
+
+
+def _gather_latent_cache_inputs(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
+    num_decode_tokens: int | None,
+    use_pcp: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """PCP latent-cache write gather; flattens k_pe for the all-gather."""
+    if not use_pcp or num_decode_tokens is None:
+        return kv_c_normed, k_pe, slot_mapping
+    assert slot_mapping is not None
+    k_pe_flat = k_pe.reshape(kv_c_normed.shape[0], -1)
+    (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = maybe_gather_cache_inputs(
+        (kv_c_normed, k_pe_flat), slot_mapping, num_decode_tokens, use_pcp
+    )
+    return cache_kv_c, cache_k_pe_flat.view(-1, *k_pe.shape[1:]), cache_slot_mapping
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):
@@ -625,7 +643,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
-                maybe_gather_mla_latent_cache_inputs(
+                _gather_latent_cache_inputs(
                     kv_c_normed,
                     k_pe,
                     layer_slot_mapping,
@@ -1142,7 +1160,7 @@ def unified_mla_kv_cache_update(
         layer_name
     )
     if layer_slot_mapping is not None:
-        kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
+        kv_c_normed, k_pe, layer_slot_mapping = _gather_latent_cache_inputs(
             kv_c_normed,
             k_pe,
             layer_slot_mapping,
