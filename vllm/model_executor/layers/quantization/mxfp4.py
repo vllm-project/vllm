@@ -22,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
-    backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
@@ -499,24 +498,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
-        self.experts_cls: type[mk.FusedMoEExperts] | None
-        if self.is_k3_situ_aiter:
-            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled():
-                # AITER keeps bf16 activations below this token count, which
-                # would not match the fp8 a8w4 kernels the interleaved SiTU
-                # path is tuned for. The a16w4 path never reads it.
-                # TODO: Remove once AITER takes this as a kernel argument.
-                os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
-        else:
-            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
-                moe
-            )
+        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
 
@@ -809,42 +791,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
-
-    def _convert_k3_situ_weight_to_kernel_format(
-        self, layer: RoutedExperts
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # K3's AITER A16W4 kernel wants the separated ([gate_all, up_all])
-        # stage-1 layout, unlike the interleaved gpt-oss/DeepSeek path in
-        # convert_weight_to_mxfp4_moe_kernel_format. Preshuffle once here.
-        from aiter.utility.fp4_utils import e8m0_shuffle
-
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        fp4_dtype = torch.float4_e2m1fn_x2
-        e8m0_dtype = torch.float8_e8m0fnu
-        num_experts = layer.w13_weight.shape[0]
-
-        # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
-        # interleaved (_gui_) fp8 flydsl kernels, which need w13 weight+scale
-        # in interleave layout. Default a16w4 keeps the separated layout.
-        guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
-        w13 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
-        )
-        w2 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w2_weight.data.view(fp4_dtype), 16, False
-        )
-        w13_scale_raw = layer.w13_weight_scale.data.view(e8m0_dtype)
-        w2_scale_raw = layer.w2_weight_scale.data.view(e8m0_dtype)
-        w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
-        )
-        w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
-
-        w13.is_shuffled = True
-        w2.is_shuffled = True
-
-        return w13, w2, w13_scale, w2_scale
 
     def process_weights_after_loading(self, layer):
         w13 = layer.w13_weight
