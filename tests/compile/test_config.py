@@ -530,7 +530,7 @@ def _mock_config_for_cudagraph_sizes(
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens"),
     [
-        # No speculation: the 2x headroom under the 512 ceiling, unchanged.
+        # No speculation: the 2x headroom under the platform ceiling, unchanged.
         (8, 0),
         (32, 0),
         # Speculating, but the widest decode batch still fits under the ceiling.
@@ -682,7 +682,8 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
 
     VllmConfig._set_cudagraph_sizes(config)
 
-    assert compilation_config.max_cudagraph_capture_size == 512
+    # 24 requests * 17 tokens, the widest decode batch inside the 512 budget.
+    assert compilation_config.max_cudagraph_capture_size == 408
     assert 544 not in compilation_config.cudagraph_capture_sizes
 
 

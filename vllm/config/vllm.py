@@ -1928,10 +1928,10 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            # Widest uniform decode batch, tracked only when a request is more
-            # than one token wide and only when the default is computed here,
-            # so an explicit capture range is left exactly as configured.
-            max_uniform_decode_size: int | None = None
+            # Decode sizes to cover, in tokens. Populated only when a request
+            # is more than one token wide and only when the default is computed
+            # here, so an explicit capture range is left exactly as configured.
+            uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
 
@@ -1948,7 +1948,33 @@ class VllmConfig:
                     max_num_seqs * decode_query_len * 2, size_ceiling
                 )
                 if decode_query_len > 1:
-                    max_uniform_decode_size = max_num_seqs * decode_query_len
+                    # A speculative decode batch is decode_query_len tokens per
+                    # request, so the widest one is far outside this ceiling.
+                    # It is covered by adding the decode sizes themselves rather
+                    # than by raising the ceiling: the range below is strided in
+                    # tokens, and extending it would multiply the whole grid --
+                    # at max_num_seqs=256 and 16 draft tokens, 51 entries become
+                    # 291, each captured for PIECEWISE and again as a FULL
+                    # decode descriptor.
+                    #
+                    # The grid would not buy decode coverage anyway. Dispatch
+                    # requires an exact multiple of decode_query_len, so a
+                    # token-strided entry is only usable when it happens to be
+                    # one; at query length 17 a captured 560 rounds to 561 and
+                    # is rejected. Scaling a request-count grid keeps every
+                    # entry usable and the count comparable to the non-
+                    # speculative case.
+                    # At most the platform default number of requests,
+                    # mirroring the one-token-per-request decode ceiling.
+                    max_decode_reqs = min(max_num_seqs, default_max_graph_size)
+                    request_counts = [n for n in (1, 2, 4) if n <= max_decode_reqs]
+                    request_counts += list(range(8, min(max_decode_reqs + 1, 256), 8))
+                    request_counts += list(range(256, max_decode_reqs + 1, 16))
+                    if max_decode_reqs not in request_counts:
+                        request_counts.append(max_decode_reqs)
+                    uniform_decode_sizes = [
+                        n * decode_query_len for n in request_counts
+                    ]
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -1996,18 +2022,11 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
-                # Same for the widest uniform decode batch. A decode batch is
-                # only ever padded up to a captured size that is a multiple of
-                # decode_query_len, so unlike a one-token-per-request batch it
-                # cannot borrow the next size up the stride: at query length 17
-                # a captured 560 rounds to 561 and is rejected. Lifting the
-                # ceiling to reach the widest batch is therefore not enough on
-                # its own when it lands off the stride.
-                if (
-                    max_uniform_decode_size is not None
-                    and max_uniform_decode_size <= max_cudagraph_capture_size
-                ):
-                    cudagraph_capture_sizes.append(max_uniform_decode_size)
+                # Not gated on max_cudagraph_capture_size: these deliberately
+                # reach past a ceiling that counts one token per request.
+                cudagraph_capture_sizes += [
+                    size for size in uniform_decode_sizes if size <= max_num_tokens
+                ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
