@@ -346,6 +346,26 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
         self.assertEqual(len(github.comments), 1)
 
+    def test_untrusted_approval_cannot_launch_ci(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(),
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "untrusted-reviewer"},
+                }
+            ],
+        )
+        buildkite = FakeBuildkite()
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.list_calls, [])
+        self.assertEqual(github.reactions, ["eyes"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+
     def test_ready_label_notifies_author_once(self) -> None:
         pr = make_pr(labels=[{"name": "ready"}])
         event = {
