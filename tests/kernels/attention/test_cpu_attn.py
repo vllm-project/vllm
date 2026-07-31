@@ -686,6 +686,7 @@ def test_varlen_encoder_attention_vec(
         isa=isa,
     )
 
+
 @pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -720,6 +721,7 @@ def test_varlen_encoder_attention_neon(
         block_size=block_size,
         isa=isa,
     )
+
 
 @pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
