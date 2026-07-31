@@ -15,7 +15,6 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
-from vllm.models.deepseek_v32.nvidia.mtp import _GLM52_EH_CONFIGS
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 
@@ -65,20 +64,10 @@ RESIDUAL_CUTE_CASES = [
 ]
 
 GLM_CUTE_CASES = [
-    (
-        spec,
-        config,
-    )
-    for spec in (
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
-    )
+    (spec, config)
+    for spec in glm52_gemm.GLM52_PROJECTIONS.values()
     for _, config in spec.cute_configs
 ]
-GLM_CUTE_CASES.extend(
-    (SimpleNamespace(n=6144, k=12288), config)
-    for config in _GLM52_EH_CONFIGS.values()
-)
 
 EXPECTED_CUTE_CONFIGS = {
     (3072, 7168, 1): (224, 3, 4, 8),
@@ -275,7 +264,13 @@ def test_glm52_projection_plans_are_separate() -> None:
         for num_tokens, (backend, _) in q_b_plan.items()
         if backend == "dsv3_fused_a"
     } == set(range(3, 17))
-    assert set(_GLM52_EH_CONFIGS) == {1, 2, 3}
+
+    eh = glm52_gemm.GLM52_EH_PROJECTION
+    eh_plan = eh.build_plan()
+    assert (eh.n, eh.k) == (6144, 12288)
+    # The MTP eh_proj has no dsv3 winners; M >= 4 falls back to cuBLAS.
+    assert set(eh_plan) == {1, 2, 3}
+    assert all(backend == "cute" for backend, _ in eh_plan.values())
 
 
 def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
@@ -349,9 +344,7 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         root.attn.q_b_proj.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
-    assert (
-        root.attn.fused_qkv_a_proj.quant_method._plan == qkv_a.build_plan()
-    )
+    assert root.attn.fused_qkv_a_proj.quant_method._plan == qkv_a.build_plan()
     assert root.attn.q_b_proj.quant_method._plan == q_b.build_plan()
     assert isinstance(
         root.same_shape_other_name.quant_method,
