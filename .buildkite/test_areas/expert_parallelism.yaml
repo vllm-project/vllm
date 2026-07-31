@@ -30,6 +30,7 @@ steps:
 - label: EPLB Execution # 17min
   key: eplb-execution
   timeout_in_minutes: 25
+  device: h100
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:

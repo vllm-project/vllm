@@ -138,3 +138,14 @@ steps:
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
+
+- label: ReplaySSM Decode (H100)
+  key: replayssm-decode-h100
+  timeout_in_minutes: 45
+  device: h100
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/
+    - tests/v1/e2e/test_replayssm_decode.py
+  commands:
+    - pytest -v -s v1/e2e/test_replayssm_decode.py

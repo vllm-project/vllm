@@ -5,7 +5,7 @@ steps:
 - label: V1 Sample + Logits
   key: v1-sample-logits
   timeout_in_minutes: 83
-  device: h200_18gb
+  device: h200_35gb
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
@@ -421,7 +421,7 @@ steps:
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
 
 - label: Acceptance Length Test (Large Models) # optional
-  device: h200_35gb
+  device: h100
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20
   gpu: h100
