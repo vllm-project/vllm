@@ -122,7 +122,19 @@ class TestFusedQkNormRopeConfigPicker:
         args = _generate_fake_input(20, 3000, 70)
         selected_key = pick_config(args, config_keys)
         assert selected_key == CaseKey(
-            {"q_heads": 2048, "kv_heads": 64, "num_tokens": 32}
+            {"q_heads": 2048, "kv_heads": 64, "num_tokens": 16}
+        )
+
+    def test_config_picker_head_mismatch_uses_lower_token_bucket(self):
+        config_keys = [
+            CaseKey({"q_heads": 16, "kv_heads": 8, "num_tokens": 256}),
+            CaseKey({"q_heads": 16, "kv_heads": 8, "num_tokens": 512}),
+        ]
+
+        args = _generate_fake_input(512, 8, 4)
+        selected_key = pick_config(args, config_keys)
+        assert selected_key == CaseKey(
+            {"q_heads": 16, "kv_heads": 8, "num_tokens": 256}
         )
 
     def test_config_picker_prefers_exact_head_dim(self):

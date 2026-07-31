@@ -117,9 +117,9 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
          (exact match preferred).
       3. Find the closest kv_heads among available configs
          (exact match preferred).
-      4. Among the num_tokens values tuned for that q_heads and kv_heads, pick
-         the smallest num_tokens >= the input's num_tokens. If the input is
-         larger than all available num_tokens, fall back to the largest.
+      4. Use an exact token config only when the Q/KV head tuple also matches.
+         Otherwise, pick the largest token config below the input size. If no
+         smaller token config exists, fall back to the smallest.
     """
 
     if not config_keys:
@@ -160,9 +160,14 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     best_q_heads = min(configs, key=lambda s: abs(s - q_heads))
     best_kv_heads = min(configs[best_q_heads], key=lambda s: abs(s - kv_heads))
     available_num_tokens = sorted(configs[best_q_heads][best_kv_heads])
-    best_num_tokens = next(
-        (n for n in available_num_tokens if n >= num_tokens), available_num_tokens[-1]
-    )
+    head_shape_exact = best_q_heads == q_heads and best_kv_heads == kv_heads
+    if head_shape_exact and num_tokens in available_num_tokens:
+        best_num_tokens = num_tokens
+    else:
+        smaller_num_tokens = [n for n in available_num_tokens if n < num_tokens]
+        best_num_tokens = (
+            smaller_num_tokens[-1] if smaller_num_tokens else available_num_tokens[0]
+        )
 
     result = next(
         key
