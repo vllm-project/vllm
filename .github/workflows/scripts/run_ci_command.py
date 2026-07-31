@@ -3,6 +3,7 @@
 
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -40,14 +41,20 @@ class ApiError(RuntimeError):
         self.status = status
 
 
+def rate_limit_jitter() -> float:
+    return random.uniform(1, 5)
+
+
 class HttpTransport:
     def __init__(
         self,
         *,
-        max_attempts: int = 3,
+        max_retries: int = 3,
+        jitter: Callable[[], float] = rate_limit_jitter,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self.max_attempts = max_attempts
+        self.max_retries = max_retries
+        self.jitter = jitter
         self.sleep = sleep
 
     def request(
@@ -65,17 +72,19 @@ class HttpTransport:
             headers=dict(headers or {}),
             method=method,
         )
-        for attempt in range(self.max_attempts):
+        for attempt in range(self.max_retries + 1):
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     response_body = response.read().decode()
                 break
             except urllib.error.HTTPError as error:
                 response_body = error.read().decode()
-                if error.code == 429 and attempt + 1 < self.max_attempts:
+                if error.code == 429 and attempt < self.max_retries:
                     delay = self._rate_limit_delay(error, response_body)
                     print(
-                        f"API rate limit reached; retrying in {delay:g} seconds.",
+                        "API rate limit reached; "
+                        f"retry {attempt + 1}/{self.max_retries} "
+                        f"in {delay:g} seconds.",
                         file=sys.stderr,
                     )
                     self.sleep(delay)
@@ -106,8 +115,8 @@ class HttpTransport:
             return fallback
         return str(parsed.get("message", fallback))
 
-    @staticmethod
     def _rate_limit_delay(
+        self,
         error: urllib.error.HTTPError,
         response_body: str,
     ) -> float:
@@ -121,7 +130,6 @@ class HttpTransport:
             "RateLimit-User-Reset" if scope == "rest_user" else "RateLimit-Reset"
         )
         candidates = [
-            error.headers.get("Retry-After"),
             error.headers.get(reset_header),
             parsed.get("reset"),
         ]
@@ -131,8 +139,8 @@ class HttpTransport:
             except (TypeError, ValueError):
                 continue
             if delay >= 0:
-                return delay + 1
-        return 60
+                return delay + self.jitter()
+        return 60 + self.jitter()
 
 
 class GitHubClient:
