@@ -85,6 +85,7 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: list[int]
     new_logprobs: object | None = None
+    new_sampling_mask: object | None = None
     new_prompt_logprobs_tensors: object | None = None
     pooling_output: object | None = None
     finish_reason: FinishReason | None = None
@@ -272,6 +273,7 @@ def engine_output_wire(
         request_id,
         [7, 8],
         new_logprobs,
+        None,
         new_prompt_logprobs_tensors,
         None,
         int(FinishReason.LENGTH),
