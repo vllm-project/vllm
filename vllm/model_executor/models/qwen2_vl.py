@@ -1182,6 +1182,7 @@ class Qwen2VLForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]

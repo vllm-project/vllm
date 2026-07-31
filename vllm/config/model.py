@@ -379,6 +379,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_device_do_normalize: InitVar[bool] = False
 
     def compute_hash(self) -> str:
         """
@@ -508,6 +509,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_device_do_normalize: bool
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -740,6 +742,7 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_device_do_normalize=mm_device_do_normalize and self._model_info.supports_mm_device_do_normalize
             )
 
             mm_config_kwargs = {

@@ -325,6 +325,7 @@ class MultiModalConfig:
             self.mm_encoder_tp_mode,
             self.mm_encoder_attn_dtype,
             self.mm_encoder_fp8_scale_path,
+            self.mm_device_do_normalize
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
