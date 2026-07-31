@@ -7,7 +7,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.logger import init_logger
 from vllm.utils import is_moe_layer
+
+logger = init_logger(__name__)
 
 
 class Cache:
@@ -137,6 +140,18 @@ class All2AllManagerBase:
     def max_sms_used(self) -> int | None:
         return None  # None means it could use the whole GPU
 
+    def checkpoint_prepare(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_prepare is not implemented; skipping.",
+            type(self).__name__,
+        )
+
+    def checkpoint_restore(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_restore is not implemented; skipping.",
+            type(self).__name__,
+        )
+
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
 
@@ -160,6 +175,7 @@ class DeviceCommunicatorBase:
         unique_name: str = "",
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
+        use_all2all: bool = False,
     ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
@@ -189,32 +205,27 @@ class DeviceCommunicatorBase:
             self.global_world_size = dist.get_world_size()
             self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
-        use_ep = False
         all2all_backend = None
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # initialize the all2all manager for DP or sequence-parallel EP.
-            parallel_config = config.parallel_config
-            use_ep = (
-                parallel_config.data_parallel_size > 1
-                or parallel_config.use_sequence_parallel_moe
-                or (
-                    parallel_config.enable_expert_parallel
-                    and parallel_config.prefill_context_parallel_size > 1
-                )
-            )
-            all2all_backend = parallel_config.all2all_backend
+            all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
-        self.use_all2all = self.is_ep_communicator and use_ep
+        self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_
+
+    def checkpoint_prepare(self) -> None:
+        """Prepare reclaimable communicator state for checkpoint (default: no-op)."""
+
+    def checkpoint_restore(self) -> None:
+        """Restore communicator state after checkpoint (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:

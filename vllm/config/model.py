@@ -17,6 +17,7 @@ from vllm.config.model_arch import (
 from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
+    MMHasherAlgorithm,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -84,7 +85,14 @@ RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
-    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+    "auto",
+    "hf",
+    "slow",
+    "mistral",
+    "deepseek_v32",
+    "deepseek_v4",
+    "inkling",
+    "kimi_k3",
 ]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
@@ -141,6 +149,8 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
+      with Kimi K3's Python XTML encoding instead of a Jinja template.
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
@@ -365,6 +375,7 @@ class ModelConfig:
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
+    mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
@@ -376,6 +387,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
@@ -493,6 +505,7 @@ class ModelConfig:
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
+        mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
@@ -504,6 +517,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
@@ -632,6 +646,8 @@ class ModelConfig:
                 self.tokenizer_mode = "terratorch"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
+            elif arch == "KimiK3ForConditionalGeneration":
+                self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
@@ -724,6 +740,7 @@ class ModelConfig:
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
+                mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
@@ -735,6 +752,7 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
@@ -745,15 +763,29 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
+            pruning_spec = self.multimodal_config.get_video_pruning_spec()
+            supported_pruning = self._model_info.supported_video_pruning_methods
+            if (
+                pruning_spec is not None
+                and supported_pruning
+                and pruning_spec[0] not in supported_pruning
+            ):
+                raise ValueError(
+                    f"Video pruning method '{pruning_spec[0]}' is not "
+                    f"supported by {self._model_info.architecture} "
+                    f"(supported methods: {supported_pruning})."
+                )
+
             if (
                 self.renderer_num_workers > 1
                 and self.multimodal_config.mm_processor_cache_gb > 0
+                and self.runner_type == "pooling"
             ):
                 raise ValueError(
                     "Cannot use --renderer-num-workers > 1 with the "
-                    "multimodal processor cache enabled. The cache is "
-                    "not thread-safe and does not support concurrent "
-                    "renderer workers. Please set "
+                    "multimodal processor cache enabled for pooling models. "
+                    "Pooling preprocessing runs on the renderer workers, and "
+                    "the cache is not thread-safe. Please set "
                     "--renderer-num-workers 1 (the default), or "
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
