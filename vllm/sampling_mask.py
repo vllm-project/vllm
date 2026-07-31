@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 
 @dataclass
 class SamplingMask:
-    """CSR token support sets aligned with completion token IDs.
+    """Per-token sampling support sets aligned with completion token IDs.
 
-    Args:
-        token_ids: Flattened token IDs from every support set.
-        offsets: Start offsets for each support set, including the final end
-            offset.
+    Each inner list contains the vocabulary token IDs that survived
+    top-k / top-p / min-p filtering for the corresponding generated token.
     """
 
-    token_ids: Sequence[int]
-    offsets: Sequence[int]
+    token_ids: list[list[int]]

@@ -45,6 +45,19 @@ def test_sampling_mask_tensors_tolist():
     assert result.cu_num_generated_tokens == [0, 1, 1, 2]
 
 
+def test_sampling_mask_lists_to_nested_list():
+    from vllm.v1.outputs import SamplingMaskLists
+
+    mask = SamplingMaskLists(
+        token_ids=np.array([10, 11, 12, 20, 21]),
+        offsets=np.array([0, 3, 5]),
+    )
+
+    nested = mask.to_nested_list()
+
+    assert nested == [[10, 11, 12], [20, 21]]
+
+
 def test_sampling_mask_tensors_from_logits():
     tensors = SamplingMaskTensors.from_logits(
         logits=torch.tensor(
