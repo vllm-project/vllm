@@ -239,8 +239,7 @@ class CudaGraphManager:
             capture_sizes, self.lora_capture_cases
         ):
             # Varlen decode graphs take any mix of 1..decode_query_len tokens per
-            # request, so capture on the token grid instead of rounding up to a
-            # uniform query length.
+            # request, worst case 1 token per request (or max_num_reqs)
             if capture_varlen_decode and num_tokens <= max_decode_tokens:
                 desc = BatchExecutionDescriptor(
                     cg_mode=decode_mode,
