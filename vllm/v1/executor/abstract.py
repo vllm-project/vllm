@@ -124,7 +124,7 @@ class Executor(ABC):
         self.collective_rpc(
             "initialize_from_config",
             args=(kv_cache_configs,),
-            kwargs={"extensible": extensible} if extensible else None,
+            kwargs={"extensible": extensible},
         )
 
     def compile_or_warm_up_model(self) -> list[CompilationTimes]:

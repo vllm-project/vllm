@@ -222,6 +222,29 @@ def _check_layer_coverage(
     )
 
 
+def _group_kernel_block_size(
+    kv_cache_spec: KVCacheSpec,
+    kernel_block_sizes: list[int],
+    kv_cache_group_id: int,
+) -> int:
+    """Kernel block size for a group; specs that apply block-size compression
+    (e.g. DeepSeek V4) lock it to storage_block_size."""
+    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+        return kv_cache_spec.storage_block_size
+    return kernel_block_sizes[kv_cache_group_id]
+
+
+def _layer_cache_dtype(kv_cache_spec: AttentionSpec, cache_dtype: str) -> str:
+    """Skipped layers (--kv-cache-dtype-skip-layers) keep the unquantized
+    shape; only the quantized primary uses the quantized cache dtype's
+    (possibly packed) layout."""
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE and not isinstance(
+        kv_cache_spec, TQFullAttentionSpec
+    ):
+        return "auto"
+    return cache_dtype
+
+
 def _kv_cache_num_segments_by_layer(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: list[int],
@@ -239,17 +262,10 @@ def _kv_cache_num_segments_by_layer(
             continue
         kv_cache_spec = group.kv_cache_spec
         if isinstance(kv_cache_spec, AttentionSpec):
-            if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                kernel_block_size = kv_cache_spec.storage_block_size
-            else:
-                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-            # Mirror the per-layer dtype selection of _reshape_kv_cache.
-            layer_cache_dtype = (
-                "auto"
-                if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                else cache_dtype
+            kernel_block_size = _group_kernel_block_size(
+                kv_cache_spec, kernel_block_sizes, group.kv_cache_group_id
             )
+            layer_cache_dtype = _layer_cache_dtype(kv_cache_spec, cache_dtype)
             block_dim = group.backend.get_kv_cache_block_dim(
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
@@ -280,13 +296,13 @@ def _kv_cache_num_segments_by_layer(
 
 
 def narrow_kv_caches_to_num_blocks(
-    kv_caches: dict[str, Any],
+    kv_caches: dict[str, torch.Tensor],
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: list[int],
     cache_dtype: str,
     num_blocks: int,
     kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
+) -> dict[str, torch.Tensor]:
     """Return views of the KV caches narrowed to the first `num_blocks` blocks.
 
     With the extensible KV cache, the layer views span the full reserved
@@ -296,48 +312,41 @@ def narrow_kv_caches_to_num_blocks(
     prefix of each layout segment, a narrow along the block dim covers exactly
     the committed bytes of every segment.
     """
-    narrowed: dict[str, Any] = dict(kv_caches)
+    narrowed = dict(kv_caches)
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
         kv_cache_spec = group.kv_cache_spec
+        if isinstance(kv_cache_spec, AttentionSpec):
+            kernel_block_size = _group_kernel_block_size(
+                kv_cache_spec, kernel_block_sizes, group.kv_cache_group_id
+            )
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=_layer_cache_dtype(kv_cache_spec, cache_dtype),
+            )
+            narrow_len = num_blocks * (
+                kv_cache_spec.storage_block_size // kernel_block_size
+            )
+        elif isinstance(kv_cache_spec, MambaSpec):
+            # A single block-major [num_blocks, 1, 1, page_size] view.
+            block_dim = 0
+            narrow_len = num_blocks
+        else:
+            continue
         for layer_name in group.layer_names:
             kv_cache = kv_caches.get(layer_name)
-            if kv_cache is None:
-                continue
-            if isinstance(kv_cache_spec, AttentionSpec):
-                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                    kernel_block_size = kv_cache_spec.storage_block_size
-                else:
-                    kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-                num_blocks_per_kv_block = (
-                    kv_cache_spec.storage_block_size // kernel_block_size
-                )
-                layer_cache_dtype = (
-                    "auto"
-                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                    else cache_dtype
-                )
-                block_dim = group.backend.get_kv_cache_block_dim(
-                    kernel_block_size,
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                    cache_dtype_str=layer_cache_dtype,
-                )
-                narrowed[layer_name] = kv_cache.narrow(
-                    block_dim, 0, num_blocks * num_blocks_per_kv_block
-                )
-            elif isinstance(kv_cache_spec, MambaSpec):
-                # A single block-major [num_blocks, 1, 1, page_size] view.
-                narrowed[layer_name] = kv_cache.narrow(0, 0, num_blocks)
+            if kv_cache is not None:
+                narrowed[layer_name] = kv_cache.narrow(block_dim, 0, narrow_len)
 
     _bound_packed_kv_cache_storages(narrowed, kv_cache_config, num_blocks)
     return narrowed
 
 
 def _bound_packed_kv_cache_storages(
-    kv_caches: dict[str, Any],
+    kv_caches: dict[str, torch.Tensor],
     kv_cache_config: KVCacheConfig,
     num_blocks: int,
 ) -> None:
@@ -349,7 +358,7 @@ def _bound_packed_kv_cache_storages(
         committed_bytes = num_blocks * tensor_config.block_stride
         for layer_name in tensor_config.shared_by:
             cache = kv_caches.get(layer_name)
-            if not isinstance(cache, torch.Tensor):
+            if cache is None:
                 continue
             storage_ptr = cache.untyped_storage().data_ptr()
             previous = packed_by_storage.get(storage_ptr)
@@ -365,16 +374,13 @@ def _bound_packed_kv_cache_storages(
                 layer_names.append(layer_name)
 
     for storage_ptr, (committed_bytes, layer_names) in packed_by_storage.items():
-        first_cache = kv_caches[layer_names[0]]
-        assert isinstance(first_cache, torch.Tensor)
-        device_index = first_cache.device.index
+        device_index = kv_caches[layer_names[0]].device.index
         assert device_index is not None
         bounded_storage = uint8_tensor_from_ptr(
             storage_ptr, committed_bytes, device_index
         )
         for layer_name in layer_names:
             cache = kv_caches[layer_name]
-            assert isinstance(cache, torch.Tensor)
             typed_storage = bounded_storage.view(cache.dtype)
             kv_caches[layer_name] = torch.as_strided(
                 typed_storage,
@@ -541,12 +547,9 @@ def _reshape_kv_cache(
             continue
 
         kv_cache_spec = group.kv_cache_spec
-        if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-            # use storage_block_size as the kernel block size for groups
-            # that apply a compression on block size (eg. DeepSeek V4).
-            kernel_block_size = kv_cache_spec.storage_block_size
-        else:
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+        kernel_block_size = _group_kernel_block_size(
+            kv_cache_spec, kernel_block_sizes, group.kv_cache_group_id
+        )
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:
@@ -571,15 +574,7 @@ def _reshape_kv_cache(
                     kv_cache_spec.storage_block_size // kernel_block_size
                 )
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-                # Skipped layers (--kv-cache-dtype-skip-layers) keep the
-                # unquantized shape; only the quantized primary uses the
-                # quantized cache dtype's (possibly packed) layout.
-                layer_cache_dtype = (
-                    "auto"
-                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                    else cache_dtype
-                )
+                layer_cache_dtype = _layer_cache_dtype(kv_cache_spec, cache_dtype)
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
                     kernel_block_size,

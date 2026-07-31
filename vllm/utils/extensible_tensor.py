@@ -330,12 +330,6 @@ class ExtensibleTensor:
                 start = i * self._segment_capacity_bytes
                 full[start + old : start + bytes_per_segment].zero_()
 
-    def append(self, num_bytes: int) -> torch.Tensor:
-        """Grow by `num_bytes` additional bytes and return the new view."""
-        if num_bytes < 0:
-            raise ValueError("num_bytes to append must be non-negative.")
-        return self.resize_(self._bytes_per_segment + num_bytes)
-
     @property
     def num_bytes(self) -> int:
         """Current committed size in bytes, summed over all segments."""

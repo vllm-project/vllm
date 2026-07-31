@@ -152,7 +152,6 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -6439,12 +6438,14 @@ class GPUModelRunner(
             else:
                 mm_budget = self.mm_budget
                 assert mm_budget is not None
-                dummy_encoder_cache = EncoderCacheManager.make_profiling_reservation(
-                    mm_budget.encoder_cache_size,
-                    self.inputs_embeds_size,
-                    self.model_config.dtype,
-                    self.device,
-                )
+                if mm_budget.encoder_cache_size > 0:
+                    # Reserve the encoder cache's worst-case footprint during
+                    # profiling so measured KV sizing accounts for it.
+                    dummy_encoder_cache = torch.empty(
+                        (mm_budget.encoder_cache_size, self.inputs_embeds_size),
+                        dtype=self.model_config.dtype,
+                        device=self.device,
+                    )
 
                 if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
                     if not mm_budget.mm_max_toks_per_item:
@@ -7668,7 +7669,7 @@ class GPUModelRunner(
     @property
     def kv_cache_committed_bytes(self) -> int:
         """Physically committed KV cache bytes (0 without extensible KV)."""
-        buffers = getattr(self, "extensible_kv_buffers", None)
+        buffers = self.extensible_kv_buffers
         return buffers.physical_bytes if buffers is not None else 0
 
     def initialize_kv_cache_tensors(
@@ -7691,13 +7692,12 @@ class GPUModelRunner(
 
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
-        if extensible and self.use_uniform_kv_cache(self.attn_groups):
-            raise ValueError(
-                "enable_extensible_kv_cache=True is not supported with "
-                "cross-layer uniform KV cache layouts."
-            )
-
-        if not extensible and self.use_uniform_kv_cache(self.attn_groups):
+        if self.use_uniform_kv_cache(self.attn_groups):
+            if extensible:
+                raise ValueError(
+                    "enable_extensible_kv_cache=True is not supported with "
+                    "cross-layer uniform KV cache layouts."
+                )
             kv_caches, cross_layers_kv_cache, attn_backend = (
                 self.allocate_uniform_kv_caches(
                     kv_cache_config,

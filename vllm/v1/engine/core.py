@@ -355,13 +355,7 @@ class EngineCore:
                 # With an explicit kv_cache_memory_bytes, the requested size
                 # is committed as-is (the extensible path still defers the
                 # commit until after warmup).
-                if len(compilation_times) != len(available_gpu_memory):
-                    raise RuntimeError(
-                        "Expected one CompilationTimes result per worker when "
-                        "initializing extensible KV cache, but got "
-                        f"{len(compilation_times)} results for "
-                        f"{len(available_gpu_memory)} workers."
-                    )
+                # One CompilationTimes result per worker (zip strict).
                 final_available_gpu_memory = [
                     max(
                         available_memory

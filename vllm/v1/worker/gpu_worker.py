@@ -194,9 +194,7 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
-        extensible_kv_buffers = getattr(
-            self.model_runner, "extensible_kv_buffers", None
-        )
+        extensible_kv_buffers = self.model_runner.extensible_kv_buffers
         if (
             extensible_kv_buffers is not None
             and self.vllm_config.kv_transfer_config is not None
@@ -267,9 +265,7 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         if tags is None or "kv_cache" in tags:
-            extensible_kv_buffers = getattr(
-                self.model_runner, "extensible_kv_buffers", None
-            )
+            extensible_kv_buffers = self.model_runner.extensible_kv_buffers
             if extensible_kv_buffers is not None:
                 extensible_kv_buffers.recommit()
             self.model_runner.post_kv_cache_wake_up()
@@ -730,7 +726,13 @@ class Worker(WorkerBase):
             # The final size is committed; now the connector may register the
             # (physically backed) KV cache memory.
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-            assert hasattr(self.model_runner, "init_deferred_kv_connector")
+            from vllm.v1.worker.gpu.model_runner import (
+                GPUModelRunner as GPUModelRunnerV2,
+            )
+
+            # Deferred KV transfer init is gated to the V2 runner in
+            # EngineCore._initialize_kv_caches.
+            assert isinstance(self.model_runner, GPUModelRunnerV2)
             self.model_runner.init_deferred_kv_connector()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:

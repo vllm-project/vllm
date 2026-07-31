@@ -340,6 +340,8 @@ class WorkerWrapperBase:
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
             if extensible:
+                # Only forward the kwarg when set: worker classes that don't
+                # support the extensible KV cache keep the plain signature.
                 self.worker.initialize_from_config(  # type: ignore
                     kv_cache_config, extensible=True
                 )

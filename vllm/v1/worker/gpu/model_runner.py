@@ -590,7 +590,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @property
     def kv_cache_committed_bytes(self) -> int:
         """Physically committed KV cache bytes (0 without extensible KV)."""
-        buffers = getattr(self, "extensible_kv_buffers", None)
+        buffers = self.extensible_kv_buffers
         return buffers.physical_bytes if buffers is not None else 0
 
     def _init_kv_zero_meta(self) -> None:
