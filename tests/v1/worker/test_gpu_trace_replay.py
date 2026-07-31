@@ -125,6 +125,18 @@ def test_state_end_to_end():
     assert sampled.tolist() == [22, -1]
 
 
+def test_state_allocates_trace_buffer_lazily():
+    state = TraceReplayState(max_num_reqs=2, device=torch.device(DEVICE))
+    assert state.trace_token_ids is None
+
+    state.add_request(0, SamplingParams())
+    state.apply_staged_writes()
+    assert state.trace_token_ids is None
+
+    state.add_request(0, SamplingParams(trace_decode_token_ids=[11]))
+    assert state.trace_token_ids is not None
+
+
 def test_state_skips_when_no_trace_in_batch():
     """apply_trace is a no-op when no batched request replays a trace."""
     state = TraceReplayState(max_num_reqs=4, device=torch.device(DEVICE))

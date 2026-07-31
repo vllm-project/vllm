@@ -5,7 +5,6 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.inputs import (
     EngineInput,
