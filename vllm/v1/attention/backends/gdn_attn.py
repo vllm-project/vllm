@@ -51,6 +51,12 @@ class QwenGDNAttentionBackend(GDNAttentionBackend):
 
         return current_platform.is_cuda() and current_platform.has_device_capability(90)
 
+    @classmethod
+    def get_batch_invariant_prefill_chunk_size(cls) -> int:
+        from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+        return FLA_CHUNK_SIZE
+
 
 @dataclass
 class GDNAttentionMetadata:

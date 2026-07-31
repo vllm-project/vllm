@@ -47,6 +47,30 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def test_batch_invariant_mamba_prefill_uses_canonical_chunks() -> None:
+    scheduler = Mock(
+        mamba_prefill_alignment=64,
+        max_num_scheduled_tokens=256,
+        scheduler_config=Mock(long_prefill_token_threshold=0),
+        use_eagle=False,
+        needs_mamba_cache_alignment=False,
+        mamba_partial_cache_hit=False,
+        hash_block_size=16,
+    )
+    request = Mock(
+        num_computed_tokens=0,
+        num_prompt_tokens=193,
+        num_tokens=193,
+        shared_prefix_boundary=0,
+    )
+
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 73) == 64
+    request.num_computed_tokens = 64
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 73) == 64
+    request.num_computed_tokens = 128
+    assert Scheduler._mamba_block_aligned_split(scheduler, request, 65) == 65
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

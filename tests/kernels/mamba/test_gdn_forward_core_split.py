@@ -498,3 +498,94 @@ def test_flashinfer_prefill_is_bitwise_invariant_across_batch_sizes(
 
     torch.testing.assert_close(single_output, batched_output, atol=0, rtol=0)
     torch.testing.assert_close(single_state, batched_state, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    (
+        ["cutedsl"]
+        if current_platform.is_device_capability_family(100)
+        else ["flashinfer", "triton"]
+    ),
+)
+def test_prefill_is_bitwise_invariant_across_canonical_partitions(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot and state-carry prefills must use the same 64-token graph."""
+    torch.manual_seed(11)
+    monkeypatch.setattr(qwen_gdn_linear_attn.envs, "VLLM_BATCH_INVARIANT", True)
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    seq_len = 3 * FLA_CHUNK_SIZE
+    num_heads = 8
+    head_dim = 128
+    q = torch.randn(1, seq_len, num_heads, head_dim, device=device, dtype=dtype) * 0.1
+    k = torch.randn_like(q) * 0.1
+    v = torch.randn_like(q) * 0.1
+    g = -torch.rand(1, seq_len, num_heads, device=device, dtype=torch.float32) * 0.1
+    beta = torch.rand(1, seq_len, num_heads, device=device, dtype=dtype)
+    initial_state = (
+        torch.randn(
+            1,
+            num_heads,
+            head_dim,
+            head_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.01
+    )
+
+    config = _make_vllm_config()
+    config.additional_config = {"gdn_prefill_backend": backend}
+    with set_current_vllm_config(config):
+        op = ChunkGatedDeltaRule()
+
+    def run(start: int, end: int, state: torch.Tensor):
+        length = end - start
+        cu_seqlens_cpu = torch.tensor([0, length], dtype=torch.int32)
+        cu_seqlens = cu_seqlens_cpu.to(device)
+        if backend == "cutedsl":
+            from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                prepare_metadata_cutedsl,
+            )
+
+            chunk_indices, chunk_offsets = prepare_metadata_cutedsl(
+                cu_seqlens, length, FLA_CHUNK_SIZE
+            )
+        else:
+            chunk_indices = prepare_chunk_indices(cu_seqlens_cpu, FLA_CHUNK_SIZE).to(
+                device
+            )
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens_cpu, FLA_CHUNK_SIZE).to(
+                device
+            )
+        return op(
+            q=q[:, start:end].contiguous(),
+            k=k[:, start:end].contiguous(),
+            v=v[:, start:end].contiguous(),
+            g=g[:, start:end].contiguous(),
+            beta=beta[:, start:end].contiguous(),
+            initial_state=state.contiguous(),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            use_qk_l2norm_in_kernel=False,
+        )
+
+    full_output, full_state = run(0, seq_len, initial_state.clone())
+    partitioned_output = []
+    partitioned_state = initial_state.clone()
+    for start in range(0, seq_len, FLA_CHUNK_SIZE):
+        output, partitioned_state = run(
+            start, start + FLA_CHUNK_SIZE, partitioned_state
+        )
+        partitioned_output.append(output)
+
+    torch.testing.assert_close(
+        torch.cat(partitioned_output, dim=1), full_output, atol=0, rtol=0
+    )
+    torch.testing.assert_close(partitioned_state, full_state, atol=0, rtol=0)

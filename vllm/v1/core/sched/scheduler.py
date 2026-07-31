@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -53,7 +54,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -311,15 +312,58 @@ class Scheduler(SchedulerInterface):
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
-        self.need_mamba_block_aligned_split = (
+        needs_mamba_cache_alignment = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.needs_mamba_cache_alignment = needs_mamba_cache_alignment
+        batch_invariant_prefill_chunk_sizes: set[int] = set()
+        if envs.VLLM_BATCH_INVARIANT:
+            for group in kv_cache_config.kv_cache_groups:
+                spec = group.kv_cache_spec
+                if not isinstance(spec, MambaSpec):
+                    continue
+                chunk_size = (
+                    spec.mamba_type.get_class().get_batch_invariant_prefill_chunk_size()
+                )
+                if chunk_size is not None:
+                    batch_invariant_prefill_chunk_sizes.add(chunk_size)
+        if len(batch_invariant_prefill_chunk_sizes) > 1:
+            raise ValueError(
+                "All recurrent backends must use the same batch-invariant "
+                "prefill chunk size."
+            )
+        batch_invariant_prefill_chunk_size = next(
+            iter(batch_invariant_prefill_chunk_sizes), None
+        )
+        if batch_invariant_prefill_chunk_size is not None:
+            if self.max_num_scheduled_tokens < batch_invariant_prefill_chunk_size:
+                raise ValueError(
+                    "The effective scheduler token budget must be at least the "
+                    "batch-invariant prefill chunk size "
+                    f"({batch_invariant_prefill_chunk_size})."
+                )
+            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            if 0 < long_prefill_threshold < batch_invariant_prefill_chunk_size:
+                raise ValueError(
+                    "long_prefill_token_threshold must be zero or at least the "
+                    "batch-invariant prefill chunk size "
+                    f"({batch_invariant_prefill_chunk_size})."
+                )
+            if needs_mamba_cache_alignment:
+                raise NotImplementedError(
+                    "Batch-invariant recurrent prefill does not yet support "
+                    "Mamba cache alignment."
+                )
+
+        self.mamba_prefill_alignment = batch_invariant_prefill_chunk_size or (
+            self.cache_config.block_size if needs_mamba_cache_alignment else 1
+        )
+        self.need_mamba_block_aligned_split = self.mamba_prefill_alignment > 1
         # A finer prefix_match_unit is configured: a mamba partial tail entry
         # can only be registered by a step ending exactly at the prompt's last
         # hash boundary, so the split adds that stop.
         self.mamba_partial_cache_hit = (
-            self.need_mamba_block_aligned_split
-            and self.hash_block_size < self.block_size
+            needs_mamba_cache_alignment and self.hash_block_size < self.block_size
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -366,13 +410,13 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        """Clip a prefill chunk so it ends where Mamba state must be cached.
+        """Clip recurrent prefill at required arithmetic or cache boundaries.
 
-        In "align" cache mode reusable SSM states are materialized at block
-        boundaries, plus mandatory early stops (the prompt's partial-tail hash
-        boundary, a detected shared-prefix junction). If a block is larger
-        than the configured prefill chunk limit, intermediate chunks keep
-        private running state until they reach the next cacheable position.
+        BIC uses a fixed arithmetic grid for non-final chunks. In "align"
+        cache mode, reusable SSM states are also materialized at block
+        boundaries and mandatory early stops. If a cache block is larger than
+        the configured prefill limit, intermediate chunks keep private state
+        until they reach the next cacheable position.
         """
         start = (
             request.num_computed_tokens
@@ -384,19 +428,19 @@ class Scheduler(SchedulerInterface):
         if start >= max(request.num_prompt_tokens, request.num_tokens - 1):
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
-        # The last block-aligned position whose state can be cached. With
-        # Eagle, FullAttn prunes the last matching block, so back off one
-        # block to avoid a Mamba cache miss.
-        last_cache_position = request.num_tokens - request.num_tokens % block_size
+        block_size = self.mamba_prefill_alignment
+        # The last position on the required grid. With Eagle, FullAttn prunes
+        # the last matching block, so back off one block to avoid a Mamba
+        # cache miss.
+        last_aligned_position = request.num_tokens - request.num_tokens % block_size
         if self.use_eagle:
-            last_cache_position = max(last_cache_position - block_size, 0)
+            last_aligned_position = max(last_aligned_position - block_size, 0)
 
         end = start + num_new_tokens
-        # Until `last_cache_position`, prefer chunks ending on block
+        # Until `last_aligned_position`, prefer chunks ending on block
         # boundaries. When a block cannot fit in any configured prefill chunk,
         # allow sub-block progress and re-align at the next reachable boundary.
-        if end < last_cache_position:
+        if end < last_aligned_position:
             max_prefill_tokens = self.max_num_scheduled_tokens
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
@@ -416,14 +460,14 @@ class Scheduler(SchedulerInterface):
             # the block grid before running on, so the crossed boundary's
             # state is materialized (unless it is past the cacheable range).
             next_block_boundary
-            if start % block_size != 0 and next_block_boundary <= last_cache_position
+            if start % block_size != 0 and next_block_boundary <= last_aligned_position
             else 0,
             # Never run past the last cacheable block boundary mid-chunk.
-            last_cache_position,
+            last_aligned_position if self.needs_mamba_cache_alignment else 0,
             # Fine-grained hits: the prompt's partial-tail entry can only be
             # registered by a chunk ending exactly at its last hash boundary.
             tail_boundary
-            if last_cache_position < tail_boundary < request.num_prompt_tokens
+            if last_aligned_position < tail_boundary < request.num_prompt_tokens
             else 0,
             # Marconi shared-prefix junction, block-floored (a sub-block
             # junction's state is not separately cacheable): cache its state
