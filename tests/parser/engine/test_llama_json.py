@@ -1343,3 +1343,298 @@ class TestRequiredAndNamedToolChoice:
 
         assert [c.name for c in calls or []] == ["get_weather"]
         assert content and "Sure, here you go." in content
+
+
+class TestNamedChoiceWithoutStructuralTag:
+    """sc-01: a named choice must produce a call with strict calling off.
+
+    Without ``VLLM_ENFORCE_STRICT_TOOL_CALLING`` there is no llama structural
+    tag, so ``adjust_request()`` constrains the model to the selected
+    function's ``parameters`` alone.  The model then emits ``{"city": "SF"}``
+    and never writes the ``{"name": ..., "parameters": ...}`` envelope this
+    parser keys on, so the parameters come back as content and the call is
+    lost.  Legacy synthesized the name from ``tool_choice``.
+
+    Chat completions carry that constraint in ``structured_outputs.json``
+    and the Responses API in ``text.format``, so both are driven through
+    ``adjust_request()`` and assert the field it actually wrote first.
+    """
+
+    PARAMETERS = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
+        "required": ["city", "unit"],
+    }
+    BARE_PARAMETERS = '{"city":"SF","unit":"C"}'
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        return cls
+
+    def _request(self, request_kind):
+        if request_kind == "chat":
+            return ChatCompletionRequest(
+                model="llama",
+                messages=[{"role": "user", "content": "weather in SF?"}],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": self.PARAMETERS,
+                        },
+                    }
+                ],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            )
+
+        from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+        return ResponsesRequest(
+            model="llama",
+            input="weather in SF?",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "look up the weather",
+                    "parameters": self.PARAMETERS,
+                    "strict": True,
+                }
+            ],
+            tool_choice={"type": "function", "name": "get_weather"},
+        )
+
+    def _adjusted(self, parser, request_kind):
+        request = parser.adjust_request(self._request(request_kind))
+        # Precondition: this is the constraint that makes the model emit
+        # bare parameters at all.  Assert it so a change in the request
+        # plumbing fails here and says so, instead of leaving the rest of
+        # the test quietly exercising nothing.
+        if request_kind == "chat":
+            assert request.structured_outputs is not None
+            assert request.structured_outputs.json == self.PARAMETERS
+        else:
+            assert request.text is not None
+            assert request.text.format.schema_ == self.PARAMETERS
+        return request
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_named_choice_returns_a_call_not_bare_parameters(
+        self, parser_cls, mock_tokenizer, request_kind
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, request_kind)
+
+        _, content, tool_calls = parser.parse(
+            self.BARE_PARAMETERS, request, enable_auto_tools=True
+        )
+
+        assert [
+            (call.name, json.loads(call.arguments)) for call in tool_calls or []
+        ] == [("get_weather", {"city": "SF", "unit": "C"})]
+        assert content is None
+
+    @pytest.mark.parametrize("chunk_size", [1, 4])
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_named_choice_streams_before_the_last_chunk(
+        self, parser_cls, mock_tokenizer, request_kind, chunk_size
+    ):
+        """The name and arguments must not be buffered until EOF.
+
+        A parser that holds every tool-call event until the envelope
+        balances still accumulates to the right answer, so an assertion on
+        the folded result cannot tell the two apart.  Only deltas emitted
+        while ``finished`` is False count here.
+        """
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, request_kind)
+        early = []
+
+        for start in range(0, len(self.BARE_PARAMETERS), chunk_size):
+            delta_text = self.BARE_PARAMETERS[start : start + chunk_size]
+            finished = start + chunk_size >= len(self.BARE_PARAMETERS)
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=finished,
+            )
+            if not finished and delta and delta.tool_calls:
+                early.extend(delta.tool_calls)
+
+        assert any(
+            call.function and call.function.name == "get_weather" for call in early
+        )
+        assert any(call.function and call.function.arguments for call in early)
+
+
+class TestSchemaCoercionPreservesValidValues:
+    """sc-02: coercion repairs a value written in the wrong JSON type.
+
+    A value already valid for its schema must come back exactly as the
+    model wrote it.  ``extract_types_from_schema`` answers ``["string"]``
+    when it can determine nothing, which is right for reading a value out
+    of raw text and wrong as a constraint: it made an empty schema, a
+    ``const`` and a ``$ref`` all retype an integer as a string.  Where
+    types *were* known, an already-valid value still went through the
+    coercion machinery and came back altered.
+    """
+
+    @staticmethod
+    def _tools(property_schema, definitions=None):
+        parameters = {"type": "object", "properties": {"x": property_schema}}
+        if definitions is not None:
+            parameters["$defs"] = definitions
+        return [
+            ChatCompletionToolsParam(
+                type="function",
+                function={"name": "f", "parameters": parameters},
+            )
+        ]
+
+    @classmethod
+    def _arguments(
+        cls, mock_tokenizer, mock_request, property_schema, literal, definitions=None
+    ):
+        tools = cls._tools(property_schema, definitions)
+        mock_request.tools = tools
+        arguments = f'{{"x":{literal}}}'
+        text = f'{{"name":"f","parameters":{arguments}}}'
+        result = LlamaJsonParser(mock_tokenizer, tools).extract_tool_calls(
+            text, mock_request
+        )
+        return result.tool_calls[0].function.arguments
+
+    @pytest.mark.parametrize(
+        ("property_schema", "literal", "definitions"),
+        [
+            ({"type": "number"}, "9007199254740993", None),
+            ({"type": ["string", "integer"]}, '"007"', None),
+            ({"anyOf": [{"type": "string"}, {"type": "boolean"}]}, '"false"', None),
+            ({"oneOf": [{"type": "string"}, {"type": "integer"}]}, '"007"', None),
+            ({"type": ["string", "null"]}, '"null"', None),
+            ({}, "7", None),
+            ({"const": 7}, "7", None),
+            (
+                {"$ref": "#/$defs/integer_value"},
+                "7",
+                {"integer_value": {"type": "integer"}},
+            ),
+        ],
+        ids=[
+            "large-integer",
+            "type-union-string",
+            "anyof-string",
+            "oneof-string",
+            "nullable-union-string",
+            "empty-schema",
+            "const",
+            "ref",
+        ],
+    )
+    def test_already_valid_values_are_returned_unchanged(
+        self, mock_tokenizer, mock_request, property_schema, literal, definitions
+    ):
+        assert (
+            self._arguments(
+                mock_tokenizer, mock_request, property_schema, literal, definitions
+            )
+            == f'{{"x":{literal}}}'
+        )
+
+    def test_allof_is_a_conjunction_not_a_union(self, mock_tokenizer, mock_request):
+        """``allOf`` narrows the permitted types; it does not widen them.
+
+        Both halves live in one test on purpose.  The first fails against a
+        parser with no validity check at all, the second against one that
+        unions the ``allOf`` branches -- a value permitted by some branch
+        but not by every branch is not already valid, and skipping coercion
+        for it reports a type the schema forbids.
+        """
+        keep = {
+            "allOf": [
+                {"type": ["string", "integer"]},
+                {"type": ["string", "boolean"]},
+            ]
+        }
+        assert (
+            self._arguments(mock_tokenizer, mock_request, keep, '"007"')
+            == '{"x":"007"}'
+        )
+
+        coerce = {
+            "allOf": [
+                {"type": ["string", "boolean"]},
+                {"type": ["boolean", "integer"]},
+            ]
+        }
+        assert (
+            self._arguments(mock_tokenizer, mock_request, coerce, '"true"')
+            == '{"x":true}'
+        )
+
+    @pytest.mark.parametrize(
+        ("property_schema", "literal"),
+        [
+            (
+                {"type": "object", "properties": {"n": {"type": "number"}}},
+                '{"n":9007199254740993}',
+            ),
+            ({"type": "array", "items": {"type": "number"}}, "[9007199254740993]"),
+        ],
+        ids=["nested-object", "array-item"],
+    )
+    def test_valid_values_survive_inside_containers(
+        self, mock_tokenizer, mock_request, property_schema, literal
+    ):
+        """Coercion recurses through ``properties`` and ``items``.
+
+        The scalar cases above only prove the top level is left alone; a
+        validity check placed at the wrong depth still rewrites a large
+        integer nested one level down.
+        """
+        assert (
+            self._arguments(mock_tokenizer, mock_request, property_schema, literal)
+            == f'{{"x":{literal}}}'
+        )
+
+    @pytest.mark.parametrize("chunk_size", [1, 4])
+    def test_streaming_preserves_already_valid_values(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        """The streaming path must preserve them too, and agree exactly.
+
+        Coercion is applied twice by different machinery -- spliced into
+        the settled prefix while streaming, and over the whole object at
+        flush -- so a fix applied to only one path yields a client that
+        sees a different number depending on whether it asked for a stream.
+        """
+        literal = "9007199254740993"
+        property_schema = {"type": "number"}
+        tools = self._tools(property_schema)
+        mock_request.tools = tools
+        arguments = f'{{"x":{literal}}}'
+        text = f'{{"name":"f","parameters":{arguments}}}'
+
+        reference = LlamaJsonParser(mock_tokenizer, tools).extract_tool_calls(
+            text, mock_request
+        )
+        parser = LlamaJsonParser(mock_tokenizer, tools)
+        _, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+
+        assert [c["args"] for c in calls] == [
+            tc.function.arguments for tc in reference.tool_calls
+        ]
+        assert [c["args"] for c in calls] == [arguments]
