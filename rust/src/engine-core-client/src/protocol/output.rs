@@ -426,7 +426,7 @@ mod tests {
                                 7,
                             ],
                             new_logprobs: None,
-                                        new_prompt_logprobs_tensors: None,
+                            new_prompt_logprobs_tensors: None,
                             pooling_output: None,
                             finish_reason: None,
                             stop_reason: None,
