@@ -472,8 +472,8 @@ class KimiMoE(nn.Module):
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate_size,
+                hidden_size=config.hidden_size,  # 7618
+                intermediate_size=shared_intermediate_size,  # 3072*2
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,

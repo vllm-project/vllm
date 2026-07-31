@@ -35,12 +35,12 @@ class LatentTailTier(IntEnum):
     # copy. Requires SM100, TP 8/16, BF16
     TAIL_FUSION = 0
 
-    # ``_overlay_allreduce_tail``. The portable default: reduce the latent,
+    # ``_overlap_allreduce_tail``. The portable default, up to
+    # VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD tokens: reduce the latent,
     # up-project the full hidden dim from the replicated weight, and add the
-    # separately reduced shared output. Below
-    # VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD tokens it hides the shared
-    # all-reduce behind that GEMM on the aux stream.
-    REPLICATED = 1
+    # separately reduced shared output, hiding that shared all-reduce behind the
+    # up-projection GEMM on the aux stream.
+    ALLREDUCE_OVERLAP = 1
 
     # ``_shard_up_proj_tail``. Prefill-sized: each rank up-projects only its
     # hidden shard and accumulates into the shared partial, so the shared
@@ -172,7 +172,7 @@ class LatentMoERunner(MoERunner):
             num_tokens <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
             and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
         ):
-            return LatentTailTier.REPLICATED
+            return LatentTailTier.ALLREDUCE_OVERLAP
         # tier 2
         return LatentTailTier.COLUMN_PARALLEL
 
@@ -199,7 +199,7 @@ class LatentMoERunner(MoERunner):
             result, trunc_size, output_is_reduced=True
         )
 
-    def _overlay_allreduce_tail(
+    def _overlap_allreduce_tail(
         self,
         fused_output: torch.Tensor,
         shared_output: torch.Tensor,
@@ -325,8 +325,8 @@ class LatentMoERunner(MoERunner):
         tier = self._select_tail_tier(fused_output, shared_output)
         if tier is LatentTailTier.TAIL_FUSION:
             latent_tail = self._small_batch_tail
-        elif tier is LatentTailTier.REPLICATED:
-            latent_tail = self._overlay_allreduce_tail
+        elif tier is LatentTailTier.ALLREDUCE_OVERLAP:
+            latent_tail = self._overlap_allreduce_tail
         else:
             latent_tail = self._shard_up_proj_tail
 
