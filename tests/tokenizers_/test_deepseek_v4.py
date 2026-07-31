@@ -183,8 +183,17 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     assert 'parameter name="arguments"' not in prompt
 
 
-@pytest.mark.parametrize("reasoning_effort", ["minimal", "low", "medium", "high"])
-def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
+@pytest.mark.parametrize(
+    ("reasoning_effort", "expected_prefix"),
+    [
+        ("low", "<｜begin▁of▁sentence｜><｜User｜>Hello"),
+        ("high", "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"),
+        ("max", "<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"),
+    ],
+)
+def test_deepseek_v4_renders_0731_reasoning_effort_prompts(
+    reasoning_effort, expected_prefix
+):
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
         tokenize=False,
@@ -193,7 +202,7 @@ def test_deepseek_v4_accepts_openai_reasoning_effort_values(reasoning_effort):
     )
 
     assert prompt.endswith("<｜Assistant｜><think>")
-    assert "Reasoning Effort: Absolute maximum" not in prompt
+    assert prompt.startswith(expected_prefix)
 
 
 def test_deepseek_v4_none_reasoning_effort_disables_thinking():
@@ -212,7 +221,7 @@ def test_deepseek_v4_none_reasoning_effort_disables_thinking():
     [
         ("none", "chat", None),
         ("minimal", "thinking", "high"),
-        ("low", "thinking", "high"),
+        ("low", "thinking", "low"),
         ("medium", "thinking", "high"),
         ("high", "thinking", "high"),
         ("xhigh", "thinking", "max"),
@@ -248,7 +257,7 @@ def test_deepseek_v4_maps_compatible_thinking_reasoning_effort_values(
     assert captured_kwargs[-1]["reasoning_effort"] == expected_effort
 
 
-def test_deepseek_v4_preserves_reference_max_reasoning_effort():
+def test_deepseek_v4_renders_0731_max_reasoning_effort():
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
         tokenize=False,
@@ -256,12 +265,10 @@ def test_deepseek_v4_preserves_reference_max_reasoning_effort():
         reasoning_effort="max",
     )
 
-    assert prompt.startswith(
-        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
-    )
+    assert prompt.startswith("<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum")
 
 
-def test_deepseek_v4_maps_xhigh_to_reference_max_reasoning_effort():
+def test_deepseek_v4_maps_xhigh_to_0731_max_reasoning_effort():
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
         tokenize=False,
@@ -269,9 +276,7 @@ def test_deepseek_v4_maps_xhigh_to_reference_max_reasoning_effort():
         reasoning_effort="xhigh",
     )
 
-    assert prompt.startswith(
-        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
-    )
+    assert prompt.startswith("<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum")
 
 
 @pytest.mark.parametrize(

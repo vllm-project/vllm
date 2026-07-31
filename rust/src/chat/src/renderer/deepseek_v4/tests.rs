@@ -76,12 +76,52 @@ fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
     let rendered = render_request(&request);
 
     expect![[r#"
+        <｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.
+        You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.
+        Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.
+
+        <｜User｜>solve it<｜Assistant｜><think>"#]]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn reasoning_effort_high_adds_0731_high_prefix() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::High);
+
+    let rendered = render_request(&request);
+
+    expect![[r#"
         <｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum with no shortcuts permitted.
         You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.
         Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.
 
         <｜User｜>solve it<｜Assistant｜><think>"#]]
     .assert_eq(&rendered);
+}
+
+#[test]
+fn reasoning_effort_low_keeps_the_default_prompt() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"].assert_eq(&rendered);
 }
 
 #[test]

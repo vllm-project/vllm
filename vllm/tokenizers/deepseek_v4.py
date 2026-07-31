@@ -48,6 +48,8 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 reasoning_effort = None
             elif reasoning_effort in ("max", "xhigh"):
                 reasoning_effort = "max"
+            elif reasoning_effort == "low":
+                reasoning_effort = "low"
             else:
                 reasoning_effort = "high"
 
