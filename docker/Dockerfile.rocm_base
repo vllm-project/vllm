@@ -128,13 +128,10 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
     fi
 
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
-# This creates wrapper scripts in a separate directory and points HIP to use
-# them
+# This creates wrapper scripts in a separate directory and points HIP to use them
 # This avoids modifying the original ROCm binaries which can break detection
-# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images
-# (Dockerfile.rocm)
-# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers
-# if USE_SCCACHE=1
+# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
+# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
