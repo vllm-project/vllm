@@ -39,9 +39,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -95,7 +93,7 @@ class MiniMaxM2MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             scoring_func=config.scoring_func,

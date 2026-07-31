@@ -409,7 +409,7 @@ def _deep_ep_v2_moe_cudagraph(
     vllm_cfg.kernel_config = KernelConfig(moe_backend="flashinfer_trtllm")
 
     with set_current_vllm_config(vllm_cfg):
-        # Initialize vLLM parallel state (needed by FusedMoE layer)
+        # Initialize vLLM parallel state (needed by MoERunner layer)
         temp_file = tempfile.mktemp()
         init_distributed_environment(
             world_size=pgi.world_size,
