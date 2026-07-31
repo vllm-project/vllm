@@ -9,929 +9,1550 @@
 #include "vec_pack.h"
 
 namespace {
-// For this cpu kernel, we have some innovations aside from the existing gpu kernels:
-// 1) Use less parallel loops, i.e. 4 including l2_norm.
-// 2) Fuse part of l2_norm with the rest of the computation.
 
-#define THREAD_BUFFER_ALLOC(dst, base_ptr, offset, type, size) \
-  type* dst = reinterpret_cast<type*>((base_ptr) + (offset));  \
-  offset += (size);
+// [NOTE] GDN Optimizations on AMX CPU
+//   * intra loop: fuse `kkt_solve` and `recompute_w_u` so as to avoid materialize `A`.
+//   * inter loop: fuse `recompute_w_u` and `update_v` so as to avoid materialize `h` and `v_new`.
+//   * intra loop parallel on H instead of Hv, remove duplicated key @ key.T
+//   * fuse format pack with elemwise OP as much as possible.
+//   * update state (FP32) with amx-bf16 where C(FP32) += A(BF16) * B(BF16)
+//   * compile time mask out upper triangular part in decay mask and tril solve, reduce fma needed.
 
-template <typename scalar_t>
-inline void fill_stub(scalar_t* __restrict__ out, float val, int size) {
+// * convert to vnni format， expect contiguous input and output
+//     from [K/2, 2, N] FP32 to [K/2, N, 2] BF16
+// * update src = src * exp(g_last)
+template <typename scalar_t, int K, int N>
+void pack_vnni2(scalar_t* __restrict__ dst, float* __restrict__ src, const float g_last, int ld_src, int ld_dst) {
+  static_assert(K % 32 == 0);
+  static_assert(N % 32 == 0);
+
+  const float scale = std::exp(g_last);
+#if defined(CPU_CAPABILITY_AVX512)
+  constexpr int KB = K / 2;
+  constexpr int NB = N / 32;
+
+  __m512i s0, s1, d0, d1;
+  __m512 vd = _mm512_set1_ps(scale);
+
+  const auto trans = [&](auto i) {
+    constexpr int kb = i / NB;
+    constexpr int nb = i % NB;
+
+    // [K/2, 2, N/32, 32] -> [K/2, N/32, 32, 2]
+    constexpr int k0 = kb * 2 + 0;
+    constexpr int k1 = kb * 2 + 1;
+    __m512 v00 = _mm512_loadu_ps(src + k0 * ld_src + nb * 32);
+    __m512 v01 = _mm512_loadu_ps(src + k0 * ld_src + nb * 32 + 16);
+    __m512 v10 = _mm512_loadu_ps(src + k1 * ld_src + nb * 32);
+    __m512 v11 = _mm512_loadu_ps(src + k1 * ld_src + nb * 32 + 16);
+    s0 = (__m512i)_mm512_cvtne2ps_pbh(v01, v00);
+    s1 = (__m512i)_mm512_cvtne2ps_pbh(v11, v10);
+
+    std::tie(d0, d1) = transpose_2x32_16bit(s0, s1);
+    _mm512_storeu_si512(dst + kb * ld_dst * 2 + nb * 32 * 2, d0);
+    _mm512_storeu_si512(dst + kb * ld_dst * 2 + nb * 32 * 2 + 32, d1);
+
+    // update src = src * exp(g_last)
+    _mm512_storeu_ps(src + k0 * ld_src + nb * 32, _mm512_mul_ps(v00, vd));
+    _mm512_storeu_ps(src + k0 * ld_src + nb * 32 + 16, _mm512_mul_ps(v01, vd));
+    _mm512_storeu_ps(src + k1 * ld_src + nb * 32, _mm512_mul_ps(v10, vd));
+    _mm512_storeu_ps(src + k1 * ld_src + nb * 32 + 16, _mm512_mul_ps(v11, vd));
+  };
+  Unroll<KB * NB>{}(trans);
+#else
+  // [K/2, 2, N] -> [K/2, N, 2]
+  for (int k = 0; k < K; k += 2) {
+    for (int n = 0; n < N; ++n) {
+      const float v0 = src[(k + 0) * ld_src + n];
+      const float v1 = src[(k + 1) * ld_src + n];
+      dst[(k >> 1) * ld_dst * 2 + n * 2 + 0] = static_cast<scalar_t>(v0);
+      dst[(k >> 1) * ld_dst * 2 + n * 2 + 1] = static_cast<scalar_t>(v1);
+      src[(k + 0) * ld_src + n] = v0 * scale;
+      src[(k + 1) * ld_src + n] = v1 * scale;
+    }
+  }
+#endif
+}
+
+template <typename scalar_t, int SIZE>
+inline void fill_stub(scalar_t* __restrict__ out, float val) {
   using Vec = at::vec::Vectorized<scalar_t>;
   constexpr int kVecSize = Vec::size();
+  static_assert(SIZE % kVecSize == 0);
   const Vec data_vec = Vec(static_cast<scalar_t>(val));
-  int d = 0;
-#pragma GCC unroll 4
-  for (; d <= size - kVecSize; d += kVecSize) {
+#pragma GCC unroll 8
+  for (int d = 0; d < SIZE; d += kVecSize) {
     data_vec.store(out + d);
-  }
-  if (size - d > 0) {
-    data_vec.store(out + d, size - d);
   }
 }
 
-template <typename scalar_t, int64_t chunk_size = 64>
-void chunk_gated_delta_rule_kernel_impl(
-    scalar_t* __restrict__ out,                  // [B, T, HV, EV]
-    float* __restrict__ final_state_data,        // [N, HV, EK, EV]
-    const scalar_t* __restrict__ q_orig,         // [B, T, HK, EK]
-    const scalar_t* __restrict__ k_orig,         // [B, T, HK, EK]
-    const scalar_t* __restrict__ v_orig,         // [B, T, HV, EV]
-    const float* __restrict__ g_orig,            // [B, T, HV] FP32
-    const scalar_t* __restrict__ b_orig,         // [B, T, HV]
-    const int32_t* __restrict__ cu_seqlens_ptr,  // [N + 1] INT32
-    float* __restrict__ buff,
-    scalar_t* __restrict__ reduced_buff,
-    scalar_t* __restrict__ thread_buff,
-    const int32_t* __restrict__ chunk_offsets_ptr,
-    const int32_t* __restrict__ chunk_indices_ptr,
-    bool use_qk_l2norm_in_kernel,
-    const int64_t& batch_size,
-    const int64_t& global_seq_len,
-    const int64_t& qk_num_head,
-    const int64_t& v_num_head,
-    const int64_t& qk_head_size,
-    const int64_t& v_head_size,
-    const int64_t& qStrideH,
-    const int64_t& qStrideT,
-    const int64_t& kStrideH,
-    const int64_t& kStrideT,
-    const int64_t& vStrideH,
-    const int64_t& vStrideT,
-    const int64_t& oStrideH,
-    const int64_t& oStrideT,
-    const int64_t& global_total_seq_length,
-    const int64_t& global_num_chunk,
-    const int64_t& buff_size_16bit_per_thread,
-    double eps = 1e-5) {
-  int64_t gStrideH = 1;
-  int64_t gStrideT = v_num_head;
-  int64_t bStrideH = 1;
-  int64_t bStrideT = v_num_head;
-  int64_t final_state_StrideN = v_num_head * qk_head_size * v_head_size;
-  int64_t final_state_StrideH = qk_head_size * v_head_size;
-  int64_t final_state_StrideE = v_head_size;
-  int64_t head_group = v_num_head / qk_num_head;
-  float scale = 1.0 / std::sqrt(qk_head_size);
-  using bVec = at::vec::Vectorized<scalar_t>;
-  using fVec = at::vec::Vectorized<float>;
-  constexpr int64_t VecSize = bVec::size();
-  constexpr int64_t fVecSize = fVec::size();
+// Portable fallback for non-AVX512 builds (ARM/NEON, old x86 without
+// AVX512BF16), vectorized via at::vec::Vectorized<T> (portable across
+// AVX2/NEON/generic) mirroring the idioms used elsewhere in this file (see
+// l2norm_fwd_kernel_impl's predecessor and fused_gdn_gating_kernel_impl):
+// bVec/fVec pairs with convert_to_float/convert_from_float for bf16<->float,
+// plain scalar tails for remainders. Two kernels (cumsum_kernel,
+// update_key_kernel) write a transposed layout relative to their vectorized
+// read axis; those vectorize the load/compute and unpack lanes for the
+// (unavoidably strided) store.
+template <typename scalar_t, int D, bool has_scale>
+struct l2norm_kernel {
+  static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input, float eps) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int bVecSize = bVec::size();
+    constexpr float scale = 1.f / std::sqrt(static_cast<float>(D));
 
-  // Data pointers
-  float* g_pad = buff;
-  float* core_attn_out = g_pad + v_num_head * global_total_seq_length;
-  float* decay_mask = core_attn_out + batch_size * v_num_head * global_total_seq_length * v_head_size;
-  float* v_beta_attn = decay_mask + v_num_head * global_total_seq_length * chunk_size;
+    fVec sum_fvec0(0.f), sum_fvec1(0.f);
+    int d = 0;
+    for (; d <= D - bVecSize; d += bVecSize) {
+      bVec in_bvec = bVec::loadu(input + d);
+      fVec in0, in1;
+      std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+      sum_fvec0 = sum_fvec0 + in0 * in0;
+      sum_fvec1 = sum_fvec1 + in1 * in1;
+    }
+    float sqsum = vec_reduce_sum(sum_fvec0 + sum_fvec1);
+    for (; d < D; ++d) {
+      float v = static_cast<float>(input[d]);
+      sqsum += v * v;
+    }
 
-  scalar_t* q_pad = reduced_buff;
-  scalar_t* k_pad = q_pad + qk_num_head * global_total_seq_length * qk_head_size;
-  scalar_t* v_pad = k_pad + qk_num_head * global_total_seq_length * qk_head_size;
-  scalar_t* k_beta = v_pad + v_num_head * global_total_seq_length * v_head_size;
-  scalar_t* v_beta = k_beta + v_num_head * global_total_seq_length * qk_head_size;
-  scalar_t* k_cumdecay_reduced = v_beta + v_num_head * global_total_seq_length * v_head_size;
-  scalar_t* q_norm_sum = k_cumdecay_reduced + v_num_head * global_total_seq_length * qk_head_size;
-  scalar_t* k_norm_sum = q_norm_sum + qk_num_head * global_seq_len;
-
-  if (use_qk_l2norm_in_kernel) {
-    at::parallel_for(0, qk_num_head * global_seq_len, 0, [&](int64_t begin, int64_t end) {
-      int64_t h_qk = 0, l = 0;
-      data_index_init(begin, h_qk, qk_num_head, l, global_seq_len);
-      for (int64_t i = begin; i < end; ++i) {
-        auto q_norm_sum_ptr = q_norm_sum + h_qk * global_seq_len + l;
-        auto k_norm_sum_ptr = k_norm_sum + h_qk * global_seq_len + l;
-        float sum_q = float(0);
-        float sum_k = float(0);
-        fVec sum_q_fvec = fVec(float(0));
-        fVec sum_k_fvec = fVec(float(0));
-        int64_t q_offset = l * qStrideT + h_qk * qStrideH;
-        int64_t k_offset = l * qStrideT + h_qk * qStrideH;
-        int64_t d;
-        for (d = 0; d <= qk_head_size - VecSize; d += VecSize) {
-          bVec q_bvec = bVec::loadu(q_orig + q_offset + d);
-          fVec q_fvec0, q_fvec1;
-          std::tie(q_fvec0, q_fvec1) = at::vec::convert_to_float(q_bvec);
-          sum_q_fvec += q_fvec0 * q_fvec0;
-          sum_q_fvec += q_fvec1 * q_fvec1;
-          bVec k_bvec = bVec::loadu(k_orig + k_offset + d);
-          fVec k_fvec0, k_fvec1;
-          std::tie(k_fvec0, k_fvec1) = at::vec::convert_to_float(k_bvec);
-          sum_k_fvec += k_fvec0 * k_fvec0;
-          sum_k_fvec += k_fvec1 * k_fvec1;
-        }
-        sum_q += vec_reduce_sum(sum_q_fvec);
-        sum_k += vec_reduce_sum(sum_k_fvec);
-        q_norm_sum_ptr[0] = static_cast<scalar_t>(float(1) / std::sqrt(sum_q + eps));
-        k_norm_sum_ptr[0] = static_cast<scalar_t>(float(1) / std::sqrt(sum_k + eps));
-        data_index_step(h_qk, qk_num_head, l, global_seq_len);
+    float rscale = 1.f / std::sqrt(sqsum + eps);
+    fVec rscale_fvec(rscale);
+    fVec scale_fvec(scale);
+    d = 0;
+    for (; d <= D - bVecSize; d += bVecSize) {
+      bVec in_bvec = bVec::loadu(input + d);
+      fVec in0, in1;
+      std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+      in0 = in0 * rscale_fvec;
+      in1 = in1 * rscale_fvec;
+      if constexpr (has_scale) {
+        in0 = in0 * scale_fvec;
+        in1 = in1 * scale_fvec;
       }
-    });
+      bVec out_bvec = at::vec::convert_from_float<scalar_t>(in0, in1);
+      out_bvec.store(out + d);
+    }
+    for (; d < D; ++d) {
+      float v = static_cast<float>(input[d]) * rscale;
+      if constexpr (has_scale) {
+        v *= scale;
+      }
+      out[d] = static_cast<scalar_t>(v);
+    }
   }
+};
 
-  // query = query * scale
-  // k_beta = key * beta.unsqueeze(-1)
-  // v_beta = value * beta.unsqueeze(-1)
-  // Padding for q/k/v/beta
-  at::parallel_for(0, qk_num_head * global_num_chunk, 1, [&](int64_t begin, int64_t end) {
-    int ompIdx = at::get_thread_num();
-    int64_t h_qk = 0, c = 0;
-    data_index_init(begin, h_qk, qk_num_head, c, global_num_chunk);
-    for ([[maybe_unused]] auto z : c10::irange(begin, end)) {
-      int64_t ib = chunk_indices_ptr[c * 2];      // idx_batch
-      int64_t ic = chunk_indices_ptr[c * 2 + 1];  // idx_chunk
-      int64_t l_orig = cu_seqlens_ptr[ib] + ic * chunk_size;
-      int64_t l = c * chunk_size;
-      bool is_tail = (c + 1 == chunk_offsets_ptr[ib + 1]);
-      int64_t seq_len = cu_seqlens_ptr[ib + 1] - cu_seqlens_ptr[ib];
-      int64_t real_chunk_size = is_tail ? seq_len - ic * chunk_size : chunk_size;
-      auto q_orig_ptr = q_orig + h_qk * qStrideH + l_orig * qStrideT;
-      auto k_orig_ptr = k_orig + h_qk * kStrideH + l_orig * kStrideT;
-      auto v_orig_ptr = v_orig + l_orig * vStrideT;
-      auto b_orig_ptr = b_orig + l_orig * bStrideT;
-      auto q_pad_ptr = q_pad + h_qk * global_total_seq_length * qk_head_size + l * qk_head_size;
-      auto k_pad_ptr = k_pad + h_qk * global_total_seq_length * qk_head_size + l * qk_head_size;
-      auto v_pad_ptr = v_pad + l * v_head_size;
-      auto k_beta_ptr = k_beta + l * qk_head_size;
-      auto v_beta_ptr = v_beta + l * v_head_size;
+#if defined(CPU_CAPABILITY_AVX512)
+template <int D, bool has_scale>
+struct l2norm_kernel<at::BFloat16, D, has_scale> {
+  static inline void apply(at::BFloat16* __restrict__ out, const at::BFloat16* __restrict__ input, float eps) {
+    static_assert(D % 32 == 0);
+    constexpr int COLS = D / 32;
 
-      for (int64_t j = 0; j < real_chunk_size; j++) {
-        auto curr_q_orig = q_orig_ptr + j * qStrideT;
-        auto curr_k_orig = k_orig_ptr + j * kStrideT;
-        auto curr_q_pad = q_pad_ptr + j * qk_head_size;
-        auto curr_k_pad = k_pad_ptr + j * qk_head_size;
-        auto q_scale =
-            use_qk_l2norm_in_kernel ? *(q_norm_sum + h_qk * global_seq_len + l_orig + j) : static_cast<scalar_t>(1);
-        auto k_scale =
-            use_qk_l2norm_in_kernel ? *(k_norm_sum + h_qk * global_seq_len + l_orig + j) : static_cast<scalar_t>(1);
-        auto q_scale_vec = bVec(q_scale);
-        auto k_scale_vec = bVec(k_scale);
-        int64_t i = 0;
-        scalar_t scale_reduced = static_cast<scalar_t>(scale);
-        auto vec_scale_reduced = bVec(scale_reduced);
-        for (; i < fVecSize * (qk_head_size / fVecSize); i += fVecSize) {
-          auto tmp0 = bVec::loadu(curr_q_orig + i, fVecSize);
-          auto tmp1 = tmp0 * q_scale_vec * vec_scale_reduced;
-          tmp1.store(curr_q_pad + i, fVecSize);
-          auto tmp3 = bVec::loadu(curr_k_orig + i, fVecSize);
-          auto tmp4 = tmp3 * k_scale_vec;
-          tmp4.store(curr_k_pad + i, fVecSize);
+    __m512bh va[COLS];
+    __m512 vrscale;
+
+    constexpr float scale = 1.f / std::sqrt(D);
+    __m512 vscale = _mm512_set1_ps(scale);
+
+    // step 1: load input and do reduce with avx512-bf16
+    __m512 vsum = _mm512_set1_ps(0.f);
+    auto reduce = [&](auto col) {
+      va[col] = (__m512bh)(_mm512_loadu_si512(input + col * 32));
+      vsum = _mm512_dpbf16_ps(vsum, va[col], va[col]);
+    };
+    Unroll<COLS>{}(reduce);
+
+    float sqsum = _mm512_reduce_add_ps(vsum);
+    float rscale = 1.f / std::sqrt(sqsum + eps);
+    vrscale = _mm512_set1_ps(rscale);
+
+    // step 2: apply scale to output
+    auto map = [&](auto col) {
+      __m512i a16 = (__m512i)va[col];
+      __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(a16, 0));
+      __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(a16, 1));
+      va0 = _mm512_mul_ps(va0, vrscale);
+      va1 = _mm512_mul_ps(va1, vrscale);
+      // keep the mul order same as torch code:
+      //   query = l2norm(query) * scale
+      if constexpr (has_scale) {
+        va0 = _mm512_mul_ps(va0, vscale);
+        va1 = _mm512_mul_ps(va1, vscale);
+      }
+      _mm512_storeu_si512(out + col * 32, (__m512i)(_mm512_cvtne2ps_pbh(va1, va0)));
+    };
+    Unroll<COLS>{}(map);
+  }
+};
+#endif
+
+template <typename scalar_t, int CHUNK_SIZE, int BLOCK_H>
+struct cumsum_kernel {
+  static inline void apply(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      int mb_size,
+      int hb_size,
+      int ld_src,
+      int ld_dst) {
+    // out: [hb_size valid rows, CHUNK_SIZE] within a [BLOCK_H, ld_dst] buffer
+    // input: [mb_size valid rows, hb_size] within a [CHUNK_SIZE(padded), ld_src] buffer
+    // input is contiguous along j (vectorize the load/accumulate); out is
+    // contiguous along i instead (transposed), so the store is per-lane.
+    using Vec = at::vec::Vectorized<scalar_t>;
+    constexpr int VecSize = Vec::size();
+    alignas(64) scalar_t lane_buf[VecSize];
+    int j = 0;
+    for (; j <= hb_size - VecSize; j += VecSize) {
+      Vec running(static_cast<scalar_t>(0));
+      for (int i = 0; i < CHUNK_SIZE; ++i) {
+        if (i < mb_size) {
+          running = running + Vec::loadu(input + i * ld_src + j);
+        }
+        running.store(lane_buf);
+        for (int lane = 0; lane < VecSize; ++lane) {
+          out[(j + lane) * ld_dst + i] = lane_buf[lane];
+        }
+      }
+    }
+    for (; j < hb_size; ++j) {
+      float running = 0.f;
+      for (int i = 0; i < CHUNK_SIZE; ++i) {
+        if (i < mb_size) {
+          running += static_cast<float>(input[i * ld_src + j]);
+        }
+        out[j * ld_dst + i] = static_cast<scalar_t>(running);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE, int BLOCK_H>
+struct cumsum_kernel<float, CHUNK_SIZE, BLOCK_H> {
+  static inline void
+  apply(float* __restrict__ out, const float* __restrict__ input, int mb_size, int hb_size, int ld_src, int ld_dst) {
+    // vector length of fp32 for avx512
+    static_assert(BLOCK_H == 16);
+    TORCH_CHECK(hb_size > 0 && hb_size <= BLOCK_H);
+    const __mmask16 vmask = static_cast<__mmask16>((1u << hb_size) - 1u);
+
+    __m512i va[16];
+    __m512 vsum = _mm512_set1_ps(0.f);
+
+    for (int i = 0; i < CHUNK_SIZE; i += 16) {
+      // load input data
+      Unroll<16>{}([&](auto j) {
+        __m512 v;
+        if (i + j < mb_size) {
+          v = _mm512_maskz_loadu_ps(vmask, input + (i + j) * ld_src);
+        } else {
+          v = _mm512_setzero_ps();
+        }
+        vsum = _mm512_add_ps(vsum, v);
+        va[j] = _mm512_castps_si512(vsum);
+      });
+      // transpose
+      transpose_16x16_32bit(va);
+      // store output data
+      Unroll<16>{}([&](auto j) {
+        if (j < hb_size) {
+          _mm512_storeu_si512(out + j * ld_dst + i, va[j]);
+        }
+      });
+    }
+  }
+};
+#endif
+
+template <typename scalar_t, int CHUNK_SIZE>
+struct decay_mask_kernel {
+  // decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+  static inline void apply(scalar_t* __restrict__ out, const scalar_t* __restrict__ input) {
+    using Vec = at::vec::Vectorized<scalar_t>;
+    constexpr int VecSize = Vec::size();
+    const Vec zero(static_cast<scalar_t>(0));
+    for (int row = 0; row < CHUNK_SIZE; ++row) {
+      Vec g_row(input[row]);
+      Vec limit_vec(static_cast<scalar_t>(row));
+      int col = 0;
+      for (; col <= CHUNK_SIZE - VecSize; col += VecSize) {
+        Vec g_col = Vec::loadu(input + col);
+        Vec vc = (g_row - g_col).exp_u20();
+        Vec idx = Vec::arange(static_cast<scalar_t>(col), static_cast<scalar_t>(1));
+        Vec result = Vec::blendv(zero, vc, idx <= limit_vec);
+        result.store(out + row * CHUNK_SIZE + col);
+      }
+      for (; col < CHUNK_SIZE; ++col) {
+        out[row * CHUNK_SIZE + col] =
+            col <= row
+                ? static_cast<scalar_t>(std::exp(static_cast<float>(input[row]) - static_cast<float>(input[col])))
+                : static_cast<scalar_t>(0);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE>
+struct decay_mask_kernel<float, CHUNK_SIZE> {
+  static inline void apply(float* __restrict__ out, const float* __restrict__ input) {
+    static_assert(CHUNK_SIZE % 16 == 0);
+
+    constexpr int ROWS = CHUNK_SIZE;
+    constexpr int COLS = CHUNK_SIZE / 16;
+
+    __m512 va;
+    __m512 vb[COLS];
+
+    // step 1: load g[j]
+    auto loadb = [&](auto i) { vb[i] = _mm512_loadu_ps(input + i * 16); };
+    Unroll<COLS>{}(loadb);
+
+    // step2: exp(g[i] - g[j])
+    auto compute = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      if constexpr (col == 0) {
+        va = _mm512_set1_ps(input[row]);
+      }
+
+      // mask vb[col] (already loaded in step 1) for the lower-triangular region
+      constexpr int len = std::max(0, std::min(row + 1 - col * 16, 16));
+
+      __m512 vc;
+      if constexpr (len == 16) {
+        vc = _mm512_fexp_u20_ps(va - vb[col]);
+      } else if constexpr (len == 0) {
+        vc = _mm512_setzero_ps();
+      } else {
+        vc = _mm512_fexp_u20_ps(va - vb[col]);
+        // do mask for vc
+        constexpr __mmask16 vmask = (1 << len) - 1;
+        vc = _mm512_mask_blend_ps(vmask, _mm512_setzero_ps(), vc);
+      }
+      _mm512_storeu_ps(out + row * CHUNK_SIZE + col * 16, vc);
+    };
+    Unroll<ROWS * COLS>{}(compute);
+  }
+};
+#endif
+
+template <typename scalar_t, int CHUNK_SIZE, bool has_beta>
+struct apply_mask_kernel {
+  // has_beta:  attn2 = -attn * beta * d  (strict lower, col < row)
+  // !has_beta: attn2 = attn * d         (lower incl. diagonal, col <= row)
+  static inline void apply(
+      scalar_t* __restrict__ attn2,
+      const float* __restrict__ attn,
+      const scalar_t* __restrict__ beta,
+      const float* __restrict__ d,
+      int size,
+      int b_stride = 0) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+    const fVec zero(0.f);
+    for (int row = 0; row < size; ++row) {
+      int col_limit = has_beta ? row : row + 1;
+      float beta_val = 1.f;
+      if constexpr (has_beta) {
+        beta_val = -static_cast<float>(beta[row * b_stride]);
+      }
+      fVec beta_fvec(beta_val);
+      fVec limit_fvec(static_cast<float>(col_limit));
+      int col = 0;
+      for (; col <= CHUNK_SIZE - bVecSize; col += bVecSize) {
+        fVec a0 = fVec::loadu(attn + row * CHUNK_SIZE + col);
+        fVec a1 = fVec::loadu(attn + row * CHUNK_SIZE + col + fVecSize);
+        fVec d0 = fVec::loadu(d + row * CHUNK_SIZE + col);
+        fVec d1 = fVec::loadu(d + row * CHUNK_SIZE + col + fVecSize);
+        fVec v0 = a0 * beta_fvec * d0;
+        fVec v1 = a1 * beta_fvec * d1;
+        fVec idx0 = fVec::arange(static_cast<float>(col), 1.f);
+        fVec idx1 = fVec::arange(static_cast<float>(col + fVecSize), 1.f);
+        v0 = fVec::blendv(zero, v0, idx0 < limit_fvec);
+        v1 = fVec::blendv(zero, v1, idx1 < limit_fvec);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(v0, v1);
+        out_bvec.store(attn2 + row * CHUNK_SIZE + col);
+      }
+      for (; col < CHUNK_SIZE; ++col) {
+        float v = 0.f;
+        if (col < col_limit) {
+          v = attn[row * CHUNK_SIZE + col] * beta_val * d[row * CHUNK_SIZE + col];
+        }
+        attn2[row * CHUNK_SIZE + col] = static_cast<scalar_t>(v);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE, bool has_beta>
+struct apply_mask_kernel<at::BFloat16, CHUNK_SIZE, has_beta> {
+  static inline void apply(
+      at::BFloat16* __restrict__ attn2,
+      const float* __restrict__ attn,
+      const at::BFloat16* __restrict__ beta,
+      const float* __restrict__ d,
+      int size,
+      int b_stride = 0) {
+    static_assert(CHUNK_SIZE % 16 == 0);
+
+    constexpr int ROWS = CHUNK_SIZE;
+    constexpr int COLS = CHUNK_SIZE / 16;
+
+    __m512 vbeta;
+
+    // has_beta: attn2 = -attn * beta * d  (strict lower)
+    // !has_beta: attn2 = attn * d         (lower incl. diagonal)
+    auto compute = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+
+      constexpr int len =
+          has_beta ? std::max(0, std::min(row - col * 16, 16)) : std::max(0, std::min(row + 1 - col * 16, 16));
+      if (row < size) {
+        if constexpr (has_beta) {
+          if constexpr (col == 0) {
+            vbeta = _mm512_set1_ps(-static_cast<float>(beta[row * b_stride]));
+          }
         }
 
-        for (auto hi = 0; hi < head_group; hi++) {
-          int64_t h = h_qk * head_group + hi;
-          auto curr_v_orig = v_orig_ptr + h * vStrideH + j * vStrideT;
-          auto curr_b_orig = b_orig_ptr + h * bStrideH + j * bStrideT;
-          scalar_t b_orig_val_reduced = *(curr_b_orig);
-          auto curr_v_pad = v_pad_ptr + h * global_total_seq_length * v_head_size + j * v_head_size;
-          auto curr_k_beta = k_beta_ptr + h * global_total_seq_length * qk_head_size + j * qk_head_size;
-          auto curr_v_beta = v_beta_ptr + h * global_total_seq_length * v_head_size + j * v_head_size;
+        __m512 vc;
+        if constexpr (len == 0) {
+          vc = _mm512_setzero_ps();
+        } else {
+          constexpr __mmask16 vmask = (1 << len) - 1;
+          __m512 va = _mm512_maskz_loadu_ps(vmask, attn + row * CHUNK_SIZE + col * 16);
+          __m512 vd = _mm512_maskz_loadu_ps(vmask, d + row * CHUNK_SIZE + col * 16);
+          if constexpr (has_beta) {
+            vc = _mm512_mul_ps(_mm512_mul_ps(va, vbeta), vd);
+          } else {
+            vc = _mm512_mul_ps(va, vd);
+          }
+        }
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(attn2 + row * CHUNK_SIZE + col * 16), (__m256i)(_mm512_cvtneps_pbh(vc)));
+      }
+    };
+    Unroll<ROWS * COLS>{}(compute);
+  }
+};
+#endif
 
-          // query = query * scale
-          // k_beta = key * beta.unsqueeze(-1)
-          int64_t i = 0;
-          auto vec_b_reduced = bVec(b_orig_val_reduced);
-          for (; i < fVecSize * (qk_head_size / fVecSize); i += fVecSize) {
-            auto tmp0 = bVec::loadu(curr_k_orig + i, fVecSize);
-            auto tmp2 = tmp0 * k_scale_vec * vec_b_reduced;
-            tmp2.store(curr_k_beta + i, fVecSize);
-          }
-          // v_beta = value * beta.unsqueeze(-1)
-          i = 0;
-          for (; i < VecSize * (v_head_size / VecSize); i += VecSize) {
-            auto tmp3 = bVec::loadu(curr_v_orig + i);
-            tmp3.store(curr_v_pad + i);
-            auto tmp5 = tmp3 * vec_b_reduced;
-            tmp5.store(curr_v_beta + i);
-          }
+template <typename scalar_t, int CHUNK_SIZE>
+struct solve_tril_kernel {
+  // (I + L)^{-1} via forward substitution, L = strict-lower part of attn2.
+  static inline void apply(scalar_t* __restrict__ attn2, int size) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
+    // for len == 0 and row < size, we don't have to write back zero again
+    // as in `apply_mask_kernel`, we already set zero for the upper-triangular region
+    for (int i = 1; i < size; ++i) {
+      scalar_t* __restrict__ row_ptr = attn2 + i * CHUNK_SIZE;
+      float vsum[CHUNK_SIZE];
+      int j = 0;
+      for (; j <= i - bVecSize; j += bVecSize) {
+        bVec row_bvec = bVec::loadu(row_ptr + j);
+        fVec f0, f1;
+        std::tie(f0, f1) = at::vec::convert_to_float(row_bvec);
+        f0.store(vsum + j);
+        f1.store(vsum + j + fVecSize);
+      }
+      for (; j < i; ++j) {
+        vsum[j] = static_cast<float>(row_ptr[j]);
+      }
+
+      // row = attn[..., i, :i].clone()
+      // sub = attn[..., :i, :i].clone()
+      // vsum = row + (row.unsqueeze(-1) * sub).sum(-2)
+      for (int k = 0; k < i; ++k) {
+        // read BEFORE row_ptr is written back below (row k was finalized in
+        // an earlier outer iteration; row i itself is untouched until the
+        // final write-back after this loop)
+        float va = static_cast<float>(row_ptr[k]);
+        fVec va_vec(va);
+        const scalar_t* __restrict__ row_k_ptr = attn2 + k * CHUNK_SIZE;
+        int jj = 0;
+        for (; jj <= k - bVecSize; jj += bVecSize) {
+          bVec rk_bvec = bVec::loadu(row_k_ptr + jj);
+          fVec rk0, rk1;
+          std::tie(rk0, rk1) = at::vec::convert_to_float(rk_bvec);
+          fVec vsum0 = fVec::loadu(vsum + jj);
+          fVec vsum1 = fVec::loadu(vsum + jj + fVecSize);
+          vsum0 = vsum0 + va_vec * rk0;
+          vsum1 = vsum1 + va_vec * rk1;
+          vsum0.store(vsum + jj);
+          vsum1.store(vsum + jj + fVecSize);
+        }
+        for (; jj < k; ++jj) {
+          vsum[jj] += va * static_cast<float>(row_k_ptr[jj]);
         }
       }
 
-      for (int64_t j = real_chunk_size; j < chunk_size; j++) {
-        auto curr_q_pad = q_pad_ptr + j * qk_head_size;
-        auto curr_k_pad = k_pad_ptr + j * qk_head_size;
-        int64_t i = 0;
-        auto vec_zero = bVec(0.0);
-        for (; i < VecSize * (qk_head_size / VecSize); i += VecSize) {
-          vec_zero.store(curr_q_pad + i);
-          vec_zero.store(curr_k_pad + i);
+      j = 0;
+      for (; j <= i - bVecSize; j += bVecSize) {
+        fVec f0 = fVec::loadu(vsum + j);
+        fVec f1 = fVec::loadu(vsum + j + fVecSize);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(f0, f1);
+        out_bvec.store(row_ptr + j);
+      }
+      for (; j < i; ++j) {
+        row_ptr[j] = static_cast<scalar_t>(vsum[j]);
+      }
+    }
+
+    // attn = attn + torch.eye(chunk_size)
+    for (int i = 0; i < size; ++i) {
+      attn2[i * CHUNK_SIZE + i] = static_cast<scalar_t>(static_cast<float>(attn2[i * CHUNK_SIZE + i]) + 1.f);
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE>
+struct solve_tril_kernel<at::BFloat16, CHUNK_SIZE> {
+  static inline void apply(at::BFloat16* __restrict__ attn2, int size) {
+    static_assert(CHUNK_SIZE % 16 == 0);
+
+    constexpr int COLS = CHUNK_SIZE / 16;
+
+    __m512 va;
+    __m512 vb[COLS];
+    __m512 vsum[COLS];
+
+    // for len == 0 and row < size, we don't have to write back zero again
+    // as in `apply_mask_kernel`, we already set zero for the upper-triangular region
+    for (int i = 1; i < size; ++i) {
+      // load row attn[..., i, :i]
+      at::BFloat16* __restrict__ row_ptr = attn2 + i * CHUNK_SIZE;
+      Unroll<COLS>{}([&](auto col) {
+        int len = std::min(i - col * 16, 16);
+        if (len > 0) {
+          const __mmask16 vmask = (1 << len) - 1;
+          vsum[col] = CVT_BF16_TO_FP32(_mm256_maskz_loadu_epi16(vmask, row_ptr + col * 16));
         }
-        for (auto hi = 0; hi < head_group; hi++) {
-          int64_t h = h_qk * head_group + hi;
-          auto curr_v_pad = v_pad_ptr + h * global_total_seq_length * v_head_size + j * v_head_size;
-          auto curr_k_beta = k_beta_ptr + h * global_total_seq_length * qk_head_size + j * qk_head_size;
-          auto curr_v_beta = v_beta_ptr + h * global_total_seq_length * v_head_size + j * v_head_size;
-          int64_t i = 0;
-          for (; i < VecSize * (qk_head_size / VecSize); i += VecSize) {
-            vec_zero.store(curr_k_beta + i);
+      });
+
+      // row = attn[..., i, :i].clone()
+      // sub = attn[..., :i, :i].clone()
+      // vsum = row + (row.unsqueeze(-1) * sub).sum(-2)
+      for (int k = 0; k < i; ++k) {
+        va = _mm512_set1_ps(static_cast<float>(row_ptr[k]));
+
+        const at::BFloat16* __restrict__ row_k_ptr = attn2 + k * CHUNK_SIZE;
+        Unroll<COLS>{}([&](auto col) {
+          int len = std::min(k - col * 16, 16);
+          if (len > 0) {
+            const __mmask16 vmask = (1 << len) - 1;
+            vb[col] = CVT_BF16_TO_FP32(_mm256_maskz_loadu_epi16(vmask, row_k_ptr + col * 16));
+            vsum[col] = _mm512_fmadd_ps(va, vb[col], vsum[col]);
           }
-          i = 0;
-          for (; i < VecSize * (v_head_size / VecSize); i += VecSize) {
-            vec_zero.store(curr_v_pad + i);
-            vec_zero.store(curr_v_beta + i);
+        });
+      }
+
+      // attn[..., i, :i] = vsum
+      Unroll<COLS>{}([&](auto col) {
+        int len = std::min(i - col * 16, 16);
+        if (len > 0) {
+          const __mmask16 vmask = (1 << len) - 1;
+          _mm256_mask_storeu_epi16(row_ptr + col * 16, vmask, (__m256i)(_mm512_cvtneps_pbh(vsum[col])));
+        }
+      });
+    }
+
+    // attn = attn + torch.eye(chunk_size)
+    for (int i = 0; i < size; ++i) {
+      attn2[i * CHUNK_SIZE + i] += 1.f;
+    }
+  }
+};
+#endif
+
+template <typename scalar_t, int CHUNK_SIZE, int D, bool has_beta, bool has_g>
+struct apply_beta_kernel {
+  static inline void apply(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      const scalar_t* __restrict__ beta,
+      const float* __restrict__ g,
+      int size,
+      int ld_src,
+      int ld_dst,
+      int b_stride) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
+    for (int i = 0; i < size; ++i) {
+      float scale = 1.f;
+      if constexpr (has_beta) {
+        scale *= static_cast<float>(beta[i * b_stride]);
+      }
+      if constexpr (has_g) {
+        scale *= std::exp(g[i]);
+      }
+      fVec scale_fvec(scale);
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec in_bvec = bVec::loadu(input + i * ld_src + d);
+        fVec in0, in1;
+        std::tie(in0, in1) = at::vec::convert_to_float(in_bvec);
+        in0 = in0 * scale_fvec;
+        in1 = in1 * scale_fvec;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(in0, in1);
+        out_bvec.store(out + i * ld_dst + d);
+      }
+      for (; d < D; ++d) {
+        out[i * ld_dst + d] = static_cast<scalar_t>(static_cast<float>(input[i * ld_src + d]) * scale);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE, int D, bool has_beta, bool has_g>
+struct apply_beta_kernel<at::BFloat16, CHUNK_SIZE, D, has_beta, has_g> {
+  static inline void apply(
+      at::BFloat16* __restrict__ out,
+      const at::BFloat16* __restrict__ input,
+      const at::BFloat16* __restrict__ beta,
+      const float* __restrict__ g,
+      int size,
+      int ld_src,
+      int ld_dst,
+      int b_stride) {
+    static_assert(D % 32 == 0);
+    constexpr int COLS = D / 16;
+
+    // get g.exp() and g is padded to CHUNK_SIZE
+    alignas(64) float g_arr[CHUNK_SIZE];
+    if constexpr (has_g) {
+      Unroll<CHUNK_SIZE / 16>{}([&](auto col) {
+        __m512 vg = _mm512_loadu_ps(g + col * 16);
+        __m512 vg_exp = _mm512_fexp_u20_ps(vg);
+        _mm512_storeu_ps(g_arr + col * 16, vg_exp);
+      });
+    }
+
+    for (int i = 0; i < size; ++i) {
+      __m512 vbeta;
+      if constexpr (has_beta) {
+        vbeta = _mm512_set1_ps(static_cast<float>(beta[i * b_stride]));
+      }
+      __m512 vg;
+      if constexpr (has_g) {
+        vg = _mm512_set1_ps(g_arr[i]);
+      }
+
+      Unroll<COLS>{}([&](auto col) {
+        // load for 0, 2, 4, 6
+        if constexpr (col % 2 == 0) {
+          __m512i a16 = _mm512_loadu_si512(input + i * ld_src + col * 16);
+          __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(a16, 0));
+          __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(a16, 1));
+          if constexpr (has_beta) {
+            va0 = _mm512_mul_ps(va0, vbeta);
+            va1 = _mm512_mul_ps(va1, vbeta);
           }
+          if constexpr (has_g) {
+            va0 = _mm512_mul_ps(va0, vg);
+            va1 = _mm512_mul_ps(va1, vg);
+          }
+          _mm512_storeu_si512(out + i * ld_dst + col * 16, (__m512i)(_mm512_cvtne2ps_pbh(va1, va0)));
+        }
+      });
+    }
+  }
+};
+#endif
+
+template <typename scalar_t, int D>
+struct update_kernel {
+  static inline void
+  apply(scalar_t* __restrict__ out, const float* __restrict__ input, int size, int ld_src, int ld_dst) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
+    for (int i = 0; i < size; ++i) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        fVec f0 = fVec::loadu(input + i * ld_src + d);
+        fVec f1 = fVec::loadu(input + i * ld_src + d + fVecSize);
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(f0, f1);
+        out_bvec.store(out + i * ld_dst + d);
+      }
+      for (; d < D; ++d) {
+        out[i * ld_dst + d] = static_cast<scalar_t>(input[i * ld_src + d]);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int D>
+struct update_kernel<at::BFloat16, D> {
+  static inline void
+  apply(at::BFloat16* __restrict__ out, const float* __restrict__ input, int size, int ld_src, int ld_dst) {
+    static_assert(D % 32 == 0);
+    constexpr int COLS = D / 16;
+
+    for (int i = 0; i < size; ++i) {
+      Unroll<COLS>{}([&](auto col) {
+        if constexpr (col % 2 == 0) {
+          __m512 va0 = _mm512_loadu_ps(input + i * ld_src + (col + 0) * 16);
+          __m512 va1 = _mm512_loadu_ps(input + i * ld_src + (col + 1) * 16);
+          __m512i a16 = (__m512i)(_mm512_cvtne2ps_pbh(va1, va0));
+          _mm512_storeu_si512(out + i * ld_dst + col * 16, a16);
+        }
+      });
+    }
+  }
+};
+#endif
+
+template <typename scalar_t, int D>
+struct update_value_kernel {
+  static inline void apply(
+      scalar_t* __restrict__ v_prime2,
+      const scalar_t* __restrict__ v,
+      const float* __restrict__ v_prime,
+      int size,
+      int padded_size,
+      int v_strideT) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+
+    // v2' = v - v'
+    for (int i = 0; i < size; ++i) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec v_bvec = bVec::loadu(v + i * v_strideT + d);
+        fVec v0, v1;
+        std::tie(v0, v1) = at::vec::convert_to_float(v_bvec);
+        fVec vp0 = fVec::loadu(v_prime + i * D + d);
+        fVec vp1 = fVec::loadu(v_prime + i * D + d + fVecSize);
+        v0 = v0 - vp0;
+        v1 = v1 - vp1;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(v0, v1);
+        out_bvec.store(v_prime2 + i * D + d);
+      }
+      for (; d < D; ++d) {
+        float val = static_cast<float>(v[i * v_strideT + d]) - v_prime[i * D + d];
+        v_prime2[i * D + d] = static_cast<scalar_t>(val);
+      }
+    }
+    // pad the last chunk
+    const bVec zero_bvec(static_cast<scalar_t>(0));
+    for (int i = size; i < padded_size; ++i) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        zero_bvec.store(v_prime2 + i * D + d);
+      }
+      for (; d < D; ++d) {
+        v_prime2[i * D + d] = static_cast<scalar_t>(0);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int D>
+struct update_value_kernel<at::BFloat16, D> {
+  static inline void apply(
+      at::BFloat16* __restrict__ v_prime2,
+      const at::BFloat16* __restrict__ v,
+      const float* __restrict__ v_prime,
+      int size,
+      int padded_size,
+      int v_strideT) {
+    static_assert(D % 32 == 0);
+    constexpr int COLS = D / 16;
+
+    // v2' = v - v'
+    for (int i = 0; i < size; ++i) {
+      Unroll<COLS>{}([&](auto col) {
+        // load for 0, 2, 4, 6
+        if constexpr (col % 2 == 0) {
+          __m512i v16 = _mm512_loadu_si512(v + i * v_strideT + col * 16);
+          __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(v16, 0));
+          __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(v16, 1));
+
+          __m512 v_prime0 = _mm512_loadu_ps(v_prime + i * D + col * 16);
+          __m512 v_prime1 = _mm512_loadu_ps(v_prime + i * D + col * 16 + 16);
+          va0 = _mm512_sub_ps(va0, v_prime0);
+          va1 = _mm512_sub_ps(va1, v_prime1);
+          __m512i o16 = (__m512i)(_mm512_cvtne2ps_pbh(va1, va0));
+          _mm512_storeu_si512(v_prime2 + i * D + col * 16, o16);
+        }
+      });
+    }
+
+    // pad the last chunk
+    for (int i = size; i < padded_size; ++i) {
+      Unroll<COLS>{}([&](auto col) {
+        if constexpr (col % 2 == 0) {
+          __m512i v16 = _mm512_setzero_si512();
+          _mm512_storeu_si512(v_prime2 + i * D + col * 16, v16);
+        }
+      });
+    }
+  }
+};
+#endif
+
+template <typename scalar_t, int CHUNK_SIZE, int D>
+struct update_key_kernel {
+  static inline void apply(
+      scalar_t* __restrict__ k_updated,
+      const scalar_t* __restrict__ k,
+      const float* __restrict__ g,
+      int size,
+      int k_strideT) {
+    // k_updated is transposed: [D, CHUNK_SIZE], k_updated[d, t] = k[t, d] * exp(g_last - g[t]).
+    // k's D dim is contiguous (vectorize load/compute); k_updated's D dim is
+    // strided (CHUNK_SIZE apart), so the store is unpacked per lane.
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int fVecSize = fVec::size();
+    constexpr int bVecSize = bVec::size();
+    alignas(64) scalar_t lane_buf[bVecSize];
+
+    const float g_last = g[size - 1];
+    for (int t = 0; t < size; ++t) {
+      float scale = std::exp(g_last - g[t]);
+      fVec scale_fvec(scale);
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        bVec k_bvec = bVec::loadu(k + t * k_strideT + d);
+        fVec k0, k1;
+        std::tie(k0, k1) = at::vec::convert_to_float(k_bvec);
+        k0 = k0 * scale_fvec;
+        k1 = k1 * scale_fvec;
+        bVec out_bvec = at::vec::convert_from_float<scalar_t>(k0, k1);
+        out_bvec.store(lane_buf);
+        for (int lane = 0; lane < bVecSize; ++lane) {
+          k_updated[(d + lane) * CHUNK_SIZE + t] = lane_buf[lane];
         }
       }
-      // Move to the next query
-      data_index_step(h_qk, qk_num_head, c, global_num_chunk);
+      for (; d < D; ++d) {
+        k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(static_cast<float>(k[t * k_strideT + d]) * scale);
+      }
+    }
+    const bVec zero_bvec(static_cast<scalar_t>(0));
+    for (int t = size; t < CHUNK_SIZE; ++t) {
+      int d = 0;
+      for (; d <= D - bVecSize; d += bVecSize) {
+        zero_bvec.store(lane_buf);
+        for (int lane = 0; lane < bVecSize; ++lane) {
+          k_updated[(d + lane) * CHUNK_SIZE + t] = lane_buf[lane];
+        }
+      }
+      for (; d < D; ++d) {
+        k_updated[d * CHUNK_SIZE + t] = static_cast<scalar_t>(0);
+      }
+    }
+  }
+};
+
+#if defined(CPU_CAPABILITY_AVX512)
+template <int CHUNK_SIZE, int D>
+struct update_key_kernel<at::BFloat16, CHUNK_SIZE, D> {
+  static inline void apply(
+      at::BFloat16* __restrict__ k_updated,
+      const at::BFloat16* __restrict__ k,
+      const float* __restrict__ g,
+      int size,
+      int k_strideT) {
+    static_assert(D % 32 == 0);
+    const int MB = div_up(size, 16);
+    const int KB = D / 16;
+
+    const float g_last = g[size - 1];
+    const __m512 vg_last = _mm512_set1_ps(g_last);
+
+    float scale_arr[16];
+    __m256i va[16];
+
+    // from [C, D](MB, KB) to [D, C](KB, MB)
+    // pad size to 16 in this kernel so that transpose can be done in one loop
+    for (int mb = 0; mb < MB; ++mb) {
+      const int mb_size = std::min(size - mb * 16, 16);
+      // prepare exp(g_last - g)
+      __m512 vg = _mm512_loadu_ps(g + mb * 16);
+      _mm512_storeu_ps(scale_arr, _mm512_fexp_u20_ps(_mm512_sub_ps(vg_last, vg)));
+      for (int kb = 0; kb < KB; ++kb) {
+        const at::BFloat16* __restrict__ k_ptr = k + mb * 16 * k_strideT + kb * 16;
+        at::BFloat16* __restrict__ k_updated_ptr = k_updated + kb * 16 * CHUNK_SIZE + mb * 16;
+        // load 16 regs
+        Unroll<16>{}([&](auto m) {
+          if (m < mb_size) {
+            __m256i v16 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(k_ptr + m * k_strideT));
+            __m512 v32 = _mm512_mul_ps(CVT_BF16_TO_FP32(v16), _mm512_set1_ps(scale_arr[m]));
+            va[m] = (__m256i)_mm512_cvtneps_pbh(v32);
+          } else {
+            va[m] = _mm256_setzero_si256();
+          }
+        });
+        // transpose 16x16
+        transpose_16x16_16bit(va);
+        // store 16 regs
+        Unroll<16>{}(
+            [&](auto k) { _mm256_storeu_si256(reinterpret_cast<__m256i*>(k_updated_ptr + k * CHUNK_SIZE), va[k]); });
+      }
+    }
+  }
+};
+#endif
+
+
+// template head_dim here to reduce extra read
+//   * normal approach: read inputs 2 times:
+//     - reduce: 1R
+//     - scale: 1R + 1W
+//   * keep input data in register:
+//     - reduce: 1R
+//     - scale: 1W
+template <typename scalar_t, int D>
+void l2norm_fwd_kernel_impl(
+    scalar_t* __restrict__ query_norm,
+    scalar_t* __restrict__ key_norm,
+    const scalar_t* __restrict__ query,
+    const scalar_t* __restrict__ key,
+    float eps,
+    int64_t T,
+    int64_t H,
+    int64_t q_strideT,
+    int64_t q_strideH,
+    int64_t k_strideT,
+    int64_t k_strideH) {
+  // expected to be contuguous
+  int64_t qn_strideH = D;
+  int64_t kn_strideH = D;
+
+  // parallel on [B, T, H]
+  at::parallel_for(0, T * H, 0, [&](int64_t begin, int64_t end) {
+    int64_t t{0}, h{0};
+    data_index_init(begin, t, T, h, H);
+
+    for (int64_t i = begin; i < end; ++i) {
+      const scalar_t* __restrict__ q_ptr = query + t * q_strideT + h * q_strideH;
+      const scalar_t* __restrict__ k_ptr = key + t * k_strideT + h * k_strideH;
+      scalar_t* __restrict__ qn_ptr = query_norm + i * qn_strideH;
+      scalar_t* __restrict__ kn_ptr = key_norm + i * kn_strideH;
+
+      l2norm_kernel<scalar_t, D, true>::apply(qn_ptr, q_ptr, eps);
+      l2norm_kernel<scalar_t, D, false>::apply(kn_ptr, k_ptr, eps);
+
+      // move to the next index
+      data_index_step(t, T, h, H);
     }
   });
+}
 
-  at::parallel_for(0, v_num_head * global_num_chunk, 1, [&](int64_t begin, int64_t end) {
-    int64_t h = 0, c = 0;
-    data_index_init(begin, h, v_num_head, c, global_num_chunk);
-    int ompIdx = at::get_thread_num();
-    int64_t offset = 0;
-    scalar_t* thread_buff_ptr = thread_buff + ompIdx * buff_size_16bit_per_thread;
-    THREAD_BUFFER_ALLOC(k_transpose, thread_buff_ptr, offset, scalar_t, qk_head_size * chunk_size);
-    THREAD_BUFFER_ALLOC(v_pack, thread_buff_ptr, offset, scalar_t, chunk_size * v_head_size);
-    THREAD_BUFFER_ALLOC(k_beta_g, thread_buff_ptr, offset, scalar_t, chunk_size * qk_head_size);
-    THREAD_BUFFER_ALLOC(k_beta_g_pack, thread_buff_ptr, offset, scalar_t, chunk_size * qk_head_size);
-    THREAD_BUFFER_ALLOC(curr_attn, thread_buff_ptr, offset, float, chunk_size* chunk_size * 2);
-    THREAD_BUFFER_ALLOC(curr_attn_reduced, thread_buff_ptr, offset, scalar_t, chunk_size * chunk_size);
-    THREAD_BUFFER_ALLOC(k_cumdecay, thread_buff_ptr, offset, float, chunk_size* qk_head_size * 2);
-    THREAD_BUFFER_ALLOC(row, thread_buff_ptr, offset, float, chunk_size * 2);
-    THREAD_BUFFER_ALLOC(updated, thread_buff_ptr, offset, float, chunk_size * 2);
-    for ([[maybe_unused]] auto z : c10::irange(begin, end)) {
-      int64_t ib = chunk_indices_ptr[c * 2];      // idx_batch
-      int64_t ic = chunk_indices_ptr[c * 2 + 1];  // idx_chunk
-      int64_t l_orig = cu_seqlens_ptr[ib] + ic * chunk_size;
-      int64_t seq_len = cu_seqlens_ptr[ib + 1] - cu_seqlens_ptr[ib];
-      int64_t h_qk = h / head_group;
-      auto curr_g_orig = g_orig + h * gStrideH + l_orig * gStrideT;
-      auto curr_g_pad = g_pad + h * global_total_seq_length + c * chunk_size;
-      auto curr_decay_mask = decay_mask + h * global_total_seq_length * chunk_size + c * chunk_size * chunk_size;
-      auto curr_k_pad = k_pad + h_qk * global_total_seq_length * qk_head_size + c * chunk_size * qk_head_size;
-      auto curr_k_beta = k_beta + h * global_total_seq_length * qk_head_size + c * chunk_size * qk_head_size;
-      auto curr_k_cumdecay_reduced =
-          k_cumdecay_reduced + h * global_total_seq_length * qk_head_size + c * chunk_size * qk_head_size;
-      auto curr_v_beta = v_beta + h * global_total_seq_length * v_head_size + c * chunk_size * v_head_size;
-      auto curr_value = v_beta_attn + h * global_total_seq_length * v_head_size + c * chunk_size * v_head_size;
+// g  : [B, T, Hv]
+// g_ : [B, Hv, NT, C] -> [B, NT, HB, BLOCK_H, C]
+// cu_seqlens : [num_seqs + 1]
+// chunk_indices : [NT * 2]
+template <typename scalar_t, int CHUNK_SIZE>
+void chunk_local_cumsum_kernel_impl(
+    scalar_t* __restrict__ g_,
+    const scalar_t* __restrict__ g,
+    const int32_t* __restrict__ cu_seqlens,
+    const int32_t* __restrict__ chunk_indices,
+    int64_t Hv,
+    int64_t NT) {
+  constexpr int BLOCK_H = 16;
+  int64_t HB = div_up(Hv, int64_t(BLOCK_H));
 
-      float acc_val = 0;
-      for (int64_t i = 0; i < chunk_size; i++) {
-        // Padding for g
-        // g = g.cumsum(dim=-1)
-        // g: [B, HV, num_chunk, chunk_size]
-        if (ic * chunk_size + i < seq_len) {
-          acc_val += curr_g_orig[i * gStrideT];
-        }
-        curr_g_pad[i] = acc_val;
-        // decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
-        // decay_mask: [B, HV, num_chunk, chunk_size, chunk_size]
-        float curr_g_pad_i = static_cast<float>(curr_g_pad[i]);
-        auto vec_curr_g_pad_i = fVec(curr_g_pad_i);
-        int64_t j = 0;
-        int64_t len = i + 1;
-        for (; j < fVecSize * (len / fVecSize); j += fVecSize) {
-          auto tmp0 = fVec::loadu(curr_g_pad + j);
-          auto tmp1 = vec_curr_g_pad_i - tmp0;
-          auto tmp2 = tmp1.exp_u20();
-          tmp2.store(curr_decay_mask + i * chunk_size + j);
-        }
-        if (j < len) {
-          auto tmp0 = fVec::loadu(curr_g_pad + j, len - j);
-          auto tmp1 = vec_curr_g_pad_i - tmp0;
-          auto tmp2 = tmp1.exp_u20();
-          tmp2.store(curr_decay_mask + i * chunk_size + j, len - j);
-        }
+  // parallel on [NT * HB] to increase parallelism
+  at::parallel_for(0, NT * HB, 0, [&](int64_t begin, int64_t end) {
+    int64_t nt{0}, hb{0};
+    data_index_init(begin, nt, NT, hb, HB);
+
+    for (int64_t i = begin; i < end; ++i) {
+      int32_t bs = chunk_indices[nt * 2 + 0];
+      int32_t batch_offset = cu_seqlens[bs];
+      int32_t seqlen = cu_seqlens[bs + 1] - cu_seqlens[bs];
+      int64_t mb_start = chunk_indices[nt * 2 + 1] * CHUNK_SIZE;
+      int64_t mb_size = std::min(seqlen - mb_start, int64_t(CHUNK_SIZE));
+      int64_t hb_size = std::min(Hv - hb * BLOCK_H, int64_t(BLOCK_H));
+
+      const scalar_t* __restrict__ g_ptr = g + (batch_offset + mb_start) * Hv + hb * BLOCK_H;
+      scalar_t* __restrict__ gsum_ptr = g_ + nt * (Hv * CHUNK_SIZE) + hb * (BLOCK_H * CHUNK_SIZE);
+      cumsum_kernel<scalar_t, CHUNK_SIZE, BLOCK_H>::apply(gsum_ptr, g_ptr, mb_size, hb_size, Hv, CHUNK_SIZE);
+
+      // move to the next index
+      data_index_step(nt, NT, hb, HB);
+    }
+  });
+}
+
+#define DECL_BUF(type, name, size_expr) alignas(64) type name[(size_expr)]
+#define DECL_ZERO_BUF(type, name, size_expr) \
+  DECL_BUF(type, name, size_expr);           \
+  fill_stub<type, (size_expr)>(name, 0.f)
+
+// w : [B, T, Hv, D]
+// u : [B, T, Hv, Dv]
+// d : [B, NT, Hv, C, C]
+// k : [B, T, H, D]
+// v : [B, T, Hv, Dv]
+// g : [B, NT, Hv, C]
+// beta : [B, T, Hv]
+// cu_seqlens : [num_seqs + 1]
+// chunk_indices : [NT * 2]
+template <typename scalar_t, int D, int CHUNK_SIZE>
+void chunk_gated_delta_rule_fwd_intra_kernel_impl(
+    scalar_t* __restrict__ w,
+    scalar_t* __restrict__ u,
+    float* __restrict__ d,
+    const scalar_t* __restrict__ k,
+    const scalar_t* __restrict__ v,
+    const float* __restrict__ g,
+    const scalar_t* __restrict__ beta,
+    const int32_t* __restrict__ cu_seqlens,
+    const int32_t* __restrict__ chunk_indices,
+    int64_t H,
+    int64_t Hv,
+    int64_t NT,
+    int64_t k_strideT,
+    int64_t k_strideH,
+    int64_t v_strideT,
+    int64_t v_strideH) {
+  // head group, expect to be 1，2，4 for qwen3.5
+  const int64_t HG = Hv / H;
+
+  // strides
+  const int64_t w_strideT = Hv * D;
+  const int64_t w_strideH = D;
+  const int64_t u_strideT = Hv * D;
+  const int64_t u_strideH = D;
+
+  // [NB]: parallel on [NT, H]
+  //   * parallel on num_heads and go sequential on num_heads_v,
+  //   * avoid instantialize k_beta (beta * k)
+  //   * compute key @ key^T * beta instead of k_beta @ key^T, same as triton impl
+  //   * compute key @ key^T once for each k head index and reuse for v head index
+  at::parallel_for(0, NT * H, 0, [&](int64_t begin, int64_t end) {
+    int64_t nt{0}, h{0};
+    data_index_init(begin, nt, NT, h, H);
+
+    // thread local temp buffer
+    DECL_ZERO_BUF(scalar_t, tmp, CHUNK_SIZE * D);
+    DECL_ZERO_BUF(scalar_t, tmp2, CHUNK_SIZE * D);
+    DECL_ZERO_BUF(float, attn, CHUNK_SIZE* CHUNK_SIZE);
+    DECL_ZERO_BUF(scalar_t, attn2, CHUNK_SIZE * CHUNK_SIZE);
+    DECL_ZERO_BUF(float, tmp3, CHUNK_SIZE* D);
+
+    // alias
+    scalar_t* __restrict__ k_packed = tmp;
+    scalar_t* __restrict__ k_beta = tmp;
+    scalar_t* __restrict__ v_beta = tmp;
+    scalar_t* __restrict__ k_beta_packed = tmp2;
+    scalar_t* __restrict__ v_beta_packed = tmp2;
+    float* __restrict__ k_updated = tmp3;
+    float* __restrict__ v_updated = tmp3;
+
+    for (int64_t i = begin; i < end; ++i) {
+      int32_t bs = chunk_indices[nt * 2 + 0];
+      int32_t batch_offset = cu_seqlens[bs];
+      int32_t seqlen = cu_seqlens[bs + 1] - cu_seqlens[bs];
+      int64_t mb_start = chunk_indices[nt * 2 + 1] * CHUNK_SIZE;
+      int64_t mb_size = std::min(seqlen - mb_start, int64_t(CHUNK_SIZE));
+
+      // mb_size` is K in 5.c, 5.g, pad to TILE_K;
+      const int64_t padded_mb_size = div_up((int)mb_size, TILE_K) * TILE_K;
+
+      // step 1: decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+      for (int64_t hv = h * HG; hv < h * HG + HG; ++hv) {
+        const float* __restrict__ g_ptr = g + nt * (Hv * CHUNK_SIZE) + hv * CHUNK_SIZE;
+        float* __restrict__ d_ptr = d + nt * (Hv * CHUNK_SIZE * CHUNK_SIZE) + hv * (CHUNK_SIZE * CHUNK_SIZE);
+        decay_mask_kernel<float, CHUNK_SIZE>::apply(d_ptr, g_ptr);
       }
 
-      // attn = k_beta @ key.transpose(-1, -2)
-      // attn: [B, HV, num_chunk, chunk_size, chunk_size]
-      // transpose and pack for key
+      // step 2: attn = key @ key^T
+      const scalar_t* __restrict__ k_ptr = k + (batch_offset + mb_start) * k_strideT + h * k_strideH;
       if constexpr (brgemm_supported()) {
         pack_vnni<scalar_t>(
-            /*    dst */ k_transpose,
-            /*    src */ curr_k_pad,
-            /*     N  */ chunk_size,
-            /*     K  */ qk_head_size,
-            /* ld_src */ qk_head_size,
-            /* ld_dst */ chunk_size);
-        // k_beta @ key.transpose(-1, -2)
+            /*    dst */ k_packed,
+            /*    src */ k_ptr,
+            /*     N  */ mb_size,
+            /*     K  */ D,
+            /* ld_src */ k_strideT,
+            /* ld_dst */ CHUNK_SIZE);
+
         at::native::cpublas::brgemm(
-            /*     M */ chunk_size,
-            /*     N */ chunk_size,
-            /*     K */ qk_head_size,
-            /*   lda */ qk_head_size,
-            /*   ldb */ chunk_size,
-            /*   ldc */ chunk_size,
+            /*     M */ mb_size,
+            /*     N */ mb_size,
+            /*     K */ D,
+            /*   lda */ k_strideT,
+            /*   ldb */ CHUNK_SIZE,
+            /*   ldc */ CHUNK_SIZE,
             /* add_C */ false,
-            /*     A */ curr_k_beta,
-            /*     B */ k_transpose,
-            /*     C */ curr_attn);
+            /*     A */ k_ptr,
+            /*     B */ k_packed,
+            /*     C */ attn);
       } else {
         blas_gemm(
             at::native::TransposeType::Transpose,
             at::native::TransposeType::NoTranspose,
-            chunk_size,
-            chunk_size,
-            qk_head_size,
+            mb_size,
+            mb_size,
+            D,
             1.0f,
-            curr_k_pad,
-            qk_head_size,
-            curr_k_beta,
-            qk_head_size,
+            k_ptr,
+            k_strideT,
+            k_ptr,
+            k_strideT,
             0.0f,
-            curr_attn,
-            chunk_size);
-      }
-      // attn = attn * decay_mask
-      for (int64_t m = 0; m < chunk_size; m++) {
-        at::vec::map2<float>(
-            [](fVec x, fVec y) { return fVec(0) - x * y; },
-            curr_attn + m * chunk_size,
-            curr_attn + m * chunk_size,
-            curr_decay_mask + m * chunk_size,
-            chunk_size);
+            attn,
+            CHUNK_SIZE);
       }
 
-      // chunk decay
-      // attn: [B, HV, num_chunk, chunk_size, chunk_size]
-      // mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0)
-      // attn = -attn.masked_fill(mask, 0)
-      // attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2) [B, HV, num_chunk, i]
-      // attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
-      // attn = -attn.masked_fill(mask, 0)
-      for (int i = 0; i < chunk_size; i++) {
-        const auto vec_zero = fVec(0);
-        int64_t len = chunk_size - i;
-        int64_t front = len % fVecSize;
-        int64_t j = i;
-        // first masked vec for alignment
-        if (front > 0) {
-          vec_zero.store(curr_attn + i * chunk_size + j, front);
-          j += front;
+      for (int64_t hv = h * HG; hv < h * HG + HG; ++hv) {
+        // step 3: attn2 = -attn * beta * d
+        const scalar_t* __restrict__ beta_ptr = beta + (batch_offset + mb_start) * Hv + hv;
+        const float* __restrict__ d_ptr = d + nt * (Hv * CHUNK_SIZE * CHUNK_SIZE) + hv * (CHUNK_SIZE * CHUNK_SIZE);
+        apply_mask_kernel<scalar_t, CHUNK_SIZE, true>::apply(attn2, attn, beta_ptr, d_ptr, mb_size, Hv);
+
+        // step 4: solve_tril(attn2) -> (I + L)^{-1}, L = strict-lower from step 3
+        //   for i in 1..C-1: attn2[i, :i] += (attn2[i, :i] * attn2[:i, :i]).sum(-1)
+        //   attn2 += eye(C)
+        solve_tril_kernel<scalar_t, CHUNK_SIZE>::apply(attn2, mb_size);
+
+        // step 5: recompute_w_u
+        //   w = attn2 @ (k_beta * g.exp().unsqueeze(-1))
+        //   u = attn2 @ value * beta.unsqueeze(-1)
+        const float* __restrict__ g_ptr = g + nt * (Hv * CHUNK_SIZE) + hv * CHUNK_SIZE;
+        const scalar_t* __restrict__ v_ptr = v + (batch_offset + mb_start) * v_strideT + hv * v_strideH;
+
+        //  5.a key = key * beta * g.exp
+        apply_beta_kernel<scalar_t, CHUNK_SIZE, D, true, true>::apply(
+            k_beta, k_ptr, beta_ptr, g_ptr, mb_size, k_strideT, D, Hv);
+
+        //  5.b pack key
+        if constexpr (brgemm_supported()) {
+          pack_vnni2<scalar_t>(
+              /*    dst */ k_beta_packed,
+              /*    src */ k_beta,
+              /*     K  */ mb_size,
+              /*     N  */ D,
+              /* ld_src */ D,
+              /* ld_dst */ D);
+
+          // 5.c w = attn2 @ k_beta
+          at::native::cpublas::brgemm(
+              /*     M */ mb_size,
+              /*     N */ D,
+              /*     K */ padded_mb_size,  // mb_size
+              /*   lda */ CHUNK_SIZE,
+              /*   ldb */ D,
+              /*   ldc */ D,
+              /* add_C */ false,
+              /*     A */ attn2,
+              /*     B */ k_beta_packed,
+              /*     C */ k_updated);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              D,
+              mb_size,
+              padded_mb_size,
+              1.0f,
+              k_beta,
+              D,
+              attn2,
+              CHUNK_SIZE,
+              0.0f,
+              k_updated,
+              D);
         }
-        for (; j < fVecSize * (chunk_size / fVecSize); j += fVecSize) {
-          vec_zero.store(curr_attn + i * chunk_size + j);
+
+        // 5.d k_updated -> w
+        scalar_t* __restrict__ w_ptr = w + (batch_offset + mb_start) * w_strideT + hv * w_strideH;
+        update_kernel<scalar_t, D>::apply(w_ptr, k_updated, mb_size, D, w_strideT);
+
+        // 5.e value = value * beta
+        apply_beta_kernel<scalar_t, CHUNK_SIZE, D, true, false>::apply(
+            v_beta, v_ptr, beta_ptr, nullptr, mb_size, v_strideT, D, Hv);
+
+        // 5.f pack value
+        if constexpr (brgemm_supported()) {
+          pack_vnni2<scalar_t>(
+              /*    dst */ v_beta_packed,
+              /*    src */ v_beta,
+              /*     K  */ mb_size,
+              /*     N  */ D,
+              /* ld_src */ D,
+              /* ld_dst */ D);
+
+          // 5.g u = attn2 @ v_beta
+          at::native::cpublas::brgemm(
+              /*     M */ mb_size,
+              /*     N */ D,
+              /*     K */ padded_mb_size,  // mb_size
+              /*   lda */ CHUNK_SIZE,
+              /*   ldb */ D,
+              /*   ldc */ D,
+              /* add_C */ false,
+              /*     A */ attn2,
+              /*     B */ v_beta_packed,
+              /*     C */ v_updated);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              D,
+              mb_size,
+              padded_mb_size,
+              1.0f,
+              v_beta,
+              D,
+              attn2,
+              CHUNK_SIZE,
+              0.0f,
+              v_updated,
+              D);
         }
-      }
-      for (int i = 1; i < chunk_size; i++) {
-        // row = attn[..., i, :i] [B, HK, num_chunk, i]
-        int64_t j = 0;
-        int64_t len = i;
-        for (; j < fVecSize * (len / fVecSize); j += fVecSize) {
-          auto tmp0 = fVec::loadu(curr_attn + i * chunk_size + j);
-          tmp0.store(row + j);
-        }
-        if (j < len) {
-          auto tmp0 = fVec::loadu(curr_attn + i * chunk_size + j, len - j);
-          tmp0.store(row + j, len - j);
-        }
-        // (row.unsqueeze(-1) * sub).sum(-2)
-        fill_stub(updated, 0, i);
-        for (int k = 0; k < i; k++) {
-          float row_k = row[k];
-          auto vec_row_k = fVec(row_k);
-          int64_t j = 0;
-          int64_t len = i;
-          for (; j < fVecSize * (len / fVecSize); j += fVecSize) {
-            auto tmp0 = fVec::loadu(curr_attn + k * chunk_size + j);
-            auto tmp1 = vec_row_k * tmp0;
-            auto tmp2 = fVec::loadu(updated + j);
-            auto tmp3 = tmp1 + tmp2;
-            tmp3.store(updated + j);
-          }
-          if (j < len) {
-            auto tmp0 = fVec::loadu(curr_attn + k * chunk_size + j, len - j);
-            auto tmp1 = vec_row_k * tmp0;
-            auto tmp2 = fVec::loadu(updated + j);
-            auto tmp3 = tmp1 + tmp2;
-            tmp3.store(updated + j, len - j);
-          }
-        }
-        // attn[..., i, :i] = row + sum(...)
-        j = 0;
-        len = i;
-        for (; j < fVecSize * (len / fVecSize); j += fVecSize) {
-          auto tmp0 = fVec::loadu(row + j);
-          auto tmp1 = fVec::loadu(updated + j);
-          auto tmp2 = tmp0 + tmp1;
-          tmp2.store(curr_attn + i * chunk_size + j);
-        }
-        if (j < len) {
-          auto tmp0 = fVec::loadu(row + j, len - j);
-          auto tmp1 = fVec::loadu(updated + j, len - j);
-          auto tmp2 = tmp0 + tmp1;
-          tmp2.store(curr_attn + i * chunk_size + j, len - j);
-        }
-      }
-      for (int i = 0; i < chunk_size; i++) {
-        curr_attn[i * chunk_size + i] += 1.0f;
-        at::vec::map<scalar_t>(
-            [](fVec x) { return x; }, curr_attn_reduced + i * chunk_size, curr_attn + i * chunk_size, chunk_size);
+
+        // 5.h v_updated -> u
+        scalar_t* __restrict__ u_ptr = u + (batch_offset + mb_start) * u_strideT + hv * u_strideH;
+        update_kernel<scalar_t, D>::apply(u_ptr, v_updated, mb_size, D, u_strideT);
       }
 
-      // v_beta_attn = attn @ v_beta
-      // k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
-      // v_beta_attn: [B, HV, num_chunk, chunk_size, EV]
-      // k_beta_g = k_beta * g: [B, HV, num_chunk, chunk_size, EK]
-      // k_cumdecay: [B, HV, num_chunk, chunk_size, EK]
-      // pack for value
-      if constexpr (brgemm_supported()) {
-        pack_vnni2<scalar_t>(
-            /*    dst */ v_pack,
-            /*    src */ curr_v_beta,
-            /*     N  */ chunk_size,
-            /*     K  */ v_head_size,
-            /* ld_src */ v_head_size,
-            /* ld_dst */ v_head_size);
-        // value = attn @ v_beta
-        at::native::cpublas::brgemm(
-            /*     M */ chunk_size,
-            /*     N */ v_head_size,
-            /*     K */ chunk_size,
-            /*   lda */ chunk_size,
-            /*   ldb */ v_head_size,
-            /*   ldc */ v_head_size,
-            /* add_C */ false,
-            /*     A */ curr_attn_reduced,
-            /*     B */ v_pack,
-            /*     C */ curr_value);
-      } else {
-        blas_gemm(
-            at::native::TransposeType::NoTranspose,
-            at::native::TransposeType::NoTranspose,
-            v_head_size,
-            chunk_size,
-            chunk_size,
-            1.0f,
-            curr_v_beta,
-            v_head_size,
-            curr_attn_reduced,
-            chunk_size,
-            0.0f,
-            curr_value,
-            v_head_size);
-      }
-      // k_beta_g = k_beta * g.exp().unsqueeze(-1)
-      for (int64_t j = 0; j < chunk_size; j++) {
-        int64_t i = 0;
-        float g_exp = std::exp(curr_g_pad[j]);
-        scalar_t g_exp_reduced = static_cast<scalar_t>(g_exp);
-        auto vec_g_exp_reduced = bVec(g_exp_reduced);
-        for (; i < VecSize * (qk_head_size / VecSize); i += VecSize) {
-          auto tmp0 = bVec::loadu(curr_k_beta + j * qk_head_size + i);
-          auto tmp1 = tmp0 * vec_g_exp_reduced;
-          tmp1.store(k_beta_g + j * qk_head_size + i);
-        }
-      }
-      // pack for k_beta_g
-      if constexpr (brgemm_supported()) {
-        pack_vnni2<scalar_t>(
-            /*    dst */ k_beta_g_pack,
-            /*    src */ k_beta_g,
-            /*     N  */ chunk_size,
-            /*     K  */ qk_head_size,
-            /* ld_src */ qk_head_size,
-            /* ld_dst */ qk_head_size);
-        // k_cumdecay = attn @ k_beta_g
-        at::native::cpublas::brgemm(
-            /*     M */ chunk_size,
-            /*     N */ qk_head_size,
-            /*     K */ chunk_size,
-            /*   lda */ chunk_size,
-            /*   ldb */ qk_head_size,
-            /*   ldc */ qk_head_size,
-            /* add_C */ false,
-            /*     A */ curr_attn_reduced,
-            /*     B */ k_beta_g_pack,
-            /*     C */ k_cumdecay);
-      } else {
-        blas_gemm(
-            at::native::TransposeType::NoTranspose,
-            at::native::TransposeType::NoTranspose,
-            qk_head_size,
-            chunk_size,
-            chunk_size,
-            1.0f,
-            k_beta_g,
-            qk_head_size,
-            curr_attn_reduced,
-            chunk_size,
-            0.0f,
-            k_cumdecay,
-            qk_head_size);
-      }
-      for (int i = 0; i < chunk_size; i++) {
-        at::vec::map<scalar_t>(
-            [](fVec x) { return x; },
-            curr_k_cumdecay_reduced + i * qk_head_size,
-            k_cumdecay + i * qk_head_size,
-            qk_head_size);
-      }
-
-      // Move to the next query
-      data_index_step(h, v_num_head, c, global_num_chunk);
+      // move to the next index
+      data_index_step(nt, NT, h, H);
     }
+    at::native::cpublas::brgemm_release();
   });
+}
 
-  // for each chunk
-  at::parallel_for(0, batch_size * v_num_head, 1, [&](int64_t begin, int64_t end) {
-    int64_t b = 0, h = 0;
-    data_index_init(begin, b, batch_size, h, v_num_head);
-    int ompIdx = at::get_thread_num();
-    int64_t offset =
-        /* k_transpose */ qk_head_size * chunk_size +
-        /* v_pack */ chunk_size * v_head_size +
-        /* k_beta_g  */ chunk_size * qk_head_size +
-        /* k_beta_g_pack  */ chunk_size * qk_head_size +
-        /* attn */ chunk_size * chunk_size * 2 +
-        /* attn_reduced */ chunk_size * chunk_size +
-        /* k_cumdecay */ chunk_size * qk_head_size * 2 +
-        /* row */ chunk_size * 2 +
-        /* updated */ chunk_size * 2;
-    scalar_t* thread_buff_ptr = thread_buff + ompIdx * buff_size_16bit_per_thread;
-    THREAD_BUFFER_ALLOC(
-        curr_last_recurrent_state_reduced, thread_buff_ptr, offset, scalar_t, qk_head_size * v_head_size);
-    THREAD_BUFFER_ALLOC(
-        curr_last_recurrent_state_pack_reduced, thread_buff_ptr, offset, scalar_t, qk_head_size * v_head_size);
-    THREAD_BUFFER_ALLOC(k_transpose_i, thread_buff_ptr, offset, scalar_t, qk_head_size * chunk_size);
-    THREAD_BUFFER_ALLOC(attn_i, thread_buff_ptr, offset, float, chunk_size* chunk_size * 2);
-    THREAD_BUFFER_ALLOC(attn_i_reduced, thread_buff_ptr, offset, scalar_t, chunk_size * chunk_size);
-    THREAD_BUFFER_ALLOC(v_prime, thread_buff_ptr, offset, float, chunk_size* v_head_size * 2);
-    THREAD_BUFFER_ALLOC(v_prime_reduced, thread_buff_ptr, offset, scalar_t, chunk_size * v_head_size);
-    THREAD_BUFFER_ALLOC(v_prime_pack_reduced, thread_buff_ptr, offset, scalar_t, chunk_size * v_head_size);
-    THREAD_BUFFER_ALLOC(qg, thread_buff_ptr, offset, scalar_t, chunk_size * qk_head_size);
-    THREAD_BUFFER_ALLOC(attn_inter, thread_buff_ptr, offset, float, chunk_size* v_head_size * 2);
-    THREAD_BUFFER_ALLOC(kg, thread_buff_ptr, offset, scalar_t, chunk_size * qk_head_size);
-    THREAD_BUFFER_ALLOC(kg_transpose, thread_buff_ptr, offset, scalar_t, qk_head_size * chunk_size);
-    THREAD_BUFFER_ALLOC(kgv, thread_buff_ptr, offset, float, qk_head_size* v_head_size * 2);
+//
+// out           : [B, T, Hv, Dv]
+// state         : [num_seqs, Hv, Dv, D]
+// q             : [B, T, H, D]
+// k             : [B, T, H, D]
+// w             : [B, T, Hv, D]
+// u             : [B, T, Hv, Dv]
+// g             : [B, NT, Hv, C]
+// d             : [B, NT, Hv, C, C]
+// cu_seqlens    : [num_seqs + 1]
+// chunk_offsets : [num_seqs + 1]
+template <typename scalar_t, int D, int CHUNK_SIZE>
+void chunk_gated_delta_rule_fwd_inter_kernel_impl(
+    scalar_t* __restrict__ out,
+    float* __restrict__ state,
+    const int32_t* __restrict__ indices,
+    const scalar_t* __restrict__ q,
+    const scalar_t* __restrict__ k,
+    const scalar_t* __restrict__ w,
+    const scalar_t* __restrict__ u,
+    const float* __restrict__ g,
+    const float* __restrict__ d,
+    const int32_t* __restrict__ cu_seqlens,
+    const int32_t* __restrict__ chunk_offsets,
+    int64_t H,
+    int64_t Hv,
+    int64_t num_seqs,
+    int64_t q_strideT,
+    int64_t q_strideH,
+    int64_t k_strideT,
+    int64_t k_strideH,
+    int64_t state_strideS) {
+  // head group, expect to be 1，2，4 for qwen3.5
+  const int64_t HG = Hv / H;
 
-    for ([[maybe_unused]] auto z : c10::irange(begin, end)) {
-      int64_t start_q = cu_seqlens_ptr[b];
-      int64_t seq_len = cu_seqlens_ptr[b + 1] - start_q;
-      int64_t num_chunk = chunk_offsets_ptr[b + 1] - chunk_offsets_ptr[b];
-      int64_t chunk_offset = chunk_offsets_ptr[b];
-      int64_t len_offset = chunk_offset * chunk_size;
+  // strides
+  const int64_t w_strideT = Hv * D;
+  const int64_t w_strideH = D;
+  const int64_t u_strideT = Hv * D;
+  const int64_t u_strideH = D;
+  const int64_t o_strideT = Hv * D;
+  const int64_t o_strideH = D;
 
-      int64_t h_qk = h / head_group;
-      auto out_ptr = out + start_q * oStrideT;
-      auto curr_q = q_pad + len_offset * qk_head_size +
-                    h_qk * global_total_seq_length * qk_head_size;  // [num_chunk, chunk_size, EK]
-      auto curr_k = k_pad + len_offset * qk_head_size +
-                    h_qk * global_total_seq_length * qk_head_size;            // [num_chunk, chunk_size, EK]
-      auto curr_v = v_beta_attn + h * global_total_seq_length * v_head_size;  // [num_chunk, chunk_size, EV]
-      auto curr_decay_mask =
-          decay_mask + h * global_total_seq_length * chunk_size;  // [num_chunk, chunk_size, chunk_size]
-      auto curr_k_cumdecay_reduced =
-          k_cumdecay_reduced + h * global_total_seq_length * qk_head_size;  // [num_chunk, chunk_size, EK]
-      auto curr_last_recurrent_state =
-          final_state_data + b * final_state_StrideN + h * final_state_StrideH;  // [EK, EV]
-      auto curr_g_pad = g_pad + len_offset + h * global_total_seq_length;        // [num_chunk, chunk_size]
-      auto curr_core_attn_out = core_attn_out + len_offset * v_head_size +
-                                h * global_total_seq_length * v_head_size;  // [num_chunk, chunk_size, EV]
-      for (int64_t c = 0; c < num_chunk; c++) {
-        for (int i = 0; i < qk_head_size; i++) {
-          at::vec::map<scalar_t>(
-              [](fVec x) { return x; },
-              curr_last_recurrent_state_reduced + i * v_head_size,
-              curr_last_recurrent_state + i * v_head_size,
-              v_head_size);
-        }
-        auto q_i = curr_q + c * chunk_size * qk_head_size;                                   // [chunk_size, EK]
-        auto k_i = curr_k + c * chunk_size * qk_head_size;                                   // [chunk_size, EK]
-        auto v_i = curr_v + (chunk_offset + c) * chunk_size * v_head_size;                   // [chunk_size, EV]
-        auto decay_mask_i = curr_decay_mask + (chunk_offset + c) * chunk_size * chunk_size;  // [chunk_size, chunk_size]
-        auto k_cumdecay_i_reduced =
-            curr_k_cumdecay_reduced + (chunk_offset + c) * chunk_size * qk_head_size;  // [chunk_size, EK]
-        auto g_pad_i = curr_g_pad + c * chunk_size;                                    // [chunk_size]
-        auto core_attn_out_i = curr_core_attn_out + c * chunk_size * v_head_size;      // [chunk_size, EV]
+  // [NB]: parallel on [num_seqs, Hv]
+  //  * choose to parallel on Hv instead of H, though this means q @ kT has duplicated compute
+  //  * H might be 16 which is not enough to use 32C when num_seqs is small
+  at::parallel_for(0, num_seqs * Hv, 0, [&](int64_t begin, int64_t end) {
+    int64_t bs{0}, hv{0};
+    data_index_init(begin, bs, num_seqs, hv, Hv);
 
+    // thread local temp buffer
+    DECL_ZERO_BUF(scalar_t, tmp, CHUNK_SIZE * D);
+    DECL_ZERO_BUF(scalar_t, tmp2, D * D);
+    DECL_ZERO_BUF(float, tmp3, CHUNK_SIZE* D);
+    DECL_ZERO_BUF(scalar_t, tmp4, CHUNK_SIZE * D);
+    DECL_ZERO_BUF(float, attn, CHUNK_SIZE* CHUNK_SIZE);
+    DECL_ZERO_BUF(scalar_t, attn2, CHUNK_SIZE * CHUNK_SIZE);
+
+    // alias
+    scalar_t* __restrict__ k_packed = tmp;
+    scalar_t* __restrict__ s_packed = tmp2;
+    float* __restrict__ v_prime = tmp3;
+    scalar_t* __restrict__ v_prime2 = tmp;
+    float* __restrict__ attn_inter = tmp3;
+    scalar_t* __restrict__ qg_exp = tmp4;
+    scalar_t* __restrict__ v_packed = tmp4;
+    scalar_t* __restrict__ k_updated = tmp;
+
+    for (int64_t i = begin; i < end; ++i) {
+      int64_t h = hv / HG;
+      int32_t batch_offset = cu_seqlens[bs];
+      int32_t seqlen = cu_seqlens[bs + 1] - cu_seqlens[bs];
+      int64_t nt = chunk_offsets[bs];
+
+      for (int64_t mb_start = 0; mb_start < seqlen; mb_start += CHUNK_SIZE, ++nt) {
+        int64_t mb_size = std::min(seqlen - mb_start, int64_t(CHUNK_SIZE));
+
+        // mb_size` is K in 4.a, pad to TILE_K;
+        const int64_t padded_mb_size = div_up((int)mb_size, TILE_K) * TILE_K;
+
+        // step 1.a: attn = query @ key^T
         // attn_i = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
-        // k_transpose_i = k_i.transpose(-1, -2)
+        const scalar_t* __restrict__ q_ptr = q + (batch_offset + mb_start) * q_strideT + h * q_strideH;
+        const scalar_t* __restrict__ k_ptr = k + (batch_offset + mb_start) * k_strideT + h * k_strideH;
         if constexpr (brgemm_supported()) {
           pack_vnni<scalar_t>(
-              /*    dst */ k_transpose_i,
-              /*    src */ k_i,
-              /*     N  */ chunk_size,
-              /*     K  */ qk_head_size,
-              /* ld_src */ qk_head_size,
-              /* ld_dst */ chunk_size);
-          // attn_i = q_i @ k_transpose_i
+              /*    dst */ k_packed,
+              /*    src */ k_ptr,
+              /*     N  */ mb_size,
+              /*     K  */ D,
+              /* ld_src */ k_strideT,
+              /* ld_dst */ CHUNK_SIZE);
+
           at::native::cpublas::brgemm(
-              /* M */ chunk_size,
-              /* N */ chunk_size,
-              /* K */ qk_head_size,
-              /* lda */ qk_head_size,
-              /* ldb */ chunk_size,
-              /* ldc */ chunk_size,
+              /*     M */ mb_size,
+              /*     N */ mb_size,
+              /*     K */ D,
+              /*   lda */ q_strideT,
+              /*   ldb */ CHUNK_SIZE,
+              /*   ldc */ CHUNK_SIZE,
               /* add_C */ false,
-              /* A */ q_i,
-              /* B */ k_transpose_i,
-              /* C */ attn_i);
+              /*     A */ q_ptr,
+              /*     B */ k_packed,
+              /*     C */ attn);
         } else {
           blas_gemm(
               at::native::TransposeType::Transpose,
               at::native::TransposeType::NoTranspose,
-              chunk_size,
-              chunk_size,
-              qk_head_size,
+              mb_size,
+              mb_size,
+              D,
               1.0f,
-              k_i,
-              qk_head_size,
-              q_i,
-              qk_head_size,
+              k_ptr,
+              k_strideT,
+              q_ptr,
+              q_strideT,
               0.0f,
-              attn_i,
-              chunk_size);
-        }
-        // attn_i = attn_i * decay_mask_i
-        for (int64_t m = 0; m < chunk_size; m++) {
-          auto attn_i_m = attn_i + m * chunk_size;
-          auto attn_i_reduced_m = attn_i_reduced + m * chunk_size;
-          auto decay_mask_i_m = decay_mask_i + m * chunk_size;
-          int64_t n = 0;
-          for (; n < fVecSize * (chunk_size / fVecSize); n += fVecSize) {
-            auto tmp0 = fVec::loadu(attn_i_m + n);
-            auto tmp1 = fVec::loadu(decay_mask_i_m + n);
-            auto tmp2 = tmp0 * tmp1;
-            auto tmp3 = at::vec::convert<scalar_t>(tmp2);
-            tmp3.store(attn_i_reduced_m + n, fVecSize);
-          }
-          if (n < chunk_size) {
-            auto tmp0 = fVec::loadu(attn_i_m + n, chunk_size - n);
-            auto tmp1 = fVec::loadu(decay_mask_i_m + n, chunk_size - n);
-            auto tmp2 = tmp0 * tmp1;
-            auto tmp3 = at::vec::convert<scalar_t>(tmp2);
-            tmp3.store(attn_i_reduced_m + n, chunk_size - n);
-          }
-        }
-        // mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1)
-        // attn_i = attn_i.masked_fill_(mask, 0)
-        for (int i = 0; i < chunk_size - 1; i++) {
-          const auto vec_zero = bVec(0);
-          int64_t len = chunk_size - i - 1;
-          int64_t front = len % VecSize;
-          int64_t j = i + 1;
-          // first masked vec for alignment
-          if (front > 0) {
-            vec_zero.store(attn_i_reduced + i * chunk_size + j, front);
-            j += front;
-          }
-          for (; j < VecSize * (chunk_size / VecSize); j += VecSize) {
-            vec_zero.store(attn_i_reduced + i * chunk_size + j);
-          }
+              attn,
+              CHUNK_SIZE);
         }
 
-        // pack for curr_last_recurrent_state
+        // step 1.b: attn = attn * decay_mask.masked_fill_(mask, 0)
+        const float* __restrict__ d_ptr = d + nt * (Hv * CHUNK_SIZE * CHUNK_SIZE) + hv * (CHUNK_SIZE * CHUNK_SIZE);
+        apply_mask_kernel<scalar_t, CHUNK_SIZE, false>::apply(attn2, attn, nullptr, d_ptr, mb_size);
+
+        // step 2.a: v' = w @ state (fuse state *= exp(g_last) with packing)
+        float* __restrict__ s_ptr = state + indices[bs] * state_strideS + hv * (D * D);
+        const float* __restrict__ g_ptr = g + nt * (Hv * CHUNK_SIZE) + hv * (CHUNK_SIZE);
+        float g_last = g_ptr[mb_size - 1];
+        const scalar_t* __restrict__ w_ptr = w + (batch_offset + mb_start) * w_strideT + hv * w_strideH;
         if constexpr (brgemm_supported()) {
-          pack_vnni2<scalar_t>(
-              /*    dst */ curr_last_recurrent_state_pack_reduced,
-              /*    src */ curr_last_recurrent_state_reduced,
-              /*     N  */ qk_head_size,
-              /*     K  */ v_head_size,
-              /* ld_src */ v_head_size,
-              /* ld_dst */ v_head_size);
+          pack_vnni2<scalar_t, D, D>(
+              /*    dst */ s_packed,
+              /*    src */ s_ptr,
+              /* g_last */ g_last,
+              /* ld_src */ D,
+              /* ld_dst */ D);
 
-          // v_prime = k_cumdecay_i @ curr_last_recurrent_state: [chunk_size, EV]
-          // k_cumdecay_i: [chunk_size, EK]
-          // curr_last_recurrent_state: [EK, EV]
           at::native::cpublas::brgemm(
-              /*     M */ chunk_size,
-              /*     N */ v_head_size,
-              /*     K */ qk_head_size,
-              /*   lda */ qk_head_size,
-              /*   ldb */ v_head_size,
-              /*   ldc */ v_head_size,
+              /*     M */ mb_size,
+              /*     N */ D,
+              /*     K */ D,
+              /*   lda */ w_strideT,
+              /*   ldb */ D,
+              /*   ldc */ D,
               /* add_C */ false,
-              /*     A */ k_cumdecay_i_reduced,
-              /*     B */ curr_last_recurrent_state_pack_reduced,
+              /*     A */ w_ptr,
+              /*     B */ s_packed,
               /*     C */ v_prime);
         } else {
+          // brgemm_supported()==false path: pack_vnni2 above packs the
+          // *unscaled* state into its dst (for this GEMM's B operand) while
+          // separately scaling src in place by exp(g_last) (consumed later,
+          // at step 5.3's state accumulation). Replicate both halves in the
+          // same order: snapshot s_ptr into s_packed BEFORE scaling s_ptr,
+          // not after, since the GEMM below needs the pre-scale state.
+          float g_last_scale = std::exp(g_last);
+          for (int64_t d0 = 0; d0 < D * D; ++d0) {
+            s_packed[d0] = static_cast<scalar_t>(s_ptr[d0]);
+            s_ptr[d0] *= g_last_scale;
+          }
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
-              v_head_size,
-              chunk_size,
-              qk_head_size,
+              D,
+              mb_size,
+              D,
               1.0f,
-              curr_last_recurrent_state_reduced,
-              v_head_size,
-              k_cumdecay_i_reduced,
-              qk_head_size,
+              s_packed,
+              D,
+              w_ptr,
+              w_strideT,
               0.0f,
               v_prime,
-              v_head_size);
+              D);
         }
 
-        // v_new = v_prime = v_i - v_prime
-        // v_i: [chunk_size, EV]
-        for (int64_t m = 0; m < chunk_size; m++) {
-          int64_t i = 0;
-          for (; i < fVecSize * (v_head_size / fVecSize); i += fVecSize) {
-            auto tmp0 = fVec::loadu(v_i + m * v_head_size + i);
-            auto tmp1 = fVec::loadu(v_prime + m * v_head_size + i);
-            auto tmp2 = tmp0 - tmp1;
-            auto tmp3 = at::vec::convert<scalar_t>(tmp2);
-            tmp3.store(v_prime_reduced + m * v_head_size + i, fVecSize);
-          }
-        }
+        // step 2.b: v2' = u - v'
+        const scalar_t* __restrict__ u_ptr = u + (batch_offset + mb_start) * u_strideT + hv * u_strideH;
+        update_value_kernel<scalar_t, D>::apply(v_prime2, u_ptr, v_prime, mb_size, padded_mb_size, u_strideT);
 
-        // attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
-        // qg = q_i * g[:, :, i, :, None].exp(): [chunk_size, EK]
-        // q_i: [chunk_size, EK]
-        // g[:, :, i, :, None]: [chunk_size, 1]
-        for (int64_t m = 0; m < chunk_size; m++) {
-          auto g_pad_i_m = g_pad_i + m;
-          auto g_exp = std::exp(*g_pad_i_m);
-          int64_t i = 0;
-          scalar_t g_exp_reduced = static_cast<scalar_t>(g_exp);
-          auto vec_g_exp_reduced = bVec(g_exp_reduced);
-          for (; i < VecSize * (qk_head_size / VecSize); i += VecSize) {
-            auto tmp0 = bVec::loadu(q_i + m * qk_head_size + i);
-            auto tmp2 = tmp0 * vec_g_exp_reduced;
-            tmp2.store(qg + m * qk_head_size + i);
-          }
-        }
-        // attn_inter = qg @ curr_last_recurrent_state: [chunk_size, EV]
-        // curr_last_recurrent_state: [EK, EV]
+        // step 3.a: qg_exp = q * exp(g)
+        apply_beta_kernel<scalar_t, CHUNK_SIZE, D, false, true>::apply(
+            qg_exp, q_ptr, nullptr, g_ptr, mb_size, q_strideT, D, /*b_stride*/ 0);
+
+        // step 3.b: attn_inter = qg_exp @ state
         if constexpr (brgemm_supported()) {
           at::native::cpublas::brgemm(
-              /* M */ chunk_size,
-              /* N */ v_head_size,
-              /* K */ qk_head_size,
-              /* lda */ qk_head_size,
-              /* ldb */ v_head_size,
-              /* ldc */ v_head_size,
+              /*     M */ mb_size,
+              /*     N */ D,
+              /*     K */ D,
+              /*   lda */ D,
+              /*   ldb */ D,
+              /*   ldc */ D,
               /* add_C */ false,
-              /* A */ qg,
-              /* B */ curr_last_recurrent_state_pack_reduced,
-              /* C */ attn_inter);
+              /*     A */ qg_exp,
+              /*     B */ s_packed,
+              /*     C */ attn_inter);
         } else {
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
-              v_head_size,
-              chunk_size,
-              qk_head_size,
+              D,
+              mb_size,
+              D,
               1.0f,
-              curr_last_recurrent_state_reduced,
-              v_head_size,
-              qg,
-              qk_head_size,
+              s_packed,
+              D,
+              qg_exp,
+              D,
               0.0f,
               attn_inter,
-              v_head_size);
+              D);
         }
 
-        // core_attn_out[:, :, i] = attn_inter + attn_i @ v_new
-        // pack for v_prime
+        // step 4.a: attn_inter += attn2 @ v2'
         if constexpr (brgemm_supported()) {
           pack_vnni2<scalar_t>(
-              /*    dst */ v_prime_pack_reduced,
-              /*    src */ v_prime_reduced,
-              /*     N  */ chunk_size,
-              /*     K  */ v_head_size,
-              /* ld_src */ v_head_size,
-              /* ld_dst */ v_head_size);
-          // attn_inter = attn_inter + attn_i @ v_new: [chunk_size, EV]
-          // attn_i: [chunk_size, chunk_size]
-          // v_new: [chunk_size, EV]
+              /*    dst */ v_packed,
+              /*    src */ v_prime2,
+              /*     K  */ padded_mb_size,
+              /*     N  */ D,
+              /* ld_src */ D,
+              /* ld_dst */ D);
+
           at::native::cpublas::brgemm(
-              /* M */ chunk_size,
-              /* N */ v_head_size,
-              /* K */ chunk_size,
-              /* lda */ chunk_size,
-              /* ldb */ v_head_size,
-              /* ldc */ v_head_size,
+              /*     M */ mb_size,
+              /*     N */ D,
+              /*     K */ padded_mb_size,
+              /*   lda */ CHUNK_SIZE,
+              /*   ldb */ D,
+              /*   ldc */ D,
               /* add_C */ true,
-              /* A */ attn_i_reduced,
-              /* B */ v_prime_pack_reduced,
-              /* C */ attn_inter);
+              /*     A */ attn2,
+              /*     B */ v_packed,
+              /*     C */ attn_inter);
         } else {
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
-              v_head_size,
-              chunk_size,
-              chunk_size,
+              D,
+              mb_size,
+              padded_mb_size,
               1.0f,
-              v_prime_reduced,
-              v_head_size,
-              attn_i_reduced,
-              chunk_size,
+              v_prime2,
+              D,
+              attn2,
+              CHUNK_SIZE,
               1.0f,
               attn_inter,
-              v_head_size);
+              D);
         }
 
-        // core_attn_out[:, :, i] = attn_inter
-        for (int64_t m = 0; m < chunk_size; m++) {
-          at::vec::map<float>(
-              [](fVec x) { return x; }, core_attn_out_i + m * v_head_size, attn_inter + m * v_head_size, v_head_size);
+        // step 4.b: write attn_inter -> out
+        scalar_t* __restrict__ o_ptr = out + (batch_offset + mb_start) * o_strideT + hv * o_strideH;
+        update_kernel<scalar_t, D>::apply(o_ptr, attn_inter, mb_size, D, o_strideT);
+
+        // brgemm_supported()==false path: step 5.2 below overwrites k_updated,
+        // which aliases the same buffer as v_prime2 (both are `tmp`). Snapshot
+        // v_prime2 into v_packed (otherwise brgemm-only, and free by now since
+        // qg_exp was consumed at step 3.b) before that happens, so step 5.3
+        // doesn't read k_updated's data under the v_prime2 name.
+        if constexpr (!brgemm_supported()) {
+          std::copy(v_prime2, v_prime2 + padded_mb_size * D, v_packed);
         }
 
-        // last_recurrent_state = (
-        //     last_recurrent_state * g[:, :, i, -1, None, None].exp()
-        //     + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
-        // )
-        // 1) last_recurrent_state * g[:, :, i, -1, None, None].exp()
-        // curr_last_recurrent_state: [EK, EV]
-        // g[:, :, i, -1, None, None]: [1, 1]
-        // last_recurrent_state * g[:, :, i, -1, None, None].exp(): [EK, EV]
-        auto g_pad_i_last = g_pad_i + chunk_size - 1;
-        auto g_exp_last = std::exp(g_pad_i_last[0]);
-        for (int64_t m = 0; m < qk_head_size; m++) {
-          int64_t i = 0;
-          auto vec_g_exp_last = fVec(g_exp_last);
-          for (; i < fVecSize * (v_head_size / fVecSize); i += fVecSize) {
-            auto tmp0 = bVec::loadu(curr_last_recurrent_state_reduced + m * v_head_size + i);
-            auto tmp1 = at::vec::convert<float>(tmp0);
-            auto tmp2 = tmp1 * vec_g_exp_last;
-            tmp2.store(curr_last_recurrent_state + m * v_head_size + i);
-          }
-          if (i < v_head_size) {
-            auto tmp0 = bVec::loadu(curr_last_recurrent_state_reduced + m * v_head_size + i, v_head_size - i);
-            auto tmp1 = at::vec::convert<float>(tmp0);
-            auto tmp2 = tmp1 * vec_g_exp_last;
-            tmp2.store(curr_last_recurrent_state + m * v_head_size + i, v_head_size - i);
-          }
-        }
-        // 2) (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
-        // k_i: [chunk_size, EK]
-        // g[:, :, i, -1, None]: [1]
-        // g[:, :, i]: [chunk_size]
-        // (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]: [chunk_size, 1]
-        // kg = k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]: [chunk_size, EK]
-        // (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2): [EK, chunk_size]
-        // v_new: [chunk_size, EV]
-        // (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new: [EK, EV]
-        // kg = k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]
-        for (int64_t m = 0; m < chunk_size; m++) {
-          auto g_exp = std::exp((g_pad_i_last[0] - g_pad_i[m]));
-          int64_t i = 0;
-          scalar_t g_exp_reduced = static_cast<scalar_t>(g_exp);
-          auto vec_g_exp_reduced = bVec(g_exp_reduced);
-          for (; i < VecSize * (qk_head_size / VecSize); i += VecSize) {
-            auto tmp0 = bVec::loadu(k_i + m * qk_head_size + i);
-            auto tmp2 = tmp0 * vec_g_exp_reduced;
-            tmp2.store(kg + m * qk_head_size + i);
-          }
-        }
-        // kg.transpose(-1, -2): [EK, chunk_size]
-        at::native::utils::transpose<scalar_t>(
-            /* M */ chunk_size,
-            /* N */ qk_head_size,
-            /* src */ kg,
-            /* ld_src */ qk_head_size,
-            /* dst */ kg_transpose,
-            /* ld_dst */ chunk_size);
-        // kgv = kg.transpose(-1, -2) @ v_new
-        // v_new: [chunk_size, EV]
+        // step 5: update state
+        //   state_new = state * exp(g_last) + (k * exp(g_last - g)).T @ v2'
+
+        // step 5.1 state *= exp(g_last) fused with step 2.a
+
+        // step 5.2 k' = k * exp(g_last - g).T; TODO: fuse this with 1.a
+        update_key_kernel<scalar_t, CHUNK_SIZE, D>::apply(k_updated, k_ptr, g_ptr, mb_size, k_strideT);
+
+        // step 5.3 state += k' @ v2'
         if constexpr (brgemm_supported()) {
           at::native::cpublas::brgemm(
-              /* M */ qk_head_size,
-              /* N */ v_head_size,
-              /* K */ chunk_size,
-              /* lda */ chunk_size,
-              /* ldb */ v_head_size,
-              /* ldc */ v_head_size,
-              /* add_C */ false,
-              /* A */ kg_transpose,
-              /* B */ v_prime_pack_reduced,
-              /* C */ kgv);
+              /*     M */ D,
+              /*     N */ D,
+              /*     K */ padded_mb_size,  // mb_size
+              /*   lda */ CHUNK_SIZE,
+              /*   ldb */ D,
+              /*   ldc */ D,
+              /* add_C */ true,
+              /*     A */ k_updated,
+              /*     B */ v_packed,
+              /*     C */ s_ptr);
         } else {
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
-              v_head_size,
-              qk_head_size,
-              chunk_size,
+              D,
+              D,
+              padded_mb_size,
               1.0f,
-              v_prime_reduced,
-              v_head_size,
-              kg_transpose,
-              chunk_size,
-              0.0f,
-              kgv,
-              v_head_size);
-        }
-        // last_recurrent_state = 1) + 2)
-        for (int64_t m = 0; m < qk_head_size; m++) {
-          at::vec::map2<float>(
-              [](fVec x, fVec y) { return x + y; },
-              curr_last_recurrent_state + m * v_head_size,
-              curr_last_recurrent_state + m * v_head_size,
-              kgv + m * v_head_size,
-              v_head_size);
+              v_packed,
+              D,
+              k_updated,
+              CHUNK_SIZE,
+              1.0f,
+              s_ptr,
+              D);
         }
       }
 
-      // core_attn_out -> output
-      // output: [B, T, HV, EV]
-      // core_attn_out: [B, HV, padded_T, EV]
-      auto curr_out = out_ptr + h * oStrideH;
-      for (int64_t m = 0; m < seq_len; m++) {
-        at::vec::map<scalar_t>(
-            [](fVec x) { return x; }, curr_out + m * oStrideT, curr_core_attn_out + m * v_head_size, v_head_size);
-      }
-
-      // Move to the next query
-      data_index_step(b, batch_size, h, v_num_head);
+      // move to the next index
+      data_index_step(bs, num_seqs, hv, Hv);
     }
+    at::native::cpublas::brgemm_release();
   });
 }
 
@@ -1011,14 +1632,10 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
         int64_t d;
 #pragma GCC unroll 4
         for (d = 0; d <= head_dim - VecSize; d += VecSize) {
-          bVec q_bvec = bVec::loadu(q_ptr + q_offset + d);
-          fVec q_fvec0, q_fvec1;
-          std::tie(q_fvec0, q_fvec1) = at::vec::convert_to_float(q_bvec);
+          auto [q_fvec0, q_fvec1] = load_float_vec2(q_ptr + q_offset + d);
           sum_q_fvec += q_fvec0 * q_fvec0;
           sum_q_fvec += q_fvec1 * q_fvec1;
-          bVec k_bvec = bVec::loadu(k_ptr + k_offset + d);
-          fVec k_fvec0, k_fvec1;
-          std::tie(k_fvec0, k_fvec1) = at::vec::convert_to_float(k_bvec);
+          auto [k_fvec0, k_fvec1] = load_float_vec2(k_ptr + k_offset + d);
           sum_k_fvec += k_fvec0 * k_fvec0;
           sum_k_fvec += k_fvec1 * k_fvec1;
         }
@@ -1066,14 +1683,11 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
         fVec kv_mem_vec1 = fVec(float(0));
         for (int di = 0; di < head_dim; ++di) {
           fVec k_val_vec = fVec(k_ptr[k_offset + di] * k_scale);
-          fVec state_vec0 = fVec::loadu(state_ptr + state_offset + di * v_head_dim + dvi);
-          fVec state_vec1 = fVec::loadu(state_ptr + state_offset + di * v_head_dim + dvi + fVecSize);
+          auto [state_vec0, state_vec1] = load_float_vec2(state_ptr + state_offset + di * v_head_dim + dvi);
           kv_mem_vec0 = kv_mem_vec0 + state_vec0 * g_val_exp_vec * k_val_vec;
           kv_mem_vec1 = kv_mem_vec1 + state_vec1 * g_val_exp_vec * k_val_vec;
         }
-        bVec v_bvec = bVec::loadu(v_ptr + v_offset + dvi);
-        fVec v_vec0, v_vec1;
-        std::tie(v_vec0, v_vec1) = at::vec::convert_to_float(v_bvec);
+        auto [v_vec0, v_vec1] = load_float_vec2(v_ptr + v_offset + dvi);
         fVec dt_vec0 = (v_vec0 - kv_mem_vec0) * beta_vec;
         fVec dt_vec1 = (v_vec1 - kv_mem_vec1) * beta_vec;
         fVec o_vec0 = fVec(float(0));
@@ -1081,8 +1695,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
         for (int di = 0; di < head_dim; ++di) {
           fVec q_vec = fVec(q_ptr[q_offset + di] * q_scale);
           fVec k_vec = fVec(k_ptr[k_offset + di] * k_scale);
-          fVec state_vec0 = fVec::loadu(state_ptr + state_offset + di * v_head_dim + dvi);
-          fVec state_vec1 = fVec::loadu(state_ptr + state_offset + di * v_head_dim + dvi + fVecSize);
+          auto [state_vec0, state_vec1] = load_float_vec2(state_ptr + state_offset + di * v_head_dim + dvi);
           state_vec0 = state_vec0 * g_val_exp_vec + k_vec * dt_vec0;
           state_vec1 = state_vec1 * g_val_exp_vec + k_vec * dt_vec1;
           o_vec0 = o_vec0 + state_vec0 * q_vec * scale_vec;
@@ -1116,6 +1729,164 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
   });
 }
 
+// Speculative-decode variant: processes a varlen batch where each sequence has
+// ``q_len`` draft tokens, runs the recurrence sequentially over those tokens
+// (inside the kernel, so one dispatch handles the whole draft block), reads the
+// initial state from cache slot ``num_accepted-1`` and stores the state *after*
+// token ``t`` into cache slot ``t`` (multi-slot rollback, matching the GPU
+// kernel). Parallelized over (sequence, v_head); the per-sequence token loop is
+// sequential as required by the recurrence.
+template <typename scalar_t, typename param_t>
+void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
+    const scalar_t* __restrict__ q_ptr,  // [T, HK, EK]
+    const scalar_t* __restrict__ k_ptr,  // [T, HK, EK]
+    const scalar_t* __restrict__ v_ptr,  // [T, HV, EV]
+    const param_t* __restrict__ A_log_ptr,
+    const scalar_t* __restrict__ a_ptr,  // [T, HV]
+    const scalar_t* __restrict__ dt_bias_ptr,
+    const scalar_t* __restrict__ b_ptr,  // [T, HV]
+    const int32_t* __restrict__ spec_indices_ptr,  // [N, S]
+    const int32_t* __restrict__ num_accepted_ptr,  // [N]
+    const int32_t* __restrict__ cu_seqlens_ptr,     // [N + 1]
+    float* __restrict__ state_ptr,
+    scalar_t* __restrict__ o_ptr,  // [T, HV, EV]
+    float* __restrict__ qk_scale_buf,  // [2, T, HK]
+    int64_t total_tokens,
+    int64_t batch_size,
+    int64_t spec_stride,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t v_num_heads,
+    int64_t v_head_dim,
+    int64_t q_strideT,
+    int64_t q_strideH,
+    int64_t k_strideT,
+    int64_t k_strideH,
+    int64_t v_strideT,
+    int64_t v_strideH,
+    int64_t state_slot_stride,
+    bool use_qk_l2norm_in_kernel,
+    double softplus_threshold) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int64_t VecSize = bVec::size();
+  constexpr int64_t fVecSize = fVec::size();
+  int64_t group_size = v_num_heads / num_heads;
+  double scale = 1 / std::sqrt((double)head_dim);
+  fVec scale_vec = fVec((float)scale);
+
+  if (use_qk_l2norm_in_kernel) {
+    float eps = 1e-5f;
+    at::parallel_for(0, total_tokens * num_heads, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t i = begin; i < end; ++i) {
+        int64_t ti = i / num_heads;
+        int64_t ni = i % num_heads;
+        const scalar_t* qp = q_ptr + ti * q_strideT + ni * q_strideH;
+        const scalar_t* kp = k_ptr + ti * k_strideT + ni * k_strideH;
+        float sq = 0.f, sk = 0.f;
+        for (int64_t d = 0; d < head_dim; ++d) {
+          float qv = (float)qp[d];
+          sq += qv * qv;
+          float kv = (float)kp[d];
+          sk += kv * kv;
+        }
+        qk_scale_buf[ti * num_heads + ni] = 1.f / std::sqrt(sq + eps);
+        qk_scale_buf[total_tokens * num_heads + ti * num_heads + ni] = 1.f / std::sqrt(sk + eps);
+      }
+    });
+  }
+
+  at::parallel_for(0, batch_size * v_num_heads, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t idx = begin; idx < end; ++idx) {
+      int64_t bi = idx / v_num_heads;
+      int64_t ni = idx % v_num_heads;
+      int64_t kh = ni / group_size;
+      int64_t q_start = cu_seqlens_ptr[bi];
+      int64_t q_len = cu_seqlens_ptr[bi + 1] - q_start;
+      if (q_len <= 0) {
+        continue;
+      }
+      int64_t acc = (int64_t)num_accepted_ptr[bi];
+      // Clamp acc-1 to >=0: when num_accepted is 0 the unclamped index reads
+      // out of bounds and yields an arbitrary prev_slot used to index the SSM
+      // state. Mirrors the GPU guard tl.maximum(num_accepted - 1, 0).
+      int64_t prev_slot =
+          (int64_t)spec_indices_ptr[bi * spec_stride + (acc > 0 ? acc - 1 : 0)];
+      for (int64_t t = 0; t < q_len; ++t) {
+        int64_t cur_slot = (int64_t)spec_indices_ptr[bi * spec_stride + t];
+        int64_t token = q_start + t;
+        const float* src = state_ptr + prev_slot * state_slot_stride + ni * head_dim * v_head_dim;
+        float* dst = state_ptr + cur_slot * state_slot_stride + ni * head_dim * v_head_dim;
+        float g_val = -std::exp((float)A_log_ptr[ni]) *
+            softplus((float)a_ptr[token * v_num_heads + ni] + (float)dt_bias_ptr[ni], softplus_threshold);
+        float g_val_exp = std::exp(g_val);
+        fVec g_val_exp_vec = fVec(g_val_exp);
+        float beta_val = 1.f / (1.f + std::exp(-(float)b_ptr[token * v_num_heads + ni]));
+        fVec beta_vec = fVec(beta_val);
+        int64_t q_offset = token * q_strideT + kh * q_strideH;
+        int64_t k_offset = token * k_strideT + kh * k_strideH;
+        float q_scale = use_qk_l2norm_in_kernel ? qk_scale_buf[token * num_heads + kh] : 1.f;
+        float k_scale =
+            use_qk_l2norm_in_kernel ? qk_scale_buf[total_tokens * num_heads + token * num_heads + kh] : 1.f;
+        int64_t v_offset = token * v_strideT + ni * v_strideH;
+        int64_t o_offset = (token * v_num_heads + ni) * v_head_dim;
+        int64_t dvi = 0;
+        for (; dvi <= v_head_dim - VecSize; dvi += VecSize) {
+          fVec kv_mem_vec0 = fVec(0.f);
+          fVec kv_mem_vec1 = fVec(0.f);
+          for (int di = 0; di < head_dim; ++di) {
+            fVec k_val_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
+            fVec sv0 = fVec::loadu(src + di * v_head_dim + dvi);
+            fVec sv1 = fVec::loadu(src + di * v_head_dim + dvi + fVecSize);
+            kv_mem_vec0 = kv_mem_vec0 + sv0 * g_val_exp_vec * k_val_vec;
+            kv_mem_vec1 = kv_mem_vec1 + sv1 * g_val_exp_vec * k_val_vec;
+          }
+          bVec v_bvec = bVec::loadu(v_ptr + v_offset + dvi);
+          fVec v_vec0, v_vec1;
+          std::tie(v_vec0, v_vec1) = at::vec::convert_to_float(v_bvec);
+          fVec dt_vec0 = (v_vec0 - kv_mem_vec0) * beta_vec;
+          fVec dt_vec1 = (v_vec1 - kv_mem_vec1) * beta_vec;
+          fVec o_vec0 = fVec(0.f);
+          fVec o_vec1 = fVec(0.f);
+          for (int di = 0; di < head_dim; ++di) {
+            fVec q_vec = fVec((float)q_ptr[q_offset + di] * q_scale);
+            fVec k_vec = fVec((float)k_ptr[k_offset + di] * k_scale);
+            fVec sv0 = fVec::loadu(src + di * v_head_dim + dvi);
+            fVec sv1 = fVec::loadu(src + di * v_head_dim + dvi + fVecSize);
+            sv0 = sv0 * g_val_exp_vec + k_vec * dt_vec0;
+            sv1 = sv1 * g_val_exp_vec + k_vec * dt_vec1;
+            o_vec0 = o_vec0 + sv0 * q_vec * scale_vec;
+            o_vec1 = o_vec1 + sv1 * q_vec * scale_vec;
+            sv0.store(dst + di * v_head_dim + dvi);
+            sv1.store(dst + di * v_head_dim + dvi + fVecSize);
+          }
+          bVec o_vec = at::vec::convert_from_float<scalar_t>(o_vec0, o_vec1);
+          o_vec.store(o_ptr + o_offset + dvi);
+        }
+        for (; dvi < v_head_dim; ++dvi) {
+          float kv_mem_val = 0.f;
+          for (int di = 0; di < head_dim; ++di) {
+            float k_val = (float)k_ptr[k_offset + di] * k_scale;
+            kv_mem_val += src[di * v_head_dim + dvi] * g_val_exp * k_val;
+          }
+          float v_val = (float)v_ptr[v_offset + dvi];
+          float dt_val = (v_val - kv_mem_val) * beta_val;
+          float o_val = 0.f;
+          for (int di = 0; di < head_dim; ++di) {
+            float q_val = (float)q_ptr[q_offset + di] * q_scale;
+            float k_val = (float)k_ptr[k_offset + di] * k_scale;
+            float ns = src[di * v_head_dim + dvi] * g_val_exp + k_val * dt_val;
+            dst[di * v_head_dim + dvi] = ns;
+            o_val += ns * q_val * scale;
+          }
+          o_ptr[o_offset + dvi] = (scalar_t)o_val;
+        }
+        prev_slot = cur_slot;
+      }
+    }
+  });
+}
+
 template <typename scalar_t>
 void fused_gdn_gating_kernel_impl(
     float* __restrict__ A_log,
@@ -1131,25 +1902,19 @@ void fused_gdn_gating_kernel_impl(
   constexpr int vec_size = bVec::size();
   constexpr int fvec_size = fVec::size();
   const fVec neg_one(-1.0f);
-  const fVec one(1.0f);
   at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
     for (int64_t i = begin; i < end; ++i) {
       int64_t j = 0;
       for (; j < num_heads - (num_heads % vec_size); j += vec_size) {
-        fVec A_log_vec0 = fVec::loadu(A_log + j);
-        fVec A_log_vec1 = fVec::loadu(A_log + j + fvec_size);
-        bVec dt_bias_vec = bVec::loadu(dt_bias + j);
-        bVec a_bvec = bVec::loadu(a + i * num_heads + j);
-        bVec b_bvec = bVec::loadu(b + i * num_heads + j);
-        fVec a0, a1, dt_bias_vec0, dt_bias_vec1, b0, b1;
-        std::tie(a0, a1) = at::vec::convert_to_float(a_bvec);
-        std::tie(b0, b1) = at::vec::convert_to_float(b_bvec);
-        std::tie(dt_bias_vec0, dt_bias_vec1) = at::vec::convert_to_float(dt_bias_vec);
+        auto [A_log_vec0, A_log_vec1] = load_float_vec2(A_log + j);
+        auto [dt_bias_vec0, dt_bias_vec1] = load_float_vec2(dt_bias + j);
+        auto [a0, a1] = load_float_vec2(a + i * num_heads + j);
+        auto [b0, b1] = load_float_vec2(b + i * num_heads + j);
 
         fVec g0 = neg_one * A_log_vec0.exp_u20() * softplus(a0 + dt_bias_vec0);
         fVec g1 = neg_one * A_log_vec1.exp_u20() * softplus(a1 + dt_bias_vec1);
-        fVec beta0 = one / (one + (neg_one * b0).exp_u20());
-        fVec beta1 = one / (one + (neg_one * b1).exp_u20());
+        fVec beta0 = fast_sigmoid(b0);
+        fVec beta1 = fast_sigmoid(b1);
 
         g0.store(out + i * num_heads + j);
         g1.store(out + i * num_heads + j + fvec_size);
@@ -1179,26 +1944,19 @@ void fused_gdn_gating_kernel_impl(
   constexpr int vec_size = bVec::size();
   constexpr int fvec_size = fVec::size();
   const fVec neg_one(-1.0f);
-  const fVec one(1.0f);
   at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
     for (int64_t i = begin; i < end; ++i) {
       int64_t j = 0;
       for (; j < num_heads - (num_heads % vec_size); j += vec_size) {
-        bVec A_log_bvec = bVec::loadu(A_log + j);
-        fVec A_log_vec0, A_log_vec1;
-        std::tie(A_log_vec0, A_log_vec1) = at::vec::convert_to_float(A_log_bvec);
-        bVec dt_bias_vec = bVec::loadu(dt_bias + j);
-        bVec a_bvec = bVec::loadu(a + i * num_heads + j);
-        bVec b_bvec = bVec::loadu(b + i * num_heads + j);
-        fVec a0, a1, dt_bias_vec0, dt_bias_vec1, b0, b1;
-        std::tie(a0, a1) = at::vec::convert_to_float(a_bvec);
-        std::tie(b0, b1) = at::vec::convert_to_float(b_bvec);
-        std::tie(dt_bias_vec0, dt_bias_vec1) = at::vec::convert_to_float(dt_bias_vec);
+        auto [A_log_vec0, A_log_vec1] = load_float_vec2(A_log + j);
+        auto [dt_bias_vec0, dt_bias_vec1] = load_float_vec2(dt_bias + j);
+        auto [a0, a1] = load_float_vec2(a + i * num_heads + j);
+        auto [b0, b1] = load_float_vec2(b + i * num_heads + j);
 
         fVec g0 = neg_one * A_log_vec0.exp_u20() * softplus(a0 + dt_bias_vec0);
         fVec g1 = neg_one * A_log_vec1.exp_u20() * softplus(a1 + dt_bias_vec1);
-        fVec beta0 = one / (one + (neg_one * b0).exp_u20());
-        fVec beta1 = one / (one + (neg_one * b1).exp_u20());
+        fVec beta0 = fast_sigmoid(b0);
+        fVec beta1 = fast_sigmoid(b1);
 
         g0.store(out + i * num_heads + j);
         g1.store(out + i * num_heads + j + fvec_size);
@@ -1215,29 +1973,208 @@ void fused_gdn_gating_kernel_impl(
 
 }  // anonymous namespace
 
-template <bool is_last_dim_contiguous>
-inline void
-CHECK_INPUT_SHAPE_DTYPE(const at::Tensor& tensor, const int64_t& dim, const at::IntArrayRef& sizes, at::ScalarType st) {
-  TORCH_CHECK(tensor.sizes() == sizes, "Input tensor shape mismatch: expected ", sizes, ", got ", tensor.sizes());
-  TORCH_CHECK(tensor.dtype() == st, "Input tensor dtype mismatch");
-  CHECK_DIM(dim, tensor);
-  if (is_last_dim_contiguous) {
-    CHECK_LAST_DIM_CONTIGUOUS_INPUT(tensor);
-  } else {
-    CHECK_CONTIGUOUS(tensor);
+template <int CHUNK_SIZE>
+std::tuple<at::Tensor, at::Tensor> prepare_chunk_indices(const at::Tensor& cu_seqlens) {
+  int64_t num_seqs = cu_seqlens.size(0) - 1;
+  at::Tensor chunk_offsets = at::empty({num_seqs + 1}, cu_seqlens.options());
+  // get number of chunks and chunk offsets
+  const int32_t* offsets_data = cu_seqlens.data_ptr<int32_t>();
+  int32_t num_chunks = 0;
+  chunk_offsets[0] = 0;
+  for (int64_t row = 0; row < num_seqs; ++row) {
+    num_chunks += div_up(offsets_data[row + 1] - offsets_data[row], CHUNK_SIZE);
+    chunk_offsets[row + 1] = num_chunks;
   }
+  // get chunk indices
+  at::Tensor chunk_indices = at::empty({num_chunks, 2}, cu_seqlens.options());
+  int32_t* indices_data = chunk_indices.data_ptr<int32_t>();
+
+  int64_t idx = 0;
+  for (int32_t row = 0; row < num_seqs; ++row) {
+    int32_t num_chunks = div_up(offsets_data[row + 1] - offsets_data[row], CHUNK_SIZE);
+
+    for (int32_t col = 0; col < num_chunks; ++col) {
+      indices_data[idx * 2 + 0] = row;
+      indices_data[idx * 2 + 1] = col;
+      idx++;
+    }
+  }
+  return std::make_tuple(chunk_indices, chunk_offsets);
 }
 
-// query: [B, T, HK, EK]
-// key: [B, T, HK, EK]
-// value: [B, T, HV, EV]
-// g: [B, T, HV] FP32
-// beta: [B, T, HV]
-// initial_state: [N, HV, EK, EV] FP32
-// output_final_state: bool
-// cu_seqlens: [N + 1] INT32
-// head_first: bool
-// use_qk_l2norm_in_kernel: bool
+#define DISPATCH_HEAD_DIM_CASE(launch_macro, hd) \
+  case hd: {                                     \
+    launch_macro(hd);                            \
+    break;                                       \
+  }
+
+// [NB]: add new head_dim support here
+#define DISPATCH_HEAD_DIM(dim, launch_macro)                 \
+  switch (dim) {                                             \
+    DISPATCH_HEAD_DIM_CASE(launch_macro, 64)                 \
+    DISPATCH_HEAD_DIM_CASE(launch_macro, 128)                \
+    default:                                                 \
+      TORCH_CHECK(false, "Unexpected head dim size, ", dim); \
+  }
+
+#define LAUNCH_L2NORM_KERNEL(HD)        \
+  l2norm_fwd_kernel_impl<scalar_t, HD>( \
+      query_norm.data_ptr<scalar_t>(),  \
+      key_norm.data_ptr<scalar_t>(),    \
+      query.data_ptr<scalar_t>(),       \
+      key.data_ptr<scalar_t>(),         \
+      eps,                              \
+      T,                                \
+      H,                                \
+      query.stride(1),                  \
+      query.stride(2),                  \
+      key.stride(1),                    \
+      key.stride(2));
+
+std::tuple<at::Tensor, at::Tensor> l2norm_fwd(const at::Tensor& query, const at::Tensor& key, double eps) {
+  int64_t B = query.size(0);
+  int64_t T = query.size(1);
+  int64_t H = query.size(2);
+  int64_t D = query.size(3);
+
+  at::Tensor query_norm = at::empty_like(query);
+  at::Tensor key_norm = at::empty_like(key);
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+      query.scalar_type(), "l2norm_fwd", [&] { DISPATCH_HEAD_DIM(D, LAUNCH_L2NORM_KERNEL); });
+
+  return std::make_tuple(query_norm, key_norm);
+}
+
+// [NB]: instantiate decay_mask to avoid heavy recomputation in the kernel with exp
+template <int CHUNK_SIZE>
+at::Tensor chunk_local_cumsum(const at::Tensor& g, const at::Tensor& cu_seqlens, const at::Tensor& chunk_indices) {
+  int64_t B = g.size(0);
+  // int64_t T = g.size(1);
+  int64_t Hv = g.size(2);
+  int64_t NT = chunk_indices.size(0);
+
+  at::Tensor g_ = at::empty({B, NT, Hv, CHUNK_SIZE}, g.options());
+  AT_DISPATCH_FLOATING_TYPES(g.scalar_type(), "chunk_local_cumsum", [&] {
+    chunk_local_cumsum_kernel_impl<scalar_t, CHUNK_SIZE>(
+        g_.data_ptr<scalar_t>(),
+        g.data_ptr<scalar_t>(),
+        cu_seqlens.data_ptr<int32_t>(),
+        chunk_indices.data_ptr<int32_t>(),
+        Hv,
+        NT);
+  });
+  return g_;
+}
+
+#define LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTRA_KERNEL(HD)                \
+  chunk_gated_delta_rule_fwd_intra_kernel_impl<scalar_t, HD, CHUNK_SIZE>( \
+      w.data_ptr<scalar_t>(),                                             \
+      u.data_ptr<scalar_t>(),                                             \
+      decay_mask.data_ptr<float>(),                                       \
+      k.data_ptr<scalar_t>(),                                             \
+      v.data_ptr<scalar_t>(),                                             \
+      g.data_ptr<float>(),                                                \
+      beta.data_ptr<scalar_t>(),                                          \
+      cu_seqlens.data_ptr<int32_t>(),                                     \
+      chunk_indices.data_ptr<int32_t>(),                                  \
+      H,                                                                  \
+      Hv,                                                                 \
+      NT,                                                                 \
+      k.stride(1),                                                        \
+      k.stride(2),                                                        \
+      v.stride(1),                                                        \
+      v.stride(2));
+
+template <int CHUNK_SIZE>
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_intra(
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& g,
+    const at::Tensor& beta,
+    const at::Tensor& cu_seqlens,
+    const at::Tensor& chunk_indices) {
+  int64_t B = k.size(0);
+  int64_t T = k.size(1);
+  int64_t H = k.size(2);
+  int64_t D = k.size(3);
+  int64_t Hv = v.size(2);
+  int64_t Dv = v.size(3);
+  int64_t NT = chunk_indices.size(0);
+
+  at::Tensor w = at::empty({B, T, Hv, D}, k.options());                                 // BFloat16
+  at::Tensor u = at::empty({B, T, Hv, Dv}, k.options());                                // BFloat16
+  at::Tensor decay_mask = at::empty({B, NT, Hv, CHUNK_SIZE, CHUNK_SIZE}, g.options());  // Float
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(k.scalar_type(), "chunk_gated_delta_rule_fwd_intra", [&] {
+    DISPATCH_HEAD_DIM(D, LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTRA_KERNEL);
+  });
+
+  return std::make_tuple(w, u, decay_mask);
+}
+
+#define LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTER_KERNEL(HD)                \
+  chunk_gated_delta_rule_fwd_inter_kernel_impl<scalar_t, HD, CHUNK_SIZE>( \
+      o.data_ptr<scalar_t>(),                                             \
+      initial_state.data_ptr<float>(),                                    \
+      initial_state_indices.data_ptr<int32_t>(),                          \
+      q.data_ptr<scalar_t>(),                                             \
+      k.data_ptr<scalar_t>(),                                             \
+      w.data_ptr<scalar_t>(),                                             \
+      u.data_ptr<scalar_t>(),                                             \
+      g.data_ptr<float>(),                                                \
+      decay_mask.data_ptr<float>(),                                       \
+      cu_seqlens.data_ptr<int32_t>(),                                     \
+      chunk_offsets.data_ptr<int32_t>(),                                  \
+      H,                                                                  \
+      Hv,                                                                 \
+      num_seqs,                                                           \
+      q.stride(1),                                                        \
+      q.stride(2),                                                        \
+      k.stride(1),                                                        \
+      k.stride(2),                                                        \
+      initial_state.stride(0));
+
+template <int CHUNK_SIZE>
+std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_inter(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& w,
+    const at::Tensor& u,
+    const at::Tensor& g,
+    const at::Tensor& decay_mask,
+    const at::Tensor& initial_state,
+    bool output_final_state,
+    const at::Tensor& cu_seqlens,
+    const at::Tensor& chunk_offsets,
+    const at::Tensor& initial_state_indices) {
+  const int64_t B = q.size(0);
+  const int64_t T = q.size(1);
+  const int64_t H = q.size(2);
+  const int64_t D = q.size(3);
+  const int64_t Hv = w.size(2);
+  const int64_t Dv = u.size(3);
+  const int64_t num_seqs = initial_state_indices.size(0);
+
+  at::Tensor o = at::empty({B, T, Hv, Dv}, q.options());
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(q.scalar_type(), "chunk_gated_delta_rule_fwd_inter", [&] {
+    DISPATCH_HEAD_DIM(D, LAUNCH_CHUNK_GATED_DELTA_RULE_FWD_INTER_KERNEL);
+  });
+
+  return std::make_tuple(o, initial_state);
+}
+
+// [NB]: Support only varlen inputs
+//   B: packed batch dim of q/k/v (== 1)
+//   num_seqs: number of variable-length sequences
+//
+//   query: [B, T, H, D]
+//   key: [B, T, H, D]
+//   value: [B, T, Hv, Dv]
+//   g: [B, T, Hv] FP32
+//   beta: [B, T, Hv]
+//   initial_state: [num_seqs, Hv, Dv, D] FP32
+//   cu_seqlens: [num_seqs + 1] INT32
+//
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -1249,154 +2186,71 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& cu_seqlens,
     bool head_first,
     bool use_qk_l2norm_in_kernel,
-    double eps = 1e-5) {
-  TORCH_CHECK(head_first == false, "chunk_gated_delta_rule_cpu does not support head first");
+    const at::Tensor& initial_state_indices,
+    double eps = 1e-6) {
+  TORCH_CHECK(!head_first, "chunk_gated_delta_rule_cpu: does not support head first");
+
   int64_t B = query.size(0);
-  int64_t global_seq_len = query.size(1);
-  int64_t qk_num_head = query.size(2);
-  int64_t qk_head_size = query.size(3);
-  int64_t v_num_head = value.size(2);
-  int64_t v_head_size = value.size(3);
-  int64_t batch_size = initial_state.size(0);
-  CHECK_EQ(B, 1);
-  TORCH_CHECK(v_num_head % qk_num_head == 0, "expect v_num_head multiple of qk_num_head.");
-  TORCH_CHECK(qk_head_size % 32 == 0, "expect qk_head_size to be multiples of 32.");
-  TORCH_CHECK(v_head_size % 32 == 0, "expect v_head_size to be multiples of 32.");
-  CHECK_INPUT_SHAPE_DTYPE<true>(query, 4, {B, global_seq_len, qk_num_head, qk_head_size}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<true>(key, 4, {B, global_seq_len, qk_num_head, qk_head_size}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<true>(value, 4, {B, global_seq_len, v_num_head, v_head_size}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<false>(g, 3, {B, global_seq_len, v_num_head}, at::kFloat);
-  CHECK_INPUT_SHAPE_DTYPE<false>(beta, 3, {B, global_seq_len, v_num_head}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<false>(cu_seqlens, 1, {batch_size + 1}, at::kInt);
-  CHECK_INPUT_SHAPE_DTYPE<false>(initial_state, 4, {batch_size, v_num_head, qk_head_size, v_head_size}, at::kFloat);
+  int64_t T = query.size(1);
+  int64_t H = query.size(2);
+  int64_t D = query.size(3);
+  int64_t Hv = value.size(2);
+  int64_t Dv = value.size(3);
+  int64_t num_seqs = initial_state_indices.size(0);
 
-  at::Tensor output = at::empty_like(value, value.options());  // [B, T, HV, EV]
-  at::Tensor final_state = initial_state.to(at::kFloat);       // [N, HV, EK, EV]
+  TORCH_CHECK(B == 1, __func__, ": expect batch size to be 1");
+  TORCH_CHECK(Hv % H == 0, __func__, ": expect num_heads_kv multiple of num_heads.");
+  TORCH_CHECK(D % 32 == 0, __func__, ": expect head_dim to be multiples of 32.");
+  TORCH_CHECK(Dv % 32 == 0, __func__, ": expect head_dim_v to be multiples of 32.");
+  TORCH_CHECK(D == Dv, __func__, ": expect head_dim to be equal to head_dim_v.");
+  CHECK_INPUT_SHAPE_DTYPE<true>(query, {B, T, H, D}, at::kBFloat16);
+  CHECK_INPUT_SHAPE_DTYPE<true>(key, {B, T, H, D}, at::kBFloat16);
+  CHECK_INPUT_SHAPE_DTYPE<true>(value, {B, T, Hv, Dv}, at::kBFloat16);
+  CHECK_INPUT_SHAPE_DTYPE<false>(g, {B, T, Hv}, at::kFloat);
+  CHECK_INPUT_SHAPE_DTYPE<false>(beta, {B, T, Hv}, at::kBFloat16);
+  CHECK_INPUT_SHAPE_DTYPE<false>(cu_seqlens, {num_seqs + 1}, at::kInt);
+  TORCH_CHECK(initial_state.sizes() == at::IntArrayRef({initial_state.size(0), Hv, Dv, D}),
+              "chunk_gated_delta_rule_cpu: initial_state shape mismatch, got ", initial_state.sizes());
+  TORCH_CHECK(initial_state.scalar_type() == at::kFloat, "chunk_gated_delta_rule_cpu: initial_state dtype mismatch");
+  CHECK_CPU(initial_state);
+  // initial_state may be a pooled/paged buffer with padding between slots
+  // (e.g. mamba cache-align mode), so only the per-slot (Hv, Dv, D) layout
+  // needs to be densely packed; dim 0's stride is read at runtime instead of
+  // assumed, mirroring conv.cpp's conv_state_slot_stride handling.
+  TORCH_CHECK(initial_state.stride(-1) == 1 && initial_state.stride(-2) == D &&
+                  initial_state.stride(-3) == Dv * D,
+              "chunk_gated_delta_rule_cpu: expect initial_state to be contiguous per pool slot.");
+  CHECK_INPUT_SHAPE_DTYPE<false>(initial_state_indices, {num_seqs}, at::kInt);
 
-  // Strides
-  int64_t qStrideH = query.stride(2);
-  int64_t qStrideT = query.stride(1);
-  int64_t kStrideH = key.stride(2);
-  int64_t kStrideT = key.stride(1);
-  int64_t vStrideH = value.stride(2);
-  int64_t vStrideT = value.stride(1);
-  int64_t oStrideH = output.stride(2);
-  int64_t oStrideT = output.stride(1);
+  constexpr int CHUNK_SIZE = 64;
 
-  constexpr int64_t chunk_size = 64;
-  // Deduce the global chunks
-  // e.g. cu_seqlens: [0, 5, 13, 16], chunk_size = 4
-  // chunk_offsets: [0, 2, 4, 5]
-  // chunk_indices (batch_id, local_chunk_id): [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0]]
-  at::Tensor chunk_offsets = at::empty(batch_size + 1, cu_seqlens.options());
-  auto chunk_offsets_ptr = chunk_offsets.data_ptr<int32_t>();
-  chunk_offsets_ptr[0] = 0;
-  int32_t* cu_seqlens_ptr = cu_seqlens.data_ptr<int32_t>();
-  int64_t s = 0;
-  int64_t e = 0;
-  int64_t s_pad = 0;
-  int64_t e_pad = 0;
-  for (int64_t b = 0; b < batch_size; b++) {
-    e = cu_seqlens_ptr[b + 1];
-    int64_t seq_len = e - s;
-    int64_t pad_size = (chunk_size - seq_len % chunk_size) % chunk_size;
-    int64_t total_seq_length = seq_len + pad_size;
-    e_pad = s_pad + total_seq_length;
-    chunk_offsets[b + 1] = e_pad / chunk_size;
-    s = e;
-    s_pad = e_pad;
-  }
-  int64_t global_total_seq_length = e_pad;
-  int64_t global_num_chunk = chunk_offsets_ptr[batch_size];
-  at::Tensor chunk_indices = at::empty(global_num_chunk * 2, cu_seqlens.options());
-  auto chunk_indices_ptr = chunk_indices.data_ptr<int32_t>();
-  int64_t curr_c = 0;
-  for (int64_t b = 0; b < batch_size; b++) {
-    int64_t batch_chunk_num = chunk_offsets_ptr[b + 1] - chunk_offsets_ptr[b];
-    for (int64_t c = 0; c < batch_chunk_num; c++) {
-      chunk_indices_ptr[curr_c * 2] = b;
-      chunk_indices_ptr[curr_c * 2 + 1] = c;
-      curr_c += 1;
-    }
-  }
+  // prepare chunk indices
+  auto [chunk_indices, chunk_offsets] = prepare_chunk_indices<CHUNK_SIZE>(cu_seqlens);
 
-  // Allocate buffer
-  int64_t buff_size = v_num_head * global_total_seq_length                               // g_pad_data
-                      + batch_size * v_num_head * global_total_seq_length * v_head_size  // core_attn
-                      + v_num_head * global_total_seq_length * chunk_size                // decay_mask
-                      + v_num_head * global_total_seq_length * v_head_size;              // v_beta_attn
-  at::Tensor buff_data = at::empty({buff_size}, query.options().dtype(at::kFloat));
-  int64_t reduced_buff_size = qk_num_head * global_total_seq_length * qk_head_size    // q_pad_data
-                              + qk_num_head * global_total_seq_length * qk_head_size  // k_pad_data
-                              + v_num_head * global_total_seq_length * v_head_size    // v_pad_data
-                              + v_num_head * global_total_seq_length * qk_head_size   // k_beta_data
-                              + v_num_head * global_total_seq_length * v_head_size    // v_beta_data
-                              + v_num_head * global_total_seq_length * qk_head_size   // k_cumdecay_reduced
-                              + qk_num_head * global_seq_len                          // q_norm_sum
-                              + qk_num_head * global_seq_len;                         // k_norm_sum
-  at::Tensor reduced_buff_data = at::empty({reduced_buff_size}, query.options());
-  int64_t num_thread = at::get_num_threads();
-  int64_t buff_size_16bit_per_thread =
-      /* k_transpose */ qk_head_size * chunk_size +
-      /* v_pack */ chunk_size * v_head_size +
-      /* k_beta_g  */ chunk_size * qk_head_size +
-      /* k_beta_g_pack  */ chunk_size * qk_head_size +
-      /* attn */ chunk_size * chunk_size * 2 +
-      /* attn_reduced */ chunk_size * chunk_size +
-      /* k_cumdecay */ chunk_size * qk_head_size * 2 +
-      /* row */ chunk_size * 2 +
-      /* updated */ chunk_size * 2 +
-      /* curr_last_recurrent_state_reduced  */ qk_head_size * v_head_size +
-      /* curr_last_recurrent_state_pack_reduced   */ qk_head_size * v_head_size +
-      /* k_transpose_i  */ qk_head_size * chunk_size +
-      /* attn_i   */ chunk_size * chunk_size * 2 +
-      /* attn_i_reduced     */ chunk_size * chunk_size +
-      /* v_prime */ chunk_size * v_head_size * 2 +
-      /* v_prime_reduced */ chunk_size * v_head_size +
-      /* v_prime_pack_reduced */ chunk_size * v_head_size +
-      /* qg */ chunk_size * qk_head_size +
-      /* attn_inter */ chunk_size * v_head_size * 2 +
-      /* kg */ chunk_size * qk_head_size +
-      /* kg_transpose */ qk_head_size * chunk_size +
-      /* kgv */ qk_head_size * v_head_size * 2;
-  at::Tensor thread_buff_data = at::empty({num_thread, buff_size_16bit_per_thread}, query.options());
+  float scale = 1.0 / std::sqrt(D);
+  auto [query_, key_] = use_qk_l2norm_in_kernel ? l2norm_fwd(query, key, eps) : std::make_tuple(query.mul(scale), key);
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(query.scalar_type(), "chunk_gated_delta_rule_kernel", [&] {
-    chunk_gated_delta_rule_kernel_impl<scalar_t, chunk_size>(
-        output.data_ptr<scalar_t>(),
-        final_state.data_ptr<float>(),
-        query.data_ptr<scalar_t>(),
-        key.data_ptr<scalar_t>(),
-        value.data_ptr<scalar_t>(),
-        g.data_ptr<float>(),
-        beta.data_ptr<scalar_t>(),
-        cu_seqlens_ptr,
-        buff_data.data_ptr<float>(),
-        reduced_buff_data.data_ptr<scalar_t>(),
-        thread_buff_data.data_ptr<scalar_t>(),
-        chunk_offsets_ptr,
-        chunk_indices_ptr,
-        use_qk_l2norm_in_kernel,
-        batch_size,
-        global_seq_len,
-        qk_num_head,
-        v_num_head,
-        qk_head_size,
-        v_head_size,
-        qStrideH,
-        qStrideT,
-        kStrideH,
-        kStrideT,
-        vStrideH,
-        vStrideT,
-        oStrideH,
-        oStrideT,
-        global_total_seq_length,
-        global_num_chunk,
-        buff_size_16bit_per_thread,
-        eps);
-  });
-  return std::make_tuple(std::move(output), std::move(final_state));
+  auto g_ = chunk_local_cumsum<CHUNK_SIZE>(g, cu_seqlens, chunk_indices);
+
+  // fused kkt + solve_tril + recompute_w_u
+  auto [w, u, decay_mask] =
+      chunk_gated_delta_rule_fwd_intra<CHUNK_SIZE>(key_, value, g_, beta, cu_seqlens, chunk_indices);
+
+  // fused `chunk_gated_delta_rule_fwd_h` + `chunk_fwd_o`
+  auto [output, final_state] = chunk_gated_delta_rule_fwd_inter<CHUNK_SIZE>(
+      query_,
+      key_,
+      w,
+      u,
+      g_,
+      decay_mask,
+      initial_state,
+      output_final_state,
+      cu_seqlens,
+      chunk_offsets,
+      initial_state_indices);
+
+  return std::make_tuple(output, final_state);
 }
 
 // A_log: [v_num_heads]
@@ -1498,6 +2352,103 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
             softplus_threshold);
       });
   return core_attn_out;
+}
+
+// Speculative-decode update (multi-token, multi-slot rollback).
+// q: [T, HK, EK]  k: [T, HK, EK]  v: [T, HV, EV]
+// a: [T, HV]  b: [T, HV]
+// initial_state_source: [N_slots, HV, EK, EV] FP32 (updated in place)
+// spec_state_indices: [batch, S] INT32 (S = num_spec + 1)
+// num_accepted_tokens: [batch] INT32
+// cu_seqlens: [batch + 1] INT32
+// Returns output: [T, HV, EV]
+at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    const at::Tensor& A_log,
+    const at::Tensor& dt_bias,
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& a,
+    const at::Tensor& b,
+    at::Tensor& initial_state_source,
+    const at::Tensor& spec_state_indices,
+    const at::Tensor& num_accepted_tokens,
+    const at::Tensor& cu_seqlens,
+    bool use_qk_l2norm_in_kernel,
+    double softplus_beta = 1.0,
+    double softplus_threshold = 20.0) {
+  CHECK_DIM(3, q);
+  CHECK_DIM(3, v);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(q);
+  int64_t total_tokens = q.size(0);
+  int64_t num_heads = q.size(1);
+  int64_t head_dim = q.size(2);
+  int64_t v_num_heads = v.size(1);
+  int64_t v_head_dim = v.size(2);
+  int64_t batch_size = cu_seqlens.size(0) - 1;
+  int64_t spec_stride = spec_state_indices.stride(0);
+  CHECK_INPUT_SHAPE_DTYPE<true>(k, {total_tokens, num_heads, head_dim}, q.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(v, {total_tokens, v_num_heads, v_head_dim}, q.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(a, {total_tokens, v_num_heads}, q.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(b, {total_tokens, v_num_heads}, q.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(dt_bias, {v_num_heads}, q.scalar_type());
+  CHECK_INPUT_SHAPE_DTYPE<true>(num_accepted_tokens, {batch_size}, at::kInt);
+  CHECK_INPUT_SHAPE_DTYPE<true>(cu_seqlens, {batch_size + 1}, at::kInt);
+  CHECK_EQ(v_num_heads % num_heads, 0);
+  TORCH_CHECK(A_log.sizes() == at::IntArrayRef({v_num_heads}));
+  CHECK_INPUT_SHAPE_DTYPE<true>(
+      initial_state_source,
+      {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim},
+      at::kFloat);
+  TORCH_CHECK(initial_state_source.size(0) >= batch_size,
+      "initial_state_source capacity too small: size(0)=",
+      initial_state_source.size(0), ", batch_size=", batch_size);
+
+  int64_t q_strideT = q.stride(0);
+  int64_t q_strideH = q.stride(1);
+  int64_t k_strideT = k.stride(0);
+  int64_t k_strideH = k.stride(1);
+  int64_t v_strideT = v.stride(0);
+  int64_t v_strideH = v.stride(1);
+  int64_t state_slot_stride = initial_state_source.stride(0);
+
+  at::Tensor o = at::empty({total_tokens, v_num_heads, v_head_dim}, q.options());
+  at::Tensor qk_scale_buf = at::empty({2, total_tokens, num_heads}, at::kFloat);
+
+  CPU_DISPATCH_REDUCED_FLOATING_TYPES_EXT(
+      q.scalar_type(), A_log.scalar_type(), "fused_sigmoid_gating_delta_rule_update_spec_kernel_impl", [&] {
+        fused_sigmoid_gating_delta_rule_update_spec_kernel_impl<scalar_t, param_t>(
+            q.data_ptr<scalar_t>(),
+            k.data_ptr<scalar_t>(),
+            v.data_ptr<scalar_t>(),
+            A_log.data_ptr<param_t>(),
+            a.data_ptr<scalar_t>(),
+            dt_bias.data_ptr<scalar_t>(),
+            b.data_ptr<scalar_t>(),
+            spec_state_indices.data_ptr<int32_t>(),
+            num_accepted_tokens.data_ptr<int32_t>(),
+            cu_seqlens.data_ptr<int32_t>(),
+            initial_state_source.data_ptr<float>(),
+            o.data_ptr<scalar_t>(),
+            qk_scale_buf.data_ptr<float>(),
+            total_tokens,
+            batch_size,
+            spec_stride,
+            num_heads,
+            head_dim,
+            v_num_heads,
+            v_head_dim,
+            q_strideT,
+            q_strideH,
+            k_strideT,
+            k_strideH,
+            v_strideT,
+            v_strideH,
+            state_slot_stride,
+            use_qk_l2norm_in_kernel,
+            softplus_threshold);
+      });
+  return o;
 }
 
 // A_log: [num_v_heads]

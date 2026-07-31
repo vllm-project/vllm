@@ -17,16 +17,22 @@ steps:
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
   - tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+  - tests/kernels/mamba/test_cpu_short_conv.py
+  - tests/kernels/mamba/test_causal_conv1d.py
+  - tests/kernels/mamba/test_mamba_ssm.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
       pytest -x -v -s tests/kernels/moe/test_cpu_quant_fused_moe.py
+      pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
       pytest -x -v -s tests/kernels/test_onednn.py
       pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
       pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
-      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
+      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+      pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
+      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
@@ -139,8 +145,21 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
-      pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+      pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py --ignore=tests/models/multimodal/generation/test_qwen2_5_vl.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 4
+
+- label: CPU-Qwen2.5-VL Multimodal Tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  # - vllm/
+  - vllm/model_executor/layers/rotary_embedding
+  - tests/models/multimodal/generation/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
+      VLLM_CI_ENV=0 pytest -x -v -s tests/models/multimodal/generation/test_qwen2_5_vl.py"
 
 - label: "Arm CPU Test"
   depends_on: []
