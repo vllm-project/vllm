@@ -11,6 +11,23 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_STATS_LOG_INTERVAL = 1000
+
+
+def _pinned_cpu_copy(src: torch.Tensor) -> torch.Tensor:
+    """Pinned CPU copy of *src* with exactly one cross-device transfer.
+
+    ``src.cpu().pin_memory()`` stages GPU tensors through pageable memory,
+    copying twice; copying straight into a pinned allocation halves init
+    time and transient host RAM for multi-GB expert tensors.
+    """
+    if src.device.type == "cpu":
+        return src if src.is_pinned() else src.pin_memory()
+    dst = torch.empty_like(src, device="cpu", pin_memory=True)
+    dst.copy_(src)
+    return dst
+
+
 # How a forward too wide for the cache is broken up.
 #   "token"  -- split the rows; every token's full sum still happens inside one
 #               kernel call, so output matches the uncached path exactly. Costs
@@ -79,19 +96,14 @@ class CachedWeightProvider:
         self._num_experts = num_experts
         self.hits = 0
         self.misses = 0
+        self._prepare_calls = 0
 
         if w13_weight.device.type == "cpu":
             cuda_device = torch.accelerator.current_accelerator()
-            self._cpu_w13: torch.Tensor = (
-                w13_weight if w13_weight.is_pinned() else w13_weight.pin_memory()
-            )
-            self._cpu_w2: torch.Tensor = (
-                w2_weight if w2_weight.is_pinned() else w2_weight.pin_memory()
-            )
         else:
             cuda_device = w13_weight.device
-            self._cpu_w13 = w13_weight.cpu().pin_memory()
-            self._cpu_w2 = w2_weight.cpu().pin_memory()
+        self._cpu_w13: torch.Tensor = _pinned_cpu_copy(w13_weight)
+        self._cpu_w2: torch.Tensor = _pinned_cpu_copy(w2_weight)
 
         self._buf_w13: torch.Tensor = torch.empty(
             capacity,
@@ -109,8 +121,8 @@ class CachedWeightProvider:
         if w13_scale is not None and w2_scale is not None:
             # Pinned for the same reason the weights are: these are copied on
             # every miss, and pageable source memory forces a staging copy.
-            self._cpu_w13_scale: torch.Tensor | None = w13_scale.cpu().pin_memory()
-            self._cpu_w2_scale: torch.Tensor | None = w2_scale.cpu().pin_memory()
+            self._cpu_w13_scale: torch.Tensor | None = _pinned_cpu_copy(w13_scale)
+            self._cpu_w2_scale: torch.Tensor | None = _pinned_cpu_copy(w2_scale)
             self._buf_w13_scale: torch.Tensor | None = torch.empty(
                 capacity,
                 *w13_scale.shape[1:],
@@ -346,14 +358,16 @@ class CachedWeightProvider:
                 self._lru[expert_id] = [slot, 1, self._clock]
                 self.misses += 1
 
-        total = self.hits + self.misses
-        if total > 0:
-            logger.debug(
-                "Expert cache: %d hits, %d misses (%.1f%% hit rate)",
-                self.hits,
-                self.misses,
-                100.0 * self.hits / total,
-            )
+        self._prepare_calls += 1
+        if self._prepare_calls % _STATS_LOG_INTERVAL == 0:
+            total = self.hits + self.misses
+            if total > 0:
+                logger.debug(
+                    "Expert cache: %d hits, %d misses (%.1f%% hit rate)",
+                    self.hits,
+                    self.misses,
+                    100.0 * self.hits / total,
+                )
 
         # Expose exactly this group. Blocking on purpose: the host mirror is
         # rewritten by the next group, so an async copy could still be reading
