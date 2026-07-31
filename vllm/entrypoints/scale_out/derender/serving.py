@@ -3,8 +3,15 @@
 import time
 from typing import cast
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
-from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+import vllm.envs as envs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionResponse,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
@@ -27,7 +34,11 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
+    DerenderChatStreamRequest,
     DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
+    DerenderStreamState,
+    GenerateResponse,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -51,6 +62,71 @@ class ServingDerender(BaseServing):
 
         self.online_derenderer = online_derenderer
 
+    def _validate_derender_bounds(
+        self,
+        generate_responses: list[GenerateResponse],
+    ) -> ErrorResponse | None:
+        """Reject derender payloads that exceed resource bounds.
+
+        Runs before any tokenizer.decode() or parser invocation to prevent
+        CPU/memory exhaustion from oversized caller-supplied token structures.
+        """
+        max_n = envs.VLLM_MAX_N_SEQUENCES
+        max_model_len = self.model_config.max_model_len
+        # See ModelConfig.max_logprobs for semantics and default value.
+        max_logprobs = self.model_config.max_logprobs
+
+        if len(generate_responses) > max_n:
+            return self.create_error_response(
+                f"generate_responses count ({len(generate_responses)}) "
+                f"exceeds server maximum ({max_n}). "
+                f"Set VLLM_MAX_N_SEQUENCES to increase this limit."
+            )
+
+        for gen in generate_responses:
+            if len(gen.choices) > max_n:
+                return self.create_error_response(
+                    f"choices count ({len(gen.choices)}) in response "
+                    f"'{gen.request_id}' exceeds server maximum ({max_n})."
+                )
+
+            for choice in gen.choices:
+                if choice.token_ids and len(choice.token_ids) > max_model_len:
+                    return self.create_error_response(
+                        f"token_ids length ({len(choice.token_ids)}) in "
+                        f"choice {choice.index} exceeds "
+                        f"max_model_len ({max_model_len})."
+                    )
+                if choice.logprobs and choice.logprobs.content:
+                    if len(choice.logprobs.content) > max_model_len:
+                        return self.create_error_response(
+                            f"logprobs.content length "
+                            f"({len(choice.logprobs.content)}) in "
+                            f"choice {choice.index} exceeds "
+                            f"max_model_len ({max_model_len})."
+                        )
+                    for entry in choice.logprobs.content:
+                        if (
+                            max_logprobs >= 0
+                            and entry.top_logprobs
+                            and len(entry.top_logprobs) > max_logprobs
+                        ):
+                            return self.create_error_response(
+                                f"top_logprobs count "
+                                f"({len(entry.top_logprobs)}) in "
+                                f"choice {choice.index} exceeds "
+                                f"max_logprobs ({max_logprobs})."
+                            )
+
+            if gen.prompt_logprobs and len(gen.prompt_logprobs) > max_model_len:
+                return self.create_error_response(
+                    f"prompt_logprobs length ({len(gen.prompt_logprobs)}) "
+                    f"in response '{gen.request_id}' exceeds "
+                    f"max_model_len ({max_model_len})."
+                )
+
+        return None
+
     async def derender_chat_response(
         self,
         request: DerenderChatRequest,
@@ -67,6 +143,10 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        bounds_error = self._validate_derender_bounds([request.generate_response])
+        if bounds_error is not None:
+            return bounds_error
 
         try:
             choices = await self.online_derenderer.derender_chat(
@@ -117,16 +197,22 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if not request.generate_responses:
+            return self.create_error_response("generate_responses must not be empty")
+
+        bounds_error = self._validate_derender_bounds(request.generate_responses)
+        if bounds_error is not None:
+            return bounds_error
+
         (
             choices,
             total_prompt_tokens,
             total_completion_tokens,
         ) = await self.online_derenderer.derender_completion(
-            request.generate_responses, request.prompt_tokens
+            request.generate_responses,
+            request.prompt_tokens,
+            completion_request=request.completion_request,
         )
-
-        if not request.generate_responses:
-            return self.create_error_response("generate_responses must not be empty")
 
         first = request.generate_responses[0]
         kv_params = first.kv_transfer_params
@@ -161,6 +247,90 @@ class ServingDerender(BaseServing):
             usage=usage,
             kv_transfer_params=kv_params,
         )
+
+    async def derender_chat_stream_response(
+        self,
+        request: DerenderChatStreamRequest,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_chat_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk and returns the
+        derendered chunk together with the updated client carried state.
+
+        ``parser is None`` or no ``chat_request`` until reasoning/tool call
+        functionality added in future PR.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            chunk, updated_state = await self.online_derenderer.derender_chat_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                chat_request=request.chat_request,
+                prompt_tokens=request.prompt_tokens,
+            )
+        except NotImplementedError as exc:
+            return self.create_error_response(exc)
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
+
+    async def derender_completion_stream_response(
+        self,
+        request: DerenderCompletionStreamRequest,
+    ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_completion_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
+        delta) and returns the derendered chunk and updated state.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            (
+                chunk,
+                updated_state,
+            ) = await self.online_derenderer.derender_completion_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                prompt_tokens=request.prompt_tokens,
+                completion_request=request.completion_request,
+            )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_completion_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
 
     @staticmethod
     def _extract_mm_features(

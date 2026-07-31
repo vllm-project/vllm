@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
@@ -79,6 +82,7 @@ impl TokenizeChatRequest {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
                 reasoning_effort: None,
+                response_format: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
             tools: convert_tools(self.tools)?,
@@ -102,12 +106,13 @@ pub struct DetokenizeRequest {
     pub tokens: Vec<u32>,
 }
 
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenizeResponse {
     pub count: usize,
     pub max_model_len: u32,
     pub tokens: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_strs: Option<Vec<String>>,
 }
 

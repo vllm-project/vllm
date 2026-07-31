@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use futures::executor::block_on;
@@ -52,6 +55,7 @@ fn finished() -> Finished {
         },
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
+        ec_transfer_params: None,
     }
 }
 
@@ -115,6 +119,7 @@ fn interrupted_final_message_is_preserved() {
             },
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
+            ec_transfer_params: None,
         })
     );
 }
@@ -175,6 +180,7 @@ fn interrupted_analysis_message_is_preserved() {
             },
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
+            ec_transfer_params: None,
         })
     );
 }

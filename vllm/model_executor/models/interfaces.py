@@ -11,6 +11,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
+    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -68,6 +70,23 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class DiarizedTranscriptionSegment:
+    """A timestamped, speaker-attributed segment produced by an ASR model."""
+
+    start: float
+    end: float
+    speaker: str
+    text: str
+
+
+class StreamingTranscriptionPostProcessor:
+    """Stateful streaming post-processor for transcription deltas."""
+
+    def process_delta(self, text_delta: str, finished: bool) -> str:
+        return text_delta
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
@@ -416,6 +435,13 @@ class SupportsMultiModalPruning(Protocol):
     """
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
+
+    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
+        "evs",
+    )
+    """Video pruning methods (as reported by
+    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
+    Models supporting methods beyond EVS should override this."""
 
     def recompute_mrope_positions(
         self,
@@ -978,6 +1004,31 @@ def supports_mamba_prefix_caching(
 
 
 @runtime_checkable
+class SupportsReplaySSM(Protocol):
+    """The interface for models whose Mamba2 layers support ReplaySSM cached
+    standard decode.
+
+    This is currently experimental.
+    """
+
+    supports_replayssm: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+
+
+@overload
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+
+
+def supports_replayssm(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsReplaySSM]] | TypeIs[SupportsReplaySSM]:
+    return getattr(model, "supports_replayssm", False)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -1093,6 +1144,9 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
+    supports_diarized_transcription: ClassVar[bool] = False
+    """Enables the ``diarized_json`` response format for the model."""
+
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
@@ -1197,6 +1251,28 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
+
+    @classmethod
+    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+        """Parse the model-specific diarized transcript format.
+
+        Only models that set ``supports_diarized_transcription`` must override
+        this method.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        """
+        Return a stateful post-processor class for streaming output deltas.
+
+        Each instance receives the next decoded text delta and whether the
+        request output is final. It returns the cleaned delta that should be
+        sent to the client.
+        """
+        return StreamingTranscriptionPostProcessor
 
     @classmethod
     def get_language_detection_prompt(
@@ -1331,7 +1407,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states

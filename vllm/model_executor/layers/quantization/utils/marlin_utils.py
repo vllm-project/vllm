@@ -397,14 +397,31 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 
 
 def marlin_make_workspace_new(
-    device: torch.device, max_blocks_per_sm: int = 1
+    device: torch.device,
+    max_blocks_per_sm: int = 1,
+    existing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
-    return torch.zeros(
-        sms * max_blocks_per_sm, dtype=torch.int, device=device, requires_grad=False
-    )
+    size = sms * max_blocks_per_sm
+    # On weight reload, reuse the existing storage so the workspace address
+    # captured by CUDA graphs stays valid.
+    if existing is not None:
+        if (
+            existing.device != device
+            or existing.dtype != torch.int
+            or existing.numel() != size
+        ):
+            raise ValueError(
+                f"Existing Marlin workspace is incompatible "
+                f"(device={existing.device}, dtype={existing.dtype}, "
+                f"numel={existing.numel()}; expected device={device}, "
+                f"dtype={torch.int}, numel={size}). Reload must reuse the "
+                f"workspace storage captured by CUDA graphs."
+            )
+        return existing.zero_()
+    return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
@@ -731,74 +748,6 @@ def apply_gptq_marlin_linear(
         size_n=padded_n,
         size_k=padded_k,
         is_k_full=is_k_full,
-        use_atomic_add=use_atomic_add,
-        use_fp32_reduce=use_fp32_reduce,
-        is_zp_float=False,
-    )
-
-    output = marlin_unpad_output(output, output_size_per_partition, padded_n)
-    return output.reshape(out_shape)
-
-
-def apply_awq_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    weight_zp: torch.Tensor,
-    g_idx: torch.Tensor,
-    g_idx_sort_indices: torch.Tensor,
-    workspace: torch.Tensor,
-    quant_type: ScalarType,
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    input_global_scale: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-    input_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (output_size_per_partition,)
-
-    padded_n, padded_k = marlin_repacked_nk(weight, quant_type.size_bits)
-    reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
-
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
-    a_scales = None
-    if input_dtype == torch.int8:
-        assert quant_type == scalar_types.uint4, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
-        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-        a_scales = a_scales * input_global_scale
-    elif input_dtype == torch.float8_e4m3fn:
-        assert quant_type == scalar_types.uint4, (
-            "INT8 weight + FP8 activation is not supported."
-        )
-        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
-
-    output = ops.marlin_gemm(
-        reshaped_x,
-        None,
-        weight,
-        bias,
-        weight_scale,
-        a_scales,
-        None,
-        weight_zp,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        quant_type,
-        size_m=reshaped_x.shape[0],
-        size_n=padded_n,
-        size_k=padded_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
