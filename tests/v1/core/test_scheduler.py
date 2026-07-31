@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -17,6 +16,9 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
@@ -48,36 +50,56 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_validate_routed_experts_offload_uses_spec_blocks_per_chunk():
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-        OffloadingConnector,
+def test_routed_experts_uses_public_connector_sidecar_config():
+    connector = Mock()
+    connector.get_block_sidecar_config.return_value = KVConnectorSidecarConfig(
+        num_connector_blocks=17,
+        blocks_per_connector_block=3,
     )
-    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-
-    offloading_spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
-    offloading_spec.num_blocks = 17
-    offloading_spec.blocks_per_chunk = 3
-    connector = OffloadingConnector.__new__(OffloadingConnector)
-    connector.connector_scheduler = SimpleNamespace(spec=offloading_spec)
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.connector = connector
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
-    )
 
-    assert scheduler._validate_routed_experts_offload(kv_cache_config) == (17, 3)
+    assert scheduler._get_routed_experts_sidecar_config() == (17, 3)
+    connector.get_block_sidecar_config.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [
+        pytest.param(
+            None,
+            "supports block sidecars",
+            id="unsupported-connector",
+        ),
+        pytest.param(
+            KVConnectorSidecarConfig(
+                num_connector_blocks=0,
+                blocks_per_connector_block=1,
+            ),
+            "non-empty connector block pool",
+            id="empty-connector-block-pool",
+        ),
+        pytest.param(
+            KVConnectorSidecarConfig(
+                num_connector_blocks=1,
+                blocks_per_connector_block=0,
+            ),
+            "positive blocks-per-connector-block",
+            id="invalid-block-size-factor",
+        ),
+    ],
+)
+def test_routed_experts_rejects_invalid_connector_sidecar_config(
+    config: KVConnectorSidecarConfig | None,
+    match: str,
+):
+    connector = Mock()
+    connector.get_block_sidecar_config.return_value = config
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.connector = connector
+
+    with pytest.raises(ValueError, match=match):
+        scheduler._get_routed_experts_sidecar_config()
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

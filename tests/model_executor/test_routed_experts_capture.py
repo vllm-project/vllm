@@ -4,13 +4,19 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarTransfer,
+    KVConnectorSidecarTransfers,
+)
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
+    RoutedExpertsManager,
     RoutedExpertsTensors,
     RoutedExpertsWriteTask,
     require_full_attn_group_id,
@@ -65,6 +71,43 @@ def test_routed_experts_write_task_publishes_copied_tensors():
     assert stored_routing.tolist() == routing_data.tolist()
     assert stored_slots.tolist() == slot_mapping.tolist()
     assert output.routed_experts_slots.tolist() == slot_mapping.tolist()
+
+
+def test_routed_experts_manager_applies_public_sidecar_transfers():
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    manager.routed_experts_by_offload_block = np.zeros(
+        (2, 2, 2, 1, 1),
+        dtype=np.uint8,
+    )
+    manager._blocks_view = np.arange(6, dtype=np.uint8).reshape(3, 2, 1, 1)
+    stores = KVConnectorSidecarTransfer(
+        gpu_block_ids=np.array([0, 1]),
+        connector_block_ids=np.array([1, 1]),
+        connector_block_offsets=np.array([0, 1]),
+    )
+
+    manager.apply_offload_transfers(KVConnectorSidecarTransfers(store=stores))
+
+    np.testing.assert_array_equal(
+        manager.routed_experts_by_offload_block[1, 0],
+        np.array([0, 1], dtype=np.uint8).reshape(2, 1, 1),
+    )
+    np.testing.assert_array_equal(
+        manager.routed_experts_by_offload_block[1, 1],
+        np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),
+    )
+
+    manager._blocks_view[2].fill(0)
+    loads = KVConnectorSidecarTransfer(
+        gpu_block_ids=np.array([2]),
+        connector_block_ids=np.array([1]),
+        connector_block_offsets=np.array([1]),
+    )
+    manager.apply_offload_transfers(KVConnectorSidecarTransfers(load=loads))
+    np.testing.assert_array_equal(
+        manager._blocks_view[2],
+        np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),
+    )
 
 
 def _capturer_with_buffer(

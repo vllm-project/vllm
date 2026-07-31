@@ -900,7 +900,7 @@ class VllmConfig:
         self.kv_transfer_config.kv_role = "kv_both"
 
     def _verify_return_routed_experts_kv_compatibility(self) -> None:
-        """Reject unsupported KV transfer connectors for routed-experts returns."""
+        """Reject transfer roles that cannot preserve routed-experts sidecars."""
         if self.model_config is None or not (
             self.model_config.enable_return_routed_experts
         ):
@@ -908,20 +908,10 @@ class VllmConfig:
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
             return
-        offloading_spec_name = kv_transfer_config.kv_connector_extra_config.get(
-            "spec_name", "CPUOffloadingSpec"
-        )
-        uses_supported_cpu_offload = (
-            kv_transfer_config.kv_connector == "OffloadingConnector"
-            and kv_transfer_config.kv_role == "kv_both"
-            and offloading_spec_name == "CPUOffloadingSpec"
-        )
-        if not uses_supported_cpu_offload:
+        if kv_transfer_config.kv_role != "kv_both":
             raise ValueError(
-                "--enable-return-routed-experts only supports the CPU KV "
-                "offload connector (OffloadingConnector + CPUOffloadingSpec) "
-                "with kv_role=kv_both; PD disaggregation and other KV "
-                "connectors are not supported."
+                "--enable-return-routed-experts with KV transfer requires "
+                "kv_role=kv_both; PD disaggregation is not supported."
             )
 
     def _verify_kv_transfer_compat(self) -> None:
