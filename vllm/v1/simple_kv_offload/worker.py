@@ -31,6 +31,7 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        kv_offload_backend: str = "cpu",
         disk_path: str | None = None,
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
@@ -43,7 +44,7 @@ class SimpleCPUOffloadWorker:
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
-        self.disk_mode = disk_path is not None
+        self.disk_mode = kv_offload_backend == "disk"
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
