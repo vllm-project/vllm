@@ -149,6 +149,20 @@ def shard_sequence_parallel_mlp(
     )
 
 
+def _get_kimi_eplb_expert_counts(
+    num_logical_experts: int,
+    num_redundant_experts: int,
+    ep_size: int,
+) -> tuple[int, int]:
+    num_physical_experts = num_logical_experts + num_redundant_experts
+    if num_physical_experts % ep_size != 0:
+        raise ValueError(
+            f"Kimi K3 num_physical_experts={num_physical_experts} must be "
+            f"divisible by EP size {ep_size}. Adjust num_redundant_experts."
+        )
+    return num_physical_experts, num_physical_experts // ep_size
+
+
 class KimiMLP(nn.Module):
     """Dense / shared-expert MLP, optionally TP-sharded under sequence parallel.
 
@@ -280,6 +294,12 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         torch.accelerator.synchronize()
         torch.distributed.barrier(group=ep_group.cpu_group)
         self._synchronized_ep_groups.add(key)
+
+    def update_expert_map(self) -> None:
+        ep_group = get_ep_group()
+        self.num_experts = self.num_local_experts * ep_group.world_size
+        self.experts_start_idx = ep_group.rank_in_group * self.num_local_experts
+        self.experts_end_idx = self.experts_start_idx + self.num_local_experts
 
     def finalize_weights(self) -> None:
         if self._transformed_l1_weights is not None:
@@ -475,6 +495,20 @@ class KimiMoE(nn.Module):
         self.moe_router_activation_func = config.moe_router_activation_func
         self.num_shared_experts = config.num_shared_experts
         self.layer_idx = layer_idx
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        ep_size = get_ep_group().world_size
+        self.n_routed_experts = num_experts
+        self.n_shared_experts = self.num_shared_experts or 0
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_physical_experts, self.n_local_physical_experts = (
+            _get_kimi_eplb_expert_counts(
+                self.n_logical_experts,
+                self.n_redundant_experts,
+                ep_size,
+            )
+        )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -589,19 +623,13 @@ class KimiMoE(nn.Module):
 
         if self.use_mega_moe:
             ep_group = get_ep_group()
-            ep_size = ep_group.world_size
             ep_rank = ep_group.rank_in_group
-            if num_experts % ep_size != 0:
-                raise ValueError(
-                    f"Kimi K3 num_experts={num_experts} must be divisible by "
-                    f"EP size {ep_size}."
-                )
-            num_local_experts = num_experts // ep_size
             self.experts = KimiK3MegaMoEExperts(
                 vllm_config,
-                num_experts=num_experts,
-                num_local_experts=num_local_experts,
-                experts_start_idx=ep_rank * num_local_experts,
+                num_experts=self.n_physical_experts,
+                num_local_experts=self.n_local_physical_experts,
+                experts_start_idx=ep_rank * self.n_local_physical_experts,
+                num_logical_experts=self.n_logical_experts,
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
@@ -637,6 +665,8 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
+                enable_eplb=parallel_config.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -1010,6 +1040,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
         parallel_config = vllm_config.parallel_config
@@ -1270,6 +1303,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
                 num_experts=self.config.num_experts,
+                num_redundant_experts=self.num_redundant_experts,
             )
         else:
             expert_params_mapping = []
@@ -1402,6 +1436,52 @@ class KimiLinearForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.num_expert_groups = getattr(self.config, "num_expert_group", 1)
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, KimiMoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
+        if example_moe is None:
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_physical_experts = num_physical_experts
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
