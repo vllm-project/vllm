@@ -1410,6 +1410,14 @@ class SpeculativeConfig:
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
 
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        return min(num_mtp_layers, self.num_speculative_tokens) > 1
+
     def __repr__(self) -> str:
         method = self.method
         model = (

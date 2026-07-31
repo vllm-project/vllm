@@ -224,6 +224,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
+        # Multi-module MTP feeds its modules the next num_speculative_steps prefill
+        # tokens during chunked prefill. Other speculators only read the immediate
+        # next one.
+        num_prefill_lookahead = (
+            self.num_speculative_steps
+            if self.speculative_config is not None
+            and self.speculative_config.use_multi_module_mtp()
+            else 1
+        )
         # General request states.
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -232,6 +241,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -282,7 +292,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Do not rely on pooling_runner here, since this information is needed
             # on the first PP rank, while pooling_runner is only initialized
             # on the last PP rank.
-            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
+            tasks.extend(
+                PoolingRunner.get_supported_tasks(self.model, self.model_config)
+            )
         return tuple(tasks)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
@@ -629,7 +641,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     torch.zeros(
                         input_batch.num_tokens,
                         dtype=torch.bool,
-                        device=self.device,
+                        device="cpu",
                     ),
                 )
 
@@ -1522,6 +1534,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
             # The EAGLE/MTP drafter reads one position ahead of the target.
+            # TODO(TheEpicDolphin): Gather MM embeddings for all speculative
+            # steps during multi-module MTP.
             mm_inputs = self.model_state.gather_mm_embeddings(
                 input_batch, draft_lookahead=1
             )
