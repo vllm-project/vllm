@@ -118,15 +118,25 @@ def _gqa_sparse_fwd_kernel(
         q_abs = prefix_len + pid_q_j * BLOCK_SIZE_Q
         valid_blocks = (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K
         real_topk = tl.minimum(max_topk, valid_blocks)
-        q_ptrs = tl.make_block_ptr(
+        # q_ptrs = tl.make_block_ptr(
+        #    base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
+        #    shape=(q_len, gqa_group_size, head_dim),
+        #    strides=(stride_qn, stride_qh, stride_qd),
+        #    offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
+        #    block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        #    order=(2, 1, 0),
+        # )
+        # q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+        q_desc = tl.make_tensor_descriptor(
             base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_qn, stride_qh, stride_qd),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_qn, stride_qh, stride_qd],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
+            padding_option="zero",
         )
-        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+
+        # 2. Dynamic 3D data load passing structural coordinates as a list
+        q = tl.load_tensor_descriptor(q_desc, [pid_q_j * BLOCK_SIZE_Q, 0, 0])
         off_q = (
             tl.arange(0, BLOCK_SIZE_Q)[:, None]
             + pid_q_j * BLOCK_SIZE_Q
@@ -203,15 +213,27 @@ def _gqa_sparse_fwd_kernel(
             lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
-        o_ptrs = tl.make_block_ptr(
+        # o_ptrs = tl.make_block_ptr(
+        #    base=o_ptr + q_start * stride_on + pid_h * stride_oh,
+        #    shape=(q_len, gqa_group_size, head_dim),
+        #    strides=(stride_on, stride_oh, stride_od),
+        #    offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
+        #    block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        #    order=(2, 1, 0),
+        # )
+        # tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+        # 1. Define the 3D structural layout descriptor
+        o_desc = tl.make_tensor_descriptor(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_on, stride_oh, stride_od),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_on, stride_oh, stride_od],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
         )
-        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+
+        # 2. Functional 3D store using the global descriptor API
+        tl.store_tensor_descriptor(
+            o_desc, [pid_q_j * BLOCK_SIZE_Q, 0, 0], acc_o.to(o_ptr.dtype.element_ty)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -312,15 +334,26 @@ def _gqa_sparse_decode_kernel(
     m_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
     lse_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
     acc_o = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_D), dtype=tl.float32)
-    q_ptrs = tl.make_block_ptr(
+    # q_ptrs = tl.make_block_ptr(
+    #    base=q_ptr + pid_b * stride_qn + pid_h * stride_qh,
+    #    shape=(gqa_group_size, head_dim),
+    #    strides=(stride_qh, stride_qd),
+    #    offsets=(0, 0),
+    #    block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+    #    order=(1, 0),
+    # )
+    # q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+    # 1. Define the 2D structural layout descriptor using Python lists
+    q_desc = tl.make_tensor_descriptor(
         base=q_ptr + pid_b * stride_qn + pid_h * stride_qh,
-        shape=(gqa_group_size, head_dim),
-        strides=(stride_qh, stride_qd),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
+        shape=[gqa_group_size, head_dim],
+        strides=[stride_qh, stride_qd],
+        block_shape=[BLOCK_SIZE_H, BLOCK_SIZE_D],
+        padding_option="zero",
     )
-    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+
+    # 2. Functional load specifying coordinates directly as a list
+    q = tl.load_tensor_descriptor(q_desc, [0, 0])
 
     cur_idx_ptr = idx_base + chunk_start_topk * stride_tk
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
@@ -392,24 +425,51 @@ def _gqa_sparse_decode_kernel(
     # can hit 0 * NaN. All-empty padded rows may still produce NaNs in merge.
     scale = tl.where(lse_i > float("-inf"), tl.exp2(m_i - lse_i), tl.zeros_like(lse_i))
     acc_o = acc_o * scale[:, None]
-    o_ptrs = tl.make_block_ptr(
+    # o_ptrs = tl.make_block_ptr(
+    #    base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
+    #    shape=(gqa_group_size, head_dim),
+    #    strides=(stride_o_h, stride_o_d),
+    #    offsets=(0, 0),
+    #    block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+    #    order=(1, 0),
+    # )
+    # tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # lse_ptrs = tl.make_block_ptr(
+    #    base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
+    #    shape=(gqa_group_size,),
+    #    strides=(stride_l_h,),
+    #    offsets=(0,),
+    #    block_shape=(BLOCK_SIZE_H,),
+    #    order=(0,),
+    # )
+    # tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
+    # --- 1. Output Descriptor and Store ---
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
-        shape=(gqa_group_size, head_dim),
-        strides=(stride_o_h, stride_o_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
-        order=(1, 0),
+        shape=[gqa_group_size, head_dim],
+        strides=[stride_o_h, stride_o_d],
+        block_shape=[BLOCK_SIZE_H, BLOCK_SIZE_D],
     )
-    tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
-    lse_ptrs = tl.make_block_ptr(
+
+    tl.store_tensor_descriptor(
+        o_desc,
+        [0, 0],
+        acc_o.to(o_ptr.dtype.element_ty),
+    )
+
+    # --- 2. LSE Descriptor and Store ---
+    lse_desc = tl.make_tensor_descriptor(
         base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
-        shape=(gqa_group_size,),
-        strides=(stride_l_h,),
-        offsets=(0,),
-        block_shape=(BLOCK_SIZE_H,),
-        order=(0,),
+        shape=[gqa_group_size],
+        strides=[stride_l_h],
+        block_shape=[BLOCK_SIZE_H],
     )
-    tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
+
+    tl.store_tensor_descriptor(
+        lse_desc,
+        [0],
+        lse_i.to(lse_ptr.dtype.element_ty),
+    )
 
 
 @triton.heuristics(
@@ -444,17 +504,32 @@ def _merge_topk_attn_out_kernel(
 
     off_c = tl.arange(0, NUM_TOPK_CHUNKS)
     off_d = tl.arange(0, BLOCK_SIZE_D)
-    o_ptrs = tl.make_block_ptr(
+    # o_ptrs = tl.make_block_ptr(
+    #    base=o_ptr + pid_b * stride_o_b + pid_h * stride_o_h,
+    #    shape=(NUM_TOPK_CHUNKS, head_dim),
+    #    strides=(stride_o_c, stride_o_d),
+    #    offsets=(0, 0),
+    #    block_shape=(NUM_TOPK_CHUNKS, BLOCK_SIZE_D),
+    #    order=(1, 0),
+    # )
+    # lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
+    # o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
+    # lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+    # 1. Define the 2D output tensor layout descriptor
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr + pid_b * stride_o_b + pid_h * stride_o_h,
-        shape=(NUM_TOPK_CHUNKS, head_dim),
-        strides=(stride_o_c, stride_o_d),
-        offsets=(0, 0),
-        block_shape=(NUM_TOPK_CHUNKS, BLOCK_SIZE_D),
-        order=(1, 0),
+        shape=[NUM_TOPK_CHUNKS, head_dim],
+        strides=[stride_o_c, stride_o_d],
+        block_shape=[NUM_TOPK_CHUNKS, BLOCK_SIZE_D],
+        padding_option="zero",
     )
+
+    # 2. Vectorized 1D memory layout address remains a direct standard pointer
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
-    o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
-    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+
+    # 3. Perform the memory loads
+    o = tl.load_tensor_descriptor(o_desc, [0, 0])
+    lse = tl.load(lse_ptrs)  # Direct pointer load remains unchanged
     lse_max = tl.max(lse, axis=0)
     weights = tl.exp2(lse - lse_max)
     weights = weights / tl.sum(weights, axis=0)
