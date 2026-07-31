@@ -417,6 +417,10 @@ class ParserEngine(Parser):
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:
                 self._suppress_tool_calls = True
+        # The engine needs the suppression state too: recovery
+        # transitions must not consume text that will never be allowed
+        # to become a tool call.
+        self._engine.suppress_tool_calls = self._suppress_tool_calls
 
     def _strip_content_whitespace(
         self,

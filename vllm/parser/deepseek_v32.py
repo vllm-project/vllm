@@ -77,7 +77,8 @@ def deepseek_v32_config() -> ParserEngineConfig:
             # <｜DSML｜function_calls> wrapper and emit the invoke
             # directly.  The invoke marker has no dedicated special
             # token, so hold events and validate the parsed name
-            # before committing.
+            # before committing.  Only names the request declared are
+            # accepted.
             (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
@@ -92,6 +93,13 @@ def deepseek_v32_config() -> ParserEngineConfig:
             (ParserState.FOREIGN_BLOCK, "FOREIGN_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.TEXT_CHUNK,),
+            ),
+            # The native wrapper always wins over an unclosed foreign
+            # block, so a stray foreign start cannot disable tool
+            # parsing for the rest of the response.
+            (ParserState.FOREIGN_BLOCK, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (),
             ),
             (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,

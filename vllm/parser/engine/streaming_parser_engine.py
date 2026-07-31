@@ -8,8 +8,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import regex as re
-
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
     CONTENT_TERMINAL,
@@ -30,10 +28,6 @@ from vllm.parser.engine.token_id_scanner import (
     TextChunk,
     TokenIDScanner,
 )
-
-# Identifier-shaped tool names accepted on validated recovery
-# transitions: no whitespace, no angle brackets, non-empty.
-_RECOVERED_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 @dataclass(slots=True)
@@ -169,6 +163,12 @@ class StreamingParserEngine:
         # set per request by the owning ParserEngine, like
         # ``skip_tool_parsing`` it survives reset().
         self.allowed_tool_names: frozenset[str] | None = None
+        # True when the request asked for tool_choice "none".  Recovery
+        # transitions are skipped while set, so text that looks like a
+        # recovered tool call stays plain content instead of being
+        # consumed and then suppressed.  Set per request by the owning
+        # ParserEngine; survives reset() like ``skip_tool_parsing``.
+        self.suppress_tool_calls = False
         self.reset(initial_state=initial_state)
 
     def _reset_args_state(self) -> None:
@@ -336,6 +336,15 @@ class StreamingParserEngine:
                 and not self.skip_tool_parsing
             ):
                 return []
+            if self._hold_active and self.state == ParserState.TOOL_NAME:
+                # A terminal with no meaning inside a held tool name,
+                # for example a real tool call start token, ends the
+                # hold: replay the held text as content, then handle
+                # the terminal again in the restored state so it keeps
+                # its normal meaning.
+                events = self._abort_hold("".join(self._held_raw))
+                events.extend(self._on_terminal(terminal, value))
+                return events
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
@@ -376,6 +385,12 @@ class StreamingParserEngine:
 
     def _emit_for_state(self, text: str) -> list[SemanticEvent]:
         if self._hold_active and self.state == ParserState.TOOL_NAME:
+            candidate = "".join(self._held_name) + text
+            if not self._can_grow_into_declared_name(candidate):
+                # The held text can no longer become a declared tool
+                # name, so holding longer would only stall streaming.
+                # Release everything consumed so far as content.
+                return self._abort_hold("".join(self._held_raw) + text)
             self._held_raw.append(text)
             self._held_name.append(text)
             self._held_events.append(
@@ -414,6 +429,11 @@ class StreamingParserEngine:
         if self._hold_active:
             return self._resolve_hold(transition, value)
         if transition.validate_tool_name:
+            if self.suppress_tool_calls or self.allowed_tool_names is None:
+                # Recovery could never be accepted for this request, so
+                # the trigger text stays plain content and nothing is
+                # buffered.
+                return self._emit_for_state(value)
             return self._begin_hold(transition, value)
         return self._run_transition(transition, value)
 
@@ -445,7 +465,8 @@ class StreamingParserEngine:
     ) -> list[SemanticEvent]:
         """End the hold window at the name-completing transition."""
         name = "".join(self._held_name)
-        if self._is_allowed_recovered_name(name):
+        allowed = self.allowed_tool_names
+        if allowed is not None and name in allowed:
             events = self._held_events
             self._clear_hold()
             events.extend(self._run_transition(transition, value))
@@ -465,11 +486,19 @@ class StreamingParserEngine:
         self._held_raw = []
         self._held_name = []
 
-    def _is_allowed_recovered_name(self, name: str) -> bool:
-        if not _RECOVERED_TOOL_NAME_RE.fullmatch(name):
-            return False
+    def _can_grow_into_declared_name(self, candidate: str) -> bool:
+        """Return True when *candidate* is a prefix of a declared tool name.
+
+        Consulted while a recovery hold is active.  Membership in the
+        declared set is the only way a held name can validate, so once
+        the text seen so far stops being a prefix of any declared name
+        the caller aborts the hold.  This also bounds how much text a
+        hold can buffer to the length of the longest declared name.
+        """
         allowed = self.allowed_tool_names
-        return allowed is None or name in allowed
+        if allowed is None:
+            return False
+        return any(name.startswith(candidate) for name in allowed)
 
     def _run_transition(
         self,

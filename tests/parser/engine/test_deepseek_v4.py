@@ -23,6 +23,7 @@ from tests.parser.engine.streaming_helpers import (
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.deepseek_v4 import (
+    DSML_FOREIGN_TOOL_START,
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
@@ -241,8 +242,19 @@ class TestMissingToolStart:
     <｜DSML｜tool_calls> wrapper while still emitting a well-formed
     <｜DSML｜invoke ...> block.  The (CONTENT, INVOKE_PREFIX) transition
     recovers the tool call instead of leaking raw DSML into content.
+    Recovery only accepts tool names the request declared, so these
+    tests declare the tools they invoke.
     See https://github.com/vllm-project/vllm/issues/48931.
     """
+
+    @pytest.fixture
+    def weather_tool(self):
+        return _make_tool("get_weather", {"location": {"type": "string"}})
+
+    def _declared_parser(self, mock_tokenizer, mock_request, *tools):
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=list(tools))
+        mock_request.tools = list(tools)
+        return parser
 
     def _orphan_invoke(self, with_tool_end: bool = True) -> str:
         text = _invoke("get_weather", ("location", "true", "NYC"))
@@ -250,8 +262,10 @@ class TestMissingToolStart:
             text += DSML_TOOL_END
         return text
 
-    def test_non_streaming_orphan_invoke(self, mock_tokenizer, mock_request):
-        parser = DeepSeekV4Parser(mock_tokenizer)
+    def test_non_streaming_orphan_invoke(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
         result = parser.extract_tool_calls(self._orphan_invoke(), mock_request)
 
         assert result.tools_called is True
@@ -262,9 +276,9 @@ class TestMissingToolStart:
         assert result.content is None
 
     def test_non_streaming_orphan_invoke_no_tool_end(
-        self, mock_tokenizer, mock_request
+        self, mock_tokenizer, mock_request, weather_tool
     ):
-        parser = DeepSeekV4Parser(mock_tokenizer)
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
         result = parser.extract_tool_calls(
             self._orphan_invoke(with_tool_end=False), mock_request
         )
@@ -276,16 +290,20 @@ class TestMissingToolStart:
         assert args == {"location": "NYC"}
 
     def test_non_streaming_orphan_matches_wrapped_parse(
-        self, mock_tokenizer, mock_request
+        self, mock_tokenizer, mock_request, weather_tool
     ):
         """The orphan payload parses identically to its wrapped form."""
         invoke = _invoke("get_weather", ("location", "true", "NYC"))
 
-        wrapped_parser = DeepSeekV4Parser(mock_tokenizer)
+        wrapped_parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool
+        )
         wrapped = wrapped_parser.extract_tool_calls(
             DSML_TOOL_START + invoke + DSML_TOOL_END, mock_request
         )
-        orphan_parser = DeepSeekV4Parser(mock_tokenizer)
+        orphan_parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool
+        )
         orphan = orphan_parser.extract_tool_calls(invoke + DSML_TOOL_END, mock_request)
 
         assert orphan.tools_called is wrapped.tools_called is True
@@ -295,9 +313,11 @@ class TestMissingToolStart:
             == wrapped.tool_calls[0].function.arguments
         )
 
-    def test_streaming_orphan_invoke_split_marker(self, mock_tokenizer, mock_request):
+    def test_streaming_orphan_invoke_split_marker(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
         """The invoke marker may arrive split across streaming deltas."""
-        parser = DeepSeekV4Parser(mock_tokenizer)
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
         chunks = [
             "I'll check the weather.\n",
             "<｜DSML",
@@ -316,8 +336,10 @@ class TestMissingToolStart:
         assert "I'll check the weather." in content
         assert "DSML" not in content
 
-    def test_streaming_orphan_invoke_char_by_char(self, mock_tokenizer, mock_request):
-        parser = DeepSeekV4Parser(mock_tokenizer)
+    def test_streaming_orphan_invoke_char_by_char(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
         text = self._orphan_invoke()
         results = simulate_tool_streaming(parser, mock_request, list(text))
 
@@ -326,8 +348,11 @@ class TestMissingToolStart:
         assert args == {"location": "NYC"}
         assert "DSML" not in collect_content(results)
 
-    def test_orphan_parallel_invokes(self, mock_tokenizer, mock_request):
-        parser = DeepSeekV4Parser(mock_tokenizer)
+    def test_orphan_parallel_invokes(self, mock_tokenizer, mock_request, weather_tool):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
         text = (
             _invoke("get_weather", ("location", "true", "NYC"))
             + "\n"
@@ -376,6 +401,39 @@ class TestMissingToolStart:
         assert result.tool_calls == []
         assert result.content == text
 
+    def test_unclosed_foreign_wrapper_then_native_call(
+        self, mock_tokenizer, mock_request
+    ):
+        """A foreign wrapper that never closes must not disable native
+        tool parsing: the token backed tool_calls wrapper still wins."""
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = (
+            DSML_FOREIGN_TOOL_START
+            + "\nStray foreign text.\n"
+            + _tool_calls(_invoke("get_weather", ("location", "true", "NYC")))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+        assert "Stray foreign text." in result.content
+
+    def test_orphan_invoke_without_declared_tools_stays_content(
+        self, mock_tokenizer, mock_request
+    ):
+        """A request that declared no tools can never accept a recovered
+        name, so the orphan invoke stays plain content."""
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = self._orphan_invoke()
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
 
 # ── Orphan invoke name validation ────────────────────────────────────
 
@@ -386,9 +444,11 @@ class TestOrphanInvokeNameValidation:
     The invoke marker has no dedicated special token in the DeepSeek
     vocab, so prose that literally quotes the marker would otherwise be
     misparsed as a tool call.  The (CONTENT, INVOKE_PREFIX) recovery
-    transition holds its events until the name completes and validates
-    the name (identifier shape, and membership in the request's declared
-    tools when any are declared) before committing to a tool call.
+    transition holds its events until the name completes and only
+    commits to a tool call when the name is one of the tools the
+    request declared.  The hold ends early once the text seen so far
+    can no longer grow into a declared tool name, so streaming is not
+    stalled by prose that quotes the marker.
     The wrapped (TOOL_PREAMBLE, INVOKE_PREFIX) path is not validated.
     """
 
@@ -578,6 +638,129 @@ class TestOrphanInvokeNameValidation:
         assert len(result.tool_calls) == 2
         assert result.tool_calls[0].function.name == "get_weather"
         assert result.tool_calls[1].function.name == "get_time"
+
+    def test_quoted_marker_then_wrapped_call_non_streaming(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Prose that quotes the invoke marker and never closes it must
+        not swallow a real wrapped tool call that follows."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = (
+            "Docs quote "
+            + DSML_INVOKE_PREFIX
+            + " as the marker. "
+            + _tool_calls(_invoke("get_weather", ("location", "true", "NYC")))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+        assert DSML_INVOKE_PREFIX in result.content
+
+    def test_quoted_marker_directly_before_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A quoted marker followed immediately by the real wrapper must
+        release the hold and parse the wrapped call."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = (
+            "See "
+            + DSML_INVOKE_PREFIX
+            + _tool_calls(_invoke("get_weather", ("location", "true", "NYC")))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+        assert DSML_INVOKE_PREFIX in result.content
+
+    def test_streaming_quoted_marker_then_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        chunks = [
+            "Docs quote ",
+            DSML_INVOKE_PREFIX,
+            " as the marker. ",
+            DSML_TOOL_START,
+            _invoke("get_weather", ("location", "true", "NYC")),
+            DSML_TOOL_END,
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "get_weather"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"location": "NYC"}
+        content = collect_content(results)
+        assert DSML_INVOKE_PREFIX in content
+
+    def test_streaming_quoted_marker_prose_released_before_finish(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Prose after a quoted marker must stream out promptly instead
+        of being buffered until the end of the response."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        prose = "this marker starts a tool call block in the raw output."
+        chunks = ["Quote: ", DSML_INVOKE_PREFIX, prose, " More prose."]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) is None
+        content = collect_content(results)
+        assert prose in content
+        assert " More prose." in content
+
+    def test_tool_choice_none_keeps_quoted_invoke_as_content(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """With tool_choice set to none, invoke text must stay in the
+        content instead of being consumed by tool recovery."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        mock_request.tool_choice = "none"
+        text = (
+            "Docs say you write "
+            + _invoke("get_weather", ("location", "true", "NYC"))
+            + " to call it."
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
+
+    def test_non_ascii_declared_name_recovered(self, mock_tokenizer, mock_request):
+        """A declared tool name is recoverable even when it contains
+        characters outside the ASCII range."""
+        tool = _make_tool("查询天气", {"location": {"type": "string"}})
+        parser = self._declared_parser(mock_tokenizer, mock_request, tool)
+        text = _invoke("查询天气", ("location", "true", "NYC")) + DSML_TOOL_END
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "查询天气"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+
+    def test_trailing_prose_after_orphan_invoke_is_dropped(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Pins current behavior: after a recovered orphan invoke with
+        no closing wrapper, the engine waits for more invokes in a state
+        that has no content event, so trailing prose is dropped."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = _invoke("get_weather", ("location", "true", "NYC")) + "\nThanks!"
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.content is None
 
 
 # ── Thinking mode initial state ──────────────────────────────────────
