@@ -230,6 +230,7 @@ def test_msa_metadata_builder_prepares_cutlass_for_regular_decode(
 
     builder = object.__new__(MiniMaxM3SparseMSAMetadataBuilder)
     builder.num_q_heads = 64
+    builder.num_kv_heads = 4
     builder.topk_blocks = TOPK
     builder.kv_cache_spec = SimpleNamespace(num_kv_heads=4)
     builder.kv_cache_dtype = "fp8_e4m3"

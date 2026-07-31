@@ -86,6 +86,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         config = vllm_config.model_config.hf_text_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.num_q_heads = config.num_attention_heads // tp_size
+        self.num_kv_heads = kv_cache_spec.num_kv_heads
         self.topk_blocks = config.sparse_attention_config["sparse_topk_blocks"]
         # AttentionSpec stores every FP8 mode as uint8, so retain the configured
         # format to distinguish E4M3 (supported) from E5M2 before planning.
@@ -114,7 +115,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             decode.decode_query_len,
             decode_backend=self.decode_backend,
             num_q_heads=self.num_q_heads,
-            num_kv_heads=self.kv_cache_spec.num_kv_heads,
+            num_kv_heads=self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
             page_size=SPARSE_BLOCK_SIZE,
             topk_blocks=self.topk_blocks,
@@ -127,7 +128,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
                 seq_lens_cpu[: metadata.num_decodes],
                 decode.decode_query_len,
                 num_q_heads=self.num_q_heads,
-                num_kv_heads=self.kv_cache_spec.num_kv_heads,
+                num_kv_heads=self.num_kv_heads,
                 page_size=SPARSE_BLOCK_SIZE,
                 topk_blocks=self.topk_blocks,
                 plan_cache=self.msa_cutlass_plan_cache,
