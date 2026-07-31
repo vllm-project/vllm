@@ -485,6 +485,121 @@ class StructuredOutputManager:
             return new_token_ids
         return new_token_ids[num_reasoning:]
 
+    def _find_reasoning_end_in_tokens(
+        self,
+        reasoner: "ReasoningParser",
+        token_ids: list[int],
+        prior_token_ids: list[int],
+    ) -> int | None:
+        """Return the index in ``token_ids`` at which the reasoning-end
+        marker completes, or ``None`` if it does not complete inside this
+        batch.
+
+        Scans progressively longer prefixes via the reasoner's
+        ``is_reasoning_end_streaming`` so that multi-token markers
+        (e.g. gpt-oss's ``<|channel|>final<|message|>``) which can
+        straddle the prior-context / current-batch line are still
+        detected. ``prior_token_ids`` are tokens already committed to
+        the request (passed by the caller from ``request.all_token_ids``).
+
+        Unlike :meth:`_find_reasoning_end_index`, which conservatively
+        falls back to the final index, this returns ``None`` when the
+        marker does not complete in the batch — the pre-commit filter
+        must only act when the boundary is unambiguously inside
+        ``token_ids``.
+        """
+        # Mutate a single growing buffer instead of rebuilding the prefix
+        # list each iteration: avoids O(L * N) allocation for long prior
+        # contexts and large speculative batches.
+        buf = list(prior_token_ids)
+        for i, token in enumerate(token_ids):
+            buf.append(token)
+            if reasoner.is_reasoning_end_streaming(buf, [token]):
+                return i
+        return None
+
+    def precommit_filter_tokens(
+        self,
+        request: "Request",
+        new_token_ids: list[int],
+    ) -> tuple[list[int], int]:
+        """Pre-commit grammar filter for the reasoning-end boundary step.
+
+        When reasoning ends mid-batch (i.e. the boundary marker
+        completes inside ``new_token_ids``), the verifier may have
+        sampled bonus tokens for positions past the boundary *without*
+        the grammar mask engaged: the mask is gated on
+        ``reasoning_ended`` (see :meth:`should_fill_bitmask`), and that
+        flag is only flipped to ``True`` after the boundary has been
+        observed — i.e. after this step's tokens were sampled.
+
+        Without this filter, those grammar-invalid post-boundary bonus
+        tokens are committed to the request and then fed to
+        ``accept_tokens`` by the ``should_advance`` →
+        :meth:`trim_reasoning_for_advance` path in
+        ``Scheduler.update_from_output``, which terminates the request
+        with ``FINISHED_ERROR`` — a spec-decode-only failure mode that
+        grows with the speculative batch size and shows up most
+        prominently on reasoning models whose reasoning-end marker
+        spans multiple tokens (gpt-oss with the Harmony
+        ``openai_gptoss`` parser).
+
+        Mechanism: dry-run grammar validation
+        (:meth:`StructuredOutputGrammar.validate_tokens` — stateless,
+        never advances the matcher) on the post-boundary slice, and
+        report the count of rejected trailing tokens. The caller
+        truncates ``new_token_ids`` and adjusts
+        ``num_computed_tokens`` / ``num_output_placeholders`` by the
+        rejected count (mirroring the existing verifier-rejected
+        spec-token bookkeeping), so the next step re-samples from the
+        boundary with the mask correctly engaged. The surviving tokens
+        are accepted into the matcher afterwards by the existing
+        post-commit advance path; this method never advances it.
+
+        Returns ``(filtered_new_token_ids, num_rejected)``. When no
+        truncation is needed (no spec decode, no boundary in batch, or
+        all post-boundary tokens are grammar-valid), the original list
+        and ``0`` are returned.
+        """
+        if self.vllm_config.speculative_config is None:
+            # Without spec decode there is at most one sampled token per
+            # step, so there are never post-boundary bonus tokens.
+            return new_token_ids, 0
+        if not request.use_structured_output:
+            return new_token_ids, 0
+        reasoner = self._get_reasoner(request)
+        if reasoner is None or self.enable_in_reasoning:
+            return new_token_ids, 0
+        structured_req = request.structured_output_request
+        if structured_req is None or structured_req.grammar is None:
+            return new_token_ids, 0
+        # Only act on the boundary step. Once reasoning has ended in a
+        # prior step the mask was correctly applied at sample time, and
+        # the post-commit accept path already handles validation.
+        if structured_req.reasoning_ended:
+            return new_token_ids, 0
+
+        # Pre-commit: request.all_token_ids does NOT yet include
+        # new_token_ids (we run before _update_request_with_output), so
+        # all_token_ids IS the prior context.
+        prior_token_ids = list(request.all_token_ids or [])
+        split_idx = self._find_reasoning_end_in_tokens(
+            reasoner, new_token_ids, prior_token_ids
+        )
+        if split_idx is None:
+            return new_token_ids, 0
+
+        post_boundary = new_token_ids[split_idx + 1 :]
+        if not post_boundary:
+            return new_token_ids, 0
+
+        grammar = structured_req.grammar
+        validated = grammar.validate_tokens(post_boundary)
+        num_rejected = len(post_boundary) - len(validated)
+        if num_rejected == 0:
+            return new_token_ids, 0
+        return new_token_ids[: split_idx + 1] + list(validated), num_rejected
+
     def clear_backend(self) -> None:
         if self.backend is not None:
             self.backend.destroy()
