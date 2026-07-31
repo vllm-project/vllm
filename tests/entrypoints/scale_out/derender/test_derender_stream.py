@@ -666,16 +666,13 @@ class TestDerenderChatStreamParsed:
 
     @pytest.mark.asyncio
     async def test_finish_reason_stop_for_named_tool_choice(self, parsed_derenderer):
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionNamedFunction,
-            ChatCompletionNamedToolChoiceParam,
-        )
-
+        # ChatCompletionRequest's `check_tool_usage` is a mode="before"
+        # validator, so it sees the raw value and only accepts "auto",
+        # "required" or a dict, never an already built
+        # ChatCompletionNamedToolChoiceParam.
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
-            tool_choice=ChatCompletionNamedToolChoiceParam(
-                function=ChatCompletionNamedFunction(name="get_weather")
-            ),
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
         )
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
