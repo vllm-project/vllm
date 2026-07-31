@@ -64,7 +64,10 @@ MMCacheType = Literal["shm", "lru"]
 VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
-MMProcessorDevice = Literal["auto", "cpu", "cuda"]
+MMProcessorDevice: TypeAlias = str
+"""`"auto"`, `"cpu"`, or the platform's own accelerator name
+(`current_platform.device_type`, e.g. `"cuda"` on CUDA and ROCm,
+`"xpu"` on XPU). Validated against that set by the CLI."""
 
 
 def _get_mm_hasher_algorithm() -> MMHasherAlgorithm:

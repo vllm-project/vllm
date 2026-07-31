@@ -1357,7 +1357,12 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--mm-processor-device",
-            choices=["auto", "cpu", "cuda"],
+            choices=["auto", "cpu"]
+            + (
+                [current_platform.device_type]
+                if current_platform.device_type not in ("", "cpu")
+                else []
+            ),
             default="auto",
             help="Device the HF multi-modal processor runs the image/video "
             "transform on. Convenience for `--mm-processor-kwargs "
@@ -1698,24 +1703,32 @@ class EngineArgs:
         the tensor transport, which are only available together here.
 
         An explicit `device` in `--mm-processor-kwargs` always wins, and is
-        checked by the same warning below, so both entry points are covered.
+        checked by the same validation below, so both entry points are covered.
         """
         original = self.mm_processor_kwargs or {}
         kwargs = dict(original)
 
+        # `device_type` is the accelerator torch itself names, so this stays
+        # correct on ROCm ("cuda") and XPU ("xpu") without enumerating platforms.
+        device_type = current_platform.device_type
+        has_accelerator = device_type not in ("", "cpu")
+
         ec_config = self.ec_transfer_config
         # An EC producer that is not also a consumer runs no decoder and
         # allocates no KV cache -- `GPUModelRunner.get_kv_cache_spec` returns {}
-        # for it -- so frontend GPU work has the device to itself.
+        # for it -- so frontend accelerator work has the device to itself.
         is_encoder_instance = (
             ec_config is not None
             and ec_config.is_ec_producer
             and not ec_config.is_ec_consumer
         )
 
-        if "device" not in kwargs:
-            if self.mm_processor_device == "cuda":
-                kwargs["device"] = "cuda"
+        if "device" not in kwargs and has_accelerator:
+            # Any explicit value other than "cpu" means "the accelerator", so a
+            # programmatically-set "cuda" still works on a platform whose device
+            # type is named differently.
+            if self.mm_processor_device not in ("auto", "cpu"):
+                kwargs["device"] = device_type
             elif self.mm_processor_device == "auto" and is_encoder_instance:
                 # Any other transport serializes host bytes, so the output would
                 # be copied back, and that copy costs more than running the
@@ -1729,13 +1742,24 @@ class EngineArgs:
                         self.mm_tensor_ipc,
                     )
                 else:
-                    from vllm.platforms import current_platform
+                    kwargs["device"] = device_type
 
-                    if current_platform.is_cuda_alike():
-                        kwargs["device"] = "cuda"
-
+        # `mm_processor_kwargs` is untyped, so `device` may be any form torch
+        # accepts -- "cuda", "cuda:1", `torch.device(...)`, or a bare index.
+        # Normalise through torch rather than parsing the string, otherwise the
+        # non-string forms slip past the check below.
         device = kwargs.get("device")
-        on_accelerator = isinstance(device, str) and device.startswith("cuda")
+        requested_type: str | None = None
+        if device is not None:
+            try:
+                requested_type = torch.device(device).type
+            except (RuntimeError, TypeError, ValueError):
+                raise ValueError(
+                    f'Invalid "device" in --mm-processor-kwargs: {device!r}. '
+                    'Expected a torch device such as "cpu", "cuda" or "cuda:0".'
+                ) from None
+
+        on_accelerator = has_accelerator and requested_type == device_type
 
         if on_accelerator and not is_encoder_instance:
             raise ValueError(
