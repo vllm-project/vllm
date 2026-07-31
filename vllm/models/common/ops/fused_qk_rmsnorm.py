@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -21,6 +22,7 @@ def _fused_q_kv_rmsnorm_kernel(
     Q_SIZE: tl.constexpr,
     KV_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     # num_tokens goes on grid-x (max 2**31 - 1); task goes on grid-y.
     # CUDA's grid-y/z are capped at 65535, so putting num_tokens there crashes
@@ -40,6 +42,10 @@ def _fused_q_kv_rmsnorm_kernel(
         row_in = kv_ptr + token_idx * kv_in_stride
         weight_ptr = kv_weight_ptr
         row_out = kv_out_ptr + token_idx * kv_out_stride
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
 
     # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
     # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
@@ -92,5 +98,6 @@ def fused_q_kv_rmsnorm(
         Q_SIZE=q_size,
         KV_SIZE=kv_size,
         BLOCK_SIZE=block_size,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return qr_out, kv_out
