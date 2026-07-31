@@ -1895,9 +1895,10 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
-    logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
     logger.info_once(
+        "GPU KV cache size: %s tokens, "
         "Maximum concurrency for %s tokens per request: %.2fx",
+        f"{num_tokens:,}",
         f"{max_model_len:,}",
         max_concurrency,
     )
