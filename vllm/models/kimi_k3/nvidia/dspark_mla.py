@@ -26,26 +26,6 @@ from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
-class ReplicatedDSparkMarkovHead(DSparkMarkovHead):
-    """DSpark Markov head with full weights on every TP rank."""
-
-    def __init__(
-        self,
-        vocab_size: int,
-        draft_vocab_size: int,
-        markov_rank: int,
-        prefix: str,
-    ) -> None:
-        # TODO: Remove this mypy workaround once the K3 PR is fully merged.
-        super().__init__(  # type: ignore[call-arg]
-            vocab_size,
-            draft_vocab_size,
-            markov_rank,
-            prefix,
-            replicated=True,
-        )
-
-
 class K3DSparkDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -160,7 +140,7 @@ class K3DSparkModel(nn.Module):
             ]
         )
         self.final_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.markov_head = ReplicatedDSparkMarkovHead(
+        self.markov_head = DSparkMarkovHead(
             self.config.vocab_size,
             self.config.draft_vocab_size,
             self.config.markov_rank,
