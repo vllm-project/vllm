@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -282,6 +283,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         step: int,
         num_query_per_req: int | None = None,
         causal: bool | Mapping[int, bool] = False,
+        query_start_loc_np: np.ndarray | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -294,6 +296,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             step=step,
             num_query_per_req=self.num_query_per_req,
             causal=causal,
+            query_start_loc_np=query_start_loc_np,
         )
 
     @torch.inference_mode()
