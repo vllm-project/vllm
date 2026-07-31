@@ -392,10 +392,10 @@ def convert_to_nvfp4_moe_kernel_format(
         a2_scale = None
         w13 = layer.w13_weight
         w13_scale = layer.w13_weight_scale
-        w13_scale_2 = getattr(layer, "w13_global_scale", None)
+        w13_scale_2 = getattr(layer, "w13_weight_scale_2", None)
         w2 = layer.w2_weight
         w2_scale = layer.w2_weight_scale
-        w2_scale_2 = getattr(layer, "w2_global_scale", None)
+        w2_scale_2 = getattr(layer, "w2_weight_scale_2", None)
     elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
         a13_scale = None
         a2_scale = None
