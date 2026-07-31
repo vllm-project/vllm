@@ -434,7 +434,11 @@ def _fwd_grouped_kernel_stage1(
                 if BLOCK_DMODEL == BLOCK_DV:
                     v = tl.trans(k)
                 else:
-                    offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+                    kv_off_v = (
+                        kv_page_number * stride_buf_vpbs
+                        + (offs_n % PAGE_SIZE) * stride_buf_vbs
+                    )
+                    offs_buf_v = kv_off_v[:, None] + base_offs_v
                     v = tl.load(
                         V_Buffer + offs_buf_v,
                         mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
