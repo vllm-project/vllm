@@ -3,15 +3,18 @@
 
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
 COMMAND_RETRY_FAILED = "/ci retry"
+CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 ACTIVE_BUILD_STATES = {
@@ -38,7 +41,22 @@ class ApiError(RuntimeError):
         self.status = status
 
 
+def rate_limit_jitter() -> float:
+    return random.uniform(1, 5)
+
+
 class HttpTransport:
+    def __init__(
+        self,
+        *,
+        max_retries: int = 3,
+        jitter: Callable[[], float] = rate_limit_jitter,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.max_retries = max_retries
+        self.jitter = jitter
+        self.sleep = sleep
+
     def request(
         self,
         url: str,
@@ -54,18 +72,33 @@ class HttpTransport:
             headers=dict(headers or {}),
             method=method,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                response_body = response.read().decode()
-        except urllib.error.HTTPError as error:
-            response_body = error.read().decode()
-            message = self._error_message(response_body, error.reason)
-            raise ApiError(
-                error.code,
-                f"API returned {error.code}: {message}",
-            ) from error
-        except urllib.error.URLError as error:
-            raise ApiError(None, f"API request failed: {error.reason}") from error
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    response_body = response.read().decode()
+                break
+            except urllib.error.HTTPError as error:
+                response_body = error.read().decode()
+                if error.code == 429 and attempt < self.max_retries:
+                    delay = self._rate_limit_delay(error, response_body)
+                    print(
+                        "API rate limit reached; "
+                        f"retry {attempt + 1}/{self.max_retries} "
+                        f"in {delay:g} seconds.",
+                        file=sys.stderr,
+                    )
+                    self.sleep(delay)
+                    continue
+                message = self._error_message(response_body, error.reason)
+                raise ApiError(
+                    error.code,
+                    f"API returned {error.code}: {message}",
+                ) from error
+            except urllib.error.URLError as error:
+                raise ApiError(
+                    None,
+                    f"API request failed: {error.reason}",
+                ) from error
 
         if not response_body:
             return None
@@ -81,6 +114,33 @@ class HttpTransport:
         except json.JSONDecodeError:
             return fallback
         return str(parsed.get("message", fallback))
+
+    def _rate_limit_delay(
+        self,
+        error: urllib.error.HTTPError,
+        response_body: str,
+    ) -> float:
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        scope = parsed.get("scope")
+        reset_header = (
+            "RateLimit-User-Reset" if scope == "rest_user" else "RateLimit-Reset"
+        )
+        candidates = [
+            error.headers.get(reset_header),
+            parsed.get("reset"),
+        ]
+        for candidate in candidates:
+            try:
+                delay = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if delay >= 0:
+                return delay + self.jitter()
+        return 60 + self.jitter()
 
 
 class GitHubClient:
@@ -174,6 +234,9 @@ class GitHubClient:
 
     def list_reviews(self, number: int) -> list[dict[str, Any]]:
         return self._paginate(self._repo_path(f"/pulls/{number}/reviews"))
+
+    def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
+        return self._paginate(self._repo_path(f"/issues/{number}/comments"))
 
     def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
         return self._paginate(
@@ -484,11 +547,89 @@ def add_reaction_safely(
         print(f"Could not add {content} reaction: {error}", file=sys.stderr)
 
 
-def is_already_handled(github: GitHubClient, comment_id: int) -> bool:
+def command_comment_marker(comment_id: int) -> str:
+    return f"<!-- vllm-ci-command:{comment_id} -->"
+
+
+def has_bot_comment_marker(
+    github: GitHubClient,
+    issue_number: int,
+    marker: str,
+) -> bool:
     return any(
+        marker in str(comment.get("body", ""))
+        and (comment.get("user") or {}).get("login") == "github-actions[bot]"
+        for comment in github.list_issue_comments(issue_number)
+    )
+
+
+def is_already_handled(
+    github: GitHubClient,
+    issue_number: int,
+    comment_id: int,
+) -> bool:
+    terminal_reaction = any(
         reaction.get("content") in {"rocket", "-1"}
         and (reaction.get("user") or {}).get("login") == "github-actions[bot]"
         for reaction in github.list_reactions(comment_id)
+    )
+    if terminal_reaction:
+        return True
+    return has_bot_comment_marker(
+        github,
+        issue_number,
+        command_comment_marker(comment_id),
+    )
+
+
+def notify_authorized(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+    trusted_users_value: str = "",
+) -> None:
+    pr = event["pull_request"]
+    if pr["state"] != "open" or pr["draft"]:
+        return
+
+    trusted_users = parse_trusted_users(trusted_users_value)
+    author = pr["user"]["login"]
+    author_permission = github.get_permission(author)
+    if (
+        is_trusted_permission(author_permission)
+        or author.casefold() in trusted_users
+        or has_bot_comment_marker(
+            github,
+            pr["number"],
+            CI_AUTHORIZED_COMMENT_MARKER,
+        )
+    ):
+        return
+
+    if "label" in event:
+        if (
+            event.get("action") != "labeled"
+            or event["label"]["name"] not in READY_LABELS
+            or has_trusted_approval(github, pr["number"], trusted_users)
+        ):
+            return
+    elif "review" in event:
+        if (
+            event.get("action") != "submitted"
+            or str(event["review"].get("state", "")).casefold() != "approved"
+            or has_ready_label(pr)
+            or not has_trusted_approval(github, pr["number"], trusted_users)
+        ):
+            return
+    else:
+        return
+
+    github.add_comment(
+        pr["number"],
+        (
+            f"✅ @{author}, CI is now available for this PR. Comment `/ci run` "
+            "to run full CI or `/ci retry` to retry failed jobs.\n\n"
+            f"{CI_AUTHORIZED_COMMENT_MARKER}"
+        ),
     )
 
 
@@ -553,8 +694,6 @@ def handle_retry_failed(
         metadata = build.get("meta_data") or {}
         if str(metadata.get("github-comment-id")) == str(comment_id):
             return f"CI was already requested by this comment: {build['web_url']}"
-        if not build.get("finished_at") or is_active_build(build):
-            return f"CI is still running for this commit: {build['web_url']}"
 
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
@@ -652,7 +791,7 @@ def run(
     comment_id = event["comment"]["id"]
     actor = event["comment"]["user"]["login"]
 
-    if is_already_handled(github, comment_id):
+    if is_already_handled(github, issue_number, comment_id):
         print(f"Comment {comment_id} was already handled.")
         return
     add_reaction_safely(github, comment_id, "eyes")
@@ -661,7 +800,11 @@ def run(
         pr = github.get_pr(issue_number)
         permission = github.get_permission(actor)
         if pr["state"] != "open":
-            github.add_comment(issue_number, "CI commands require an open PR.")
+            github.add_comment(
+                issue_number,
+                "❌ CI commands require an open PR.\n\n"
+                f"{command_comment_marker(comment_id)}",
+            )
             return
 
         trusted_users = parse_trusted_users(trusted_users_value)
@@ -685,8 +828,10 @@ def run(
             trusted_users=trusted_users,
         )
         if not allowed:
-            add_reaction_safely(github, comment_id, "-1")
-            github.add_comment(issue_number, f"@{actor}, {reason}")
+            github.add_comment(
+                issue_number,
+                f"❌ @{actor}, {reason}\n\n{command_comment_marker(comment_id)}",
+            )
             return
 
         print(f"Authorized @{actor}: {reason}")
@@ -707,7 +852,7 @@ def run(
                 pr=pr,
             )
         add_reaction_safely(github, comment_id, "rocket")
-        github.add_comment(issue_number, message)
+        github.add_comment(issue_number, f"✅ {message}")
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise
@@ -718,13 +863,37 @@ def main() -> None:
     with open(event_path, encoding="utf-8") as event_file:
         event = json.load(event_file)
 
-    if not parse_command(event["comment"]["body"]):
-        return
-
     github = GitHubClient(
         os.environ.get("GH_TOKEN", ""),
         os.environ["GITHUB_REPOSITORY"],
     )
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "issue_comment")
+    if event_name == "pull_request_target":
+        notify_authorized(
+            event,
+            github,
+            os.environ.get("CI_TRUSTED_USERS", ""),
+        )
+        return
+    if event_name == "workflow_run":
+        pull_requests = event["workflow_run"].get("pull_requests") or []
+        if not pull_requests:
+            return
+        pr = github.get_pr(int(pull_requests[0]["number"]))
+        notify_authorized(
+            {
+                "action": "submitted",
+                "pull_request": pr,
+                "review": {"state": "approved"},
+            },
+            github,
+            os.environ.get("CI_TRUSTED_USERS", ""),
+        )
+        return
+
+    if not parse_command(event["comment"]["body"]):
+        return
+
     buildkite = BuildkiteClient(
         os.environ.get("BUILDKITE_API_TOKEN", ""),
         os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
