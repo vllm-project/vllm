@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
+import os
 import threading
 import time
 from collections import defaultdict
@@ -885,6 +886,20 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # The extensible KV cache is VMM-backed (cuMemCreate/cuMemMap);
+        # nvidia-peermem cannot pin such pages (ibv_reg_mr fails with EFAULT),
+        # so Mooncake must register it via its DMA-BUF path. Must be set
+        # before TransferEngine reads it at initialize().
+        if (
+            vllm_config.cache_config.enable_extensible_kv_cache
+            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+        ):
+            raise RuntimeError(
+                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible "
+                "KV cache: nvidia-peermem cannot register VMM-backed memory. "
+                "Unset it (or set it to 0) to use Mooncake's DMA-BUF "
+                "registration path, or disable the extensible KV cache."
+            )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1631,10 +1646,13 @@ class MooncakeConnectorWorker:
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
-        kv_data_ptrs: list[int] = []
-        kv_data_lens: list[int] = []
         region_base_addresses: list[int] = []
-        seen_storage_ptrs: set[int] = set()
+        # Register the span the layer views actually cover rather than the
+        # whole storage: with the extensible KV cache the storage is the full
+        # virtual reservation, of which only the committed block prefix (what
+        # the narrowed views describe) is backed by memory that can be
+        # registered with RDMA.
+        storage_spans: dict[int, int] = {}
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
         self.registered_layer_names = []
@@ -1683,11 +1701,19 @@ class MooncakeConnectorWorker:
                 )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            if storage_addr not in seen_storage_ptrs:
-                seen_storage_ptrs.add(storage_addr)
-                kv_data_ptrs.append(storage_addr)
-                kv_data_lens.append(storage.nbytes())
+            last_index = sum(
+                (size - 1) * stride for size, stride in zip(cache.shape, cache.stride())
+            )
+            view_span = min(
+                (cache.storage_offset() + last_index + 1) * cache.element_size(),
+                storage.nbytes(),
+            )
+            storage_spans[storage_addr] = max(
+                storage_spans.get(storage_addr, 0), view_span
+            )
 
+        kv_data_ptrs = list(storage_spans.keys())
+        kv_data_lens = list(storage_spans.values())
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
 

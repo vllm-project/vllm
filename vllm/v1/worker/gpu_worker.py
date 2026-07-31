@@ -206,7 +206,10 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
-        extensible_kv_buffers = self.model_runner.extensible_kv_buffers
+        # The V1 model runner has no extensible KV cache support.
+        extensible_kv_buffers = getattr(
+            self.model_runner, "extensible_kv_buffers", None
+        )
         if (
             extensible_kv_buffers is not None
             and self.vllm_config.kv_transfer_config is not None
@@ -277,7 +280,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         if tags is None or "kv_cache" in tags:
-            extensible_kv_buffers = self.model_runner.extensible_kv_buffers
+            extensible_kv_buffers = getattr(
+                self.model_runner, "extensible_kv_buffers", None
+            )
             if extensible_kv_buffers is not None:
                 extensible_kv_buffers.recommit()
             self.model_runner.post_kv_cache_wake_up()
@@ -719,9 +724,17 @@ class Worker(WorkerBase):
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(
-                kv_cache_config, extensible=extensible
-            )
+            if extensible:
+                from vllm.v1.worker.gpu.model_runner import (
+                    GPUModelRunner as GPUModelRunnerV2,
+                )
+
+                # The config gate restricts the extensible KV cache to the V2
+                # runner; V1's initialize_kv_cache has no such parameter.
+                assert isinstance(self.model_runner, GPUModelRunnerV2)
+                self.model_runner.initialize_kv_cache(kv_cache_config, extensible=True)
+            else:
+                self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -738,6 +751,12 @@ class Worker(WorkerBase):
         """Commit the final KV cache size after warmup (extensible flow)."""
         num_blocks = kv_cache_config.num_blocks
         self.cache_config.num_gpu_blocks = num_blocks
+        from vllm.v1.worker.gpu.model_runner import (
+            GPUModelRunner as GPUModelRunnerV2,
+        )
+
+        # The extensible flow (and hence this RPC) is gated to the V2 runner.
+        assert isinstance(self.model_runner, GPUModelRunnerV2)
         # Defragment when a connector will register the memory: UCX cannot
         # transfer regions spanning multiple VMM allocation handles.
         self.model_runner.extend_kv_cache(
@@ -747,13 +766,6 @@ class Worker(WorkerBase):
             # The final size is committed; now the connector may register the
             # (physically backed) KV cache memory.
             ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-            from vllm.v1.worker.gpu.model_runner import (
-                GPUModelRunner as GPUModelRunnerV2,
-            )
-
-            # Deferred KV transfer init is gated to the V2 runner in
-            # EngineCore._initialize_kv_caches.
-            assert isinstance(self.model_runner, GPUModelRunnerV2)
             self.model_runner.init_deferred_kv_connector()
 
     def extensible_kv_cache_unsupported_reason(self) -> str | None:
@@ -915,10 +927,13 @@ class Worker(WorkerBase):
             # size is computed from actual usage.
             torch.accelerator.synchronize()
             free_memory, _ = torch.accelerator.get_memory_info()
+            # Extensible is V2-only; the V1 runner has no committed-bytes
+            # notion (this branch is unreachable there).
+            kv_cache_committed_bytes = getattr(
+                self.model_runner, "kv_cache_committed_bytes", 0
+            )
             non_kv_used_memory = (
-                self.init_snapshot.free_memory
-                - free_memory
-                - self.model_runner.kv_cache_committed_bytes
+                self.init_snapshot.free_memory - free_memory - kv_cache_committed_bytes
             )
             post_warmup_available = int(self.requested_memory) - non_kv_used_memory
             warmup_memory_bytes = max(
