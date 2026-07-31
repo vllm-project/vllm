@@ -7,6 +7,36 @@ Reasoning models return an additional `reasoning` field in their outputs, which 
 !!! warning
     `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
 
+## Client compatibility
+
+`reasoning_content` was renamed to `reasoning` ([#27755](https://github.com/vllm-project/vllm/issues/27755),
+[#27752](https://github.com/vllm-project/vllm/pull/27752)) and then removed from
+the **output** entirely in
+[#33402](https://github.com/vllm-project/vllm/pull/33402). The field name you
+see depends on how the server handles the two channels:
+
+| Side | Behavior |
+|------|----------|
+| **Output** (streaming `delta` and non-streaming `message`) | `reasoning` only. `reasoning_content` is never emitted. |
+| **Input** (assistant messages in subsequent requests) | Both accepted; `reasoning_content` is normalized to `reasoning` ([#42664](https://github.com/vllm-project/vllm/pull/42664)). |
+
+This asymmetry is a **silent breaking change for output consumers**: a client
+that reads `delta.reasoning_content` (the older DeepSeek convention) gets
+`None` and loses the chain-of-thought with no error. The OpenAI Python SDK
+does not declare either field on `ChoiceDelta`, so `reasoning` only surfaces
+via pydantic's extra-field handling — direct attribute access such as
+`delta.reasoning` raises `AttributeError` on chunks where the field is absent
+(e.g. the first role-only chunk). Always read it defensively:
+
+```python
+reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+```
+
+Example SDKs that consume streaming reasoning from vLLM through the
+OpenAI-compatible API include [tulip-agents](https://github.com/tuliplabs-ai/sdk-python),
+which reads both field names for streaming and non-streaming responses so the
+same client code works across vLLM builds.
+
 ## Supported Models
 
 vLLM currently supports the following reasoning models:
@@ -105,7 +135,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
     }
     ```
 
-OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning` attribute is present in the response. For example:
+OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. Use `getattr` (not `hasattr`/direct attribute access) to check if the `reasoning` attribute is present in the response — the OpenAI SDK stores the field in pydantic's extra-field storage, and direct access such as `delta.reasoning` raises `AttributeError` on chunks where the field is absent (e.g. the first role-only chunk). For example:
 
 ??? code
 
