@@ -39,38 +39,18 @@ class CPUWorker(Worker):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        # TODO: use numactl for process setup
-        # TODO: optimize for `interleaved` policy
-        # Bind memory node
         allowed_memory_nodes = get_visible_memory_node()
-        allowed_cpu_list = get_allowed_cpu_list()
-        cpu_core = allowed_cpu_list[0]
+        current_numa_node = allowed_memory_nodes[rank % len(allowed_memory_nodes)]
+        logger.debug(
+            "CPU worker rank %d binding to NUMA node %s (available nodes: %s).",
+            rank,
+            current_numa_node,
+            allowed_memory_nodes,
+        )
 
-        # TODO: some CI hosts are not correctly set, change to assertion
-        # after fix
-        if cpu_core.numa_node not in allowed_memory_nodes:
-            logger.warning(
-                "Node %s is not in available memory nodes %s.",
-                cpu_core.numa_node,
-                allowed_memory_nodes,
-            )
+        torch.ops._C.init_cpu_memory_env([current_numa_node])
 
-        # On s390x, numa_node may be a synthetic book ID that doesn't
-        # correspond to a real memory node. Fall back to first visible node.
-        if cpu_core.numa_node in allowed_memory_nodes:
-            memory_node = cpu_core.numa_node
-        else:
-            logger.warning(
-                "CPU group key %s is not a valid memory node. "
-                "Falling back to memory node %s.",
-                cpu_core.numa_node,
-                allowed_memory_nodes[0],
-            )
-            memory_node = allowed_memory_nodes[0]
-
-        torch.ops._C.init_cpu_memory_env([memory_node])
-
-        memory_status = get_memory_node_info(memory_node)
+        memory_status = get_memory_node_info(current_numa_node)
         memory_fraction = vllm_config.cache_config.gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
@@ -82,7 +62,7 @@ class CPUWorker(Worker):
             and self.requested_cpu_memory > available_memory
         ):
             raise ValueError(
-                f"Available memory on node {cpu_core.numa_node} "
+                f"Available memory on node {current_numa_node} "
                 f"({format_gib(available_memory)}/"
                 f"{format_gib(memory_status.total_memory)} GiB) on startup "
                 f"is less than desired CPU memory utilization "
