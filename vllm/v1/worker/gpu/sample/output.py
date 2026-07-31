@@ -17,6 +17,19 @@ class SamplingMaskTensors(NamedTuple):
     # [num_requests]
     counts: torch.Tensor
 
+    @classmethod
+    def from_logits(
+        cls,
+        logits: torch.Tensor,
+        num_sampled_tokens: torch.Tensor,
+    ) -> "SamplingMaskTensors":
+        """Compact the finite-logit support for requests that sampled tokens."""
+        keep = torch.isfinite(logits)[num_sampled_tokens.bool()]
+        counts = keep.sum(dim=-1, dtype=torch.int32)
+        token_ids = keep.flatten().nonzero(as_tuple=True)[0]
+        token_ids = token_ids.remainder(keep.shape[1]).to(torch.int32)
+        return cls(token_ids, counts)
+
     def to_cpu_nonblocking(self) -> "SamplingMaskTensors":
         if self.token_ids.device.type == "cpu":
             return self
