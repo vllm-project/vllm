@@ -299,6 +299,13 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
+    # Some community text-only checkpoints keep the extraneous
+    # `model.language_model.` prefix inherited from the VL training stack.
+    # Strip it so both prefixed and clean checkpoints load correctly.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
@@ -408,14 +415,11 @@ class Qwen3_5ForCausalLMBase(
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        mapper = WeightsMapper(
-            orig_to_new_substr={"language_model.": ""},
-        )
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights, mapper=mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
