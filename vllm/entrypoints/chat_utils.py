@@ -467,8 +467,9 @@ def _merge_embeds(
 
     first_keys = set(data_items[0].keys())
     if any(set(item.keys()) != first_keys for item in data_items[1:]):
-        raise ValueError(
-            "All dictionaries in the list of embeddings must have the same keys."
+        raise VLLMValidationError(
+            "All dictionaries in the list of embeddings must have the same keys.",
+            parameter="messages",
         )
 
     fields = {
@@ -746,9 +747,9 @@ def _resolve_items(
         modality requires a processor, enforced by the guard below.
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
-        raise ValueError("Mixing raw image and embedding inputs is not allowed")
+        raise VLLMValidationError("Mixing raw image and embedding inputs is not allowed", parameter="messages")
     if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
-        raise ValueError("Mixing raw audio and embedding inputs is not allowed")
+        raise VLLMValidationError("Mixing raw audio and embedding inputs is not allowed", parameter="messages")
     # `prompt_embeds` bypasses HF MM processors. Every other modality requires one.
     processor_modalities = items_by_modality.keys() - {"prompt_embeds"}
     if processor_modalities and mm_processor is None:
@@ -1327,10 +1328,11 @@ def validate_chat_template(chat_template: Path | str | None):
 
             builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
             if not builtin_template_path.exists():
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}"
+                    f"Tried: {chat_template} and {builtin_template_path}",
+                    parameter="chat_template",
                 )
 
     else:
@@ -1378,7 +1380,7 @@ def _load_chat_template(
                     f"Tried: {chat_template} and {builtin_template_path}. "
                     f"Reason: {e}"
                 )
-                raise ValueError(msg) from e
+                raise VLLMValidationError(msg, parameter="chat_template") from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
@@ -1448,9 +1450,10 @@ def _get_full_multimodal_text_prompt(
                 interleave_strings,
             )
             logger.debug("Input prompt: %s", text_prompt)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
-                "actual multimodal data items."
+                "actual multimodal data items.",
+                parameter="messages",
             )
 
         missing_placeholders.extend([placeholder] * placeholder_counts[placeholder])
@@ -1696,10 +1699,11 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
     caller move or inject splice positions via plain text content.
     """
     if model_config.enable_prompt_embeds and PROMPT_EMBEDS_PLACEHOLDER_TOKEN in text:
-        raise ValueError(
+        raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-            )
+            ),
+            parameter="messages",
         )
 
 
