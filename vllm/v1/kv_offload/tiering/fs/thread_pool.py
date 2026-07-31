@@ -68,6 +68,7 @@ class DualQueueThreadPool:
         self._stop = False
         self._threads: list[threading.Thread] = []
         self._finished_q: deque[tuple[JobId, bool]] = deque()
+        self._inflight_jobs = 0  # guarded by _condition
 
         for i in range(n_read_threads):
             t = threading.Thread(
@@ -98,6 +99,7 @@ class DualQueueThreadPool:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            self._inflight_jobs += 1
             for fn in tasks:
                 self._load_q.append((fn, state))
             self._condition.notify(n_tasks)
@@ -111,21 +113,38 @@ class DualQueueThreadPool:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            self._inflight_jobs += 1
             for fn in tasks:
                 self._store_q.append((fn, state))
             self._condition.notify(n_tasks)
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
+        # No lock needed: deque is thread-safe for concurrent append/popleft,
+        # and the manager is the sole popper.
         jobs = []
         while self._finished_q:
             jobs.append(self._finished_q.popleft())
         return jobs
+
+    def wait_idle(self) -> None:
+        """Block until there are no in-flight jobs.
+
+        After this returns, every submitted job has had its last task
+        finish, so no worker thread is still copying data. Note:
+        completed jobs may still be sitting in ``_finished_q`` waiting
+        for ``get_finished()`` to drain them.
+        """
+        with self._condition:
+            self._condition.wait_for(lambda: self._inflight_jobs == 0)
 
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
             self._stop = True
             self._load_q.clear()
             self._store_q.clear()
+            # Cancelled tasks will not decrement _inflight_jobs; reset it so a
+            # subsequent wait_idle() returns instead of hanging.
+            self._inflight_jobs = 0
             self._condition.notify_all()
         if wait:
             for t in self._threads:
@@ -148,11 +167,14 @@ class DualQueueThreadPool:
                 job_finished, success = state.task_done(True)
             except Exception as exc:
                 logger.error(
-                    "FileSystemTierManagerPython: job %s block I/O failed: %s",
+                    "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
                 job_finished, success = state.task_done(False)
 
             if job_finished:
-                self._finished_q.append((state.job_id, success))
+                with self._condition:
+                    self._finished_q.append((state.job_id, success))
+                    self._inflight_jobs -= 1
+                    self._condition.notify_all()

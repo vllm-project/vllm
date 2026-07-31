@@ -19,7 +19,7 @@ size-1 dimensions via torch.as_strided — zero-copy.
 
 The degenerate stride manifests at different positions in different backends:
 - FlashInfer: stride(-3) after kv_cache.permute() → shape [..., 1, B, D]
-- FlashAttention: stride(-2) after kv_cache.unbind(0) → shape [N, B, 1, D]
+- FlashAttention: stride(-2) after kv_cache.unbind(1) → shape [N, B, 1, D]
 """
 
 import torch
