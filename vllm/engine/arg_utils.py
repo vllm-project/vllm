@@ -1446,6 +1446,14 @@ class EngineArgs:
             "--jit-monitor-verbose",
             **observability_kwargs["jit_monitor_verbose"],
         )
+        observability_group.add_argument(
+            "--enable-detect-nans-in-logits",
+            **observability_kwargs["enable_detect_nans_in_logits"],
+        )
+        observability_group.add_argument(
+            "--enable-nan-fault-tolerance",
+            **observability_kwargs["enable_nan_fault_tolerance"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
