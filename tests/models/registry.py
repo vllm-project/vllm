@@ -361,6 +361,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "KimiLinearForCausalLMPortable": _HfExamplesInfo(
+        "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["KimiLinearForCausalLMPortable"]},
+    ),
+    "KimiK3ForCausalLMPortable": _HfExamplesInfo(
+        "Inferact/Kimi-K3-dummy-9L",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["KimiK3ForCausalLMPortable"]},
+    ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
