@@ -349,6 +349,7 @@ def _get_tool_schema_defs(
 
 def _get_json_schema_from_tools(
     tools: list[Tool],
+    parallel_tool_calls: bool | None = None,
 ) -> dict:
     fn_tool_schemas: list[dict[str, Any]] = []
     fn_tools: list[Tool] = []
@@ -363,7 +364,7 @@ def _get_json_schema_from_tools(
         elif _is_function_tool(tool):
             fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
             fn_tools.append(tool)
-    json_schema = {
+    json_schema: dict[str, Any] = {
         "type": "array",
         "minItems": 1,
         "items": {
@@ -371,6 +372,10 @@ def _get_json_schema_from_tools(
             "anyOf": fn_tool_schemas,
         },
     }
+    # Only an explicit `false` opts out of parallel tool calls; `None` means the
+    # field was never set and the default (true) applies.
+    if parallel_tool_calls is False:
+        json_schema["maxItems"] = 1
     json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
@@ -380,6 +385,7 @@ def _get_json_schema_from_tools(
 def get_json_schema_from_tools(
     tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
     tools: list[Tool] | None,
+    parallel_tool_calls: bool | None = None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
@@ -415,7 +421,7 @@ def get_json_schema_from_tools(
         return chat_tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
-        return _get_json_schema_from_tools(tools)
+        return _get_json_schema_from_tools(tools, parallel_tool_calls)
     # tool_choice: "auto"
     return None
 
