@@ -405,7 +405,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def override_quantization_method(
