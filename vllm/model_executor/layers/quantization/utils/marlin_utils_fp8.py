@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -132,7 +133,9 @@ def prepare_fp8_layer_for_marlin(
     device = layer.weight.device
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device)
+    )
 
     # WEIGHT
     # Repack weights to marlin format
@@ -278,9 +281,10 @@ def prepare_fp8_moe_layer_for_marlin(
 
     # WORKSPACE
     device = layer.w13_weight.device
-    # NOTE(rob): we do not need to register the workspace as a param
-    # because it is not used as part of the weight reloading process.
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    # Keep the graph-visible workspace address stable across PWAL reruns.
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device, 4)
+    )
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
@@ -463,7 +467,9 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     device = layer.weight.device
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device)
+    )
 
     # WEIGHT - repack FP8 weights to Marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
@@ -549,7 +555,9 @@ def prepare_mxfp8_moe_layer_for_marlin(
     param_dtype = torch.get_default_dtype()
     perm = torch.empty(0, dtype=torch.int, device=device)
 
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device, 4)
+    )
 
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         if "w13" in name:

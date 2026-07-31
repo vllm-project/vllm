@@ -17,6 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_dummy_weights,
     initialize_single_dummy_weight,
 )
+from vllm.model_executor.reload_arena import arena_scope, get_reload_arena
 
 
 class DummyModelLoader(BaseModelLoader):
@@ -59,6 +60,7 @@ class DummyModelLoader(BaseModelLoader):
 
         quant_method = getattr(layer, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
-            quant_method.process_weights_after_loading(layer)
+            with arena_scope(get_reload_arena(layer)):
+                quant_method.process_weights_after_loading(layer)
 
         info.reset()

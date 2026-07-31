@@ -12,6 +12,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.reload_arena import (
+    arena_scope,
+    get_reload_arena,
+    peek_reload_arena,
+)
 
 from .meta import (
     SKIP_TENSORS,
@@ -20,7 +25,6 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
-from vllm.model_executor.reload_arena import peek_reload_arena
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -357,7 +361,8 @@ def _finalize_attention_layer(
         )
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    with arena_scope(get_reload_arena(layer)):
+        layer.process_weights_after_loading(model_config.dtype)
     # Attention arena slots (e.g. MLA W_UV/W_UK_T) — verify after PWAL,
     # before the caller resets info.
     _verify_layer_arena(layer, info)
@@ -383,7 +388,8 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
-    quant_method.process_weights_after_loading(layer)
+    with arena_scope(get_reload_arena(layer)):
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -419,7 +425,8 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        with arena_scope(get_reload_arena(layer)):
+            quant_method.process_weights_after_loading(layer)
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)

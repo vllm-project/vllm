@@ -319,6 +319,56 @@ with arena_scope(get_reload_arena(layer)):
     kernel = make_moe_kernel(...)
 ```
 
+All framework-owned PWAL entry points open this scope, including initial
+loading, layerwise reload, attention finalization, attention-scale reload,
+and dummy loading:
+
+```python
+with arena_scope(get_reload_arena(layer)):
+    quant_method.process_weights_after_loading(layer)
+```
+
+This is an intentional PWAL boundary, rather than a statement that every
+quantization method needs arena storage. A quantization method can construct
+several layers of transient objects:
+
+```text
+quant_method.process_weights_after_loading(layer)
+  -> select a kernel backend
+  -> construct an expert or kernel object
+  -> allocate graph-visible constants or scratch
+```
+
+The deepest constructor may know the runtime tensor but not the persistent
+layer that owns it. Passing the layer or arena through every quantization,
+kernel, and expert interface would couple those interfaces to reload. The
+ambient scope instead makes the layer's arena available only while that
+layer's PWAL call is running. Deep code can opt in with `current_arena()`.
+
+Using the same boundary for every PWAL call is important for three reasons:
+
+1. Initial load and reload execute backend selection through the same arena
+   context. Initial PWAL creates the slot before graph capture; later PWAL
+   reacquires it.
+2. Correctness does not depend on a central list of quantization methods that
+   happen to allocate graph-visible runtime tensors today. A newly introduced
+   backend can use the existing boundary without changing every caller.
+3. The scope has a precise lifetime. It is absent during normal inference, so
+   one layer cannot accidentally acquire storage from another layer's PWAL.
+
+Opening a scope does **not** automatically register tensors created during
+PWAL. Registration remains explicit: deep code must call `current_arena()`
+and publish through `put()` or `get_or_alloc()`. Methods that do not opt in
+simply enter and leave the context.
+
+The current boundary eagerly calls `get_reload_arena(layer)`, so a module
+whose PWAL never uses the arena may retain an empty arena. This is a small
+bookkeeping cost, not a device allocation: no tensor storage is allocated
+until a slot is acquired. If empty arenas become significant, the boundary
+can be changed to retain only an owner and lazily create its arena on the
+first deep acquisition. Such an optimization must preserve the uniform PWAL
+boundary and the initial-load/reload symmetry above.
+
 The constructor may resolve and retain the current arena:
 
 ```python

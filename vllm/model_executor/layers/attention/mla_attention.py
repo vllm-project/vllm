@@ -194,8 +194,6 @@ from enum import Enum
 from typing import ClassVar, Generic, TypeVar, cast
 
 import torch
-
-from vllm.model_executor.reload_arena import get_reload_arena
 import torch.nn as nn
 from tqdm import tqdm
 
@@ -242,6 +240,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -901,6 +900,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
+        arena = get_reload_arena(self)
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         if self.is_aiter_triton_fp4_bmm_enabled:
@@ -910,12 +910,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
             # Convert from (L, N, P) to (N, L, P)
-            self.W_K = self.W_K.transpose(0, 1)
-            self.W_K_scale = self.W_K_scale.transpose(0, 1)
+            self.W_K = arena.put("W_K", self.W_K.transpose(0, 1))
+            self.W_K_scale = arena.put(
+                "W_K_scale", self.W_K_scale.transpose(0, 1)
+            )
 
             self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
                 W_UV.permute(1, 2, 0)
             )
+            self.W_V = arena.put("W_V", self.W_V)
+            self.W_V_scale = arena.put("W_V_scale", self.W_V_scale)
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
@@ -925,6 +929,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype()
             )
+            self.W_K = arena.put("W_K", self.W_K)
+            self.W_K_scale = arena.put("W_K_scale", self.W_K_scale)
+            self.W_V = arena.put("W_V", self.W_V)
+            self.W_V_scale = arena.put("W_V_scale", self.W_V_scale)
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
@@ -964,7 +972,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # storage. put() adopts once and copies re-derived values into
             # the same storage on reload, so the address stays valid and the
             # value refreshes.
-            arena = get_reload_arena(self)
             # Convert from (L, N, V) to (N, L, V)
             self.W_UV = arena.put("W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)

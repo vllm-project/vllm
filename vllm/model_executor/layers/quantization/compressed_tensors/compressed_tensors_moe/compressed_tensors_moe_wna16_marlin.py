@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
@@ -487,8 +488,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             if self.experts_cls is not None and issubclass(
                 self.experts_cls, FusedMoEExpertsModular
             ):
-                layer.workspace = marlin_make_workspace_new(
-                    layer.w13_weight_g_idx.device, 4
+                layer.workspace = get_reload_arena(layer).put(
+                    "marlin.workspace",
+                    marlin_make_workspace_new(layer.w13_weight_g_idx.device, 4),
                 )
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface

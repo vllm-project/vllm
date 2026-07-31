@@ -154,6 +154,98 @@ class TestPut:
             arena.put("d", torch.ones(4))
 
 
+@pytest.mark.parametrize("quant_mode", ["mxfp4", "fp8"])
+def test_mla_quantized_decode_weights_reuse_arena_storage(
+    monkeypatch, quant_mode
+):
+    """Cover AITER-only MLA PWAL branches without requiring ROCm hardware."""
+    import vllm.model_executor.layers.attention.mla_attention as mla_mod
+
+    layer = mla_mod.MLAAttention.__new__(mla_mod.MLAAttention)
+    nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = object()
+    layer.quant_config = None
+    layer.is_aiter_triton_fp4_bmm_enabled = quant_mode == "mxfp4"
+    layer.is_aiter_triton_fp8_bmm_enabled = quant_mode == "fp8"
+
+    source = torch.arange(28, dtype=torch.float32).reshape(14, 2)
+    monkeypatch.setattr(
+        mla_mod,
+        "get_and_maybe_dequant_weights",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(mla_mod, "should_load_quant_weights", lambda _method: True)
+
+    def fake_quant(value, **_kwargs):
+        return value.contiguous() + 1, torch.full(
+            value.shape[:-1] + (1,), 2.0, dtype=torch.float32
+        )
+
+    if quant_mode == "mxfp4":
+        from vllm.model_executor.layers.quantization.quark import (
+            utils as quark_utils,
+        )
+
+        monkeypatch.setattr(
+            quark_utils, "quark_quantize_weight_to_mxfp4", fake_quant
+        )
+    else:
+        monkeypatch.setattr(mla_mod, "dynamic_per_batched_tensor_quant", fake_quant)
+        monkeypatch.setattr(mla_mod, "is_global_first_rank", lambda: False)
+        monkeypatch.setattr(
+            mla_mod.rocm_aiter_ops,
+            "triton_fp8_bmm",
+            lambda *_args, **_kwargs: None,
+        )
+
+    layer.process_weights_after_loading(torch.float32)
+    names = ("W_K", "W_K_scale", "W_V", "W_V_scale")
+    before = {name: getattr(layer, name).data_ptr() for name in names}
+
+    source.add_(100)
+    layer.process_weights_after_loading(torch.float32)
+    after = {name: getattr(layer, name).data_ptr() for name in names}
+
+    assert after == before
+    assert torch.all(layer.W_K > 50)
+
+
+def test_wna8o8_detached_activation_scales_reuse_arena_storage():
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        compressed_tensors_wNa8o8 as wna8o8,
+    )
+
+    class NoopKernel:
+        def process_weights_after_loading(self, _layer):
+            return None
+
+    cls = wna8o8.CompressedTensorsWNA8O8Int
+    scheme = cls.__new__(cls)
+    scheme.is_int_quantized = False
+    scheme.kernel = NoopKernel()
+    layer = nn.Module()
+
+    def load_scales(input_value, output_value):
+        layer.input_scale = nn.Parameter(torch.tensor([input_value]))
+        layer.output_scale = nn.Parameter(torch.tensor([output_value]))
+
+    load_scales(1.0, 2.0)
+    scheme.process_weights_after_loading(layer)
+    before = (scheme._input_scale.data_ptr(), scheme._output_scale.data_ptr())
+
+    load_scales(3.0, 4.0)
+    scheme.process_weights_after_loading(layer)
+    after = (scheme._input_scale.data_ptr(), scheme._output_scale.data_ptr())
+
+    assert after == before
+    assert scheme._input_scale.item() == 3.0
+    assert scheme._output_scale.item() == 4.0
+
+
 class TestSnapshotVerify:
 
     def test_clean_roundtrip(self):

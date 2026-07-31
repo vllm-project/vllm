@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
@@ -240,7 +241,9 @@ def prepare_fp4_layer_for_marlin(
     device = layer.weight.device
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device)
+    )
 
     # WEIGHT
     # Repack weights to marlin format
@@ -365,7 +368,9 @@ def prepare_nvfp4_moe_layer_for_marlin(
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device, 4)
+    )
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
@@ -464,7 +469,9 @@ def prepare_moe_fp4_layer_for_marlin(
     # WORKSPACE
     device = layer.w13_weight.device
     param_dtype = layer.params_dtype
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    layer.workspace = get_reload_arena(layer).put(
+        "marlin.workspace", marlin_make_workspace_new(device, 4)
+    )
     perm = torch.empty(0, dtype=torch.int, device=device)
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
