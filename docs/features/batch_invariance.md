@@ -144,7 +144,7 @@ When batch invariance is enabled, vLLM:
 
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
-3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+3. Restricts tensor-parallel all-reduce to paths with a fixed reduction order. vLLM's custom all-reduce is used, pinned to its 1-stage kernel, which accumulates over absolute rank indices so the order is identical on every rank and independent of message size. Its IPC buffers are sized at startup for the largest all-reduce the engine can issue (`max_num_batched_tokens x hidden_size x dtype_size`), so the custom-vs-NCCL choice cannot change with batch composition mid-run; if that buffer would exceed 256 MiB per rank, custom all-reduce is declined at startup and NCCL is used for every all-reduce instead. Backends without an audited fixed reduction order (FlashInfer, AITER and QuickReduce all-reduce, NCCL symmetric memory) are disabled.
 4. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out
    (not applied when sequence parallelism / async TP are enabled, since those are `torch.compile` passes).
