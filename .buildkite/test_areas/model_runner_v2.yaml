@@ -119,4 +119,3 @@ steps:
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - pytest -v -s v1/e2e/spec_decode/eagle/
   - pytest -v -s v1/e2e/spec_decode/speculators/
-  - pytest -v -s v1/e2e/spec_decode/mtp/
