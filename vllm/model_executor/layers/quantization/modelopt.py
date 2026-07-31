@@ -1205,7 +1205,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             or torch.unique(layer.weight_scale_2).numel() != 1
         ):
             logger.warning_once(
-                "In NVFP4 linear, the global scale for input or weight are different"
+                "In NVFP4 linear, the global scale for input or weight are different "
                 " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
                 " will likely results in reduce accuracy. Please verify the model"
                 " accuracy. Consider using a checkpoint with a shared global NVFP4"
@@ -1228,6 +1228,14 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.input_global_scale_inv = Parameter(
             (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
+
+        # Transpose weight if needed: checkpoints may store weights as
+        # (in_features // 2, out_features) but we expect
+        # (out_features, in_features // 2)
+        weight = layer.weight.data
+        if weight.shape[0] != layer.output_size_per_partition:
+            weight = weight.t()
+        layer.weight = Parameter(weight, requires_grad=False)
 
         # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
