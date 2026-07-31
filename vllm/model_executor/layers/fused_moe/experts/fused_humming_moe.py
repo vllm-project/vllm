@@ -370,7 +370,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         # -> down_output
         # (-> output) (if not is_batched)
         # Neighboring nodes are required to utilize distinct workspaces.
-        # The output must be derived from workspace1.
+        # The final output buffer is supplied by the modular kernel and may
+        # alias workspace1.
 
         output_shape: tuple[int, ...]
         if self.is_batched():
@@ -561,7 +562,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         input: torch.Tensor,
     ) -> None:
         clamp_limit = self.quant_config.gemm1_clamp_limit
-
         self.activation(
             activation=activation,
             input=input,
@@ -662,7 +662,8 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.
-        The output is written into workspace13 via the buffer management.
+        Results are written to the output buffer supplied by the modular
+        kernel, which may alias workspace13.
         """
         assert not apply_router_weight_on_input
 
@@ -674,6 +675,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_ids.size(1),
             activation,
         )
+        buffers["output"] = output
 
         moe_kwargs1, moe_kwargs2 = self.prepare_humming_moe_kwargs(
             topk_ids=topk_ids,
@@ -725,8 +727,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             outputs=buffers["output"],
         )
 
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
+        # buffers["output"] aliases the output supplied by the modular kernel.
 
 
 class HummingGroupedExperts(HummingExpertsBase):
@@ -766,7 +767,8 @@ class HummingGroupedExperts(HummingExpertsBase):
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.
-        The output is written into workspace13 via the buffer management.
+        Results are written to the output buffer supplied by the modular
+        kernel, which may alias workspace13.
         """
         assert not apply_router_weight_on_input
 
@@ -779,6 +781,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             topk_ids.size(1),
             activation,
         )
+        buffers["output"] = output
 
         hidden_states, _, expert_first_token_offset, inv_perm, _ = moe_permute(
             hidden_states=hidden_states,
@@ -840,8 +843,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             expert_first_token_offset=expert_first_token_offset,
         )
 
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
+        # buffers["output"] aliases the output supplied by the modular kernel.
 
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
@@ -881,7 +883,8 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
         Humming performs activation quantization internally and consumes the
         weights supplied by the modular kernel interface.
-        The output is written into workspace13 via the buffer management.
+        Results are written to the output buffer supplied by the modular
+        kernel, which may alias workspace13.
         """
         assert not apply_router_weight_on_input
         assert expert_tokens_meta is not None
@@ -897,6 +900,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             topk_ids.size(1),
             activation,
         )
+        buffers["down_output"] = output
 
         inputs, input_scale = self.quantize_input(
             "w13",
@@ -940,5 +944,5 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w2_tuning_config_str,
         )
 
-        # Note: output is already written to buffers["down_output"]
-        # which aliases workspace13/output
+        # buffers["down_output"] aliases the output supplied by the modular
+        # kernel.
