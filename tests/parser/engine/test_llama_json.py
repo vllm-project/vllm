@@ -1638,3 +1638,68 @@ class TestSchemaCoercionPreservesValidValues:
             tc.function.arguments for tc in reference.tool_calls
         ]
         assert [c["args"] for c in calls] == [arguments]
+
+
+class TestPhantomRetractionIsLinear:
+    """Prose JSON must not cost time quadratic in how much of it there is.
+
+    A ``{...}`` with no top-level ``"name"`` is not a tool call, so its
+    events are retracted and the text restored as content.  Rebuilding the
+    whole output list on each retraction made a document of N such objects
+    cost O(N^2): a model asked for JSON lines while ``tools`` was set could
+    burn seconds of CPU in one parse, with no tool call anywhere in it.
+    """
+
+    @staticmethod
+    def _document(count: int) -> str:
+        return "\n".join(f'{{"id": {i}, "value": "row{i}"}}' for i in range(count))
+
+    def _request(self):
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "one json object per line"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            tool_choice="auto",
+        )
+
+    def test_retraction_work_is_linear(self, mock_tokenizer, monkeypatch):
+        """Doubling the prose may only double the events retraction looks at."""
+        scanned = 0
+        real = LlamaJsonParser._retract_call
+
+        def counting(out, start, dense_idx):
+            nonlocal scanned
+            scanned += len(out) - start
+            return real(out, start, dense_idx)
+
+        monkeypatch.setattr(LlamaJsonParser, "_retract_call", staticmethod(counting))
+
+        counts = []
+        for count in (200, 400):
+            scanned = 0
+            parser = LlamaJsonParser(mock_tokenizer)
+            parser.extract_tool_calls(self._document(count), self._request())
+            counts.append(scanned)
+
+        # Linear would double; quadratic would quadruple. Allow generous
+        # slack for per-call constants but not for a growth-rate change.
+        assert counts[1] <= 3 * counts[0] + 100
+
+    @pytest.mark.parametrize("count", [1, 5, 50])
+    def test_prose_json_is_returned_as_content(self, mock_tokenizer, count):
+        """The retraction must still restore every object, in order."""
+        document = self._document(count)
+        result = LlamaJsonParser(mock_tokenizer).extract_tool_calls(
+            document, self._request()
+        )
+
+        assert not result.tools_called
+        assert (result.content or "").count('"id"') == count
