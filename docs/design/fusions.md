@@ -186,6 +186,14 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
 
+!!! note
+    Qwen3Next/Qwen3.5 has a separate ROCm/AITER model-path fusion for the gated
+    QKV split, QK GemmaRMSNorm, NeoX RoPE, and KV-cache write sequence. It is not
+    controlled by `fuse_rope_kvcache` or `enable_qk_norm_rope_fusion` because it
+    depends on Qwen3-specific projection/gate packing and GemmaRMSNorm weight
+    conventions. Enable it with `VLLM_ROCM_USE_AITER=1` and
+    `VLLM_ROCM_USE_AITER_QWEN3_QKV_ROPE_CACHE=1`.
+
 ### Sequence Parallelism (`enable_sp`)
 
 **What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
