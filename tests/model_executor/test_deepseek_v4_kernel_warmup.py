@@ -3,7 +3,7 @@
 
 from types import SimpleNamespace
 
-from vllm.model_executor.warmup import kernel_warmup
+from vllm.model_executor.warmup import deepseek_v4_sm12x_warmup as sm12x_warmup
 
 
 def _mtp_runner(query_len: int = 3):
@@ -15,7 +15,7 @@ def _mtp_runner(query_len: int = 3):
 
 
 def test_deepseek_v4_mtp_uniform_decode_warmup_covers_c256():
-    requests = kernel_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
+    requests = sm12x_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
         _mtp_runner(),
         max_tokens=4096,
         max_reqs=256,
@@ -25,12 +25,12 @@ def test_deepseek_v4_mtp_uniform_decode_warmup_covers_c256():
 
 
 def test_deepseek_v4_mtp_uniform_decode_warmup_still_respects_limits():
-    assert kernel_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
+    assert sm12x_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
         _mtp_runner(),
         max_tokens=4096,
         max_reqs=24,
     ) == (1, 2, 4, 8, 16, 24)
-    assert kernel_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
+    assert sm12x_warmup._deepseek_v4_mtp_uniform_decode_warmup_requests(
         _mtp_runner(),
         max_tokens=96,
         max_reqs=256,
