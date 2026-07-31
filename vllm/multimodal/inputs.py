@@ -23,7 +23,7 @@ from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
 
 from .media import MediaWithBytes
 
@@ -288,16 +288,9 @@ def nested_tensors_equal(
 
 def _nested_tensors_are_cpu(tensors: NestedTensors) -> bool:
     """Whether every tensor in `tensors` lives in host memory."""
-    on_cpu = True
-
-    def _check(x: object) -> object:
-        nonlocal on_cpu
-        if isinstance(x, torch.Tensor) and not x.is_cpu:
-            on_cpu = False
-        return x
-
-    json_map_leaves(_check, tensors)
-    return on_cpu
+    return not any(
+        isinstance(x, torch.Tensor) and not x.is_cpu for x in json_iter_leaves(tensors)
+    )
 
 
 def _nested_tensors_h2d(
