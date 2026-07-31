@@ -5,8 +5,10 @@
 Benchmark a registered Helion kernel against a baseline.
 
 For each input case produced by the kernel's registered input generator, this
-checks the Helion kernel's numerics once, measures its latency against a chosen
-baseline, then reports the speedup.
+checks the Helion kernel's numerics once against its eager reference, measures
+its latency against a chosen performance baseline, then reports the speedup.
+Use ``--numerics-with-perf-baseline`` to check numerics against the performance
+baseline instead.
 
 Two baselines are supported (``--baseline``):
 
@@ -29,6 +31,10 @@ Usage:
     # Benchmark against the CUDA baseline
     python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --baseline cuda
+
+    # Check numerics against the performance baseline instead of eager
+    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+        --baseline cuda --numerics-with-perf-baseline
 
     # Disable CUDA graph capture and save results
     python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
@@ -220,12 +226,8 @@ def make_cuda_baseline(kernel_name: str) -> Callable:
     return cuda_op
 
 
-def make_autotune_baseline(kernel_name: str) -> Callable:
-    """Return the kernel's autotune baseline wrapped in ``torch.compile``.
-
-    The baseline is the native-torch reference the kernel is tuned against,
-    registered via ``helion_settings.autotune_baseline_fn``.
-    """
+def make_eager_baseline(kernel_name: str) -> Callable:
+    """Return the kernel's registered native-torch reference."""
     wrapper = get_kernel_by_name(kernel_name)
     settings = wrapper.helion_settings
     baseline_fn = getattr(settings, "autotune_baseline_fn", None)
@@ -239,6 +241,13 @@ def make_autotune_baseline(kernel_name: str) -> Callable:
         )
         sys.exit(1)
 
+    return baseline_fn
+
+
+def make_autotune_baseline(kernel_name: str) -> Callable:
+    """Return the kernel's autotune baseline wrapped in ``torch.compile``."""
+    baseline_fn = make_eager_baseline(kernel_name)
+
     return torch.compile(
         baseline_fn,
         fullgraph=True,
@@ -246,6 +255,25 @@ def make_autotune_baseline(kernel_name: str) -> Callable:
         backend="inductor",
         options=_TORCH_COMPILE_OPTIONS,
     )
+
+
+def make_correctness_baseline(
+    kernel_name: str,
+    timed_baseline_fn: Callable,
+    numerics_with_perf_baseline: bool,
+) -> Callable:
+    """Choose the numerical reference independently from the timed baseline."""
+    if not numerics_with_perf_baseline:
+        logger.info(
+            "Using the eager reference for '%s' correctness",
+            kernel_name,
+        )
+        return make_eager_baseline(kernel_name)
+    logger.info(
+        "Using the selected performance baseline for '%s' correctness",
+        kernel_name,
+    )
+    return timed_baseline_fn
 
 
 def cleanup_gpu_resources() -> None:
@@ -364,7 +392,8 @@ def check_kernel_correctness(
         One ``CorrectnessResult`` per shape case, in iteration order. A case that
         raises (compile/run error or numerics mismatch) is marked
         ``passed=False`` with the exception text in ``error``; iteration
-        continues regardless.
+        continues regardless. An empty input mapping returns an empty list, which
+        the CLI reports as a skipped check.
     """
     if inputs_dict is None:
         inputs_dict = kernel.get_inputs()
@@ -453,6 +482,7 @@ def do_bench_cudagraph_l2_clear(
 def benchmark(
     kernel_name: str,
     baseline_fn: Callable,
+    correctness_fn: Callable,
     repeat: int,
     cudagraph: bool,
     return_mode: str,
@@ -468,7 +498,7 @@ def benchmark(
     for key, inputs in inputs_dict.items():
         logger.info("Benchmarking case %s", key)
 
-        check_correctness(kernel, baseline_fn, inputs, str(key))
+        check_correctness(kernel, correctness_fn, inputs, str(key))
         logger.info("Numerics check passed for case %s", key)
 
         # Kernels may mutate their inputs in place; give each side its own copy.
@@ -532,7 +562,7 @@ def main() -> None:
         choices=["cuda", "autotune"],
         default="autotune",
         help=(
-            "Baseline to compare against: 'autotune' uses the kernel's "
+            "Performance baseline: 'autotune' uses the kernel's "
             "autotune_baseline_fn under torch.compile; 'cuda' uses the mapped "
             "torch.ops._C op (default: autotune)"
         ),
@@ -552,6 +582,14 @@ def main() -> None:
         "--numerics-only",
         action="store_true",
         help="Only run the per-case numerics check; skip timing and reporting",
+    )
+    parser.add_argument(
+        "--numerics-with-perf-baseline",
+        action="store_true",
+        help=(
+            "Compare numerics against the selected performance baseline instead "
+            "of the eager reference"
+        ),
     )
 
     args = parser.parse_args()
@@ -590,9 +628,20 @@ def main() -> None:
             baseline_fn = make_cuda_baseline(args.kernel)
         else:
             baseline_fn = make_autotune_baseline(args.kernel)
+        correctness_fn = make_correctness_baseline(
+            args.kernel,
+            baseline_fn,
+            args.numerics_with_perf_baseline,
+        )
 
         if args.numerics_only:
-            results = check_kernel_correctness(wrapper, baseline_fn)
+            results = check_kernel_correctness(wrapper, correctness_fn)
+            if not results:
+                logger.warning(
+                    "No input cases generated for '%s'; skipping numerics check",
+                    args.kernel,
+                )
+                return
             for r in results:
                 if r.passed:
                     logger.info("Numerics check passed for case %s", r.case)
@@ -615,6 +664,7 @@ def main() -> None:
         rows = benchmark(
             args.kernel,
             baseline_fn,
+            correctness_fn,
             args.repeat,
             args.cudagraph,
             args.return_mode,
@@ -628,6 +678,9 @@ def main() -> None:
                 {
                     "kernel": args.kernel,
                     "baseline": args.baseline,
+                    "numerics_baseline": (
+                        args.baseline if args.numerics_with_perf_baseline else "eager"
+                    ),
                     "cudagraph": args.cudagraph,
                     "repeat": args.repeat,
                     "return_mode": args.return_mode,
