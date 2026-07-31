@@ -1,5 +1,17 @@
 #include "cpu_attn_dispatch_generated.h"
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <cpuid.h>
+// Runtime check for AMX-FP8 (Diamond Rapids): CPUID leaf 7, subleaf 1, EAX[21].
+static bool runtime_has_amx_fp8() {
+  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+  if (__get_cpuid_count(7, 1, &eax, &ebx, &ecx, &edx)) {
+    return (eax >> 21) & 1u;
+  }
+  return false;
+}
+#endif  // x86_64
+
 // Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
 // "auto" -> kAuto(0); "fp8"/"fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
 static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
@@ -22,7 +34,10 @@ bool cpu_attn_has_isa(const std::string& isa) {
   }
   if (isa == "amx_fp8") {
 #ifdef CPU_CAPABILITY_AMXFP8
-    return true;
+    // Guard with runtime CPUID check: the binary may be compiled with
+    // -mamx-fp8 (CPU_CAPABILITY_AMXFP8 defined) but run on a CPU that
+    // has AMX-BF16 without AMX-FP8 (e.g. Sapphire Rapids, Emerald Rapids).
+    return runtime_has_amx_fp8();
 #else
     return false;
 #endif
