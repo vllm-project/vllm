@@ -801,7 +801,6 @@ def make_routing_data(
         sparse_logits.mask_metadata.col_sum,
         dispatch_indx.shape[0],
     )
-    n_expts_act = sparse_logits.indx.shape[1]
     gate_scal = sparse_logits.vals.flatten()[combine_indx]
     routing_data = RoutingData(
         gate_scal,
