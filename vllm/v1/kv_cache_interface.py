@@ -979,6 +979,8 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    num_cpu_blocks: int | None = None
+    """The unified number of CPU offload blocks, if CPU offloading is enabled."""
 
     @property
     def has_mamba_layers(self) -> bool:
