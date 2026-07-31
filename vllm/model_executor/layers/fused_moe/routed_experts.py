@@ -213,12 +213,17 @@ class RoutedExperts(PluggableLayer):
                 "moe_expert_cache_size is not compatible with data parallelism "
                 "or sequence parallelism."
             )
-        if not get_current_vllm_config().model_config.enforce_eager:
-            raise ValueError(
-                "moe_expert_cache_size requires --enforce-eager; CUDA graph "
-                "capture with an active expert cache produces incorrect "
-                "results."
-            )
+        vllm_config = get_current_vllm_config()
+        if not vllm_config.model_config.enforce_eager:
+            splitting_ops = vllm_config.compilation_config.splitting_ops or []
+            if "vllm.moe_forward" not in splitting_ops:
+                raise ValueError(
+                    "moe_expert_cache_size without --enforce-eager requires "
+                    "the MoE op to run outside CUDA graphs "
+                    "(vllm.moe_forward in compilation_config.splitting_ops). "
+                    "This is configured automatically by VllmConfig; do not "
+                    "override splitting_ops to exclude it."
+                )
         # Checked before create_weights: an unsupported method would still get
         # its expert weights allocated in CPU pinned memory below and then run
         # its normal setup against them, which is not a supported combination.

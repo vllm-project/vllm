@@ -1532,6 +1532,35 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
+        # Expert LRU cache: run MoE ops eagerly between piecewise graph segments.
+        # The cache's prepare() is dynamic host code (LFRU bookkeeping, D2H
+        # routing sync, H2D weight copies) and must never be captured.
+        if (
+            self.model_config is not None
+            and self.offload_config.moe_expert_cache_size > 0
+            and not self.model_config.enforce_eager
+        ):
+            cc = self.compilation_config
+            if cc.mode != CompilationMode.VLLM_COMPILE:
+                raise ValueError(
+                    "--moe-expert-cache-size without --enforce-eager requires "
+                    "compilation mode VLLM_COMPILE (piecewise CUDA graphs). "
+                    "Pass --enforce-eager or remove -O overrides."
+                )
+            if cc.splitting_ops is None:
+                cc.splitting_ops = []
+            for op in ("vllm.moe_forward", "vllm.moe_forward_shared"):
+                if op not in cc.splitting_ops:
+                    cc.splitting_ops.append(op)
+            if cc.cudagraph_mode.has_full_cudagraphs():
+                logger.info(
+                    "MoE expert cache: downgrading cudagraph_mode %s -> "
+                    "PIECEWISE; the cache's prepare() must run eagerly "
+                    "between graph segments.",
+                    cc.cudagraph_mode,
+                )
+                cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism, native rms norm tracing errors due to
             # incorrect residual shape.
@@ -2376,21 +2405,6 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "
                 "(P/D disaggregation, KV cache offload)"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_moe_expert_cache(self) -> "VllmConfig":
-        if self.model_config is None:
-            return self
-        if (
-            self.offload_config.moe_expert_cache_size > 0
-            and not self.model_config.enforce_eager
-        ):
-            raise ValueError(
-                "--moe-expert-cache-size requires --enforce-eager. "
-                "The expert LRU cache uses dynamic Python state in prepare() "
-                "that is incompatible with CUDA graph capture."
             )
         return self
 
