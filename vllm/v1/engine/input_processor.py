@@ -111,6 +111,11 @@ class InputProcessor:
                         "bound sampling mask size, reduce transfer overhead, "
                         "and avoid potential OOMs"
                     )
+                if params.logprobs != 1:
+                    raise ValueError(
+                        "sampling distribution replay requires "
+                        "SamplingParams.logprobs=1"
+                    )
             if params.thinking_token_budget is not None:
                 if (
                     self.vllm_config.reasoning_config is None
