@@ -88,3 +88,5 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
+    # Unified number of CPU offload blocks across all workers, if precomputed.
+    num_cpu_blocks: int | None = None

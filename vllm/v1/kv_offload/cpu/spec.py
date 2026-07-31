@@ -117,7 +117,12 @@ class CPUOffloadingSpec(OffloadingSpec):
             aligned_kv_bytes_per_chunk = round_up(
                 kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            computed_num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            self.num_chunks = (
+                config.num_cpu_blocks
+                if config.num_cpu_blocks is not None
+                else computed_num_chunks
+            )
 
             # Expose aligned_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
