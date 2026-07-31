@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
@@ -69,6 +70,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self,
         moe_config: mk.FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        layer: torch.nn.Module | None = None,
     ):
         super().__init__(moe_config, quant_config)
 
@@ -95,33 +97,45 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.num_experts,
-                dtype=torch.float32,
-                device=self.device,
+            self.gemm1_clamp_limit = self._stable_constant(
+                layer, "gemm1_clamp_limit", quant_config.gemm1_clamp_limit
             )
 
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
             # Need to revisit this for other models
-            self.gemm1_alpha = torch.tensor(
-                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
-            )
-            self.gemm1_beta = torch.tensor(
-                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
-            )
+            self.gemm1_alpha = self._stable_constant(layer, "gemm1_alpha", 1.702)
+            self.gemm1_beta = self._stable_constant(layer, "gemm1_beta", 1.0)
             if self.gemm1_clamp_limit is None:
-                self.gemm1_clamp_limit = torch.tensor(
-                    [7.0] * self.num_experts,
-                    dtype=torch.float32,
-                    device=self.device,
+                self.gemm1_clamp_limit = self._stable_constant(
+                    layer, "gemm1_clamp_limit", 7.0
                 )
             if quant_config.quant_dtype == "mxfp8":
-                self.fake_input_scale = torch.ones(
-                    self.num_experts,
-                    device=self.device,
-                    dtype=torch.float32,
+                self.fake_input_scale = self._stable_constant(
+                    layer, "fake_input_scale", 1.0
                 )
+
+    def _stable_constant(
+        self, layer: torch.nn.Module | None, name: str, value: float
+    ) -> torch.Tensor:
+        """Allocate a per-expert constant at a reload-stable address.
+
+        This object is rebuilt by every process_weights_after_loading pass,
+        but these tensors are passed to the kernel each forward, so captured
+        CUDA graphs bake their addresses (see #48312). Registering them on
+        the layer with replace_parameter(prefer_copy=True) makes every
+        rebuild copy into the storage the graph captured instead of
+        allocating a fresh tensor.
+        """
+        constant = torch.full(
+            (self.num_experts,), value, dtype=torch.float32, device=self.device
+        )
+        if layer is None:
+            # Direct construction without an owning layer (tests, benchmarks):
+            # nothing survives a rebuild, so plain storage is equivalent.
+            return constant
+        replace_parameter(layer, name, constant, prefer_copy=True)
+        return getattr(layer, name)
 
     @property
     def expects_unquantized_inputs(self) -> bool:

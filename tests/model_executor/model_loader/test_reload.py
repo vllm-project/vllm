@@ -444,6 +444,179 @@ def test_marlin_act_order_layerwise_reload_accounting(monkeypatch, dist_init):
     assert torch.equal(layer.g_idx_sort_indices.data, expected_sort_indices)
 
 
+_FLASHINFER_NUM_EXPERTS = 8
+
+# variant -> (quant_dtype, weight_dtype, gemm1_clamp_limit,
+#             expected {constant name: value})
+_FLASHINFER_CONSTANT_VARIANTS = {
+    "mxfp4_bf16": (
+        None,
+        "mxfp4",
+        None,
+        {"gemm1_alpha": 1.702, "gemm1_beta": 1.0, "gemm1_clamp_limit": 7.0},
+    ),
+    "mxfp4_mxfp8": (
+        "mxfp8",
+        "mxfp4",
+        None,
+        {
+            "gemm1_alpha": 1.702,
+            "gemm1_beta": 1.0,
+            "gemm1_clamp_limit": 7.0,
+            "fake_input_scale": 1.0,
+        },
+    ),
+    "fp8_clamp": (
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fn,
+        3.0,
+        {"gemm1_clamp_limit": 3.0},
+    ),
+}
+
+
+def _make_flashinfer_experts(layer, variant):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    quant_dtype, weight_dtype, gemm1_clamp_limit, _ = _FLASHINFER_CONSTANT_VARIANTS[
+        variant
+    ]
+    moe_config = FusedMoEConfig(
+        num_experts=_FLASHINFER_NUM_EXPERTS,
+        experts_per_token=2,
+        hidden_dim=128,
+        intermediate_size=256,
+        num_local_experts=_FLASHINFER_NUM_EXPERTS,
+        num_logical_experts=_FLASHINFER_NUM_EXPERTS,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=1,
+            ep_size=1,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=False,
+            all2all_backend="naive",
+            enable_eplb=False,
+        ),
+        in_dtype=torch.bfloat16,
+    )
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype=quant_dtype,
+        weight_dtype=weight_dtype,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
+    return FlashInferExperts(moe_config, quant_config, layer=layer)
+
+
+@pytest.mark.parametrize("variant", sorted(_FLASHINFER_CONSTANT_VARIANTS))
+def test_flashinfer_cutlass_moe_constants_preserve_addresses(variant, dist_init):
+    """FlashInferExperts is rebuilt by every post-load pass, but its per-expert
+    SwiGLU constants are read by captured CUDA graphs, so each rebuild must
+    reuse the storage the graph captured instead of allocating fresh tensors."""
+    expected = _FLASHINFER_CONSTANT_VARIANTS[variant][3]
+
+    layer = torch.nn.Module()
+    experts = _make_flashinfer_experts(layer, variant)
+
+    pointers = {name: getattr(layer, name).data_ptr() for name in expected}
+
+    # Reload: the quant method rebuilds the kernel, constructing a new
+    # experts object against the same layer
+    experts = _make_flashinfer_experts(layer, variant)
+
+    for name, value in expected.items():
+        constant = getattr(layer, name)
+        assert constant.data_ptr() == pointers[name], name
+        # registered as a Parameter so layerwise reload copy-back preserves it
+        assert isinstance(constant, torch.nn.Parameter), name
+        # the rebuilt experts object reads from the preserved storage
+        assert getattr(experts, name) is constant, name
+        assert torch.equal(
+            constant.data,
+            torch.full((_FLASHINFER_NUM_EXPERTS,), value, dtype=torch.float32),
+        ), name
+
+
+def test_flashinfer_cutlass_moe_layerwise_reload_accounting(dist_init):
+    """The SwiGLU constants are generated during weight processing and never
+    loaded from checkpoints. Registering them as Parameters must not count
+    them toward `load_numel_total`: reload restores the construction-time
+    tensor set before sizing, so the layer still processes during streaming
+    instead of deferring (and buffering weights) until finalization."""
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+
+    class _KernelQuantMethod(QuantizeMethodBase):
+        def create_weights(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def apply(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def process_weights_after_loading(self, layer):
+            # The kernel (and its experts object) is rebuilt on every pass
+            self.experts = _make_flashinfer_experts(layer, "mxfp4_bf16")
+
+    def _load_checkpoint_format_weights(layer, checkpoint):
+        for name, weight in checkpoint.items():
+            param = torch.nn.Parameter(weight.clone(), requires_grad=False)
+            param.weight_loader = default_weight_loader
+            setattr(layer, name, param)
+
+    def _make_checkpoint(fill):
+        return {
+            "w13_weight": torch.full((8, 16, 4), fill, dtype=torch.bfloat16),
+            "w2_weight": torch.full((8, 4, 8), fill, dtype=torch.bfloat16),
+        }
+
+    layer = torch.nn.Module()
+    layer.quant_method = _KernelQuantMethod()
+    _load_checkpoint_format_weights(layer, _make_checkpoint(1.0))
+
+    # Metadata is recorded at model construction, before any processing
+    record_metadata_for_reloading(layer)
+    checkpoint_numel = sum(t.numel() for t in get_layer_tensors(layer).values())
+
+    layer.quant_method.process_weights_after_loading(layer)
+    constants = {
+        name: getattr(layer, name)
+        for name in ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+    }
+
+    initialize_layerwise_reload(layer)
+    info = get_layerwise_info(layer)
+    assert info.load_numel_total == checkpoint_numel
+
+    # Stream a new checkpoint; the layer must process as soon as its last
+    # tensor arrives
+    for name, weight in _make_checkpoint(2.0).items():
+        param = getattr(layer, name)
+        param.weight_loader(param, weight)
+
+    assert not info.can_load()
+    assert not info.loaded_weights
+    for name, constant in constants.items():
+        assert getattr(layer, name) is constant, name
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer

@@ -215,6 +215,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
                 experts_cls=self.experts_cls,
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def apply(
