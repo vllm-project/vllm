@@ -1893,3 +1893,149 @@ class TestLlama4PythonMarkers:
 
         assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
         assert "<|python_" not in (result.content or "")
+
+
+class TestArgumentsStreamIncrementally:
+    """Arguments must reach the client as they are produced, not at the end.
+
+    The whole point of the splice machinery (_compute_arg_delta,
+    _stable_arg_prefix, _ArgScan) is that a client rendering a tool call
+    sees its arguments grow.  Every other streaming test folds the deltas
+    together before asserting, so a change that buffered the whole call
+    until it closed -- turning streaming into non-streaming -- would leave
+    the suite green.
+    """
+
+    @staticmethod
+    def _arg_deltas(parser, request, text, chunk_size):
+        """Argument fragments, and how many arrived before the last feed."""
+        deltas: list[str] = []
+        before_final = 0
+        results = _stream_text_only(parser, request, text, chunk_size)
+        for position, delta in enumerate(results):
+            if delta is None:
+                continue
+            for tool_call in delta.tool_calls or []:
+                if tool_call.function and tool_call.function.arguments:
+                    deltas.append(tool_call.function.arguments)
+                    if position < len(results) - 1:
+                        before_final += 1
+        return deltas, before_final
+
+    def test_arguments_arrive_before_the_stream_ends(self, parser, mock_request):
+        value = "x" * 200
+        text = f'{{"name": "f", "parameters": {{"body": "{value}"}}}}'
+
+        deltas, before_final = self._arg_deltas(parser, mock_request, text, 8)
+
+        assert json.loads("".join(deltas)) == {"body": value}
+        # The load-bearing assertion: not one blob at the end.
+        assert before_final > 1
+
+    def test_more_feeds_produce_more_argument_deltas(
+        self, mock_tokenizer, mock_request
+    ):
+        """Halving the chunk size must not collapse to a single delta."""
+        value = "y" * 240
+        text = f'{{"name": "f", "parameters": {{"body": "{value}"}}}}'
+
+        coarse, _ = self._arg_deltas(
+            LlamaJsonParser(mock_tokenizer), mock_request, text, 64
+        )
+        fine, _ = self._arg_deltas(
+            LlamaJsonParser(mock_tokenizer), mock_request, text, 8
+        )
+
+        assert json.loads("".join(coarse)) == json.loads("".join(fine))
+        assert len(fine) > len(coarse)
+
+
+class TestBareArgumentsRepair:
+    """Truncated bare parameters must still be valid JSON.
+
+    A named choice constrained to bare parameters carries no envelope, so
+    _llama_bare_arg_converter is what closes an unfinished object. If
+    generation stops mid-string the client must still receive parseable
+    arguments rather than '{"city":"S'.
+    """
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        return cls
+
+    @staticmethod
+    def _request():
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "weather in SF?"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string"},
+                                "unit": {"type": "string"},
+                            },
+                        },
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+        )
+
+    TRUNCATED = [
+        '{"city":"S',
+        '{"city":"SF","unit":',
+        '{"city":"SF", "unit": tr',
+        '{"city":"SF"',
+        "{",
+    ]
+
+    @pytest.mark.parametrize("body", TRUNCATED)
+    def test_non_streaming_arguments_are_parseable(
+        self, parser_cls, mock_tokenizer, body
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request())
+
+        calls, _ = parser._extract_tool_calls(body, request, enable_auto_tools=True)
+
+        assert [c.name for c in calls or []] == ["get_weather"]
+        json.loads(calls[0].arguments)
+
+    @pytest.mark.parametrize("body", TRUNCATED)
+    @pytest.mark.parametrize("chunk_size", [1, 4])
+    def test_streamed_arguments_are_parseable(
+        self, parser_cls, mock_tokenizer, body, chunk_size
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request())
+
+        args: dict[int, str] = {}
+        for start in range(0, len(body), chunk_size):
+            delta_text = body[start : start + chunk_size]
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(body),
+            )
+            for tool_call in (delta.tool_calls if delta else None) or []:
+                if tool_call.function and tool_call.function.arguments:
+                    args[tool_call.index] = (
+                        args.get(tool_call.index, "") + tool_call.function.arguments
+                    )
+
+        for streamed in args.values():
+            json.loads(streamed)
