@@ -433,49 +433,6 @@ class EngineCore:
             )
         return metadata
 
-    def apply_trace_replay(self, request: Request) -> None:
-        """Adjust generation bounds for trace-replay requests.
-
-        When a request carries ``trace_decode_token_ids``, cap generation to
-        the trace length and force ``ignore_eos``. Falls back to normal
-        sampling for modes that trace-replay cannot support.
-        """
-        params = request.sampling_params
-        if params is None or params.trace_decode_token_ids is None:
-            return
-
-        conflict_reason = None
-        if self.use_spec_decode:
-            conflict_reason = "speculative decoding"
-        elif params.n > 1:
-            conflict_reason = "n > 1"
-
-        if conflict_reason:
-            logger.warning(
-                "trace-replay is incompatible with %s; "
-                "falling back to normal sampling for request %s.",
-                conflict_reason,
-                request.request_id,
-            )
-            request.sampling_params = msgspec.structs.replace(
-                params, trace_decode_token_ids=None
-            )
-        else:
-            new_max = len(params.trace_decode_token_ids)
-            # check_stop applies min_tokens and stop token checks before the
-            # length cap. Disable them so the full trace replays, including
-            # EOS and user-provided stop tokens.
-            request.sampling_params = msgspec.structs.replace(
-                params,
-                max_tokens=new_max,
-                min_tokens=0,
-                ignore_eos=True,
-                _eos_token_id=None,
-                stop_token_ids=[],
-                _all_stop_token_ids=set(),
-            )
-            request.max_tokens = new_max
-
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -515,8 +472,6 @@ class EngineCore:
                 "Got ec_transfer_params, but no ECConnector found. "
                 "Disabling ECTransfer for this request."
             )
-
-        self.apply_trace_replay(request)
 
         self.scheduler.add_request(request)
         if request.abort_immediately:
