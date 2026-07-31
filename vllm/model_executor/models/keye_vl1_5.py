@@ -328,10 +328,9 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields=self.metadata_fields("image"),
+                out_of_band_fields={"image_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )
 
@@ -345,10 +344,9 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields=self.metadata_fields("video"),
+                out_of_band_fields={"video_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )
 

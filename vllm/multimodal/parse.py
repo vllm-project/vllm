@@ -567,6 +567,32 @@ class MultiModalDataParser:
     it through `get_data_parser`.
     """
 
+    placeholder_metadata_fields: Mapping[str, Set[str]] | None = None
+    """Per modality, the keys declared by
+    `BaseProcessingInfo.get_placeholder_metadata_fields`.
+
+    Stamped by `build_data_parser` alongside `allow_out_of_band_embeds`; `None`
+    means it was never stamped. Read it through `metadata_fields`.
+    """
+
+    def metadata_fields(self, modality: str) -> set[str]:
+        """The keys that size `modality`'s placeholder range.
+
+        These stay required even when the embeddings arrive out of band, since
+        they are all the consumer has left to work from. Declared once on the
+        model's `BaseProcessingInfo` so that an EC connector reporting them and
+        a parser requiring them cannot drift apart.
+        """
+        if self.placeholder_metadata_fields is None:
+            raise RuntimeError(
+                f"{type(self).__name__} was not built through "
+                "`BaseProcessingInfo.build_data_parser`, so the placeholder "
+                "metadata fields declared by the model never reached it. "
+                "Construct parsers through `build_data_parser` rather than "
+                "calling `get_data_parser` directly."
+            )
+        return set(self.placeholder_metadata_fields.get(modality, ()))
+
     def __init__(
         self,
         *,

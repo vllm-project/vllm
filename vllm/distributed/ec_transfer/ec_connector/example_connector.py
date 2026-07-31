@@ -51,6 +51,8 @@ class ECExampleConnector(ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
+        self._model_config = vllm_config.model_config
+        self._metadata_fields_cache: dict[str, set[str]] = {}
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
             self._storage_path = transfer_config.get_from_extra_config(
@@ -166,6 +168,36 @@ class ECExampleConnector(ECConnectorBase):
         self._mm_datas_need_loads.clear()
         return meta
 
+    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
+        """Which processed keys this model needs published for `modality`.
+
+        Read from `BaseProcessingInfo.get_placeholder_metadata_fields`, the same
+        declaration the consumer's parser requires, so the two cannot drift. An
+        empty set means the modality cannot be delivered out of band, and the
+        consumer will process the media itself.
+        """
+        if modality in self._metadata_fields_cache:
+            return self._metadata_fields_cache[modality]
+
+        fields: set[str] = set()
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
+            fields = info.get_placeholder_metadata_fields(modality)
+        except Exception:
+            # Reporting nothing is a safe degradation: the consumer falls back to
+            # processing the media itself.
+            logger.warning(
+                "Could not determine the placeholder metadata fields for "
+                "modality %s; the consumer will preprocess the media itself.",
+                modality,
+                exc_info=True,
+            )
+
+        self._metadata_fields_cache[modality] = fields
+        return fields
+
     def request_finished(
         self,
         request: "Request",
@@ -183,17 +215,18 @@ class ECExampleConnector(ECConnectorBase):
 
         items = []
         for feature in request.mm_features:
-            grids = {}
+            metadata = {}
+            # `data` is None for items served from the processor cache, in which
+            # case the metadata is unavailable here and the consumer has to fall
+            # back to processing the media itself.
             if feature.data is not None:
-                grids = {
+                wanted = self._placeholder_metadata_fields(feature.modality)
+                metadata = {
                     key: value.tolist()
                     for key, value in feature.data.get_data().items()
-                    if key.endswith("_grid_thw") and isinstance(value, torch.Tensor)
+                    if key in wanted and isinstance(value, torch.Tensor)
                 }
-            # `data` is None for items served from the processor cache, in which
-            # case the grid is unavailable here and the consumer has to fall
-            # back to processing the media itself.
-            items.append({"mm_hash": feature.identifier, **grids})
+            items.append({"mm_hash": feature.identifier, **metadata})
 
         if not items:
             return False, None

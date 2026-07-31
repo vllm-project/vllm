@@ -478,7 +478,7 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
         super().__init__(
             data,
             modality="image",
-            required_fields={"image_sizes"},
+            required_fields=self.metadata_fields("image"),
             out_of_band_fields={"image_embeds"},
             allow_out_of_band=self.allow_out_of_band_embeds,
             fields_factory=fields_factory,
@@ -501,7 +501,7 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
         super().__init__(
             data,
             modality="video",
-            required_fields={"video_image_sizes"},
+            required_fields=self.metadata_fields("video"),
             out_of_band_fields={"video_embeds"},
             allow_out_of_band=self.allow_out_of_band_embeds,
             fields_factory=fields_factory,
@@ -581,6 +581,14 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
+
+    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
+        # The per-item sizes are what size the placeholder range.
+        if modality == "image":
+            return {"image_sizes"}
+        if modality == "video":
+            return {"video_image_sizes"}
+        return set()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         mm_limits = {"image": None}

@@ -889,10 +889,9 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={
-                    "image_embeds",
-                    "image_grid_thw",
-                },
+                required_fields=self.metadata_fields("image"),
+                out_of_band_fields={"image_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )
 
@@ -906,10 +905,9 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={
-                    "video_embeds",
-                    "video_grid_thw",
-                },
+                required_fields=self.metadata_fields("video"),
+                out_of_band_fields={"video_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )
 
@@ -917,6 +915,14 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
 
 
 class KeyeProcessingInfo(BaseProcessingInfo):
+    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
+        # The patch grid is what sizes the placeholder range.
+        if modality == "image":
+            return {"image_grid_thw"}
+        if modality == "video":
+            return {"video_grid_thw"}
+        return set()
+
     def get_max_image_size(self) -> int:
         return 9999999  # _MAX_IMAGE_SIZE
 

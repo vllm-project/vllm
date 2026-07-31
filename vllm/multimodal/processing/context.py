@@ -393,6 +393,10 @@ class BaseProcessingInfo:
         parser.allow_out_of_band_embeds = (
             mm_config is not None and mm_config.mm_embeds_out_of_band
         )
+        parser.placeholder_metadata_fields = {
+            modality: self.get_placeholder_metadata_fields(modality)
+            for modality in self.get_supported_mm_limits()
+        }
         return parser
 
     @cached_property
@@ -404,6 +408,22 @@ class BaseProcessingInfo:
         return False
 
     @abstractmethod
+    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
+        """Processed-output keys a consumer needs to size the placeholder range.
+
+        When embeddings are delivered out of band -- an encode/prefill/decode
+        encoder instance publishes them through the EC connector -- the request
+        that reaches the consumer carries no pixels and no embeddings, only this
+        metadata. It is therefore both what the consumer must require and what
+        the producer has to report, so it is declared here once and read by both:
+        `MultiModalDataParser` uses it as `required_fields`, and an EC connector
+        selects which processed keys to publish alongside the embedding.
+
+        Returning an empty set (the default) means this modality cannot be
+        delivered out of band, because nothing would be left to size the range.
+        """
+        return set()
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
         Return the maximum supported number of items for each modality.

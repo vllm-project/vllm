@@ -1434,6 +1434,12 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
         )
 
+    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
+        # The patch grid is what sizes the placeholder range.
+        if modality == "image":
+            return {"image_grid_thw"}
+        return set()
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
@@ -1522,7 +1528,7 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_grid_thw"},
+                required_fields=self.metadata_fields("image"),
                 out_of_band_fields={"image_embeds"},
                 allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_create_field_factory(self._spatial_merge_size),

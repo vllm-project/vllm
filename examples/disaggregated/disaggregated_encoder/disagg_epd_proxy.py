@@ -114,19 +114,22 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             if item.get("type") not in MM_TYPES:
                 new_content.append(item)
                 continue
-            meta = item_meta.get(idx) or {}
+            meta = dict(item_meta.get(idx) or {})
             idx += 1
-            grid = meta.get("image_grid_thw")
-            item_uuid = meta.get("mm_hash")
-            if not grid or not item_uuid:
-                # Encoder reported no grid (e.g. the item came from its
+            item_uuid = meta.pop("mm_hash", None)
+            # Whatever keys the encoder reported are the metadata its model
+            # declared as needed to size the placeholder range; the proxy does
+            # not need to know their names.
+            metadata = {k: _b64_tensor(v) for k, v in meta.items()}
+            if not metadata or not item_uuid:
+                # The encoder reported no metadata (e.g. the item came from its
                 # processor cache); let the decoder process the media itself.
                 new_content.append(item)
                 continue
             new_content.append(
                 {
                     "type": "image_embeds",
-                    "image_embeds": {"image_grid_thw": _b64_tensor(grid)},
+                    "image_embeds": metadata,
                     "uuid": item_uuid,
                 }
             )
