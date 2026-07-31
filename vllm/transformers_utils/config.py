@@ -1018,6 +1018,18 @@ def maybe_register_config_serialize_by_value() -> None:
 
         # Register transformers_modules with cloudpickle if available
         if transformers_modules_available:
+            import copyreg
+
+            from transformers.models.auto import CONFIG_MAPPING
+
+            def _reduce_lazy_config_mapping(mapping):
+                return (
+                    type(mapping),
+                    (mapping._mapping,),
+                    {"_extra_content": mapping._extra_content},
+                )
+
+            copyreg.pickle(type(CONFIG_MAPPING), _reduce_lazy_config_mapping)
             cloudpickle.register_pickle_by_value(transformers_modules)
 
             # ray vendors its own version of cloudpickle
