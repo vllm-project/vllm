@@ -270,12 +270,12 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
-def test_cpu_spec_replicated_config_preserves_per_rank_sizing(world_size: int):
+def test_cpu_spec_sizes_cpu_bytes_per_worker(world_size: int):
     # Use a page-multiple per-worker block so the row size is unaffected by the
     # page-alignment rounding regardless of the host mmap page size.
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
-        cpu_bytes_to_use=worker_kv_bytes_per_block * world_size * 2,
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         world_size=world_size,
         replicated_layout=True,
@@ -285,7 +285,7 @@ def test_cpu_spec_replicated_config_preserves_per_rank_sizing(world_size: int):
     assert spec.replicated_layout is False
     assert spec.cpu_page_size_per_worker == worker_kv_bytes_per_block
     assert spec.kv_bytes_per_chunk == worker_kv_bytes_per_block * world_size
-    assert spec.num_blocks == 2
+    assert spec.num_blocks == 8
 
 
 def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
