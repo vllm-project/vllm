@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_mi3xx
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -130,25 +130,24 @@ def rocm_unquantized_gemm_impl(
 
     cu_count = num_compute_units()
 
-    # Next ^2 of n
-    N_p2 = 1 << (n - 1).bit_length()
-    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-    # and each working on a 512-shard of K, how many CUs would we need?
-    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
-    # How many of 4 waves in a group can work on same 16 Ms at same time?
-    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
-    GrpsShrB = min(N_p2 // 16, 4)
-    # Given the above, how many CUs would we need?
-    CuNeeded = rndup_cus * GrpsShrB
+    # Next power of 2 >= n; kernel is templated on N as a power of 2.
+    n_next_pow2 = 1 << (n - 1).bit_length()
+    k_shard_size = 512  # K elements per CU per pass; matches CHUNKK in WVSPLITKRC macro
+    waves_per_block = 4  # wavefronts per block; matches WvPrGrp in WVSPLITKRC macro
+    ntile = 16  # MFMA output tile height; matches NTILE in kernel
+    m_tiles = (m + 64 - 1) // 64  # 64 = MI3XX wavefront width (WARP_SIZE)
+    k_shards = (k + k_shard_size - 1) // k_shard_size
+    # As high as possible — but capped by waves_per_block (LDS is per-block)
+    # and n_tiles (more sharers than N-tiles means unused compute).
+    wavefronts_sharing_b = min(n_next_pow2 // ntile, waves_per_block)
+    cus_needed = m_tiles * k_shards * wavefronts_sharing_b
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = (
-        N_p2 * m * ((k + 512 - 1) // 512)
-    ) <= 128 * 1024 * 12  # deterministic
-    fits_wvsplitkrc &= CuNeeded <= cu_count
+    fits_wvsplitkrc = (n_next_pow2 * m * k_shards) <= 128 * 1024 * 12  # deterministic
+    fits_wvsplitkrc &= cus_needed <= cu_count
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx950()
+        and on_mi3xx()
         and x.dtype in [torch.float16, torch.bfloat16]
         and x.dim() == 2
         and (
