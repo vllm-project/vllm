@@ -1683,6 +1683,10 @@ class EngineArgs:
                 self.seed,
             )
 
+        if envs.VLLM_USE_RUST_FRONTEND:
+            # RUST_FRONTEND does not currently support mm_device_do_normalize.
+            self.mm_device_do_normalize = False
+
         return ModelConfig(
             model=self.model,
             model_weights=self.model_weights,

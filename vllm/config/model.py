@@ -521,7 +521,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
-        mm_device_do_normalize: bool
+        mm_device_do_normalize: bool,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -757,7 +757,8 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
-                mm_device_do_normalize=mm_device_do_normalize and self._model_info.supports_mm_device_do_normalize
+                mm_device_do_normalize=mm_device_do_normalize
+                and self._model_info.supports_mm_device_do_normalize,
             )
 
             mm_config_kwargs = {
