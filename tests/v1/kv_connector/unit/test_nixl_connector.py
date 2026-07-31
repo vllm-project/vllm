@@ -2906,6 +2906,27 @@ def test_speculative_attention_backend_not_in_compatibility_hash():
     assert local_hash == remote_hash
 
 
+@pytest.mark.skip_global_cleanup
+def test_transfer_mode_changes_compatibility_hash():
+    # push (WRITE) and pull (READ) connectors use incompatible transfer
+    # protocols, so their compatibility hashes must differ; identical modes
+    # must match. The default mode is pull.
+    config = create_vllm_config()
+
+    pull_hash = compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="pull"
+    )
+    push_hash = compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="push"
+    )
+
+    assert pull_hash != push_hash
+    assert pull_hash == compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="pull"
+    )
+    assert compute_nixl_compatibility_hash(config, "FLASH_ATTN", False) == pull_hash
+
+
 @pytest.mark.parametrize(
     "mismatch_type,config_overrides,version_override,should_fail,enforce_handshake_compat",
     [
