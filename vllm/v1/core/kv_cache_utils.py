@@ -532,6 +532,10 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx
     )
 
+    # NOTE: the concatenation order below is load-bearing. It is part of the
+    # block hash, so reordering these lists changes every resulting hash and
+    # silently invalidates the entire prefix cache. Keep the order stable (do
+    # not, e.g., sort for determinism) unless a cache reset is intended.
     extra_keys: list[Any] = (
         lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
     )
