@@ -68,13 +68,7 @@ def _make_tool(name, properties):
     )
 
 
-@pytest.fixture
-def mock_tokenizer():
-    return make_mock_tokenizer({})
-
-
-@pytest.fixture
-def mock_request():
+def _request_without_tools():
     from unittest.mock import MagicMock
 
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -85,6 +79,16 @@ def mock_request():
     req.tools = []
     req.tool_choice = "auto"
     return req
+
+
+@pytest.fixture
+def mock_tokenizer():
+    return make_mock_tokenizer({})
+
+
+@pytest.fixture
+def mock_request():
+    return _request_without_tools()
 
 
 # ── Non-streaming extraction ────────────────────────────────────────
@@ -364,6 +368,273 @@ class TestOrphanInvokeNameValidation:
         content = collect_content(results)
         assert prose in content
         assert " More prose." in content
+
+    def test_trailing_prose_after_orphan_invoke_is_kept(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A model that drops the opening wrapper often drops the
+        closing one too, which leaves the response ending between
+        invokes.  The text after the invoke is real output and must
+        survive as content."""
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = _invoke("get_weather", _param("city", "true", "SF")) + "\nThanks!"
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.content == "\nThanks!"
+
+    def test_streaming_trailing_prose_after_orphan_invoke_is_kept(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        chunks = [_invoke("get_weather", _param("city", "true", "SF")), "\nThanks!"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "get_weather"
+        # Streamed out as it arrives, not buffered until finish.
+        assert collect_content(results) == "\nThanks!"
+
+    def test_whitespace_between_parallel_orphan_invokes_is_ignored(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A response that is only two invokes and the padding between
+        them comes back with no content at all.
+
+        This case is already covered by the parser dropping content that
+        is nothing but whitespace when the response called tools, so it
+        passes whether or not the engine holds the padding back.  The
+        test that actually pins the holding back is
+        ``test_padding_between_orphan_invokes_is_dropped_after_prose``.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        text = (
+            _invoke("get_weather", _param("city", "true", "SF"))
+            + "\n  \n"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 2
+        assert result.content is None
+
+    def test_padding_between_orphan_invokes_is_dropped_after_prose(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Padding between two recovered invokes is dropped even when
+        the response already produced real text.
+
+        The prose in front means the content is no longer whitespace
+        only, so the parser's own whitespace dropping does not apply and
+        the engine holding the padding back is the only thing keeping it
+        out.  A wrapped call written the same way returns just the
+        prose, and the recovered call has to match it.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        text = (
+            "Some prose "
+            + _invoke("get_weather", _param("city", "true", "SF"))
+            + "\n  \n"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 2
+        assert result.content == "Some prose "
+
+    def test_streaming_padding_between_orphan_invokes_is_dropped_after_prose(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        chunks = [
+            "Some prose ",
+            _invoke("get_weather", _param("city", "true", "SF")),
+            "\n  \n",
+            _invoke("get_time", _param("timezone", "true", "EST")),
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "Some prose "
+
+    def test_recovery_does_not_carry_into_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Once a recovered sequence ends, a later wrapped call in the
+        same response is treated as an ordinary wrapped call.
+
+        Text between the invokes of a wrapped call is dropped, so if the
+        engine still thought it was inside a recovered sequence the
+        stray text below would come back as content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        text = (
+            _invoke("get_weather", _param("city", "true", "SF"))
+            + DSML_FUNC_END
+            + DSML_FUNC_START
+            + _invoke("get_weather", _param("city", "true", "SF"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+            + DSML_FUNC_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 3
+        assert result.content is None
+
+    def test_streaming_recovery_does_not_carry_into_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        chunks = [
+            _invoke("get_weather", _param("city", "true", "SF")),
+            DSML_FUNC_END,
+            DSML_FUNC_START,
+            _invoke("get_weather", _param("city", "true", "SF")),
+            "stray between wrapped invokes",
+            _invoke("get_time", _param("timezone", "true", "EST")),
+            DSML_FUNC_END,
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == ""
+
+    def test_padding_held_before_one_invoke_does_not_reach_a_later_gap(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Padding held before one invoke is dropped when that invoke
+        starts, so it cannot reappear in front of later text.
+
+        The first gap is padding and belongs to nothing.  Only the
+        second gap runs into real text, so only that one is content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        text = (
+            _invoke("get_weather", _param("city", "true", "SF"))
+            + "\n\n"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+            + "  "
+            + "Real text"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 2
+        assert result.content == "  Real text"
+
+    def test_streaming_padding_held_before_one_invoke_does_not_reach_a_later_gap(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        chunks = [
+            _invoke("get_weather", _param("city", "true", "SF")),
+            "\n\n",
+            _invoke("get_time", _param("timezone", "true", "EST")),
+            "  ",
+            "Real text",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "  Real text"
+
+    def test_abandoned_recovery_does_not_affect_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A recovery attempt that turns out not to name a declared tool
+        must leave nothing behind.
+
+        The invoke below is held while its name is read, then given up
+        on because ``get_nothing`` was never declared.  The wrapped call
+        after it is ordinary, so the stray text between its invokes is
+        dropped.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+        abandoned = _invoke("get_nothing", _param("city", "true", "SF"))
+        text = (
+            abandoned
+            + DSML_FUNC_START
+            + _invoke("get_weather", _param("city", "true", "SF"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+            + DSML_FUNC_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 2
+        assert result.content == abandoned
+
+    def test_recovery_does_not_leak_into_the_next_request(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A response that ends part way through a recovered sequence
+        must not leave the engine set up for recovery.
+
+        The engine is reused, so without a clean start the next
+        response would treat an ordinary wrapped call as a recovered
+        one and hand back the text between its invokes as content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool, time_tool])
+        mock_request.tools = [weather_tool, time_tool]
+
+        first = parser.extract_tool_calls(
+            _invoke("get_weather", _param("city", "true", "SF")), mock_request
+        )
+        assert first.tools_called
+
+        second = parser.extract_tool_calls(
+            DSML_FUNC_START
+            + _invoke("get_weather", _param("city", "true", "SF"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", _param("timezone", "true", "EST"))
+            + DSML_FUNC_END,
+            mock_request,
+        )
+
+        assert second.tools_called
+        assert len(second.tool_calls) == 2
+        assert second.content is None
+
+    def test_declared_names_do_not_leak_into_the_next_request(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """The engine is reused across requests, so a request that
+        declares no tools must not recover a tool that an earlier
+        request declared."""
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = _invoke("get_weather", _param("city", "true", "SF")) + DSML_FUNC_END
+
+        first = parser.extract_tool_calls(text, mock_request)
+        assert first.tools_called
+
+        second = parser.extract_tool_calls(text, _request_without_tools())
+
+        assert not second.tools_called
+        assert second.tool_calls == []
+        assert second.content == text
 
 
 # ── Initial state ────────────────────────────────────────────────────

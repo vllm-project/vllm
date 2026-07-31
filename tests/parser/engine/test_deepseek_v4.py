@@ -750,12 +750,13 @@ class TestOrphanInvokeNameValidation:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"location": "NYC"}
 
-    def test_trailing_prose_after_orphan_invoke_is_dropped(
+    def test_trailing_prose_after_orphan_invoke_is_kept(
         self, mock_tokenizer, mock_request, weather_tool
     ):
-        """Pins current behavior: after a recovered orphan invoke with
-        no closing wrapper, the engine waits for more invokes in a state
-        that has no content event, so trailing prose is dropped."""
+        """A model that drops the opening wrapper often drops the
+        closing one too, which leaves the response ending between
+        invokes.  The text after the invoke is real output and must
+        survive as content."""
         parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
         text = _invoke("get_weather", ("location", "true", "NYC")) + "\nThanks!"
         result = parser.extract_tool_calls(text, mock_request)
@@ -763,7 +764,264 @@ class TestOrphanInvokeNameValidation:
         assert result.tools_called is True
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].function.name == "get_weather"
+        assert result.content == "\nThanks!"
+
+    def test_streaming_trailing_prose_after_orphan_invoke_is_kept(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        chunks = [_invoke("get_weather", ("location", "true", "NYC")), "\nThanks!"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "get_weather"
+        # Streamed out as it arrives, not buffered until finish.
+        assert collect_content(results) == "\nThanks!"
+
+    def test_whitespace_between_parallel_orphan_invokes_is_ignored(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A response that is only two invokes and the padding between
+        them comes back with no content at all.
+
+        This case is already covered by the parser dropping content that
+        is nothing but whitespace when the response called tools, so it
+        passes whether or not the engine holds the padding back.  The
+        test that actually pins the holding back is
+        ``test_padding_between_orphan_invokes_is_dropped_after_prose``.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        text = (
+            _invoke("get_weather", ("location", "true", "NYC"))
+            + "\n  \n"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
         assert result.content is None
+
+    def test_padding_between_orphan_invokes_is_dropped_after_prose(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Padding between two recovered invokes is dropped even when
+        the response already produced real text.
+
+        The prose in front means the content is no longer whitespace
+        only, so the parser's own whitespace dropping does not apply and
+        the engine holding the padding back is the only thing keeping it
+        out.  A wrapped call written the same way returns just the
+        prose, and the recovered call has to match it.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        text = (
+            "Some prose "
+            + _invoke("get_weather", ("location", "true", "NYC"))
+            + "\n  \n"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.content == "Some prose "
+
+    def test_streaming_padding_between_orphan_invokes_is_dropped_after_prose(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        chunks = [
+            "Some prose ",
+            _invoke("get_weather", ("location", "true", "NYC")),
+            "\n  \n",
+            _invoke("get_time", ("timezone", "true", "EST")),
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "Some prose "
+
+    def test_recovery_does_not_carry_into_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Once a recovered sequence ends, a later wrapped call in the
+        same response is treated as an ordinary wrapped call.
+
+        Text between the invokes of a wrapped call is dropped, so if the
+        engine still thought it was inside a recovered sequence the
+        stray text below would come back as content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        text = (
+            _invoke("get_weather", ("location", "true", "NYC"))
+            + DSML_TOOL_END
+            + DSML_TOOL_START
+            + _invoke("get_weather", ("location", "true", "NYC"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 3
+        assert result.content is None
+
+    def test_streaming_recovery_does_not_carry_into_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        chunks = [
+            _invoke("get_weather", ("location", "true", "NYC")),
+            DSML_TOOL_END,
+            DSML_TOOL_START,
+            _invoke("get_weather", ("location", "true", "NYC")),
+            "stray between wrapped invokes",
+            _invoke("get_time", ("timezone", "true", "EST")),
+            DSML_TOOL_END,
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == ""
+
+    def test_padding_held_before_one_invoke_does_not_reach_a_later_gap(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """Padding held before one invoke is dropped when that invoke
+        starts, so it cannot reappear in front of later text.
+
+        The first gap is padding and belongs to nothing.  Only the
+        second gap runs into real text, so only that one is content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        text = (
+            _invoke("get_weather", ("location", "true", "NYC"))
+            + "\n\n"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+            + "  "
+            + "Real text"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.content == "  Real text"
+
+    def test_streaming_padding_held_before_one_invoke_does_not_reach_a_later_gap(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        chunks = [
+            _invoke("get_weather", ("location", "true", "NYC")),
+            "\n\n",
+            _invoke("get_time", ("timezone", "true", "EST")),
+            "  ",
+            "Real text",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "  Real text"
+
+    def test_abandoned_recovery_does_not_affect_a_later_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A recovery attempt that turns out not to name a declared tool
+        must leave nothing behind.
+
+        The invoke below is held while its name is read, then given up
+        on because ``get_nothing`` was never declared.  The wrapped call
+        after it is ordinary, so the stray text between its invokes is
+        dropped.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+        abandoned = _invoke("get_nothing", ("location", "true", "NYC"))
+        text = (
+            abandoned
+            + DSML_TOOL_START
+            + _invoke("get_weather", ("location", "true", "NYC"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.content == abandoned
+
+    def test_recovery_does_not_leak_into_the_next_request(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A response that ends part way through a recovered sequence
+        must not leave the engine set up for recovery.
+
+        The engine is reused, so without a clean start the next
+        response would treat an ordinary wrapped call as a recovered
+        one and hand back the text between its invokes as content.
+        """
+        time_tool = _make_tool("get_time", {"timezone": {"type": "string"}})
+        parser = self._declared_parser(
+            mock_tokenizer, mock_request, weather_tool, time_tool
+        )
+
+        first = parser.extract_tool_calls(
+            _invoke("get_weather", ("location", "true", "NYC")), mock_request
+        )
+        assert first.tools_called is True
+
+        second = parser.extract_tool_calls(
+            DSML_TOOL_START
+            + _invoke("get_weather", ("location", "true", "NYC"))
+            + "stray between wrapped invokes"
+            + _invoke("get_time", ("timezone", "true", "EST"))
+            + DSML_TOOL_END,
+            mock_request,
+        )
+
+        assert second.tools_called is True
+        assert len(second.tool_calls) == 2
+        assert second.content is None
+
+    def test_declared_names_do_not_leak_into_the_next_request(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """The engine is reused across requests, so a request that
+        declares no tools must not recover a tool that an earlier
+        request declared."""
+        parser = self._declared_parser(mock_tokenizer, mock_request, weather_tool)
+        text = _invoke("get_weather", ("location", "true", "NYC")) + DSML_TOOL_END
+
+        first = parser.extract_tool_calls(text, mock_request)
+        assert first.tools_called is True
+
+        second = parser.extract_tool_calls(text, _request_without_tools())
+
+        assert second.tools_called is False
+        assert second.tool_calls == []
+        assert second.content == text
 
 
 # ── Thinking mode initial state ──────────────────────────────────────
@@ -1073,6 +1331,20 @@ def _invoke(name, *params):
 
 def _tool_calls(*invokes):
     return DSML_TOOL_START + "\n".join(invokes) + DSML_TOOL_END
+
+
+def _request_without_tools():
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E501
+        ChatCompletionRequest,
+    )
+
+    req = MagicMock(spec=ChatCompletionRequest)
+    req.tools = []
+    req.tool_choice = "auto"
+    req.include_reasoning = True
+    return req
 
 
 class TestParallelUnwrapping:

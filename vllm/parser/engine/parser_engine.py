@@ -416,6 +416,12 @@ class ParserEngine(Parser):
         if tools:
             self._tools = tools
             self._engine.allowed_tool_names = self._declared_tool_names()
+        else:
+            # The engine is reused across requests and reset() keeps this
+            # field, so it has to be cleared here.  Otherwise a request
+            # that declares no tools would inherit the names of the
+            # previous one and could recover a tool it never asked for.
+            self._engine.allowed_tool_names = None
         if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:

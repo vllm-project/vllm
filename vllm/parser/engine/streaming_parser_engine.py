@@ -198,6 +198,8 @@ class StreamingParserEngine:
         self._lexer.reset()
         self._message_header_buffer = ""
         self._reset_args_state()
+        self._recovered_tool_call = False
+        self._pending_between_text = ""
         self._hold_active = False
         self._held_events: list[SemanticEvent] = []
         self._held_raw: list[str] = []
@@ -421,6 +423,24 @@ class StreamingParserEngine:
         content_type = self.config.content_events.get(self.state)
         if content_type is not None:
             return [SemanticEvent(content_type, value=text, tool_index=self.tool_index)]
+        if self._recovered_tool_call and self.state == ParserState.TOOL_BETWEEN:
+            # A response that lost its opening wrapper usually loses the
+            # closing one too, so text after a recovered invoke is often
+            # the rest of the answer rather than padding before the next
+            # invoke.  Whitespace is held back because that is what
+            # padding looks like; as soon as anything else shows up the
+            # whole run is real output and goes out as content.
+            self._pending_between_text += text
+            if self._pending_between_text.strip():
+                held = self._pending_between_text
+                self._pending_between_text = ""
+                return [
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=held,
+                        tool_index=self.tool_index,
+                    )
+                ]
         return []
 
     def _on_content(self, text: str) -> list[SemanticEvent]:
@@ -463,6 +483,7 @@ class StreamingParserEngine:
         self._held_prior_state = prior_state
         self._held_prior_tool_index = prior_tool_index
         self._hold_active = True
+        self._recovered_tool_call = True
         return []
 
     def _resolve_hold(
@@ -484,6 +505,7 @@ class StreamingParserEngine:
         """Discard held events and re-emit the raw text as content."""
         self.state = self._held_prior_state
         self.tool_index = self._held_prior_tool_index
+        self._recovered_tool_call = self._held_prior_state in self._TOOL_STATES
         self._clear_hold()
         return self._emit_for_state(raw)
 
@@ -530,9 +552,16 @@ class StreamingParserEngine:
             )
             self._args_buffer = ""
 
+        # Whatever is still held between invokes is whitespace padding,
+        # which the wrapped path drops too.
+        self._pending_between_text = ""
+
         if previous_state == ParserState.MESSAGE_HEADER:
             message_header = self._message_header_buffer
             self._message_header_buffer = ""
+
+        if transition.next_state not in self._TOOL_STATES:
+            self._recovered_tool_call = False
 
         self.state = transition.next_state
 
