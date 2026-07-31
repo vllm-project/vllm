@@ -31,6 +31,7 @@ GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
+MARLIN_MAX_BLOCKS_PER_SM = 4
 
 MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
@@ -399,29 +400,36 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 def marlin_make_workspace_new(
     device: torch.device,
     max_blocks_per_sm: int = 1,
-    existing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
-    size = sms * max_blocks_per_sm
-    # On weight reload, reuse the existing storage so the workspace address
-    # captured by CUDA graphs stays valid.
-    if existing is not None:
-        if (
-            existing.device != device
-            or existing.dtype != torch.int
-            or existing.numel() != size
-        ):
-            raise ValueError(
-                f"Existing Marlin workspace is incompatible "
-                f"(device={existing.device}, dtype={existing.dtype}, "
-                f"numel={existing.numel()}; expected device={device}, "
-                f"dtype={torch.int}, numel={size}). Reload must reuse the "
-                f"workspace storage captured by CUDA graphs."
-            )
-        return existing.zero_()
-    return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
+    return torch.zeros(
+        sms * max_blocks_per_sm,
+        dtype=torch.int,
+        device=device,
+        requires_grad=False,
+    )
+
+
+def get_marlin_workspace(device: torch.device) -> torch.Tensor:
+    """Get the Marlin lock workspace for the current stream and ubatch."""
+    from vllm.v1.worker.workspace import (
+        current_workspace_manager,
+        is_workspace_manager_initialized,
+    )
+
+    if not is_workspace_manager_initialized():
+        return marlin_make_workspace_new(device, MARLIN_MAX_BLOCKS_PER_SM)
+
+    from vllm.utils.torch_utils import current_stream
+
+    return current_workspace_manager().get_persistent(
+        ("marlin_locks", current_stream()),
+        (num_compute_units(device.index) * MARLIN_MAX_BLOCKS_PER_SM,),
+        torch.int,
+        zero_init=True,
+    )
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
