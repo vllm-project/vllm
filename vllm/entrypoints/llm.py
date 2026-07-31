@@ -140,8 +140,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         moe_expert_cache_size: Number of MoE expert weight rows to keep in a
             GPU LRU buffer. When greater than zero, expert weights are stored in
             CPU pinned memory and only the N most-recently-used experts are
-            mirrored onto the GPU on each forward pass. Requires
-            ``enforce_eager=True``. Default is 0 (disabled).
+            mirrored onto the GPU on each forward pass. Compatible with
+            piecewise CUDA graphs (the default). Default is 0 (disabled).
         moe_expert_cache_split: How a forward wider than the cache is split:
             "token" (default) reproduces the uncached output exactly;
             "expert" is much cheaper at small cache sizes but differs at

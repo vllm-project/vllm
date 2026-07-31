@@ -52,9 +52,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     @property
     def supports_expert_lru_cache(self) -> bool:
-        # FLASHINFER_TRTLLM reorders weights into a tiled block layout that is
-        # incompatible with the generic per-expert slot-based remapping.
-        return self.unquantized_backend != UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        # Only backends that do not reorder or shuffle weights at load time.
+        # FLASHINFER_TRTLLM: tiled block layout, incompatible with slot remapping.
+        # FLASHINFER_CUTLASS: requires swap_w13_to_w31.
+        # AITER: requires shuffle_weights + is_shuffled flag.
+        # TPU/OOT: untested, conservative exclusion.
+        return self.unquantized_backend in (
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+            UnquantizedMoeBackend.CPU,
+            UnquantizedMoeBackend.XPU,
+        )
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)

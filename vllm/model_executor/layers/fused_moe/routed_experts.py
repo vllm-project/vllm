@@ -216,11 +216,11 @@ class RoutedExperts(PluggableLayer):
         vllm_config = get_current_vllm_config()
         if not vllm_config.model_config.enforce_eager:
             splitting_ops = vllm_config.compilation_config.splitting_ops or []
-            if "vllm.moe_forward" not in splitting_ops:
+            if "vllm::moe_forward" not in splitting_ops:
                 raise ValueError(
                     "moe_expert_cache_size without --enforce-eager requires "
                     "the MoE op to run outside CUDA graphs "
-                    "(vllm.moe_forward in compilation_config.splitting_ops). "
+                    "(vllm::moe_forward in compilation_config.splitting_ops). "
                     "This is configured automatically by VllmConfig; do not "
                     "override splitting_ops to exclude it."
                 )

@@ -89,7 +89,7 @@ startup.
 
 The cache is compatible with piecewise CUDA graphs, which is the default
 when `--moe-expert-cache-size` is set without `--enforce-eager`. vLLM adds
-the MoE op (`vllm.moe_forward`) to `splitting_ops` and caps
+the MoE op (`vllm::moe_forward`) to `splitting_ops` and caps
 `cudagraph_mode` at `PIECEWISE`: every non-MoE segment of the model is
 captured and replayed, while the MoE layer — routing, cache management,
 H2D copies, and the grouped GEMM — runs eagerly between segments. The

@@ -1549,7 +1549,7 @@ class VllmConfig:
                 )
             if cc.splitting_ops is None:
                 cc.splitting_ops = []
-            for op in ("vllm.moe_forward", "vllm.moe_forward_shared"):
+            for op in ("vllm::moe_forward", "vllm::moe_forward_shared"):
                 if op not in cc.splitting_ops:
                     cc.splitting_ops.append(op)
             if cc.cudagraph_mode.has_full_cudagraphs():
