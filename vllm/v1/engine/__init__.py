@@ -191,7 +191,6 @@ class EngineCoreOutput(
     new_token_ids: list[int]
 
     new_logprobs: LogprobsLists | None = None
-    new_sampling_mask: SamplingMaskLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
     pooling_output: torch.Tensor | None = None
@@ -210,6 +209,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    new_sampling_mask: SamplingMaskLists | None = None
 
     @property
     def finished(self) -> bool:

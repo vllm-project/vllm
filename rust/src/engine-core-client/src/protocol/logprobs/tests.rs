@@ -25,7 +25,6 @@ fn output_wire_with_custom_fields(
             Value::from("req-1"),
             Value::Array(vec![Value::from(7), Value::from(8)]),
             new_logprobs.unwrap_or(Value::Nil),
-            Value::Nil,
             prompt_logprobs.unwrap_or(Value::Nil),
             Value::Nil,
             Value::from(EngineCoreFinishReason::Length as u8),
