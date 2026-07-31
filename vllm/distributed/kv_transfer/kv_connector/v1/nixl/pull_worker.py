@@ -144,11 +144,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        remote_worker_keys = self.transfer_topo.get_target_remote_worker_keys(
-            remote_info.remote_tp_size,
-            remote_info.remote_dcp_size,
-            remote_info.remote_pcp_size,
-        )
+        remote_worker_keys = [
+            worker.key
+            for worker in self.transfer_topo.get_target_remote_workers(
+                remote_info.remote_tp_size,
+                remote_info.remote_dcp_size,
+                remote_info.remote_pcp_size,
+            )
+        ]
         meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids,
             remote_info.remote_physical_blocks_per_logical,

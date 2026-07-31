@@ -6,7 +6,7 @@ KV cache helper for store.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import torch
 
@@ -409,6 +409,24 @@ class EngineTransferInfo:
 # ---- Transfer topology ----
 
 
+class RemoteWorkerTarget(NamedTuple):
+    """A remote worker this local worker transfers with.
+
+    A worker is addressed two ways: NIXL routes by `(tp_rank, dcp_rank)`,
+    while handshake metadata is published under the producer's
+    `(pp_rank, tp_rank, pcp_rank)` identity.
+    """
+
+    tp_rank: int
+    dcp_rank: int
+    pcp_rank: int
+
+    @property
+    def key(self) -> tuple[int, int]:
+        """Routing identity, as keyed by `dst_xfer_side_handles`."""
+        return (self.tp_rank, self.dcp_rank)
+
+
 @dataclass
 class TransferTopology:
     """Single source of truth for local TP identity and per-engine remote info."""
@@ -604,26 +622,42 @@ class TransferTopology:
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
-    def get_target_remote_worker_keys(
+    def get_target_remote_workers(
         self,
         remote_tp_size: int,
         remote_dcp_size: int,
         remote_pcp_size: int,
-    ) -> list[tuple[int, int]]:
+    ) -> list[RemoteWorkerTarget]:
+        """Remote workers whose KV head coverage and DCP token slice overlap
+        this local worker.
+
+        A remote worker `(tp_rank, pcp_rank)` owns DCP rank
+        `(tp_rank * pcp_size + pcp_rank) % dcp_size`, so at most one PCP rank
+        per remote TP rank holds this worker's shard.
+        """
         if remote_dcp_size != self.dcp_size:
             raise ValueError(
                 "NIXL requires matching DCP sizes, but got "
                 f"local_dcp_size={self.dcp_size} and "
                 f"remote_dcp_size={remote_dcp_size}."
             )
-        worker_keys = []
+        targets = []
         for remote_tp_rank in self.handshake_target_ranks(remote_tp_size):
-            remote_pcp_rank = (
-                self.dcp_rank - remote_tp_rank * remote_pcp_size
-            ) % self.dcp_size
-            if remote_pcp_rank < remote_pcp_size:
-                worker_keys.append((remote_tp_rank, self.dcp_rank))
-        return worker_keys
+            # Only PCP ranks below dcp_size publish a replica, one per distinct
+            # DCP shard; see NixlBaseConnector.get_finished_count.
+            for remote_pcp_rank in range(min(remote_pcp_size, remote_dcp_size)):
+                remote_dcp_rank = (
+                    remote_tp_rank * remote_pcp_size + remote_pcp_rank
+                ) % remote_dcp_size
+                if remote_dcp_rank == self.dcp_rank:
+                    targets.append(
+                        RemoteWorkerTarget(
+                            tp_rank=remote_tp_rank,
+                            dcp_rank=remote_dcp_rank,
+                            pcp_rank=remote_pcp_rank,
+                        )
+                    )
+        return targets
 
     def calculate_local_consumer_count(
         self,

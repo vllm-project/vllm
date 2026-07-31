@@ -613,7 +613,7 @@ class NixlBaseConnectorWorker:
         # Handshake only with remote workers whose KV head coverage and DCP
         # token slice overlap this local worker.
         assert self.transfer_topo is not None
-        remote_worker_keys = self.transfer_topo.get_target_remote_worker_keys(
+        remote_workers = self.transfer_topo.get_target_remote_workers(
             remote_tp_size,
             remote_dcp_size,
             remote_pcp_size,
@@ -627,20 +627,15 @@ class NixlBaseConnectorWorker:
         best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
-            for remote_pp_rank, remote_worker_key in itertools.product(
-                range(remote_pp_size), remote_worker_keys
+            for remote_pp_rank, remote_worker in itertools.product(
+                range(remote_pp_size), remote_workers
             ):
-                remote_tp_rank, remote_dcp_rank = remote_worker_key
-                remote_pcp_rank = self._tp_dcp_to_pcp_rank(
-                    remote_tp_rank,
-                    remote_dcp_rank,
-                    remote_pcp_size,
-                    remote_dcp_size,
-                )
+                remote_tp_rank = remote_worker.tp_rank
+                remote_dcp_rank = remote_worker.dcp_rank
                 handshake_key = (
                     remote_pp_rank,
                     remote_tp_rank,
-                    remote_pcp_rank,
+                    remote_worker.pcp_rank,
                 )
                 logger.debug(
                     "Querying metadata on path: %s for worker %s",
@@ -747,7 +742,7 @@ class NixlBaseConnectorWorker:
                     setup_agent_time - got_metadata_time,
                     notif_agents_only,
                 )
-                remote_worker_to_agent_name[(remote_pp_rank, *remote_worker_key)] = (
+                remote_worker_to_agent_name[(remote_pp_rank, *remote_worker.key)] = (
                     remote_agent_name
                 )
 
@@ -785,24 +780,6 @@ class NixlBaseConnectorWorker:
             ),
         )
         return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
-
-    @staticmethod
-    def _tp_dcp_to_pcp_rank(
-        tp_rank: int,
-        dcp_rank: int,
-        pcp_size: int,
-        dcp_size: int,
-    ) -> int:
-        if not 0 <= dcp_rank < dcp_size:
-            raise ValueError(f"Invalid dcp_rank={dcp_rank} for dcp_size={dcp_size}")
-
-        pcp_rank = (dcp_rank - tp_rank * pcp_size) % dcp_size
-        if pcp_rank >= pcp_size:
-            raise ValueError(
-                f"No worker for tp_rank={tp_rank}, dcp_rank={dcp_rank}, "
-                f"pcp_size={pcp_size}, dcp_size={dcp_size}"
-            )
-        return pcp_rank
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
