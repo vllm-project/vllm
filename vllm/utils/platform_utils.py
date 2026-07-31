@@ -15,6 +15,12 @@ def cuda_is_initialized() -> bool:
     """Check if CUDA is initialized."""
     if not torch.cuda._is_compiled():
         return False
+    # A forked child of a CUDA-initialized parent reports is_initialized()
+    # as False, yet CUDA is unusable there: any attempt to initialize it
+    # raises "Cannot re-initialize CUDA in forked subprocess". Report it as
+    # initialized so callers fall back to spawn instead of forking again.
+    if torch.cuda._is_in_bad_fork():
+        return True
     return torch.cuda.is_initialized()
 
 
