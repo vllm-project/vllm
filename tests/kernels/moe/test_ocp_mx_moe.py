@@ -1405,7 +1405,6 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            layer=None,
         )
 
         # Create inputs
