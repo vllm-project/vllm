@@ -175,9 +175,15 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Attend one context chunk.
+
+        `q` holds only the chunk's query tokens, and `k`/`v` only the context
+        rows it gathered, so every sequence-length field must come from `chunk`
+        rather than from the whole-prefill metadata.
+        """
         raise NotImplementedError

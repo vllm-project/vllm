@@ -24,7 +24,7 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
     def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
         raise NotImplementedError
 
-    def run_prefill_context_chunk(self, chunk_idx, q, k, v):
+    def run_prefill_context_chunk(self, chunk, q, k, v):
         raise NotImplementedError
 
 
@@ -112,7 +112,7 @@ def test_register_custom_backend_as_decorator():
         def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
             raise NotImplementedError
 
-        def run_prefill_context_chunk(self, chunk_idx, q, k, v):
+        def run_prefill_context_chunk(self, chunk, q, k, v):
             raise NotImplementedError
 
     assert MLAPrefillBackendEnum.CUSTOM.is_overridden()
