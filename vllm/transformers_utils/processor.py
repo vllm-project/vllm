@@ -615,9 +615,9 @@ def make_input_norm(processor: type[BaseImageProcessor]) -> nn.BatchNorm1d:
 
 
 def maybe_do_input_norm(
-    grid_thw: torch.Tensor, input_norm: nn.BatchNorm1d | None, channel: int = 3
+    grid_thw: torch.Tensor, input_norm: nn.Module | None, channel: int = 3
 ) -> torch.Tensor:
-    if input_norm is None:
+    if input_norm is None or isinstance(input_norm, nn.Identity):
         return grid_thw
 
     assert grid_thw.ndim == 2

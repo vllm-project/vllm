@@ -1358,9 +1358,9 @@ class Qwen2VLForConditionalGeneration(
         assert grid_thw.ndim == 2
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"]
+            image_embeds = image_input["image_embeds"].to(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"]
+            pixel_values = image_input["pixel_values"].to(self.visual.dtype)
             pixel_values = maybe_do_input_norm(pixel_values, self.input_norm)
 
             if self.use_data_parallel:
@@ -1382,9 +1382,11 @@ class Qwen2VLForConditionalGeneration(
         assert grid_thw.ndim == 2
 
         if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"]
+            video_embeds = video_input["video_embeds"].to(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = video_input["pixel_values_videos"].to(
+                self.visual.dtype
+            )
             pixel_values_videos = maybe_do_input_norm(
                 pixel_values_videos, self.input_norm
             )
