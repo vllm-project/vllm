@@ -23,11 +23,10 @@ if current_platform.is_rocm():
     from .amd.model import DeepseekV32ForCausalLM
     from .amd.mtp import DeepseekV32MTP
 elif current_platform.is_device_capability_family(100):
-    from .nvidia.model import DeepseekV32ForCausalLM
-    from .nvidia.mtp import DeepseekV32MTP
-
     # GLM-5.2 (glm_moe_dsa) reuses the same optimized DSA module on SM100.
-    GlmMoeDsaForCausalLM = DeepseekV32ForCausalLM
+    from .nvidia.model import DeepseekV32ForCausalLM
+    from .nvidia.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
+    from .nvidia.mtp import DeepseekV32MTP
 else:
     # Pre-SM100 CUDA, XPU and CPU. The generic implementation already handles
     # the DSA architecture, so these keep serving instead of hard-failing --
