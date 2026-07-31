@@ -343,13 +343,6 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
-            # Under DCP/PCP, physical slots are interleaved across ranks. A
-            # rank-local buffer therefore needs global token addressing.
-            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context "
-                "parallelism (dcp_world_size > 1 or pcp_world_size > 1)"
-            )
-
             num_offload_blocks = None
             block_size_factor = 1
             if self.connector is not None:
