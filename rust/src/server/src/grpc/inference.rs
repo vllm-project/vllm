@@ -68,33 +68,22 @@ impl InferenceServiceImpl {
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
             let mut text_request =
-                convert::to_text_request(proto_request, stream, self.state.served_model_names())
-                    .map_err(|status| {
-                        let detail = status.message().to_string();
-                        (status, detail)
-                    })?;
+                convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
             text_request.arrival_time = Some(arrival_time);
 
-            let media = convert::media_parts_from_request(media).map_err(|status| {
-                let detail = status.message().to_string();
-                (status, detail)
-            })?;
+            let media = convert::media_parts_from_request(media)?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
-                    let status = Status::invalid_argument(
+                    return Err(Status::invalid_argument(
                         "multimodal gRPC requests must provide token_ids input",
-                    );
-                    let detail = status.message().to_string();
-                    return Err((status, detail));
+                    ));
                 };
-                let mm_features =
-                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
-                        |error| {
-                            let detail = error.to_report_string();
-                            let status = Status::internal(detail.clone());
-                            (status, detail)
-                        },
-                    )?;
+                let mm_features = self
+                    .state
+                    .chat
+                    .prepare_media(media, &mut token_ids)
+                    .await
+                    .map_err(|error| Status::internal(error.to_report_string()))?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
@@ -106,12 +95,12 @@ impl InferenceServiceImpl {
 
         let text_request = match result {
             Ok(text_request) => text_request,
-            Err((status, detail)) => {
+            Err(status) => {
                 warn!(
                     parent: &request_span,
                     grpc_code = ?status.code(),
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %detail,
+                    error = %status.message(),
                     "gRPC inference request preparation failed"
                 );
                 return Err(status);

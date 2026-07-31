@@ -137,6 +137,24 @@ impl ChatRequestProcessor {
         }
     }
 
+    /// Prepare media for an already-tokenized request.
+    async fn prepare_media(
+        &self,
+        media: Vec<MediaContentPart>,
+        token_ids: &mut Vec<u32>,
+    ) -> Result<Option<MmFeatures>> {
+        if media.is_empty() {
+            return Ok(None);
+        }
+        let info = self
+            .backend
+            .multimodal_model_info()
+            .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        Ok(Some(features))
+    }
+
     /// Prepare one chat request without submitting it to an engine.
     pub async fn prepare(
         &self,
@@ -269,17 +287,7 @@ impl ChatLlm {
         media: Vec<MediaContentPart>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        if media.is_empty() {
-            return Ok(None);
-        }
-        let info = self
-            .processor
-            .backend
-            .multimodal_model_info()
-            .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let model_dtype = self.processor.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
-        Ok(Some(features))
+        self.processor.prepare_media(media, token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

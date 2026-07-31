@@ -22,13 +22,7 @@ pub fn media_parts_from_request(
 ) -> Result<Vec<MediaContentPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
-        let modality = pb::Modality::try_from(item.modality).map_err(|_| {
-            Status::invalid_argument(format!(
-                "media[{index}].modality has unknown value {}",
-                item.modality
-            ))
-        })?;
-        match modality {
+        match item.modality() {
             pb::Modality::Image => {}
             pb::Modality::Unspecified => {
                 return Err(Status::invalid_argument(format!(
