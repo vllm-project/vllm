@@ -344,9 +344,12 @@ def kpool_compress_and_write_cache(
 
 
 # ---------------------------------------------------------------------------
-# kpool_decode_update_and_maybe_write_cache : decode step
-# Append the current token's k/gate to a per-request tail ring; when the pool
+# kpool_decode_update_and_maybe_write_cache_batched : decode step
+# Append each request's verify tokens to its per-request tail ring; when a pool
 # fills (pos % pool_size == pool_size-1), compress and write at the pool slot.
+# One launch over [num_requests, next_n]; the kernel iterates each request's
+# tokens in position order (see the kernel docstring for the completion
+# read-after-stash dependency). Plain decode collapses to next_n == 1.
 #
 # vLLM simplification vs sglang: compress_ratio makes slot_mapping hand us the
 # pool slot directly at pool completion, so the write loc == cache_loc. No
@@ -355,19 +358,22 @@ def kpool_compress_and_write_cache(
 
 
 @triton.jit
-def _kpool_decode_update_kernel(
+def _kpool_decode_update_batched_kernel(
     buf_fp8_ptr,
     buf_fp32_ptr,
     tail_kv_ptr,
-    tail_slot_mapping_ptr,
-    key_ptr,
-    slot_score_ptr,
+    tail_slot_mapping_ptr,  # [B, NEXT_N] int32
+    key_ptr,  # [B, NEXT_N, HEAD_DIM] bf16
+    key_stride_b,
+    key_stride_t,
+    slot_score_ptr,  # [B, NEXT_N, HEAD_DIM] bf16
+    ss_stride_b,
+    ss_stride_t,
     ape_ptr,
-    slot_mapping_ptr,
-    positions_ptr,
-    key_stride_0,
-    slot_score_stride_0,
     ape_stride_0,
+    slot_mapping_ptr,  # [B, NEXT_N] int32
+    positions_ptr,  # [B, NEXT_N] int32
+    NEXT_N,  # runtime token count per request (no .item() needed)
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
     POOL_SIZE: tl.constexpr,
@@ -378,131 +384,144 @@ def _kpool_decode_update_kernel(
     ROUND_SCALE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """One program per decode token (row == request for plain decode).
+    """One program per request; iterates its NEXT_N verify tokens in order.
 
-    The in-progress pool lives in a paged tail cache ``[num_blocks, 2, POOL_SIZE,
-    HEAD_DIM]`` bf16 (K at half 0, gate score at half 1), one block per request,
-    overwritten circularly by ``pos % POOL_SIZE``. ``tail_slot_mapping[row]`` is
-    the current token's tail slot (``block * POOL_SIZE + pos % POOL_SIZE``); the
-    request's tail block (``slot // POOL_SIZE``) is constant for the whole pool.
+    Replaces the caller's per-token sequential launch loop. The intra-request
+    iteration MUST stay in position order: a pool-completion at token t* reads
+    the tail-ring slots that tokens t < t* (same request) just stashed in this
+    same invocation. ``tl.range`` iterates sequentially within the program, so
+    those stashes are visible to the later completion read. Cross-request
+    programs are independent (distinct tail blocks). With NEXT_N < POOL_SIZE
+    (the spec-verify case: NEXT_N ~= num_spec+1, POOL_SIZE=16) at most one
+    completion can occur per request per call, but the ordered loop is correct
+    for any NEXT_N.
     """
-    row = tl.program_id(0)
+    req = tl.program_id(0)
     offs = tl.arange(0, BLOCK_D)
     dim_mask = offs < HEAD_DIM
 
-    cache_loc = tl.load(slot_mapping_ptr + row)  # pool slot, valid at completion
-    pos = tl.load(positions_ptr + row)
-    safe_pos = tl.maximum(pos, 0)
-    pos_valid = (cache_loc >= 0) & (pos >= 0)
+    for t in tl.range(0, NEXT_N):
+        idx = req * NEXT_N + t
+        cache_loc = tl.load(slot_mapping_ptr + idx)
+        pos = tl.load(positions_ptr + idx)
+        safe_pos = tl.maximum(pos, 0)
+        pos_valid = (cache_loc >= 0) & (pos >= 0)
 
-    slot = safe_pos % POOL_SIZE  # position within the current pool
-    phys_slot = safe_pos % POOL_SIZE  # offset within the tail block
+        slot = safe_pos % POOL_SIZE
+        phys_slot = safe_pos % POOL_SIZE
 
-    # The request's tail block (1 block/req); constant for the whole pool.
-    tail_slot = tl.load(tail_slot_mapping_ptr + row)
-    block = (tail_slot // POOL_SIZE).to(tl.int64)
-    block_base = block * TAIL_BLOCK_ELEMS
+        # Derive the tail block from THIS token's tail_slot (the request's block
+        # is constant across a pool, but a padded / invalid entry carries a
+        # negative sentinel -- reading it from token 0 would poison every
+        # token's base address). Clamp so an invalid entry can never form an
+        # out-of-bounds base; the accesses below are gated on pos_valid anyway.
+        tail_slot = tl.load(tail_slot_mapping_ptr + idx)
+        block = tl.maximum(tail_slot, 0).to(tl.int64) // POOL_SIZE
+        block_base = block * TAIL_BLOCK_ELEMS
 
-    key = tl.load(key_ptr + row * key_stride_0 + offs, mask=dim_mask, other=0.0).to(
-        tl.float32
-    )
-    score_current = tl.load(
-        slot_score_ptr + row * slot_score_stride_0 + offs, mask=dim_mask, other=0.0
-    ).to(tl.float32)
+        key = tl.load(
+            key_ptr + req * key_stride_b + t * key_stride_t + offs,
+            mask=dim_mask,
+            other=0.0,
+        ).to(tl.float32)
+        score_current = tl.load(
+            slot_score_ptr + req * ss_stride_b + t * ss_stride_t + offs,
+            mask=dim_mask,
+            other=0.0,
+        ).to(tl.float32)
 
-    # Pool complete on its last slot: compress the accumulated pool.
-    if pos_valid & (slot == POOL_SIZE - 1):
-        pool_logical_start = safe_pos - slot
+        if pos_valid & (slot == POOL_SIZE - 1):
+            pool_logical_start = safe_pos - slot
 
-        # Pass 1: per-dim max for softmax stability.
-        max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
-        for pool_slot in tl.static_range(0, POOL_SIZE):
-            is_current = pool_slot == slot
-            phys = (pool_logical_start + pool_slot) % POOL_SIZE
-            score_buf = tl.load(
-                tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
-                mask=dim_mask,
-                other=0.0,
-            ).to(tl.float32)
-            score = tl.where(is_current, score_current, score_buf)
-            score += tl.load(
-                ape_ptr + pool_slot * ape_stride_0 + offs,
-                mask=dim_mask,
-                other=0.0,
-            ).to(tl.float32)
-            max_score = tl.maximum(max_score, score)
+            max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+            for pool_slot in tl.static_range(0, POOL_SIZE):
+                is_current = pool_slot == slot
+                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                score_buf = tl.load(
+                    tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                score = tl.where(is_current, score_current, score_buf)
+                score += tl.load(
+                    ape_ptr + pool_slot * ape_stride_0 + offs,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                max_score = tl.maximum(max_score, score)
 
-        # Pass 2: softmax-weighted sum of K.
-        acc = tl.full((BLOCK_D,), 0.0, tl.float32)
-        denom = tl.full((BLOCK_D,), 0.0, tl.float32)
-        for pool_slot in tl.static_range(0, POOL_SIZE):
-            is_current = pool_slot == slot
-            phys = (pool_logical_start + pool_slot) % POOL_SIZE
-            score_buf = tl.load(
-                tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
-                mask=dim_mask,
-                other=0.0,
-            ).to(tl.float32)
-            score = tl.where(is_current, score_current, score_buf)
-            score += tl.load(
-                ape_ptr + pool_slot * ape_stride_0 + offs,
-                mask=dim_mask,
-                other=0.0,
-            ).to(tl.float32)
-            prob = tl.exp(score - max_score)
-            denom += prob
-            k_buf = tl.load(
-                tail_kv_ptr + block_base + phys * HEAD_DIM + offs,
-                mask=dim_mask,
-                other=0.0,
-            ).to(tl.float32)
-            k = tl.where(is_current, key, k_buf)
-            acc += k * prob
+            acc = tl.full((BLOCK_D,), 0.0, tl.float32)
+            denom = tl.full((BLOCK_D,), 0.0, tl.float32)
+            for pool_slot in tl.static_range(0, POOL_SIZE):
+                is_current = pool_slot == slot
+                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                score_buf = tl.load(
+                    tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                score = tl.where(is_current, score_current, score_buf)
+                score += tl.load(
+                    ape_ptr + pool_slot * ape_stride_0 + offs,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                prob = tl.exp(score - max_score)
+                denom += prob
+                k_buf = tl.load(
+                    tail_kv_ptr + block_base + phys * HEAD_DIM + offs,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                k = tl.where(is_current, key, k_buf)
+                acc += k * prob
 
-        x = (acc / denom).to(tl.bfloat16).to(tl.float32)
-        x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
+            x = (acc / denom).to(tl.bfloat16).to(tl.float32)
+            x = _hadamard128(x).to(tl.bfloat16).to(tl.float32)
 
-        fp8_max = 448.0
-        fp8_max_inv = 1.0 / fp8_max
-        absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
-        if ROUND_SCALE:
-            scale = tl.exp2(tl.ceil(tl.log2(absmax * fp8_max_inv)))
-        else:
-            scale = absmax * fp8_max_inv
-        quantized = tl.minimum(tl.maximum(x / scale, -fp8_max), fp8_max)
+            fp8_max = 448.0
+            fp8_max_inv = 1.0 / fp8_max
+            absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
+            if ROUND_SCALE:
+                scale = tl.exp2(tl.ceil(tl.log2(absmax * fp8_max_inv)))
+            else:
+                scale = absmax * fp8_max_inv
+            quantized = tl.minimum(tl.maximum(x / scale, -fp8_max), fp8_max)
 
-        # Write loc == cache_loc (the pool slot handed to us by compress_ratio).
-        loc = cache_loc.to(tl.int64)
-        loc_page_index = loc // PAGE_SIZE
-        loc_token_offset_in_page = loc % PAGE_SIZE
-        out_k_offsets = (
-            loc_page_index * BUF_NUMEL_PER_PAGE
-            + loc_token_offset_in_page * HEAD_DIM
-            + offs
+            loc = cache_loc.to(tl.int64)
+            loc_page_index = loc // PAGE_SIZE
+            loc_token_offset_in_page = loc % PAGE_SIZE
+            out_k_offsets = (
+                loc_page_index * BUF_NUMEL_PER_PAGE
+                + loc_token_offset_in_page * HEAD_DIM
+                + offs
+            )
+            out_s_offset = (
+                loc_page_index * BUF_NUMEL_PER_PAGE // 4
+                + S_OFFSET_NBYTES_IN_PAGE // 4
+                + loc_token_offset_in_page
+            )
+            tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=dim_mask)
+            tl.store(buf_fp32_ptr + out_s_offset, scale)
+
+        # Stash the current token AFTER any completion read so the completion
+        # uses prior stashes (and the current token's own key/score via
+        # is_current), then leaves this token for future pools. Order matches
+        # the per-token kernel: completion read first, stash second.
+        update_mask = dim_mask & pos_valid
+        tl.store(
+            tail_kv_ptr + block_base + phys_slot * HEAD_DIM + offs,
+            key,
+            mask=update_mask,
         )
-        out_s_offset = (
-            loc_page_index * BUF_NUMEL_PER_PAGE // 4
-            + S_OFFSET_NBYTES_IN_PAGE // 4
-            + loc_token_offset_in_page
+        tl.store(
+            tail_kv_ptr + block_base + KPOOL_HEAD + phys_slot * HEAD_DIM + offs,
+            score_current,
+            mask=update_mask,
         )
-        tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=dim_mask)
-        tl.store(buf_fp32_ptr + out_s_offset, scale)
-
-    # Always: stash the current token into the paged tail cache for future pools.
-    update_mask = dim_mask & pos_valid
-    tl.store(
-        tail_kv_ptr + block_base + phys_slot * HEAD_DIM + offs,
-        key,
-        mask=update_mask,
-    )
-    tl.store(
-        tail_kv_ptr + block_base + KPOOL_HEAD + phys_slot * HEAD_DIM + offs,
-        score_current,
-        mask=update_mask,
-    )
 
 
-def kpool_decode_update_and_maybe_write_cache(
+def kpool_decode_update_and_maybe_write_cache_batched(
     kv_cache: torch.Tensor,
     tail_kv_cache: torch.Tensor,
     tail_slot_mapping: torch.Tensor,
@@ -515,36 +534,39 @@ def kpool_decode_update_and_maybe_write_cache(
     head_dim: int = INDEX_HEAD_DIM,
     round_scale: bool = True,
 ) -> None:
-    """Decode-step kpool update.
+    """Batched decode-step kpool update for spec verify (``next_n > 1``).
+
+    One launch replaces the caller's per-token loop. Inputs are grouped per
+    request: ``[num_requests, next_n, ...]``. Each program handles one
+    request's ``next_n`` tokens in position order (see the kernel docstring for
+    why ordering is required for pool-completion correctness).
+
+    Plain decode (``next_n == 1``) is handled here too — the kernel collapses
+    to a single-iteration loop.
 
     Args:
         kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
         tail_kv_cache: paged tail cache ``[num_blocks, 2, pool_size, head_dim]``
-            bf16 (K at half 0, gate score at half 1), one block per request,
-            overwritten circularly by ``pos % pool_size``.
-        tail_slot_mapping: ``[batch]`` int32 -- each decode token's tail slot
-            (``block * pool_size + pos % pool_size``); ``slot // pool_size`` is
-            the request's tail block.
-        key / slot_score: ``[batch, head_dim]`` -- current decode token's K / gate.
+            bf16 (K at half 0, gate score at half 1).
+        tail_slot_mapping: ``[num_requests, next_n]`` int32.
+        key / slot_score: ``[num_requests, next_n, head_dim]`` bf16.
         ape: ``[pool_size, head_dim]`` fp32.
-        slot_mapping: ``[batch]`` -- pool slot per token (valid at pool completion).
-        positions: ``[batch]`` -- token positions (drives pool phase / tail offset).
-
-    Assumes plain decode (one token per request per step, row == request). Spec
-    decode (next_n > 1) is handled by the caller's per-token sequential loop.
+        slot_mapping / positions: ``[num_requests, next_n]`` int32.
     """
-    batch = key.shape[0]
-    if batch == 0:
+    num_requests, next_n = key.shape[0], key.shape[1]
+    if num_requests == 0 or next_n == 0:
         return
     assert tail_kv_cache.ndim == 4
     assert tail_kv_cache.shape[1] == 2
     assert tail_kv_cache.shape[2] == pool_size
     assert tail_kv_cache.shape[3] == head_dim
     assert tail_kv_cache.dtype == torch.bfloat16
-    assert tail_slot_mapping.shape == (batch,)
-    assert key.ndim == 2 and key.shape[1] == head_dim
+    assert key.ndim == 3 and key.shape[2] == head_dim
     assert slot_score.shape == key.shape
     assert ape.shape == (pool_size, head_dim)
+    assert tail_slot_mapping.shape == (num_requests, next_n)
+    assert slot_mapping.shape == (num_requests, next_n)
+    assert positions.shape == (num_requests, next_n)
     assert key.dtype == torch.bfloat16
     assert slot_score.dtype == torch.bfloat16
     assert ape.dtype == torch.float32
@@ -555,19 +577,30 @@ def kpool_decode_update_and_maybe_write_cache(
     buf_fp8 = buf.view(torch.float8_e4m3fn)
     buf_fp32 = buf.view(torch.float32)
 
-    _kpool_decode_update_kernel[(batch,)](
+    # The kernel indexes the int tensors as ``req * next_n + t`` (row-major),
+    # so they must be contiguous. Callers pass either a view of a contiguous
+    # slice or a freshly scattered tensor, making these no-ops; the calls guard
+    # against a future caller handing over a strided view.
+    tail_slot_mapping = tail_slot_mapping.contiguous()
+    slot_mapping = slot_mapping.contiguous()
+    positions = positions.contiguous()
+
+    _kpool_decode_update_batched_kernel[(num_requests,)](
         buf_fp8,
         buf_fp32,
         tail_kv_cache,
         tail_slot_mapping,
         key,
+        key.stride(0),
+        key.stride(1),
         slot_score,
+        slot_score.stride(0),
+        slot_score.stride(1),
         ape,
+        ape.stride(0),
         slot_mapping,
         positions,
-        key.stride(0),
-        slot_score.stride(0),
-        ape.stride(0),
+        next_n,
         PAGE_SIZE=page_size,
         BUF_NUMEL_PER_PAGE=buf.stride(0),
         POOL_SIZE=pool_size,

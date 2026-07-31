@@ -17,7 +17,7 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (
     append_tail_to_topk,
     expand_pools_to_tokens,
     kpool_compress_and_write_cache,
-    kpool_decode_update_and_maybe_write_cache,
+    kpool_decode_update_and_maybe_write_cache_batched,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -634,20 +634,26 @@ def sparse_attn_indexer_kpool(
             # The compress kernel writes the raw fp8 cache (not the quant view);
             # pass the underlying kv_cache, not kv_cache_quant_view.
             if dec_tail_slot is not None:
-                for t in range(dec_pos.shape[1]):
-                    kpool_decode_update_and_maybe_write_cache(
-                        kv_cache_raw,
-                        tail_kv_cache,
-                        dec_tail_slot[:, t].contiguous(),
-                        dec_k[:, t, :].contiguous(),
-                        dec_gate[:, t, :].contiguous(),
-                        compress_ape,
-                        dec_slot[:, t].contiguous(),
-                        dec_pos[:, t].contiguous(),
-                        index_kpool,
-                        head_dim,
-                        round_scale=(scale_fmt is not None),
-                    )
+                # Single batched launch over [num_requests, next_n] replaces the
+                # per-token sequential loop. The kernel iterates each request's
+                # tokens in position order internally, preserving the
+                # pool-completion read-after-stash dependency that the loop
+                # provided. Inputs are already grouped per request (uniform:
+                # view; non-uniform: _scatter_decode_tokens_by_request padded to
+                # [B, lmax]) — no per-token .contiguous() copies needed.
+                kpool_decode_update_and_maybe_write_cache_batched(
+                    kv_cache_raw,
+                    tail_kv_cache,
+                    dec_tail_slot,
+                    dec_k,
+                    dec_gate,
+                    compress_ape,
+                    dec_slot,
+                    dec_pos,
+                    index_kpool,
+                    head_dim,
+                    round_scale=(scale_fmt is not None),
+                )
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <
