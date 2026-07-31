@@ -1677,6 +1677,10 @@ def test_get_kv_cache_config_one_worker():
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     vllm_config.cache_config.prefix_cache_retention_interval = None
+    # This test pins the direct (non-extensible) tensor geometry; the
+    # extensible KV cache prefers a block-outermost layout for pages of
+    # different sizes.
+    vllm_config.cache_config.enable_extensible_kv_cache = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     # all layers are full attention -> single group

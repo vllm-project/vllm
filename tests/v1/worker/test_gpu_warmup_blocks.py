@@ -91,6 +91,9 @@ def _make_runner(
         vllm_config=SimpleNamespace(num_lookahead_tokens=num_lookahead_tokens),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+        # No-op without the extensible KV cache; warmup calls it to commit
+        # the block prefix it writes to.
+        ensure_kv_cache_blocks=lambda num_blocks: None,
     )
 
 

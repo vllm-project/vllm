@@ -44,7 +44,10 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    narrow_layouts_to_block_outermost,
+    resolve_kv_cache_layout,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -98,6 +101,7 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
+_WARMUP_MEMORY_BUFFER_BYTES = 150 * (1 << 20)
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -286,10 +290,46 @@ class EngineCore:
         if has_kv_cache:
             # Resolve the KV cache layout before memory profiling: workers that
             # capture full cudagraphs initialize a minimal KV cache during it.
+            supported_layouts: list[list[str]] = (
+                self.model_executor.get_supported_kv_cache_layouts()
+            )
+            all_specs = [s for specs in kv_cache_specs for s in specs.values()]
+            kv_transfer_config = vllm_config.kv_transfer_config
+            needs_single_segment = kv_transfer_config is not None and (
+                kv_transfer_config.kv_connector == "MooncakeConnector"
+                or (
+                    kv_transfer_config.kv_connector == "MultiConnector"
+                    and any(
+                        c.get("kv_connector") == "MooncakeConnector"
+                        for c in kv_transfer_config.kv_connector_extra_config.get(
+                            "connectors", []
+                        )
+                    )
+                )
+            )
+            if vllm_config.cache_config.enable_extensible_kv_cache and (
+                len({spec.page_size_bytes for spec in all_specs}) > 1
+                or needs_single_segment
+            ):
+                # The extensible KV cache commits equal-size per-segment block
+                # prefixes, which layer-compact regions of different page
+                # sizes cannot provide; prefer block-outermost layouts.
+                # Mooncake also requires them regardless of page sizes: it
+                # registers the KV cache as one contiguous span, which under a
+                # layer-compact layout would cross per-segment mapping
+                # boundaries and each segment's uncommitted tail.
+                if narrowed := narrow_layouts_to_block_outermost(supported_layouts):
+                    supported_layouts = narrowed
+                else:
+                    logger.info_once(
+                        "Not using the extensible KV cache: no block-outermost "
+                        "KV cache layout is supported for this model. KV cache "
+                        "sizing will use profiling estimates instead of "
+                        "measured usage."
+                    )
+                    vllm_config.cache_config.disable_extensible_kv_cache()
             layout = resolve_kv_cache_layout(
-                vllm_config.cache_config,
-                self.model_executor.get_supported_kv_cache_layouts(),
-                [s for specs in kv_cache_specs for s in specs.values()],
+                vllm_config.cache_config, supported_layouts, all_specs
             )
             self.model_executor.set_kv_cache_layout(layout.name)
 
@@ -311,36 +351,93 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        # Track max_model_len before KV cache config to detect auto-fit changes
-        max_model_len_before = vllm_config.model_config.max_model_len
+        use_extensible_kv_cache = (
+            has_kv_cache and vllm_config.cache_config.enable_extensible_kv_cache
+        )
+        if use_extensible_kv_cache:
+            if (
+                vllm_config.kv_transfer_config is not None
+                and not vllm_config.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "enable_extensible_kv_cache=True with KV connectors "
+                    "requires the V2 model runner (which defers connector "
+                    "registration until the final KV cache size is committed)."
+                )
+            # The workers' drivers must support virtual memory management
+            # (e.g. WSL2 and non-GPU platforms do not); fall back gracefully.
+            reasons: list[str | None] = self.collective_rpc(
+                "extensible_kv_cache_unsupported_reason"
+            )
+            if reason := next((r for r in reasons if r), None):
+                logger.warning(
+                    "Disabling extensible KV cache; falling back to standard "
+                    "KV cache allocation: %s",
+                    reason,
+                )
+                use_extensible_kv_cache = False
 
+        # Track max_model_len before KV cache config to detect auto-fit changes
+        # made by get_kv_cache_configs().
+        max_model_len_before = vllm_config.model_config.max_model_len
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
+        scheduler_kv_cache_config = self._apply_kv_cache_config(
+            vllm_config,
+            kv_cache_configs,
+            max_model_len_before,
+        )
 
-        # If auto-fit reduced max_model_len, sync the new value to workers.
-        # This is needed because workers were spawned before memory profiling
-        # and have the original (larger) max_model_len cached.
-        max_model_len_after = vllm_config.model_config.max_model_len
-        if max_model_len_after != max_model_len_before:
-            self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
-
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
-        if kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
-            )
-            update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
-
-        vllm_config.validate_block_size()
-
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        # Initialize KV cache and warm up execution. With extensible KV cache,
+        # this reserves the upper-bound address range, commits only the block
+        # prefix warmup needs, and runs warmup / CUDA graph capture before the
+        # post-warmup KV size is committed.
+        self.model_executor.initialize_from_config(
+            kv_cache_configs,
+            extensible=use_extensible_kv_cache,
+        )
+        compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+        if use_extensible_kv_cache:
+            if (
+                vllm_config.cache_config.kv_cache_memory_bytes is None
+                and compilation_times
+            ):
+                # Automatic sizing: re-derive the KV cache size from the
+                # memory actually consumed by warmup and CUDA graph capture.
+                # With an explicit kv_cache_memory_bytes, the requested size
+                # is committed as-is (the extensible path still defers the
+                # commit until after warmup). When warmup was skipped
+                # (VLLM_ELASTIC_EP_SCALE_UP_LAUNCH) there is no measurement,
+                # so the first-pass size is committed as-is too.
+                # One CompilationTimes result per worker (zip strict).
+                final_available_gpu_memory = [
+                    max(
+                        available_memory
+                        - times.warmup_memory
+                        - _WARMUP_MEMORY_BUFFER_BYTES,
+                        0,
+                    )
+                    for available_memory, times in zip(
+                        available_gpu_memory, compilation_times, strict=True
+                    )
+                ]
+                max_model_len_before = vllm_config.model_config.max_model_len
+                kv_cache_configs = get_kv_cache_configs(
+                    vllm_config,
+                    kv_cache_specs,
+                    final_available_gpu_memory,
+                )
+                scheduler_kv_cache_config = self._apply_kv_cache_config(
+                    vllm_config,
+                    kv_cache_configs,
+                    max_model_len_before,
+                )
+            self.model_executor.extend_kv_cache(kv_cache_configs)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
@@ -367,6 +464,31 @@ class EngineCore:
                 "init engine (profile, create kv cache, warmup model) took %.2f s",
                 elapsed,
             )
+        return scheduler_kv_cache_config
+
+    def _apply_kv_cache_config(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_configs: list[KVCacheConfig],
+        max_model_len_before: int,
+    ) -> KVCacheConfig:
+        # If auto-fit reduced max_model_len, sync the new value to workers.
+        # This is needed because workers were spawned before memory profiling
+        # and have the original (larger) max_model_len cached.
+        max_model_len_after = vllm_config.model_config.max_model_len
+        if max_model_len_after != max_model_len_before:
+            self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
+
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_groups
+            )
+            update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+
+        vllm_config.validate_block_size()
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:

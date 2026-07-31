@@ -228,6 +228,22 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
     cache_config.kv_cache_layout = layout.name
 
 
+def narrow_layouts_to_block_outermost(
+    supported_layouts: list[list[str]],
+) -> list[list[str]] | None:
+    """Drop layer-compact layout candidates from every rank's supported list.
+
+    The extensible KV cache commits equal-size per-segment block prefixes,
+    which layer-compact regions of different page sizes cannot provide.
+    Returns None when any rank would be left without a candidate.
+    """
+    narrowed = [
+        [name for name in names if not _layout_from_name(name).is_layer_compact]
+        for names in supported_layouts
+    ]
+    return narrowed if all(narrowed) else None
+
+
 def resolve_kv_cache_layout(
     cache_config: CacheConfig,
     supported_layouts: list[list[str]],

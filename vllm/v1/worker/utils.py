@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -375,24 +375,55 @@ def select_common_block_size(
     raise ValueError(f"No common block size for {kv_manager_block_size}. ")
 
 
+def kv_cache_num_segments(kv_cache_config: KVCacheConfig) -> int:
+    """Number of equal contiguous segments of the backing allocation that
+    each hold a contiguous run of blocks ``block_stride`` bytes apart:
+    1 for block-outermost layouts (a block's window spans the whole
+    cross-section), one per layer region (times any dims hoisted outside the
+    block dim) for layer-compact layouts. A grow-only backing (the extensible
+    KV cache) commits a per-segment prefix of blocks.
+    """
+    num_blocks = kv_cache_config.num_blocks
+    segment_counts = set()
+    for tensor in kv_cache_config.kv_cache_tensors:
+        num_segments, remainder = divmod(tensor.size, num_blocks * tensor.block_stride)
+        assert not remainder, (
+            f"KV cache tensor of {tensor.size} bytes is not tiled by "
+            f"{num_blocks} blocks of stride {tensor.block_stride}"
+        )
+        segment_counts.add(num_segments)
+    assert len(segment_counts) == 1, (
+        f"KV cache tensors disagree on the buffer segmentation: {segment_counts}"
+    )
+    return segment_counts.pop()
+
+
 def allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    reserve: Callable[[int, int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
+
+    ``reserve(size, num_segments)``, when given, stands in for the plain
+    ``torch.zeros`` backing allocation (the extensible KV cache reserves
+    virtual memory and commits blocks lazily).
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
 
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
-    buf = torch.zeros(sizes.pop(), dtype=torch.int8, device=device)
+    if reserve is not None:
+        buf = reserve(sizes.pop(), kv_cache_num_segments(kv_cache_config))
+    else:
+        buf = torch.zeros(sizes.pop(), dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
