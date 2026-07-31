@@ -5,6 +5,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.inputs import (
     EngineInput,
@@ -146,8 +147,7 @@ class InputProcessor:
     def _normalize_trace_replay_params(sampling_params: SamplingParams) -> None:
         """Apply trace replay's generation semantics to request-local params."""
         trace_token_ids = sampling_params.trace_decode_token_ids
-        if trace_token_ids is None:
-            return
+        assert trace_token_ids
 
         # Apply this after the generation config so its EOS token cannot stop
         # replay before the trace is exhausted.
@@ -341,7 +341,8 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
-            self._normalize_trace_replay_params(sampling_params)
+            if sampling_params.trace_decode_token_ids:
+                self._normalize_trace_replay_params(sampling_params)
         else:
             pooling_params = params.clone()
 
