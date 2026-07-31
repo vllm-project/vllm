@@ -16,6 +16,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -387,6 +388,24 @@ class CudaGraphManager:
             return {}
 
         saved_graphs_captured = self._graphs_captured
+        # Dry-capture into a throwaway mempool, mirroring the MRv1 runner. Both
+        # wrapper classes keep their own instance registry, so each needs
+        # redirecting: torch.compile piecewise graphs live in CUDAGraphWrapper,
+        # breakable ones in BreakableCUDAGraphWrapper. Sharing the real pool
+        # here is not safe -- discarding the profiling graphs afterwards drops
+        # that pool's use_count to zero and the real capture's capture_begin
+        # then trips an allocator assert, while *not* discarding them leaves the
+        # real capture pass replaying graphs recorded against the throwaway
+        # profiling KV cache.
+        profiling_pool = current_platform.graph_pool_handle()
+        wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        original_pool = self.pool
+        original_wrapper_pools = {id(w): w.graph_pool for w in wrappers}
+        self.pool = profiling_pool
+        for wrapper in wrappers:
+            wrapper.graph_pool = profiling_pool
         try:
             gc.collect()
             torch.accelerator.synchronize()
@@ -408,7 +427,11 @@ class CudaGraphManager:
             # Discard profiling-only graphs so the real capture re-allocates.
             self.graphs.clear()
             self._graphs_captured = saved_graphs_captured
+            CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            self.pool = original_pool
+            for wrapper in wrappers:
+                wrapper.graph_pool = original_wrapper_pools[id(wrapper)]
         logger.debug(
             "Estimated CUDA graph memory (full dry-capture): %.2f MiB",
             total / (1 << 20),

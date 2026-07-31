@@ -1783,10 +1783,19 @@ class SpecDecodeBaseProposer:
         spec_block_size = (
             self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
         )
+        # kv_cache_gid stays at its -1 sentinel when no group claims the draft
+        # layers; guard the lower bound so it can't wrap around and select the
+        # last group's kernel block size.
+        if self.kv_cache_gid < 0:
+            logger.warning(
+                "Draft layers matched no KV cache group (kv_cache_gid=-1); "
+                "falling back to the spec block size %d for drafting.",
+                spec_block_size,
+            )
         kernel_block_size = (
             kernel_block_sizes[self.kv_cache_gid]
             if kernel_block_sizes is not None
-            and self.kv_cache_gid < len(kernel_block_sizes)
+            and 0 <= self.kv_cache_gid < len(kernel_block_sizes)
             else None
         )
         # eagle_step / compute_new_slot_mapping index the raw shared
