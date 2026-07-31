@@ -12,11 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
 from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
     fa4_cutedsl_warmup,
 )
@@ -112,17 +108,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
-
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
-    )
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
