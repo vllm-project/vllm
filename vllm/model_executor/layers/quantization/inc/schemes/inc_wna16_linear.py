@@ -375,6 +375,48 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
     # faster, so fall back to it per-call.
     _MIN_TOKENS_FOR_INT8 = 512
 
+    # int4_gemm_w4a8 requires both GEMM dims to be multiples of 8. Tensor
+    # parallelism shards these, so an aligned model dimension can still yield an
+    # unaligned partition.
+    _DIM_ALIGNMENT = 8
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        unaligned = [
+            (name, size)
+            for name, size in (
+                ("input", input_size_per_partition),
+                ("output", output_size_per_partition),
+            )
+            if size % self._DIM_ALIGNMENT != 0
+        ]
+        if unaligned:
+            raise NotImplementedError(
+                "VLLM_XPU_INC_W4A16_BACKEND=w4a8 requires partitioned in/out "
+                f"sizes that are multiples of {self._DIM_ALIGNMENT}, got "
+                + ", ".join(f"{name}={size}" for name, size in unaligned)
+                + f". Partition shape: ({input_size_per_partition}, "
+                f"{output_size_per_partition})."
+            )
+        super().create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         # The kernel reads both scale tensors as fp16; keep an fp16 copy for the

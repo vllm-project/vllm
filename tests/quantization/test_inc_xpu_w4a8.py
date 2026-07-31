@@ -9,11 +9,12 @@ upconverting weights to the activation dtype. It is opt-in through
 device: ARK can use XMX int8 on some XPUs, and the default ("auto") preference
 order is deliberately left unchanged.
 
-These tests stub out ``int4_gemm_w4a8`` so they run without an XPU: what needs
-guarding is the calling convention (scale dtypes, argument order, weight reuse,
-batch-size gate), which is where this path is easy to get silently wrong — the
-kernel accepts bf16 scales and returns plausible-looking garbage rather than
-raising.
+Most of these tests stub out ``int4_gemm_w4a8`` so they run without an XPU: what
+needs guarding is the calling convention (scale dtypes, argument order, weight
+reuse, batch-size gate), which is where this path is easy to get silently wrong
+— the kernel accepts bf16 scales and returns plausible-looking garbage rather
+than raising. The end-to-end tests at the bottom load a real int4 checkpoint and
+are skipped unless an XPU with the op is present.
 
 Run `pytest tests/quantization/test_inc_xpu_w4a8.py`.
 """
@@ -39,6 +40,37 @@ _QUANT_REF = "vllm._xpu_ops.xpu_ops.dynamic_per_token_int8_quant_ref"
 
 IN_FEATURES = 128
 OUT_FEATURES = 64
+
+# auto-round int4/sym/g128 checkpoints, which is what this backend serves. The
+# GPTQ- and AWQ-packed variants take different repack branches in
+# ``process_weights_after_loading``, so both are worth loading.
+E2E_MODELS = [
+    pytest.param("OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc", id="auto_round:auto_gptq"),
+    pytest.param(
+        "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound", id="auto_round:auto_awq"
+    ),
+]
+
+
+def _has_w4a8_kernel() -> bool:
+    """True when this build can actually run the w4a8 GEMM.
+
+    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
+    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    """
+    if not current_platform.is_xpu():
+        return False
+    try:
+        import vllm._xpu_ops  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
+
+
+requires_w4a8_kernel = pytest.mark.skipif(
+    not _has_w4a8_kernel(),
+    reason="needs an XPU with the int4_gemm_w4a8 op",
+)
 
 
 def make_layer_config(**overrides) -> INCLayerConfig:
@@ -87,8 +119,8 @@ def _dispatch(layer_config=None):
 
 
 @pytest.fixture
-def w4a8_layer(monkeypatch):
-    """A w4a8 method plus a layer whose weights are created but not processed."""
+def single_tp_rank(monkeypatch):
+    """Parameter creation reads the TP rank/size; there is no distributed init."""
     monkeypatch.setattr(
         "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
         lambda: 0,
@@ -98,21 +130,36 @@ def w4a8_layer(monkeypatch):
         lambda: 1,
     )
 
+
+def _create_weights(
+    method,
+    input_size_per_partition: int = IN_FEATURES,
+    output_partition_sizes: list[int] | None = None,
+) -> torch.nn.Module:
     class DummyLayer(torch.nn.Module):
         pass
 
     layer = DummyLayer()
-    method = INCXPUW4A8LinearMethod(make_layer_config())
+    output_partition_sizes = (
+        [OUT_FEATURES] if output_partition_sizes is None else output_partition_sizes
+    )
     method.create_weights(
         layer=layer,
-        input_size_per_partition=IN_FEATURES,
-        output_partition_sizes=[OUT_FEATURES],
-        input_size=IN_FEATURES,
-        output_size=OUT_FEATURES,
+        input_size_per_partition=input_size_per_partition,
+        output_partition_sizes=output_partition_sizes,
+        input_size=input_size_per_partition,
+        output_size=sum(output_partition_sizes),
         params_dtype=torch.bfloat16,
         weight_loader=lambda *args, **kwargs: None,
     )
-    return method, layer
+    return layer
+
+
+@pytest.fixture
+def w4a8_layer(single_tp_rank):
+    """A w4a8 method plus a layer whose weights are created but not processed."""
+    method = INCXPUW4A8LinearMethod(make_layer_config())
+    return method, _create_weights(method)
 
 
 def _stub_quant(monkeypatch, captured=None):
@@ -246,6 +293,73 @@ def test_invalid_backend_value_raises(monkeypatch) -> None:
     monkeypatch.setenv(_BACKEND_ENV, "onednn")
     with pytest.raises(ValueError, match=_BACKEND_ENV):
         _ = envs.VLLM_XPU_INC_W4A16_BACKEND
+
+
+# ---------------------------------------------------------------------------
+# Partition shape
+# ---------------------------------------------------------------------------
+#
+# ``XPUW4A8IntLinearKernel.can_implement`` rejects partition shapes whose in/out
+# dims are not multiples of 8, but that check is unreachable from the INC path:
+# the shapes only exist once ``create_weights`` is called, well after backend
+# selection. Unaligned dims must not reach the kernel — the int4 packing divides
+# both dims by 8, so an unaligned size is silently truncated into a weight tensor
+# that is too small rather than rejected.
+
+
+def test_rejects_unaligned_input_partition(single_tp_rank) -> None:
+    method = INCXPUW4A8LinearMethod(make_layer_config(group_size=32))
+
+    with pytest.raises(NotImplementedError, match=r"multiples of 8.*input=132"):
+        _create_weights(method, input_size_per_partition=132)
+
+
+def test_rejects_unaligned_output_partition(single_tp_rank) -> None:
+    method = INCXPUW4A8LinearMethod(make_layer_config())
+
+    with pytest.raises(NotImplementedError, match=r"multiples of 8.*output=60"):
+        _create_weights(method, output_partition_sizes=[60])
+
+
+def test_rejects_unaligned_sum_of_output_partitions(single_tp_rank) -> None:
+    """A fused QKV/MLP layer is only as aligned as the sum of its shards."""
+    method = INCXPUW4A8LinearMethod(make_layer_config())
+
+    with pytest.raises(NotImplementedError, match=r"multiples of 8.*output=76"):
+        _create_weights(method, output_partition_sizes=[OUT_FEATURES, 12])
+
+
+def test_reports_both_unaligned_dims(single_tp_rank) -> None:
+    """The message names every offending dim, not just the first."""
+    method = INCXPUW4A8LinearMethod(make_layer_config(group_size=32))
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        _create_weights(
+            method, input_size_per_partition=132, output_partition_sizes=[60]
+        )
+
+    assert "input=132" in str(excinfo.value)
+    assert "output=60" in str(excinfo.value)
+
+
+def test_accepts_aligned_partition_shape(single_tp_rank) -> None:
+    """Multiples of 8 that are not powers of two are still fine."""
+    method = INCXPUW4A8LinearMethod(make_layer_config(group_size=32))
+
+    layer = _create_weights(
+        method, input_size_per_partition=96, output_partition_sizes=[24, 48]
+    )
+
+    assert layer.qweight.shape == (96 // 8, 72)
+
+
+def test_w4a16_accepts_unaligned_partition_shape(single_tp_rank) -> None:
+    """The constraint is a w4a8 kernel requirement; w4a16 must stay unaffected."""
+    method = INCXPULinearMethod(make_layer_config(group_size=32))
+
+    layer = _create_weights(method, output_partition_sizes=[60])
+
+    assert layer.scales.shape[1] == 60
 
 
 # ---------------------------------------------------------------------------
@@ -446,3 +560,62 @@ def test_batch_gate_uses_flattened_token_count(monkeypatch, w4a8_layer) -> None:
     out = method.apply_weights(layer, x)
 
     assert out.shape == (4, tokens // 4, OUT_FEATURES)
+
+
+# ---------------------------------------------------------------------------
+# End to end on real weights
+# ---------------------------------------------------------------------------
+
+
+@requires_w4a8_kernel
+@pytest.mark.parametrize("model", E2E_MODELS)
+def test_e2e_generates_with_real_weights(vllm_runner, monkeypatch, model) -> None:
+    """The whole path — real int4 checkpoint, real kernel, real output.
+
+    The stubbed tests above cannot catch a wrong-but-plausible calling
+    convention, because the fake kernel accepts anything. Greedy decoding of a
+    factual prompt does: mis-set scales or a bad weight layout turn the answer
+    into noise rather than raising.
+    """
+    monkeypatch.setenv(_BACKEND_ENV, "w4a8")
+
+    with vllm_runner(
+        model, max_model_len=512, enforce_eager=True, gpu_memory_utilization=0.55
+    ) as vllm_model:
+        out = vllm_model.generate_greedy(["The capital of France is"], max_tokens=8)
+
+    assert "Paris" in out[0][1]
+
+
+@requires_w4a8_kernel
+def test_e2e_selects_w4a8_for_every_linear(vllm_runner, monkeypatch) -> None:
+    """Guard against the validation silently becoming dead code.
+
+    If backend selection stopped routing here, the generation test above would
+    still pass on the w4a16 path, so assert the method is actually in use and
+    that every partition shape it accepted honours the alignment rule.
+    """
+    monkeypatch.setenv(_BACKEND_ENV, "w4a8")
+    # apply_model pickles the closure below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        E2E_MODELS[0].values[0],
+        max_model_len=512,
+        enforce_eager=True,
+        gpu_memory_utilization=0.55,
+    ) as vllm_model:
+
+        def check_model(model):
+            shapes = []
+            for module in model.modules():
+                scheme = getattr(getattr(module, "quant_method", None), "scheme", None)
+                if isinstance(scheme, INCXPUW4A8LinearMethod):
+                    # qweight is the packed [in // 8, out] layout.
+                    packed_in, out = module.qweight.shape
+                    shapes.append((packed_in * 8, out))
+
+            assert shapes, "no linear layer used the w4a8 method"
+            assert all(i % 8 == 0 and o % 8 == 0 for i, o in shapes), shapes
+
+        vllm_model.apply_model(check_model)
