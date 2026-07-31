@@ -951,3 +951,140 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+_B12X_NUM_EXPERTS = 4
+_B12X_HIDDEN = 32
+_B12X_INTER = 16
+
+
+class _B12xLayer(torch.nn.Module):
+    """Minimal RoutedExperts stand-in with the params b12x post-load reads."""
+
+    def __init__(self):
+        super().__init__()
+        E, H, N = _B12X_NUM_EXPERTS, _B12X_HIDDEN, _B12X_INTER
+
+        def param(t):
+            return torch.nn.Parameter(t, requires_grad=False)
+
+        self.w13_weight = param(torch.zeros(E, 2 * N, H // 2, dtype=torch.uint8))
+        self.w13_weight_scale = param(torch.full((E, 2 * N, H // 16), 2.0))
+        self.w13_weight_scale_2 = param(torch.full((E,), 3.0))
+        self.w2_weight_scale = param(torch.full((E, H, N // 16), 2.0))
+        self.w2_weight_scale_2 = param(torch.full((E,), 3.0))
+
+
+def _make_b12x_experts(layer):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        FusedMoEQuantConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
+        FlashInferB12xExperts,
+    )
+
+    E = _B12X_NUM_EXPERTS
+    moe_config = FusedMoEConfig(
+        num_experts=E,
+        experts_per_token=2,
+        hidden_dim=_B12X_HIDDEN,
+        intermediate_size=_B12X_INTER,
+        num_local_experts=E,
+        num_logical_experts=E,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=1,
+            ep_size=1,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=False,
+            all2all_backend="naive",
+            enable_eplb=False,
+        ),
+        in_dtype=torch.bfloat16,
+    )
+    # Mirror the real flow: the quant config is rebuilt from the live layer
+    # params on every post-load pass.
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype="nvfp4",
+        w1_scale=layer.w13_weight_scale,
+        w2_scale=layer.w2_weight_scale,
+        g1_alphas=torch.ones(E),
+        g2_alphas=torch.ones(E),
+        a2_gscale=torch.full((E,), 5.0),
+    )
+    return FlashInferB12xExperts(moe_config, quant_config)
+
+
+def test_b12x_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
+    """FlashInferB12xExperts is rebuilt by every post-load pass, but its
+    runtime scale tensors and the flashinfer wrapper's workspaces are read by
+    captured CUDA graphs, so each rebuild must reuse the layer-held storage
+    the graph captured instead of allocating fresh objects (#48312)."""
+    import vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe as b12x
+
+    # The real MMA-layout conversion needs flashinfer + SM120; substitute a
+    # deterministic value-dependent transform so refresh is observable.
+    monkeypatch.setattr(
+        b12x,
+        "flashinfer_convert_sf_to_mma_layout",
+        lambda t, m, k, num_groups: t.float().clone(),
+    )
+    build_calls = []
+    monkeypatch.setattr(
+        b12x.FlashInferB12xExperts,
+        "_build_wrapper",
+        lambda self: build_calls.append(1) or object(),
+        raising=False,
+    )
+
+    layer = _B12xLayer()
+
+    experts_a = _make_b12x_experts(layer)
+    experts_a.process_weights_after_loading(layer)
+
+    names = ("fc2_input_scale", "w1_sf_mma", "w2_sf_mma")
+    ptrs = {n: getattr(layer, n).data_ptr() for n in names}
+    for n in names:
+        assert isinstance(getattr(layer, n), torch.nn.Parameter)
+    # w13_weight_scale (2.0) baked with scale_2 (3.0) -> 6.0.
+    assert torch.equal(layer.w1_sf_mma, torch.full_like(layer.w1_sf_mma, 6.0))
+    wrapper = experts_a._wrapper
+    assert wrapper is not None
+    assert layer._flashinfer_b12x_wrapper is wrapper
+    assert len(build_calls) == 1
+
+    # Simulate a weight reload: loaders restore checkpoint scale values, then
+    # a fresh experts object runs post-load processing again.
+    layer.w13_weight_scale.data = torch.full_like(layer.w13_weight_scale, 4.0)
+    layer.w13_weight_scale_2.data = torch.full_like(layer.w13_weight_scale_2, 3.0)
+    layer.w2_weight_scale.data = torch.full_like(layer.w2_weight_scale, 4.0)
+    layer.w2_weight_scale_2.data = torch.full_like(layer.w2_weight_scale_2, 3.0)
+
+    experts_b = _make_b12x_experts(layer)
+    experts_b.process_weights_after_loading(layer)
+
+    for n in names:
+        assert getattr(layer, n).data_ptr() == ptrs[n], n
+    # Rebuild refreshed the values in place: 4.0 * 3.0 = 12.0.
+    assert torch.equal(layer.w1_sf_mma, torch.full_like(layer.w1_sf_mma, 12.0))
+    assert torch.equal(layer.w2_sf_mma, torch.full_like(layer.w2_sf_mma, 12.0))
+    assert torch.equal(layer.fc2_input_scale, torch.ones_like(layer.fc2_input_scale))
+    # The experts attributes are the layer-registered tensors, and the
+    # flashinfer wrapper (whose workspaces graphs also capture) is reused.
+    assert experts_b._fc2_input_scale is layer.fc2_input_scale
+    assert experts_b.w1_sf_mma is layer.w1_sf_mma
+    assert experts_b.w2_sf_mma is layer.w2_sf_mma
+    assert experts_b._wrapper is wrapper
+    assert len(build_calls) == 1
