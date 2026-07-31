@@ -1672,28 +1672,38 @@ class TestPhantomRetractionIsLinear:
             tool_choice="auto",
         )
 
-    def test_retraction_work_is_linear(self, mock_tokenizer, monkeypatch):
-        """Doubling the prose may only double the events retraction looks at."""
-        scanned = 0
+    def test_retraction_window_stays_bounded(self, mock_tokenizer, monkeypatch):
+        """Each retraction may only look at its own call's events.
+
+        The fix records where a call's first event of the batch landed and
+        hands _retract_call that offset, so the slice it examines is a
+        couple of events wide however long the document is.  Rebuilding the
+        whole list instead -- or losing the bookkeeping that produces the
+        offset -- makes the window grow with the output, which is the
+        quadratic this guards.
+        """
+        windows: list[int] = []
         real = LlamaJsonParser._retract_call
 
-        def counting(out, start, dense_idx):
-            nonlocal scanned
-            scanned += len(out) - start
+        def measuring(out, start, dense_idx):
+            windows.append(len(out) - start)
             return real(out, start, dense_idx)
 
-        monkeypatch.setattr(LlamaJsonParser, "_retract_call", staticmethod(counting))
+        monkeypatch.setattr(LlamaJsonParser, "_retract_call", staticmethod(measuring))
 
-        counts = []
-        for count in (200, 400):
-            scanned = 0
+        widest = []
+        for count in (50, 400):
+            windows.clear()
             parser = LlamaJsonParser(mock_tokenizer)
             parser.extract_tool_calls(self._document(count), self._request())
-            counts.append(scanned)
+            # Liveness: an implementation that never retracts would make
+            # every assertion below vacuous.
+            assert len(windows) == count
+            widest.append(max(windows))
 
-        # Linear would double; quadratic would quadruple. Allow generous
-        # slack for per-call constants but not for a growth-rate change.
-        assert counts[1] <= 3 * counts[0] + 100
+        # An eightfold longer document must not widen the window at all.
+        assert widest[1] == widest[0]
+        assert widest[1] <= 8
 
     @pytest.mark.parametrize("count", [1, 5, 50])
     def test_prose_json_is_returned_as_content(self, mock_tokenizer, count):
