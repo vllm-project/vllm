@@ -68,6 +68,11 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
 
+# The event loop only keeps weak references to tasks, so a task whose only
+# reference is the create_task() call can be collected before it finishes.
+# Hold a strong reference until it completes.
+_background_tasks: set[asyncio.Task] = set()
+
 AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -1054,9 +1059,11 @@ class AsyncMPClient(MPClient):
                             notification_data = outputs.utility_output.result.result
                             assert isinstance(notification_data, Sequence)
                             assert len(notification_data) == 2
-                            asyncio.create_task(
+                            task = asyncio.create_task(
                                 notification_callback_handler(_self, notification_data)
                             )
+                            _background_tasks.add(task)
+                            task.add_done_callback(_background_tasks.discard)
                         elif outputs.utility_output.call_id == FT_STATUS_CALL_ID:
                             _self = _self_ref()
                             if not _self:

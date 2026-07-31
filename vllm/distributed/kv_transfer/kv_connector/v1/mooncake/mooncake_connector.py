@@ -66,6 +66,11 @@ from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
 
+# The event loop only keeps weak references to tasks, so a task whose only
+# reference is the create_task() call can be collected before it finishes.
+# Hold a strong reference until it completes.
+_background_tasks: set[asyncio.Task] = set()
+
 try:
     from mooncake.engine import TransferEngine
 except ImportError:
@@ -1960,9 +1965,11 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
     async def handle_new_engine_id(
         self,
@@ -1991,9 +1998,11 @@ class MooncakeConnectorWorker:
     ):
         for remote_engine_id, pull_metas in reqs_to_recv.items():
             if remote_engine_id not in self._remote_agents:
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self.handle_new_engine_id(remote_engine_id, pull_metas)
                 )
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
             else:
                 self.receive_kv(remote_engine_id, pull_metas)
 
