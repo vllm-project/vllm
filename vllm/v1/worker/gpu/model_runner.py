@@ -472,6 +472,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "enable_trace_replay": self.model_config.enable_trace_replay,
                 "reasoning_config": self.vllm_config.reasoning_config,
                 "return_sampling_mask": self.model_config.return_sampling_mask,
+                "detect_nans_in_logits": (
+                    self.observability_config.enable_detect_nans_in_logits
+                ),
             }
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
