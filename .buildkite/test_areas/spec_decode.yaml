@@ -69,7 +69,7 @@ steps:
 
 - label: Spec Decode Speculators + MTP
   key: spec-decode-speculators-mtp
-  timeout_in_minutes: 35
+  timeout_in_minutes: 50
   device: h200_35gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
