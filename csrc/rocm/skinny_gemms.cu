@@ -70,6 +70,15 @@ bool on_gfx12() {
   return result;
 }
 
+bool on_gfx120x() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx120") != std::string::npos;
+  }();
+  return result;
+}
+
 bool on_gfx1151() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
@@ -995,7 +1004,7 @@ __global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
 torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t logical_M, const int64_t CuCount) {
-  TORCH_CHECK(on_gfx12(), "swmmacGEMM is only supported on GFX12");
+  TORCH_CHECK(on_gfx120x(), "swmmacGEMM is only supported on GFX120x");
   TORCH_CHECK(in_b.scalar_type() == torch::kFloat16 ||
                   in_b.scalar_type() == torch::kBFloat16,
               "B must be FP16 or BF16");
