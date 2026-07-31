@@ -350,8 +350,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # For encoder attention
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+        is_encoder_attention = self.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        )
+        if is_encoder_attention:
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -362,14 +365,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
+        if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,
