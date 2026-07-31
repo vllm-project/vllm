@@ -24,6 +24,17 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
     and has_flashinfer()
 )
 
+# FlashInfer CUTLASS MXFP4 with MXFP8 activations runs on both Blackwell
+# device-capability families (sm100 and sm120).
+CUTLASS_MXFP4_MXFP8_AVAILABLE = (
+    current_platform.is_cuda()
+    and (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(120)
+    )
+    and has_flashinfer()
+)
+
 # ROCm platform and dependencies
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
@@ -58,6 +69,9 @@ if TRTLLM_GEN_MXFP8_AVAILABLE:
         Fp8QuantizationType,
         get_w2_permute_indices_with_cache,
     )
+
+if CUTLASS_MXFP4_MXFP8_AVAILABLE and not TRTLLM_GEN_MXFP4_AVAILABLE:
+    from flashinfer import mxfp8_quantize
 
 
 @dataclass
@@ -816,12 +830,8 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
 @pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
 @pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None), (1.702, 1.0, 7.0)])
 @pytest.mark.skipif(
-    not (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-        and has_flashinfer()
-    ),
-    reason="NVIDIA GPU sm100 and flashinfer are required for this test",
+    not CUTLASS_MXFP4_MXFP8_AVAILABLE,
+    reason="NVIDIA GPU sm100/sm120 family and flashinfer are required",
 )
 def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     topk: int,
@@ -1012,6 +1022,478 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
 
     # Allow some mismatch due to MXFP4 quantization
     check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)
+
+
+@pytest.mark.parametrize("topk", [1, 4])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("num_tokens", [128])
+# Small but aligned sizes: K=512 > 128 exercises the multi-tile scale layout
+# while keeping the einsum-based torch reference's memory footprint small
+# (reference_moe materializes [tokens, topk, rows, K] float32 gathers, which
+# at 3072x3072 would peak above 50 GiB).
+@pytest.mark.parametrize("intermediate_size,hidden_size", [(512, 512)])
+@pytest.mark.parametrize("alpha,beta,limit", [(None, None, None), (1.702, 1.0, 7.0)])
+@pytest.mark.parametrize("with_bias", [False, True])
+@pytest.mark.skipif(
+    not CUTLASS_MXFP4_MXFP8_AVAILABLE,
+    reason="NVIDIA GPU sm100/sm120 family and flashinfer are required",
+)
+def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe_via_ds4_converter(
+    topk: int,
+    num_experts: int,
+    num_tokens: int,
+    intermediate_size: int,
+    hidden_size: int,
+    alpha: float | None,
+    beta: float | None,
+    limit: float | None,
+    with_bias: bool,
+):
+    """End-to-end numerical check of the contiguous-[w1; w3] (DeepSeek/GLM/
+    MiMo-family) converter path: checkpoint-layout packed FP4 weights and
+    linear e8m0 scales go through convert_weight_to_mxfp4_moe_kernel_format
+    and the FlashInfer CUTLASS kernel, and the result is compared against a
+    dequantized torch reference that never touches the FlashInfer helpers.
+
+    alpha/beta/limit all-None exercises standard SwiGLU (the DS4-family
+    configuration: no quant-config activation overrides); the gpt-oss values
+    exercise the clamped variant. with_bias covers the converter's
+    None-tolerant bias handling in both directions.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    # Checkpoint layout: packed FP4 weights + linear (non-swizzled) e8m0
+    # scales, w13 rows contiguous [w1/gate; w3/up].
+    w13_q = torch.randint(
+        0,
+        256,
+        (num_experts, 2 * intermediate_size, hidden_size // 2),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w13_scale = torch.randint(
+        118,
+        123,
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w2_q = torch.randint(
+        0,
+        256,
+        (num_experts, hidden_size, intermediate_size // 2),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w2_scale = torch.randint(
+        118,
+        123,
+        (num_experts, hidden_size, intermediate_size // 32),
+        device=device,
+        dtype=torch.uint8,
+    )
+    if with_bias:
+        bias13 = (
+            torch.randn(
+                num_experts, 2 * intermediate_size, device=device, dtype=torch.bfloat16
+            )
+            * 10
+        )
+        bias2 = (
+            torch.randn(num_experts, hidden_size, device=device, dtype=torch.bfloat16)
+            * 10
+        )
+    else:
+        bias13 = None
+        bias2 = None
+    router_logits = torch.rand(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+
+    w13_ref = mxfp4_dequantize(w13_q.clone(), w13_scale.clone()).reshape(
+        num_experts, 2 * intermediate_size, hidden_size
+    )
+    w2_ref = mxfp4_dequantize(w2_q.clone(), w2_scale.clone()).reshape(
+        num_experts, hidden_size, intermediate_size
+    )
+    bias13_ref = (
+        bias13.to(torch.float32)
+        if bias13 is not None
+        else torch.zeros(
+            num_experts, 2 * intermediate_size, device=device, dtype=torch.float32
+        )
+    )
+    bias2_ref = (
+        bias2.to(torch.float32)
+        if bias2 is not None
+        else torch.zeros(num_experts, hidden_size, device=device, dtype=torch.float32)
+    )
+    # alpha/beta/limit None means standard SwiGLU: silu(gate) * up, which is
+    # the clamped reference with alpha=1, beta=0 and no limit.
+    ref = reference_moe(
+        router_logits.to(torch.float32),
+        topk,
+        num_experts,
+        hidden_states.to(torch.float32),
+        w13_ref,
+        bias13_ref,
+        w2_ref,
+        bias2_ref,
+        alpha if alpha is not None else 1.0,
+        beta if beta is not None else 0.0,
+        limit,
+        "mxfp8",
+        activation="swiglu",
+        use_interleaved_layout=False,
+    )
+
+    # The code under test: the production converter for this backend.
+    (conv_w13, conv_w2, conv_w13_scale, conv_w2_scale, conv_w13_bias, conv_w2_bias) = (
+        convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+            layer=torch.nn.Module(),
+            w13_weight=w13_q,
+            w2_weight=w2_q,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+            w13_bias=bias13,
+            w2_bias=bias2,
+        )
+    )
+    assert (conv_w13_bias is None) == (bias13 is None)
+    assert (conv_w2_bias is None) == (bias2 is None)
+
+    routing_weights = torch.nn.functional.softmax(
+        router_logits, dim=1, dtype=torch.float32
+    )
+    token_final_scales, token_selected_experts = torch.topk(
+        routing_weights, topk, dim=-1
+    )
+    token_final_scales = token_final_scales / token_final_scales.sum(
+        dim=-1, keepdim=True
+    )
+    token_selected_experts = token_selected_experts.to(torch.int).contiguous()
+
+    hidden_states_q, hidden_states_sf = mxfp8_quantize(hidden_states, True, 32)
+
+    def per_expert(value: float | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return torch.full((num_experts,), value, device=device)
+
+    fake_input_scale = torch.ones(num_experts, device=device)
+    quant_scales = [
+        conv_w13_scale.view(torch.int32),
+        fake_input_scale,
+        conv_w2_scale.view(torch.int32),
+        fake_input_scale,
+    ]
+
+    out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+    _ = flashinfer_cutlass_fused_moe(
+        input=hidden_states_q,
+        token_selected_experts=token_selected_experts,
+        token_final_scales=token_final_scales,
+        fc1_expert_weights=conv_w13.contiguous().view(torch.long),
+        fc2_expert_weights=conv_w2.contiguous().view(torch.long),
+        output_dtype=torch.bfloat16,
+        output=out,
+        quant_scales=quant_scales,
+        fc1_expert_biases=conv_w13_bias,
+        fc2_expert_biases=conv_w2_bias,
+        swiglu_alpha=per_expert(alpha),
+        swiglu_beta=per_expert(beta),
+        swiglu_limit=per_expert(limit),
+        tp_size=1,
+        tp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        use_mxfp8_act_scaling=True,
+        input_sf=hidden_states_sf,
+    )
+
+    # Allow some mismatch due to MXFP4 quantization
+    check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)
+
+
+@pytest.mark.parametrize("topk", [4])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("num_tokens", [128])
+# Small but aligned sizes; see the MXFP8 twin above for the rationale.
+@pytest.mark.parametrize("intermediate_size,hidden_size", [(512, 512)])
+@pytest.mark.parametrize("alpha,beta,limit", [(None, None, None), (1.702, 1.0, 7.0)])
+@pytest.mark.parametrize("with_bias", [False, True])
+@pytest.mark.skipif(
+    not HOPPER_MXFP4_BF16_AVAILABLE,
+    reason="nvidia gpu sm90 and flashinfer are required for this test",
+)
+def test_flashinfer_cutlass_mxfp4_bf16_fused_moe_via_ds4_converter(
+    topk: int,
+    num_experts: int,
+    num_tokens: int,
+    intermediate_size: int,
+    hidden_size: int,
+    alpha: float | None,
+    beta: float | None,
+    limit: float | None,
+    with_bias: bool,
+):
+    """BF16-activation twin of the DS4-converter test above (sm90 backend)."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    w13_q = torch.randint(
+        0,
+        256,
+        (num_experts, 2 * intermediate_size, hidden_size // 2),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w13_scale = torch.randint(
+        118,
+        123,
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w2_q = torch.randint(
+        0,
+        256,
+        (num_experts, hidden_size, intermediate_size // 2),
+        device=device,
+        dtype=torch.uint8,
+    )
+    w2_scale = torch.randint(
+        118,
+        123,
+        (num_experts, hidden_size, intermediate_size // 32),
+        device=device,
+        dtype=torch.uint8,
+    )
+    if with_bias:
+        bias13 = (
+            torch.randn(
+                num_experts, 2 * intermediate_size, device=device, dtype=torch.bfloat16
+            )
+            * 10
+        )
+        bias2 = (
+            torch.randn(num_experts, hidden_size, device=device, dtype=torch.bfloat16)
+            * 10
+        )
+    else:
+        bias13 = None
+        bias2 = None
+    router_logits = torch.rand(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+
+    w13_ref = mxfp4_dequantize(w13_q.clone(), w13_scale.clone()).reshape(
+        num_experts, 2 * intermediate_size, hidden_size
+    )
+    w2_ref = mxfp4_dequantize(w2_q.clone(), w2_scale.clone()).reshape(
+        num_experts, hidden_size, intermediate_size
+    )
+    bias13_ref = (
+        bias13.to(torch.float32)
+        if bias13 is not None
+        else torch.zeros(
+            num_experts, 2 * intermediate_size, device=device, dtype=torch.float32
+        )
+    )
+    bias2_ref = (
+        bias2.to(torch.float32)
+        if bias2 is not None
+        else torch.zeros(num_experts, hidden_size, device=device, dtype=torch.float32)
+    )
+    ref = reference_moe(
+        router_logits.to(torch.float32),
+        topk,
+        num_experts,
+        hidden_states.to(torch.float32),
+        w13_ref,
+        bias13_ref,
+        w2_ref,
+        bias2_ref,
+        alpha if alpha is not None else 1.0,
+        beta if beta is not None else 0.0,
+        limit,
+        "bf16",
+        activation="swiglu",
+        use_interleaved_layout=False,
+    )
+
+    (conv_w13, conv_w2, conv_w13_scale, conv_w2_scale, conv_w13_bias, conv_w2_bias) = (
+        convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+            layer=torch.nn.Module(),
+            w13_weight=w13_q,
+            w2_weight=w2_q,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+            w13_bias=bias13,
+            w2_bias=bias2,
+        )
+    )
+
+    routing_weights = torch.nn.functional.softmax(
+        router_logits, dim=1, dtype=torch.float32
+    )
+    token_final_scales, token_selected_experts = torch.topk(
+        routing_weights, topk, dim=-1
+    )
+    token_final_scales = token_final_scales / token_final_scales.sum(
+        dim=-1, keepdim=True
+    )
+    token_selected_experts = token_selected_experts.to(torch.int).contiguous()
+
+    def per_expert(value: float | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return torch.full((num_experts,), value, device=device)
+
+    out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+    _ = flashinfer_cutlass_fused_moe(
+        input=hidden_states,
+        token_selected_experts=token_selected_experts,
+        token_final_scales=token_final_scales,
+        fc1_expert_weights=conv_w13,
+        fc2_expert_weights=conv_w2,
+        output_dtype=torch.bfloat16,
+        output=out,
+        quant_scales=[conv_w13_scale.to(torch.uint8), conv_w2_scale.to(torch.uint8)],
+        fc1_expert_biases=conv_w13_bias,
+        fc2_expert_biases=conv_w2_bias,
+        swiglu_alpha=per_expert(alpha),
+        swiglu_beta=per_expert(beta),
+        swiglu_limit=per_expert(limit),
+        tp_size=1,
+        tp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        use_w4_group_scaling=True,
+    )
+
+    # Allow some mismatch due to MXFP4 quantization
+    check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)
+
+
+def test_gpt_oss_quant_config_supplies_clamped_swiglu_params():
+    """GptOssMxfp4MoEMethod must keep supplying gpt-oss's clamped-SwiGLU
+    parameters through its quant config: FlashInferExperts no longer
+    hardcodes them, so losing these would silently change gpt-oss
+    numerics."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+
+    fake_method = types.SimpleNamespace(
+        mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        w13_precision_config=None,
+        w2_precision_config=None,
+    )
+    fake_layer = types.SimpleNamespace(
+        w13_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+        w2_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+    )
+    quant_config = GptOssMxfp4MoEMethod.get_fused_moe_quant_config(
+        fake_method, fake_layer
+    )
+    assert quant_config is not None
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and has_flashinfer()),
+    reason="CUDA and flashinfer are required for FlashInferExperts",
+)
+@pytest.mark.parametrize("supplied", [False, True])
+def test_flashinfer_experts_swiglu_params_follow_quant_config(supplied: bool):
+    """FlashInferExperts honors quant-config-supplied gemm1 SwiGLU
+    parameters and leaves all three None (standard SwiGLU) when the quant
+    config supplies none — there are no model-specific defaults."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    num_experts, intermediate_size, hidden_size = 2, 128, 256
+    w1_scale = torch.zeros(
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    w2_scale = torch.zeros(
+        (num_experts, hidden_size, intermediate_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    extra = (
+        {"gemm1_alpha": 0.5, "gemm1_beta": 0.25, "gemm1_clamp_limit": 3.0}
+        if supplied
+        else {}
+    )
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=w1_scale, w2_scale=w2_scale, **extra
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=1,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+
+    if supplied:
+        for name, value in (
+            ("gemm1_alpha", 0.5),
+            ("gemm1_beta", 0.25),
+            ("gemm1_clamp_limit", 3.0),
+        ):
+            param = getattr(experts, name)
+            assert isinstance(param, torch.Tensor), f"{name} should be a tensor"
+            assert param.dtype == torch.float32
+            assert param.shape == (num_experts,)
+            assert torch.equal(
+                param.cpu(), torch.full((num_experts,), value, dtype=torch.float32)
+            ), f"{name} != {value}"
+    else:
+        assert experts.gemm1_alpha is None
+        assert experts.gemm1_beta is None
+        assert experts.gemm1_clamp_limit is None
 
 
 @pytest.mark.parametrize("topk", [1, 4])
