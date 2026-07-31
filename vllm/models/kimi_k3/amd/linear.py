@@ -63,6 +63,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.common.moe_padding import (
+    effective_moe_tp_size,
+    padded_moe_intermediate_size,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -165,6 +169,7 @@ class KimiMoE(nn.Module):
     def __init__(
         self,
         config: KimiLinearConfig,
+        vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
@@ -190,16 +195,12 @@ class KimiMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.num_shared_experts = config.num_shared_experts
         self.layer_idx = layer_idx
-        self.padded_moe_intermediate_size = moe_intermediate_size
-        min_moe_intermediate_per_partition = getattr(
-            config, "min_moe_intermediate_per_partition", 256
+        self.moe_tp_size = effective_moe_tp_size(vllm_config)
+        self.padded_moe_intermediate_size = padded_moe_intermediate_size(
+            moe_intermediate_size,
+            self.moe_tp_size,
+            getattr(config, "min_moe_intermediate_per_partition", 256),
         )
-        if self.tp_size > 1:
-            moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
-            if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
-                self.padded_moe_intermediate_size = (
-                    min_moe_intermediate_per_partition * self.tp_size
-                )
         activation_situ_beta = (
             config.activation_situ_beta if config.hidden_act == "situ" else None
         )
@@ -300,7 +301,7 @@ class KimiMoE(nn.Module):
             w13_weight.data.zero_()
             w2_weight.data.zero_()
             self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
+                moe_intermediate_size // self.moe_tp_size
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -530,6 +531,7 @@ class KimiDecoderLayer(nn.Module):
         ):
             self.block_sparse_moe = KimiMoE(
                 config=config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
