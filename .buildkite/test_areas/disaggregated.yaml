@@ -253,8 +253,7 @@ steps:
     ENABLE_HMA_FLAG: "1"
     DP_EP: "1"
     GPU_MEMORY_UTILIZATION: "0.9"
-    # 48B bf16 weights are ~92GiB, so a single H200 leaves no room for the KV
-    # cache. Shard P over TP2 and D over DP2+EP, and cap the 1M default context.
+    VLLM_SSM_CONV_STATE_LAYOUT: "DS"
     PREFILLER_TP_SIZE: "2"
     DECODER_TP_SIZE: "2"
     MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
