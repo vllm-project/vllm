@@ -169,7 +169,7 @@ def init_attn_backend(
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
-                cast(AttentionSpec, group.kv_cache_spec),
+                group.kv_cache_spec,
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support

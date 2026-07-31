@@ -58,7 +58,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -360,7 +360,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     def get_cudagraph_support(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
 

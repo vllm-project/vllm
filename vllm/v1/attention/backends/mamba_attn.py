@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
@@ -83,6 +83,7 @@ class BaseMambaAttentionMetadata:
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
+    kv_cache_spec: MambaSpec
     metadata_cls: type[M]
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -92,7 +93,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -107,7 +108,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_replayssm = vllm_config.cache_config.use_replayssm
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
 
-        assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
         if self.compilation_config.max_cudagraph_capture_size is not None:
