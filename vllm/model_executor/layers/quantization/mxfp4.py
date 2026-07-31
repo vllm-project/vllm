@@ -620,6 +620,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
+        if self.is_k3_situ_int4_gfx942:
+            # K3's AITER A16W4 kernel handles K3's native intermediate size
+            # (moe_intermediate 3072; e.g. 384/partition at TP8); the generic
+            # 256 round-up would inflate weights and OOM. AITER's
+            # resolve_flydsl_stage1_tile_n() already downgrades tile_n 256->128
+            # for such shapes, so 384 is served natively.
+            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,
