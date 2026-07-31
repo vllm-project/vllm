@@ -567,6 +567,16 @@ def _closeable_prefix(raw: str) -> tuple[int, str]:
     return best, best_closers
 
 
+def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
+    """Convert a named choice's bare parameter object to arguments."""
+    end, closers = _closeable_prefix(raw_args)
+    if partial:
+        return raw_args[:end]
+    if end == 0:
+        return "{}"
+    return raw_args[:end] + closers
+
+
 def _llama_arg_converter(raw_args: str, partial: bool) -> str:
     """Carve the arguments value out of the JSON envelope (verbatim,
     prefix-stable; see ``inkling._inkling_arg_converter`` for the full
@@ -633,6 +643,89 @@ def _array_items(raw: str, start: int, end: int) -> list[tuple[int, int]]:
     return items
 
 
+_ALL_JSON_TYPES = frozenset(
+    {"null", "boolean", "integer", "number", "string", "array", "object"}
+)
+
+
+def _json_type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def _declared_types(schema: object) -> set[str]:
+    """Return the JSON types permitted by *schema*.
+
+    Sibling constraints and ``allOf`` intersect; ``anyOf``/``oneOf`` union
+    their branches.  A schema with no type constraint permits every type,
+    unlike ``extract_types_from_schema``, whose fallback is string -- which
+    is why an integer under ``{}``, a ``const`` or a ``$ref`` used to be
+    rewritten as a string.
+    """
+    all_types = set(_ALL_JSON_TYPES)
+    if not isinstance(schema, dict):
+        return all_types
+
+    def widen(types: set[str]) -> set[str]:
+        # Every integer is a valid number, so a "number" schema accepts one.
+        if "number" in types:
+            types.add("integer")
+        return types
+
+    constraints: list[set[str]] = []
+    declared: set[str] = set()
+    type_value = schema.get("type")
+    if isinstance(type_value, str):
+        declared.add(type_value)
+    elif isinstance(type_value, list):
+        declared.update(t for t in type_value if isinstance(t, str))
+    if declared:
+        constraints.append(widen(declared))
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        constraints.append(widen({_json_type_name(v) for v in enum}))
+
+    if "const" in schema:
+        constraints.append(widen({_json_type_name(schema["const"])}))
+
+    for field in ("anyOf", "oneOf"):
+        choices = schema.get(field)
+        if isinstance(choices, list) and choices:
+            union: set[str] = set()
+            for choice in choices:
+                union |= _declared_types(choice)
+            constraints.append(union)
+
+    choices = schema.get("allOf")
+    if isinstance(choices, list) and choices:
+        conjunction = set(all_types)
+        for choice in choices:
+            conjunction &= _declared_types(choice)
+        constraints.append(conjunction)
+
+    allowed = all_types
+    for constraint in constraints:
+        allowed &= constraint
+    return allowed
+
+
+def _is_valid_for_schema_type(value: object, schema: dict) -> bool:
+    """Whether *value* already has a JSON type *schema* permits."""
+    return _json_type_name(value) in _declared_types(schema)
+
+
 def _collect_type_edits(
     raw: str,
     start: int,
@@ -664,6 +757,8 @@ def _collect_type_edits(
     try:
         value = json.loads(raw[start:end])
     except (json.JSONDecodeError, ValueError):
+        return
+    if _is_valid_for_schema_type(value, schema):
         return
     coerced, changed = ParserEngine._coerce_value(value, schema)
     if changed:
@@ -771,6 +866,8 @@ class LlamaJsonParser(ParserEngine):
         # _reset: the non-streaming path resets *after*
         # _check_skip_tool_parsing has run.
         self._forced_tool_choice: bool = False
+        # Named choices can be constrained to emit only bare parameters.
+        self._named_bare_args_name: str | None = None
         self._held_ws: list[str] = []
         self._arg_scans: dict[int, _ArgScan] = {}
         self._properties_cache: dict[str, dict] = {}
@@ -814,6 +911,45 @@ class LlamaJsonParser(ParserEngine):
             self._forced_tool_choice = tool_choice == "required" or isinstance(
                 tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
             )
+        self._named_bare_args_name = self._bare_args_tool_name(request)
+        self._arg_converter = (
+            _llama_bare_arg_converter
+            if self._named_bare_args_name is not None
+            else llama_json_config().arg_converter
+        )
+
+    @staticmethod
+    def _bare_args_tool_name(
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        """Return the selected name when guided output is bare parameters."""
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice is None or isinstance(tool_choice, str):
+            return None
+
+        from openai.types.responses import ToolChoiceFunction
+
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionNamedToolChoiceParam,
+        )
+
+        if isinstance(tool_choice, ToolChoiceFunction):
+            name = tool_choice.name
+        elif isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+            name = tool_choice.function.name
+        else:
+            return None
+
+        structured_outputs = getattr(request, "structured_outputs", None)
+        if getattr(structured_outputs, "structural_tag", None) is not None:
+            return None
+        text_format = getattr(getattr(request, "text", None), "format", None)
+        if (
+            getattr(structured_outputs, "json", None) is None
+            and getattr(text_format, "schema_", None) is None
+        ):
+            return None
+        return name or None
 
     def finish_streaming(self) -> DeltaMessage | None:
         delta = super().finish_streaming()
@@ -833,6 +969,8 @@ class LlamaJsonParser(ParserEngine):
         # "name" key nested inside the parameters object), gated on the
         # envelope classification: a name is only emitted once an args key
         # proves this is a call.
+        if self._named_bare_args_name is not None:
+            return self._named_bare_args_name
         return _envelope_name(self._tool_slots[idx].args)
 
     def _slot_args(self, dense_idx: int) -> str:
@@ -905,7 +1043,11 @@ class LlamaJsonParser(ParserEngine):
                     dense_idx < len(self._tool_slots)
                     and self._tool_slots[dense_idx].name_sent
                 )
-                if not slot_named and _envelope_name(accumulated) is None:
+                if (
+                    not slot_named
+                    and self._named_bare_args_name is None
+                    and _envelope_name(accumulated) is None
+                ):
                     # Phantom: retract this batch's (remapped) events for
                     # the call and restore the full text as content.
                     out = [
