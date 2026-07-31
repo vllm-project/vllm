@@ -370,6 +370,72 @@ class BlockPool:
             group_idx=kv_cache_group_id,
         )
 
+    def cache_decode_checkpoint(
+        self,
+        request: Request,
+        block: KVCacheBlock,
+        block_hash_with_group_id: BlockHashWithGroupId,
+        num_tokens: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> bool:
+        """Publish one exact, already-materialized recurrent-state checkpoint.
+
+        Unlike ``cache_full_blocks``, this inserts only the supplied hash alias.
+        Any other hashes owned by ``block`` remain intact.
+        """
+        assert self.enable_caching
+        assert not block.is_null and block.ref_cnt > 0
+        assert num_tokens > 0 and num_tokens % block_size == 0
+        assert get_group_id(block_hash_with_group_id) == kv_cache_group_id
+
+        block_hashes = resolve_block_hashes(
+            request.block_hashes, self.hash_block_size, block_size
+        )
+        block_idx = num_tokens // block_size - 1
+        assert 0 <= block_idx < len(block_hashes)
+        block_hash = block_hashes[block_idx]
+        assert block_hash_with_group_id == make_block_hash_with_group_id(
+            block_hash, kv_cache_group_id
+        )
+
+        if self.cached_block_hash_to_block.contain(
+            block_hash_with_group_id, block.block_id
+        ):
+            return False
+
+        self._insert_block_hash(
+            block_hash_with_group_id,
+            block,
+            num_tokens=num_tokens,
+        )
+        if self.enable_kv_cache_events:
+            parent_block_hash = (
+                maybe_convert_block_hash(block_hashes[block_idx - 1])
+                if block_idx > 0
+                else None
+            )
+            block_start = num_tokens - block_size
+            extra_keys, _ = generate_block_hash_extra_keys(
+                request,
+                block_start,
+                num_tokens,
+                0,
+            )
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=block_start,
+                    end_token_idx=num_tokens,
+                    block_size=block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                )
+            )
+        return True
+
     def emit_cached_block_events(
         self,
         request: Request,

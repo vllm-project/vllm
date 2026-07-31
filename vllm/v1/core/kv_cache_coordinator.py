@@ -29,9 +29,43 @@ from vllm.v1.request import Request
 
 def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
+    retain_decode_checkpoints: bool,
+    enable_caching: bool,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> None:
+    if retain_decode_checkpoints:
+        if not enable_caching:
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
+                "prefix caching to be enabled."
+            )
+        if retention_interval != 0:
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
+                "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0."
+            )
+        mamba_specs = [
+            group.kv_cache_spec
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        ]
+        if not mamba_specs:
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires a "
+                "Mamba KV cache group."
+            )
+        if any(spec.mamba_cache_mode != "align" for spec in mamba_specs):
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires all "
+                "Mamba KV cache groups to use mamba_cache_mode='align'."
+            )
+        if any(spec.block_size != scheduler_block_size for spec in mamba_specs):
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires every "
+                "Mamba block size to equal scheduler_block_size."
+            )
+
     if retention_interval is None:
         return
 
@@ -123,8 +157,15 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        self.retain_decode_checkpoints = (
+            envs.VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS
+        )
         _validate_prefix_cache_retention_interval(
-            self.retention_interval, self.scheduler_block_size, kv_cache_config
+            self.retention_interval,
+            self.retain_decode_checkpoints,
+            self.enable_caching,
+            self.scheduler_block_size,
+            kv_cache_config,
         )
 
     def get_num_blocks_to_allocate(
@@ -286,6 +327,31 @@ class KVCacheCoordinator(ABC):
                 num_computed_tokens,
                 retention_interval=self.retention_interval,
             )
+
+    def update_decode_checkpoint_candidates(
+        self, request: Request, materialized_tokens: int
+    ) -> None:
+        """Privately retain newly materialized recurrent decode states."""
+        if not self.retain_decode_checkpoints:
+            return
+        for manager in self.single_type_managers:
+            manager.update_decode_checkpoint_candidate(request, materialized_tokens)
+
+    def finalize_decode_checkpoints(
+        self, request: Request, materialized_tokens: int, keep: bool
+    ) -> None:
+        """Publish stopped-finish candidates, or discard their private pins."""
+        managers = iter(self.single_type_managers)
+        try:
+            for manager in managers:
+                manager.finalize_decode_checkpoints(request, materialized_tokens, keep)
+        finally:
+            # A manager releases its own pins in a finally block. If promotion
+            # raises, discard candidates belonging to groups not yet visited.
+            for manager in managers:
+                manager.finalize_decode_checkpoints(
+                    request, materialized_tokens, keep=False
+                )
 
     def free(self, request_id: str) -> None:
         """
