@@ -137,12 +137,12 @@ def test_get_image_size_with_most_features(
     "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
-def test_make_input_norm(
+def test_mm_device_do_normalize(
     image_assets: ImageTestAssets,
     model_id: str,
     num_imgs: int,
 ):
-    """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
+    """Ensure that enable mm_device_do_normalize yields the correct result."""
 
     ctx = build_model_context(
         model_id,
