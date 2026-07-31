@@ -987,6 +987,12 @@ class VllmConfig:
             raise ValueError(
                 "sampling distribution replay does not support custom logits processors"
             )
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs' so that returned logprobs "
+                "are normalized over the same nucleus as the sampling mask"
+            )
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
