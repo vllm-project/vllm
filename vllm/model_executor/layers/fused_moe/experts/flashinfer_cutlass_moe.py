@@ -107,19 +107,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
             )
 
-        clamp = quant_config.gemm1_clamp_limit
-        if clamp is None:
-            clamp = moe_config.swiglu_limit
-        alpha = quant_config.gemm1_alpha
-        if alpha is None:
-            alpha = moe_config.swiglu_alpha
-        beta = quant_config.gemm1_beta
-        if beta is None:
-            beta = moe_config.swiglu_beta
-
-        self.gemm1_clamp_limit = _per_expert(clamp)
-        self.gemm1_alpha = _per_expert(alpha)
-        self.gemm1_beta = _per_expert(beta)
+        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
+        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
+        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
 
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
