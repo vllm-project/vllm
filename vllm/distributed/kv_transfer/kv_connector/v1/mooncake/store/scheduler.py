@@ -78,6 +78,7 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -402,6 +403,12 @@ class MooncakeStoreScheduler:
                     )
                 )
 
+        # Finish-time handoffs arrive after the producing step's metadata was
+        # built. Keep their metadata across request cleanup and emit it now.
+        for req_meta in self._finished_partial_tail_metas.values():
+            meta.add_request(req_meta)
+        self._finished_partial_tail_metas.clear()
+
         self._reference_save_blocks(meta)
         return meta
 
@@ -433,10 +440,47 @@ class MooncakeStoreScheduler:
             # successful offset, which lags the scheduler's whenever a save was
             # skipped or failed, so it may read anywhere below the range.
             block_ids += [bid for group in req_meta.block_ids for bid in group]
+            # Finish-time partial tails point into the request table, unlike
+            # CoW tails. Pin each physical block only once in either case.
+            block_ids = list(dict.fromkeys(block_ids))
             if not block_ids:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[bid] for bid in block_ids])
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Queue a finish-time tail until the next step can pin its store job."""
+        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError(
+                "Partial-tail offloads for one request must share a boundary"
+            )
+        boundary_tokens = next(iter(boundaries))
+        if boundary_tokens > tracker.prefill_end_tokens:
+            return False
+        self._finished_partial_tail_metas[request.request_id] = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            block_ids=tuple(group.copy() for group in block_ids),
+            block_hashes=list(request.block_hashes),
+            can_save=True,
+            num_prompt_tokens=tracker.prefill_end_tokens,
+            partial_tail_offloads=partial_tail_offloads,
+        )
+        tracker.has_pending_offload = True
+        # The per-job pin is taken while building the next step's metadata.
+        # Until then, retain the request so its table source cannot be reused.
+        return True
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Drop the block references of store jobs every rank has finished."""

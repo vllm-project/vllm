@@ -148,6 +148,26 @@ KVConnectorFactory.register_connector(
 )
 
 
+def test_register_finished_partial_tail_notifies_every_connector():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    connector._connectors = [first, second]
+    request = MagicMock()
+    block_ids = ([1], [2])
+    offloads = [(1, 2, 12)]
+
+    assert connector.register_finished_partial_tail(request, block_ids, offloads)
+    first.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
+    second.register_finished_partial_tail.assert_called_once_with(
+        request, block_ids, offloads
+    )
+
+
 @pytest.fixture
 def mc() -> MultiConnector:
     """MultiConnector using two mocked connectors"""

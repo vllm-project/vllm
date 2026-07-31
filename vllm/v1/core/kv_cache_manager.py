@@ -882,6 +882,29 @@ class KVCacheManager:
                 )
         return offloads
 
+    def finalize_partial_tail_offloads(
+        self, request: Request
+    ) -> list[tuple[int, int, int]]:
+        """Consume safe producer partial tails when a request finishes.
+
+        A mamba align table block is a valid boundary source only if no later
+        token was forwarded. The connector queues the exact table block before
+        request cleanup, and delayed request cleanup keeps it alive until the
+        connector reports the save complete.
+        """
+        offloads: list[tuple[int, int, int]] = []
+        for mgr in self.coordinator.single_type_managers:
+            finalized = mgr.finalize_partial_tail_offload(
+                request.request_id,
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+            )
+            if finalized is None:
+                continue
+            group_id, block, boundary_tokens = finalized
+            offloads.append((group_id, block.block_id, boundary_tokens))
+        return offloads
+
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
         self.coordinator.new_step_starts()
