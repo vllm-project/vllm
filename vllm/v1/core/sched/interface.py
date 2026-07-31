@@ -9,6 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -234,6 +235,10 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def get_kv_cache_usage(self) -> float:
+        """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+        return 0.0
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
@@ -251,4 +256,7 @@ class SchedulerInterface(ABC):
         return None
 
     def get_ec_connector(self) -> "ECConnectorBase | None":
+        return None
+
+    def get_kv_event_publisher_config(self) -> "KVEventsConfig | None":
         return None

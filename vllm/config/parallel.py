@@ -687,6 +687,14 @@ class ParallelConfig:
         )
 
     @property
+    def use_all2all(self) -> bool:
+        return (
+            self.data_parallel_size > 1
+            or self.use_sequence_parallel_moe
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
+        )
+
+    @property
     def use_batched_dp_moe(self) -> bool:
         return (
             self.all2all_backend
@@ -786,6 +794,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -1018,11 +1027,6 @@ class ParallelConfig:
             logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
-            )
-        if self.nnodes > 1:
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce since we are running on multi-node."
             )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
