@@ -13,7 +13,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
-    QueryLenSupport,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -49,8 +48,35 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._reserve_attn_logits_workspace()
+
+    def _reserve_attn_logits_workspace(self) -> None:
+        """Pre-size the shared workspace for the decode split-KV attn logits.
+        Reserving at the worst case (max_model_len -> max num_kv_splits,
+        max_num_seqs decode tokens) before warmup/cudagraph capture means the
+        per-call ``get_simultaneous`` in ``forward_mqa`` never has to grow the
+        buffer at runtime (which would raise once the workspace is locked).
+        """
+        if not is_workspace_manager_initialized():
+            return
+        # Decode reorder threshold is 1, so decode tokens <= max_num_seqs.
+        B = self.vllm_config.scheduler_config.max_num_seqs
+        # DCP all-gathers the query heads before forward_mqa.
+        q_num_heads = self.num_heads * self.dcp_world_size
+        max_splits = _compute_num_kv_splits(
+            self.model_config.max_model_len,
+            current_platform.num_compute_units(),
+        )
+        lse_dim = self.mla_dims.kv_lora_rank + 1
+        current_workspace_manager().get_simultaneous(
+            ((B, q_num_heads, max_splits, lse_dim), torch.float32),
+        )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -247,23 +273,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B = q.shape[0]
         q_num_heads = q.shape[1]
 
-        # Flatten multi-token decode queries (speculative decoding).
-        # The Triton decode kernel assumes 1 token per batch item, so we
-        # tile block_table and expand seq_lens to match total_tokens.
-        num_decodes = attn_metadata.num_decodes
-        query_len = B // num_decodes
-        block_table = attn_metadata.decode.block_table
-        seq_lens = attn_metadata.decode.seq_lens
-
-        if query_len > 1:
-            block_table = block_table.repeat_interleave(query_len, dim=0)
-            offsets = torch.arange(
-                query_len, device=seq_lens.device, dtype=seq_lens.dtype
-            )
-            seq_lens = (seq_lens[:, None] - query_len + offsets[None, :] + 1).reshape(
-                -1
-            )
-
         o = torch.zeros(
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
@@ -318,8 +327,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             kv_c_cache,
             o,
             lse,
-            block_table,
-            seq_lens,
+            attn_metadata.decode.block_table,
+            attn_metadata.decode.seq_lens,
             attn_logits,
             num_kv_splits,
             self.scale,

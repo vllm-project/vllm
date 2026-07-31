@@ -52,15 +52,6 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # FA-MLA places no head-size restriction: supports_combination only
-        # gates on device capability, and the qk_rope_head_dim=0 only_qv mode
-        # (headdim_v = kv_lora_rank, kHeadDimV>=256) covers non-DeepSeek widths
-        # such as 256. Returning [] here lets the metadata guard consult FA's
-        # own policy instead of MLACommonBackend's [320, 512, 576].
-        return []
-
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
@@ -104,9 +95,6 @@ class FlashAttnMLABackend(MLACommonBackend):
     ) -> str | None:
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"
-
-        # Note: When qk_rope_head_dim=0, FA3 uses the only_qv mode where
-        # Q and K are dummy tensors and attention scores come from Qv @ V.
         return None
 
 
@@ -121,16 +109,7 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
 
 @dataclass
 class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
-    def __post_init__(self):
-        # Consult FA-MLA's own head-size policy rather than the base
-        # MLACommonBackend [320, 512, 576] guard, which would wrongly reject
-        # non-DeepSeek MLA widths (e.g. head_dim 256 with qk_rope_head_dim=0).
-        if self.head_dim is not None and not FlashAttnMLABackend.supports_head_size(
-            self.head_dim
-        ):
-            raise ValueError(
-                f"Head dimension {self.head_dim} is not supported by FlashAttn-MLA."
-            )
+    pass
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
@@ -198,18 +177,13 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         max_num_splits,
     ):
         if self.fa_aot_schedule:
-            # When qk_rope_head_dim=0, FA3 uses only_qv mode with a dummy Q
-            # of headdim=64 (required by kernel: kHeadDim==64 && kHeadDimV>=256).
-            headdim = self.mla_dims.qk_rope_head_dim
-            if headdim == 0:
-                headdim = 64
             return get_scheduler_metadata(
                 batch_size=num_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=max_seq_len,
                 num_heads_q=self.num_heads * self.dcp_world_size,
                 num_heads_kv=1,
-                headdim=headdim,
+                headdim=self.mla_dims.qk_rope_head_dim,
                 cache_seqlens=seqlens,
                 qkv_dtype=self.kv_cache_spec.dtype,
                 headdim_v=self.mla_dims.kv_lora_rank,
@@ -364,32 +338,6 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
 
-        # When qk_rope_head_dim=0, use FA3's only_qv mode:
-        # attention scores come from Qv @ V instead of Q_rope @ K_rope.
-        only_qv = self.qk_rope_head_dim == 0
-        if only_qv:
-            # FA3 kernel requires kHeadDim==64 for HasQv path.
-            # Create dummy Q and K tensors with headdim=64; the kernel
-            # ignores their values when only_qv=True.
-            dummy_headdim = 64
-            q_pe = torch.empty(
-                *q_nope.shape[:-1],
-                dummy_headdim,
-                dtype=q_nope.dtype,
-                device=q_nope.device,
-            )
-            k_pe_cache = torch.empty(
-                *kv_c_cache.shape[:-1],
-                dummy_headdim,
-                dtype=kv_c_cache.dtype,
-                device=kv_c_cache.device,
-            )
-            # softmax_scale must use Qv's headdim (kv_lora_rank),
-            # not the dummy Q's headdim.
-            softmax_scale = self.kv_lora_rank ** (-0.5)
-        else:
-            softmax_scale = self.scale
-
         # NOTE(matt): During CUDA graph capture, max_query_len can be 0, but the
         # kernel uses this to calculate grid dimensions. Ensure it's at least 1
         # to prevent invalid grid configuration during graph capture.
@@ -405,13 +353,12 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             max_seqlen_k=attn_metadata.decode.max_seq_len,
             seqused_k=attn_metadata.decode.seq_lens,
             block_table=attn_metadata.decode.block_table,
-            softmax_scale=softmax_scale,
+            softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=self.need_to_return_lse_for_decode,
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
-            only_qv=only_qv,
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,

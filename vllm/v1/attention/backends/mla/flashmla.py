@@ -95,8 +95,6 @@ class FlashMLABackend(MLACommonBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # Note: FlashMLA kernel supports head_dim_k=512 (no RoPE) and
-        # head_dim_k=576 (512 NoPE + 64 RoPE) via the patched kernel.
         if use_sparse:
             from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 
