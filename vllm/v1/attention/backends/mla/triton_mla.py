@@ -58,6 +58,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
     def _reserve_attn_logits_workspace(self) -> None:
         """Pre-size the shared workspace for the decode split-KV attn logits.
+
         Reserving at the worst case (max_model_len -> max num_kv_splits,
         max_num_seqs decode tokens) before warmup/cudagraph capture means the
         per-call ``get_simultaneous`` in ``forward_mqa`` never has to grow the
@@ -272,7 +273,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         q_num_heads = q.shape[1]
-
         o = torch.zeros(
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
