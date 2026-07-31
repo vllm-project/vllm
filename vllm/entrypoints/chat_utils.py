@@ -1333,11 +1333,10 @@ def validate_chat_template(chat_template: Path | str | None):
 
             builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
             if not builtin_template_path.exists():
-                raise VLLMValidationError(
+                raise ValueError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}",
-                    parameter="chat_template",
+                    f"Tried: {chat_template} and {builtin_template_path}"
                 )
 
     else:
@@ -1385,7 +1384,7 @@ def _load_chat_template(
                     f"Tried: {chat_template} and {builtin_template_path}. "
                     f"Reason: {e}"
                 )
-                raise VLLMValidationError(msg, parameter="chat_template") from e
+                raise ValueError(msg) from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
