@@ -106,9 +106,9 @@ class _BlocksMock:
 
 
 def _stub_sw_clipping(scheduler) -> None:
-    """Make ``get_sw_clipped_blocks`` a passthrough so tests don't need
-    the full sliding-window machinery."""
-    scheduler.get_sw_clipped_blocks = lambda block_ids: block_ids
+    """Make ``get_exchange_clipped_blocks`` a passthrough so tests don't
+    need the full sliding-window machinery."""
+    scheduler.get_exchange_clipped_blocks = lambda block_ids, clip_ssm=True: block_ids
 
 
 # ----------------------------------------------------------------- #

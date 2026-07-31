@@ -4,8 +4,7 @@
 
 import contextlib
 import json
-from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -14,6 +13,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     _FP8_AMAX_HISTORY_LEN,
     _FP8_MAX,
 )
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
@@ -29,8 +29,17 @@ NUM_HEADS = 16
 HEAD_DIM = 72
 
 
+def _is_mi3xx() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_mi3xx
+
+    return on_mi3xx()
+
+
 @contextlib.contextmanager
-def _build_attention(mm_config):
+def _build_attention(mm_config, attn_backend=None):
     """Yield an MMEncoderAttention with the given multimodal config.
 
     The VllmConfig context stays active while the test runs so that
@@ -38,25 +47,31 @@ def _build_attention(mm_config):
     invokes ``process_weights_after_loading`` to simulate the model loader's
     auto-scan. Yields ``None`` if FlashInfer cuDNN is not available.
     """
-    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
     )
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
+    if attn_backend is None:
+        attn_backend = AttentionBackendEnum.FLASHINFER
+
+    if (
+        attn_backend == AttentionBackendEnum.FLASHINFER
+        and not is_flashinfer_cudnn_fp8_prefill_attn_supported()
+    ):
         yield None
         return
 
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
+    vllm_config.model_config = MagicMock(spec=ModelConfig, multimodal_config=mm_config)
 
     with (
         set_current_vllm_config(vllm_config),
         patch(
             "vllm.model_executor.layers.attention.mm_encoder_attention"
             ".get_vit_attn_backend",
-            return_value=AttentionBackendEnum.FLASHINFER,
+            return_value=attn_backend,
         ),
     ):
         attn = MMEncoderAttention(
@@ -169,9 +184,34 @@ def test_static_scales_loaded(_make_static_attention) -> None:
     assert not hasattr(attn, "_fp8_q_amax")
 
 
+@pytest.mark.skipif(
+    not _is_mi3xx(),
+    reason="AITER FP8 attention requires MI300/MI350",
+)
+def test_aiter_static_scales_loaded(tmp_path) -> None:
+    """Verify AITER reuses the existing static FP8 scale loading path."""
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    scale_file = tmp_path / "aiter_scales.json"
+    scale_file.write_text(json.dumps({LAYER_0: {"q": 224.0, "k": 198.0, "v": 210.0}}))
+    mm_config = MultiModalConfig(
+        mm_encoder_attn_dtype="fp8",
+        mm_encoder_fp8_scale_path=str(scale_file),
+    )
+
+    with _build_attention(mm_config, AttentionBackendEnum.ROCM_AITER_FA) as attn:
+        assert attn is not None
+        assert attn.fp8_enabled
+        assert not attn._fp8_dynamic_scale
+        assert attn._fp8_q_scale.item() == 224.0
+        assert attn._fp8_k_scale.item() == 198.0
+        assert attn._fp8_v_scale.item() == 210.0
+
+
 def test_static_scales_missing_layer(tmp_path) -> None:
     """Verify error when requested layer is not in the scale file."""
-    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.config.multimodal import MultiModalConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -187,7 +227,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
         mm_encoder_fp8_scale_path=str(scale_file),
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
+    vllm_config.model_config = MagicMock(spec=ModelConfig, multimodal_config=mm_config)
 
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,

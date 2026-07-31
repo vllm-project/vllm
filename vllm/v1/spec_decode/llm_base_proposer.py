@@ -1006,11 +1006,11 @@ class SpecDecodeBaseProposer:
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
-            # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
-            # norm hidden, so its forward returns (logit_hidden,
-            # recycle_hidden). Other MTP families return a single tensor.
-            return "DeepSeekMTPModel" in (
-                self.draft_model_config.hf_config.architectures or []
+            # These models return separate hidden states for logits and for
+            # feedback into the next draft step.
+            architectures = self.draft_model_config.hf_config.architectures or []
+            return bool(
+                {"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures)
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 
@@ -1386,7 +1386,10 @@ class SpecDecodeBaseProposer:
                 self.model.config.image_token_index = (
                     target_model.config.vision_config.image_token_id
                 )
-            elif self.get_model_name(target_model) == "KimiK25ForConditionalGeneration":
+            elif self.get_model_name(target_model) in (
+                "KimiK25ForConditionalGeneration",
+                "KimiK3ForConditionalGeneration",
+            ):
                 self.model.config.image_token_index = (
                     target_model.config.media_placeholder_token_id
                 )

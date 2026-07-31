@@ -159,6 +159,7 @@ def test_pooling_runner_rejects_unsupported_selected_task() -> None:
     }
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "encoder_only"
     vllm_config.model_config.get_pooling_task.return_value = "embed&token_classify"
 
     with (
@@ -166,3 +167,43 @@ def test_pooling_runner_rejects_unsupported_selected_task() -> None:
         pytest.raises(ValueError, match="selects 'embed&token_classify'"),
     ):
         PoolingRunner(model, vllm_config)
+
+
+def test_pooling_runner_supports_encoder_token_classification() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "encoder_only"
+    vllm_config.model_config.get_pooling_task.return_value = "token_classify"
+
+    runner = PoolingRunner(model, vllm_config)
+
+    assert runner.supported_tasks == {"token_classify"}
+
+
+def test_pooling_runner_rejects_decoder_token_classification() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "decoder"
+    vllm_config.model_config.get_pooling_task.return_value = "token_classify"
+
+    with pytest.raises(ValueError, match="selects 'token_classify'") as exc_info:
+        PoolingRunner(model, vllm_config)
+
+    assert "Set an explicitly supported task" not in str(exc_info.value)
+
+
+def test_pooling_runner_filters_decoder_token_classification() -> None:
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"embed", "token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+    vllm_config.model_config.attn_type = "decoder"
+    vllm_config.model_config.get_pooling_task.return_value = "embed"
+
+    runner = PoolingRunner(model, vllm_config)
+
+    assert runner.supported_tasks == {"embed"}

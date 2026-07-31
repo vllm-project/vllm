@@ -23,9 +23,10 @@ steps:
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
-  - tests/test_jit_monitor.py
+  - tests/jit_monitor/test_hooks.py
+  - tests/jit_monitor/test_hooks_gpu.py
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   mirror:
     amd:
       dind: false

@@ -1182,15 +1182,7 @@ def test_fused_marlin_moe_non_gated(
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 
-@pytest.mark.parametrize(
-    "activation",
-    [
-        MoEActivation.SILU,
-        MoEActivation.RELU2_NO_MUL,
-    ],
-    ids=["gated", "non_gated"],
-)
-def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
+def _make_humming_indexed_experts(activation: MoEActivation):
     pytest.importorskip("humming")
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         HummingIndexedExperts,
@@ -1245,14 +1237,6 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
     )
 
-    w13_meta, w2_meta = (layer.humming_metas[name] for name in ("w13", "w2"))
-    for meta in (w13_meta, w2_meta):
-        assert meta.a_dtype == humming.dtypes.bfloat16
-        assert meta.b_dtype == humming.dtypes.float4e2m1
-
-    assert w13_meta.shape_n - w13_meta.pad_shape_n == gate_up_size
-    assert w2_meta.shape_k - w2_meta.pad_shape_k == intermediate_size
-
     layer.local_num_experts = layer.global_num_experts = num_experts
     layer.hidden_size = hidden_size
     layer.intermediate_size_per_partition = intermediate_size
@@ -1262,6 +1246,36 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         moe_config,
         quant_config,
     )
+    return experts
+
+
+@pytest.mark.parametrize(
+    "activation",
+    [
+        MoEActivation.SILU,
+        MoEActivation.RELU2_NO_MUL,
+    ],
+    ids=["gated", "non_gated"],
+)
+def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
+    from vllm.utils import humming
+
+    experts = _make_humming_indexed_experts(activation)
+    layer = experts.layer
+    moe_config = experts.moe_config
+    top_k = moe_config.experts_per_token
+    num_experts = moe_config.num_experts
+    hidden_size = moe_config.hidden_dim
+    intermediate_size = moe_config.intermediate_size
+    gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
+
+    w13_meta, w2_meta = (layer.humming_metas[name] for name in ("w13", "w2"))
+    for meta in (w13_meta, w2_meta):
+        assert meta.a_dtype == humming.dtypes.bfloat16
+        assert meta.b_dtype == humming.dtypes.float4e2m1
+
+    assert w13_meta.shape_n - w13_meta.pad_shape_n == gate_up_size
+    assert w2_meta.shape_k - w2_meta.pad_shape_k == intermediate_size
 
     buffer_metas, _ = experts.get_buffer_metas(
         M=1,
@@ -1276,6 +1290,64 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         w2=torch.empty(num_experts, 1),
         topk_ids=torch.empty(1, top_k, dtype=torch.long),
     ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
+def test_humming_indexed_writes_supplied_output_buffer():
+    from vllm.forward_context import set_forward_context
+
+    activation = MoEActivation.SILU
+    experts = _make_humming_indexed_experts(activation)
+    moe_config = experts.moe_config
+    num_tokens = 1
+    top_k = moe_config.experts_per_token
+    hidden_size = moe_config.hidden_dim
+    num_experts = moe_config.num_experts
+    workspace13_shape, workspace2_shape, _ = experts.workspace_shapes(
+        M=num_tokens,
+        N=moe_config.intermediate_size,
+        K=hidden_size,
+        topk=top_k,
+        global_num_experts=num_experts,
+        local_num_experts=num_experts,
+        expert_tokens_meta=None,
+        activation=activation,
+    )
+
+    device = torch.device("cuda")
+    dtype = experts.layer.params_dtype
+    workspace13 = torch.empty(workspace13_shape, dtype=dtype, device=device)
+    workspace2 = torch.empty(workspace2_shape, dtype=dtype, device=device)
+    hidden_states = torch.ones((num_tokens, hidden_size), dtype=dtype, device=device)
+    output = torch.full_like(hidden_states, torch.nan)
+    topk_weights = torch.full(
+        (num_tokens, top_k),
+        1 / top_k,
+        dtype=dtype,
+        device=device,
+    )
+    topk_ids = torch.arange(top_k, dtype=torch.int32, device=device).unsqueeze(0)
+    unused = torch.empty((num_experts, 0), device=device)
+
+    with set_forward_context(None, vllm_config, num_tokens=num_tokens):
+        experts.apply(
+            output=output,
+            hidden_states=hidden_states,
+            w1=unused,
+            w2=unused,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+
+    assert torch.isfinite(output).all()
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])

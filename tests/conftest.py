@@ -66,6 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -543,9 +544,15 @@ class HfRunner:
             # it will call torch.accelerator.device_count()
             from transformers import AutoProcessor
 
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+            # A concurrent refresh of the shared HF cache can briefly hide
+            # processor configuration files. Retry just as model config loading
+            # does in vllm.transformers_utils.config.
+            self.processor = with_retry(
+                lambda: AutoProcessor.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                ),
+                f"Error loading processor for {model_name}",
             )
         if skip_tokenizer_init:
             if self.processor is None:

@@ -73,6 +73,17 @@ class MLAPrefillBackend(ABC):
         pass. Overridden by backends that support it."""
         return False
 
+    def supports_out(self) -> bool:
+        """Whether `run_prefill_new_tokens` honors a caller-provided `out`
+        tensor of shape `[num_tokens, num_heads, v_head_dim]`, writing the
+        final result into it in place.
+
+        When True, callers may pass `out` and skip the post-hoc
+        slice/flatten/copy. False for backends that ignore `out` or emit a
+        padded (`qk_head_dim`) output. Overridden by backends that support it.
+        """
+        return False
+
     @classmethod
     def validate_configuration(
         cls,

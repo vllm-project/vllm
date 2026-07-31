@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -68,7 +68,7 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,

@@ -12,13 +12,14 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config import VllmConfig
+from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core_client import DPAsyncMPClient
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
@@ -82,7 +83,7 @@ async def generate(
 async def test_load(
     model: str,
     output_kind: RequestOutputKind,
-    data_parallel_backend: str,
+    data_parallel_backend: DataParallelBackend,
     async_scheduling: bool,
 ):
     if async_scheduling and data_parallel_backend == "ray":
@@ -162,7 +163,8 @@ async def test_load(
         assert not engine.output_processor.has_unfinished_requests()
 
         # testing internals here which may break
-        core_client: DPAsyncMPClient = engine.engine_core
+        core_client = engine.engine_core
+        assert isinstance(core_client, DPLBAsyncMPClient)
         # the engines only synchronize stopping every N steps so
         # allow a small amount of time here.
         for _ in range(10):

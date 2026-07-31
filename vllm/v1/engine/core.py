@@ -1639,6 +1639,7 @@ class EngineCoreProc(EngineCore):
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
+            kv_events_config=self.scheduler.get_kv_event_publisher_config(),
         )
 
     def process_input_sockets(

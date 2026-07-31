@@ -135,7 +135,8 @@ def test_sparse_flashmla_decode_smoke():
     assert lse.shape[0] == batch_size
 
 
-def test_sparse_flashmla_prefill_smoke():
+@pytest.mark.parametrize("h_q", [64, 128])
+def test_sparse_flashmla_prefill_smoke(h_q: int):
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
@@ -143,22 +144,25 @@ def test_sparse_flashmla_prefill_smoke():
         pytest.skip(reason)
 
     device = torch.device("cuda")
+    torch.manual_seed(0)
     s_q = 1
-    s_kv = 1
-    h_q = 64  # kernel expects multiple of 64
+    s_kv = 8
     h_kv = 1
     d_qk = 576
     d_v = 512
     topk = 128
+    q = torch.randn((s_q, h_q, d_qk), dtype=torch.bfloat16, device=device)
+    kv = torch.randn((s_kv, h_kv, d_qk), dtype=torch.bfloat16, device=device)
+    indices = torch.randint(s_kv, (s_q, h_kv, topk), dtype=torch.int32, device=device)
+    reference_indices = indices.clone()
+    reference_indices[..., 1:] = -1
+    kwargs = {"topk_length": torch.ones(1, dtype=torch.int32, device=device)}
+    reference = fm.flash_mla_sparse_fwd(q, kv, reference_indices, 1.0, d_v, **kwargs)
+    actual = fm.flash_mla_sparse_fwd(q, kv, indices, 1.0, d_v, **kwargs)
 
-    q = torch.zeros((s_q, h_q, d_qk), dtype=torch.bfloat16, device=device)
-    kv = torch.zeros((s_kv, h_kv, d_qk), dtype=torch.bfloat16, device=device)
-    indices = torch.zeros((s_q, h_kv, topk), dtype=torch.int32, device=device)
-
-    out, max_logits, lse = fm.flash_mla_sparse_fwd(q, kv, indices, 1.0, d_v)
-    assert out.shape == (s_q, h_q, d_v)
-    assert max_logits.shape == (s_q, h_q)
-    assert lse.shape == (s_q, h_q)
+    for actual_tensor, reference_tensor in zip(actual, reference):
+        torch.testing.assert_close(actual_tensor, reference_tensor, rtol=0, atol=0)
+    assert actual[0].shape == (s_q, h_q, d_v)
 
 
 def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():

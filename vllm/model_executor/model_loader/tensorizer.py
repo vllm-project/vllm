@@ -66,6 +66,7 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
+_TENSORIZER_ENGINE_CLEANUP_GRACE_S = 10.0
 
 
 def is_valid_deserialization_uri(uri: str | None) -> bool:
@@ -730,10 +731,38 @@ def tensorize_vllm_model(
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine = LLMEngine.from_vllm_config(engine_config)
-    engine.collective_rpc(
-        "save_tensorized_model",
-        kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-    )
+    error: BaseException | None = None
+    try:
+        engine.collective_rpc(
+            "save_tensorized_model",
+            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
+        )
+    except BaseException as operation_error:
+        error = operation_error
+
+    def shutdown_engine_core() -> None:
+        engine.engine_core.shutdown(
+            timeout=(
+                envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+                + _TENSORIZER_ENGINE_CLEANUP_GRACE_S
+            )
+        )
+
+    for name, callback in (
+        ("renderer", engine.renderer.shutdown),
+        ("engine core", shutdown_engine_core),
+    ):
+        try:
+            callback()
+        except BaseException as shutdown_error:
+            logger.exception("Failed to shut down tensorization %s", name)
+            if error is None:
+                error = shutdown_error
+            elif hasattr(error, "add_note"):
+                error.add_note(f"{name} shutdown also failed: {shutdown_error!r}")
+
+    if error is not None:
+        raise error
 
 
 def tensorize_lora_adapter(lora_path: str, tensorizer_config: TensorizerConfig):

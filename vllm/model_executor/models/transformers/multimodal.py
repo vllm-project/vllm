@@ -402,7 +402,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         # For gemma3 we check `token_type_ids` as the key
         mm_token_type_ids = processed_data.pop("token_type_ids", None)

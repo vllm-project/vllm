@@ -266,13 +266,7 @@ def convert_to_int8_moe_kernel_format(
             quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
-    elif int8_backend == Int8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_int8_moe_layer_for_cpu,
-        )
-
-        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
-    elif int8_backend != Int8MoeBackend.TRITON:
+    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU):
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2

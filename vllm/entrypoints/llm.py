@@ -55,6 +55,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
+from ..renderers import ChatParams
 from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
@@ -351,6 +352,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
         self.input_processor = self.llm_engine.input_processor
+
+        self.renderer.warmup(ChatParams(chat_template=self.chat_template))
 
         # The renderer thread pool is only consumed by the async renderer
         # path; the synchronous `LLM` entrypoint runs multimodal

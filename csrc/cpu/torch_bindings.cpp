@@ -110,7 +110,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& g, const at::Tensor& beta,
     const at::Tensor& initial_state, bool output_final_state,
     const at::Tensor& cu_seqlens, bool head_first, bool use_qk_l2norm_in_kernel,
-    double eps = 1e-5);
+    const at::Tensor& initial_state_indices, double eps = 1e-5);
 
 at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
     const at::Tensor& A_log, const at::Tensor& dt_bias, const at::Tensor& q,
@@ -398,7 +398,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || defined(__AVX2__) ||                               \
     (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
-    defined(__riscv_v)
+    defined(__riscv_v) || defined(__s390x__)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -546,7 +546,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor g, Tensor beta, "
       "Tensor initial_state, bool output_final_state, Tensor cu_seqlens, bool "
       "head_first, "
-      "bool use_qk_l2norm_in_kernel, float eps=1e-5) -> (Tensor, Tensor)");
+      "bool use_qk_l2norm_in_kernel, Tensor initial_state_indices, float "
+      "eps=1e-5) -> (Tensor, Tensor)");
   ops.impl("chunk_gated_delta_rule_cpu", torch::kCPU,
            &chunk_gated_delta_rule_cpu);
   ops.def(

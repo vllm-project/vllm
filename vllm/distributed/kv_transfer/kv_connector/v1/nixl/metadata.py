@@ -180,6 +180,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        # The scheduler process's time.perf_counter() when this metadata was
+        # built. reqs_to_send deadlines are stamped with the scheduler's
+        # clock, which is NOT comparable across processes (perf_counter is
+        # process/boot-local): workers must rebase the remaining TTL onto
+        # their own clock via this reference. 0.0 = unset (legacy metadata).
+        self.scheduler_clock: float = 0.0
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.

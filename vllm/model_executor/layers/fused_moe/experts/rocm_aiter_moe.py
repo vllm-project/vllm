@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -262,6 +263,8 @@ def rocm_aiter_fused_experts(
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
         activation_interleave = False
+    elif activation == MoEActivation.SITU:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
@@ -356,10 +359,12 @@ def rocm_aiter_fused_experts(
         # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
         # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
         # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
-        hidden_pad = hidden_pad // 128 * 128
-        intermediate_pad = (
-            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
-        )
+        # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
+        if activation != MoEActivation.SITU:
+            hidden_pad = hidden_pad // 128 * 128
+            intermediate_pad = (
+                intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+            )
 
         # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
         # for interleaved vs separated gate and up weights.
@@ -370,7 +375,15 @@ def rocm_aiter_fused_experts(
         from aiter.ops.flydsl.moe_common import GateMode
 
         gate_mode = ""
-        if quant_config.use_mxfp4_w4a16:
+        if activation == MoEActivation.SITU:
+            # a8w4 (AITER_SITUV2_A8W4=1) uses the gate/up-interleaved (_gui_)
+            # fp8 flydsl kernels; default a16w4 SiTU stays separated.
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if envs.AITER_SITUV2_A8W4
+                else GateMode.SEPARATED.value
+            )
+        elif quant_config.use_mxfp4_w4a16:
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
             gate_mode = (
@@ -401,6 +414,8 @@ def rocm_aiter_fused_experts(
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            beta=moe_config.activation_situ_beta,
+            linear_beta=moe_config.activation_situ_linear_beta,
         )
 
 
@@ -457,11 +472,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        # CK MXFP4 MoE kernels are only supported on gfx950.
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
+            from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-            if not on_gfx950():
+            if not on_gfx950() or on_gfx1250():
                 return False
         return True
 

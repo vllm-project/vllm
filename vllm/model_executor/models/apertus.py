@@ -211,8 +211,8 @@ class ApertusAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.q_norm(q.contiguous().view(-1, self.head_dim)).view_as(q)
-        k = self.k_norm(k.contiguous().view(-1, self.head_dim)).view_as(k)
+        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view_as(q)
+        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view_as(k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

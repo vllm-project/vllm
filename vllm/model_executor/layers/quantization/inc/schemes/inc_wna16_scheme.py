@@ -7,7 +7,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
 
 from ..inc_linear import INCLinearMethod
 from .inc_scheme import INCScheme
@@ -97,8 +96,8 @@ class INCWna16Scheme(INCScheme):
         layer_config: "INCLayerConfig",
     ):
         del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        # CPU does not support quantized MoE yet.
+        if current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
@@ -120,21 +119,17 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    gptq_type_map = {
-        (4, True): scalar_types.uint4b8,
-        (8, True): scalar_types.uint8b128,
-    }
-    use_marlin = (layer_config.bits, layer_config.sym) in gptq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            gptq_type_map[(layer_config.bits, layer_config.sym)],
-            layer_config.group_size,
-            has_zp=not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
+    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
+    # check like compressed-tensors does; the capability-based
+    # check_marlin_supported is skipped so the XPU path is reachable.
+    use_marlin = (layer_config.bits, layer_config.sym) in {
+        (4, True),
+        (8, True),
+    } and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
         return AutoGPTQMoEMethod(
@@ -169,21 +164,12 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         MoeWNA16Method,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_marlin_supported,
         check_moe_marlin_supports_layer,
     )
 
-    awq_type_map = {
-        4: scalar_types.uint4,
-        8: scalar_types.uint8,
-    }
-    use_marlin = layer_config.bits in awq_type_map
-    if use_marlin:
-        use_marlin = check_marlin_supported(
-            awq_type_map[layer_config.bits],
-            layer_config.group_size,
-            not layer_config.sym,
-        ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+    use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
+        layer, layer_config.group_size
+    )
 
     if use_marlin:
         return AutoAWQMoEMethod(

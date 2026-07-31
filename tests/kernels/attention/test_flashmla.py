@@ -10,7 +10,9 @@ import torch
 from vllm.triton_utils import triton
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
+    flash_mla_with_kvcache_fp8,
     get_mla_metadata,
+    get_mla_metadata_dense_fp8,
     is_flashmla_dense_supported,
 )
 
@@ -86,9 +88,14 @@ def test_flash_mla(
         )
     blocked_v = blocked_k[..., :dv]
 
-    tile_scheduler_metadata, num_splits = get_mla_metadata(
-        cache_seqlens, s_q * h_q // h_kv, h_kv
-    )
+    if use_fp8:
+        tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(
+            cache_seqlens, s_q * h_q // h_kv, h_kv
+        )
+    else:
+        tile_scheduler_metadata, num_splits = get_mla_metadata(
+            cache_seqlens, s_q * h_q // h_kv, h_kv
+        )
 
     init_dtype = q.dtype
     if use_fp8:
@@ -104,6 +111,19 @@ def test_flash_mla(
         descale_k = None
 
     def flash_mla():
+        if use_fp8:
+            return flash_mla_with_kvcache_fp8(
+                q,
+                blocked_k,
+                block_table,
+                cache_seqlens,
+                dv,
+                tile_scheduler_metadata,
+                num_splits,
+                causal=causal,
+                descale_q=descale_q,
+                descale_k=descale_k,
+            )
         return flash_mla_with_kvcache(
             q,
             blocked_k,
@@ -113,8 +133,6 @@ def test_flash_mla(
             tile_scheduler_metadata,
             num_splits,
             causal=causal,
-            descale_q=descale_q,
-            descale_k=descale_k,
         )
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):

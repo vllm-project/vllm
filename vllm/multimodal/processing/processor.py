@@ -1422,7 +1422,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1454,7 +1457,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
