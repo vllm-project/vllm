@@ -772,8 +772,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill_metadata = getattr(attn_metadata, "prefill", None)
-            if not getattr(prefill_metadata, "use_dense_mha", False):
+            prefill = getattr(attn_metadata, "prefill", None)
+            use_dense_mha = getattr(prefill, "use_dense_mha", False)
+            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+            use_masked_mha = (
+                self.prefill_backend is not None
+                and self.impl.masked_mha_available  # type: ignore[attr-defined]
+                and self.impl.dcp_world_size <= 1
+                and prefill is not None
+                and _use_masked_mha(
+                    backend_name=self.attn_backend.get_name(),
+                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
+                    query_len=prefill.max_query_len,
+                    seq_len=prefill_max_seq_len,
+                )
+            )
+            use_mha = (use_dense_mha or use_masked_mha) and not (
+                self._vllm_config.attention_config.sparse_mla_force_mqa
+            )
+            if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
@@ -781,6 +798,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is None
@@ -1387,6 +1409,7 @@ class MLACommonPrefillMetadata:
         seq_tot: list[int]
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
+        context_lens: torch.Tensor
         workspace: torch.Tensor
         token_to_seq: torch.Tensor
         chunk_total_token: list[int]
@@ -1408,10 +1431,9 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
-    # Whether the prefill suffix is routed through dense MHA.
-    # Indexer scoring may be skipped only for a pure-prefill batch,
-    # since decode tokens still consume top-k indices.
+    query_lens_cpu: torch.Tensor | None = None
     use_dense_mha: bool = False
+    topk_mask_workspace: torch.Tensor | None = None
 
 
 @dataclass
@@ -1506,6 +1528,39 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
         qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
         v_head_dim=hf_text_config.v_head_dim,
     )
+
+
+_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
+    "FLASHMLA_SPARSE": {
+        1: (1536, 4096, None, None, None),
+        2: (512, 1024, 4096, None, None),
+        4: (512, 1024, 1536, 8192, None),
+        8: (512, 512, 1024, 2048, 16384),
+    },
+    "FLASHINFER_MLA_SPARSE": {
+        8: (512, 1024, 1024, 2048, 32768),
+    },
+}
+_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
+
+
+def _use_masked_mha(
+    *,
+    backend_name: str,
+    tensor_parallel_size: int,
+    query_len: int,
+    seq_len: int,
+) -> bool:
+    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
+        tensor_parallel_size
+    )
+    if thresholds is None:
+        return False
+    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
+        if seq_len <= bucket_seq_len:
+            min_query_len = thresholds[bucket_idx]
+            return min_query_len is not None and query_len >= min_query_len
+    return False
 
 
 @functools.cache
@@ -1682,6 +1737,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
@@ -1705,6 +1761,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token,
             workspace=chunked_prefill_workspace,
