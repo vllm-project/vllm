@@ -338,6 +338,9 @@ class MooncakeStoreCoordinator:
 
                 drop_eagle_block = idx in eagle_indices and idx not in eagle_verified
                 _max_length = curr_hit_length
+                # No eagle peek margin for a recurrent (Mamba) group: its finder
+                # never drops a block, so a widened bound would match past the
+                # attention-verified hit and resume from speculative state (#43559).
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
                     eagle_margin = (
                         self.hash_block_size
