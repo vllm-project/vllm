@@ -7,10 +7,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
-# Upper bound on the length of a single replayed trace. Traces longer than this
-# are rejected at admission (see ``TraceReplayState.add_request``).
-MAX_TRACE_LEN = 8192
-
 
 class TraceReplayState:
     """Per-request state for inference trace-replay.
@@ -23,29 +19,23 @@ class TraceReplayState:
     synchronization or async placeholder handling is needed.
     """
 
-    def __init__(self, max_num_reqs: int, device: torch.device):
+    def __init__(self, max_num_reqs: int, max_model_len: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.device = device
-        self.trace_token_ids: StagedWriteTensor | None = None
+        self.trace_token_ids = StagedWriteTensor(
+            (max_num_reqs, max_model_len),
+            dtype=torch.int32,
+            device=device,
+            uva_instead_of_gpu=True,
+        )
         self.trace_len = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         # CPU mirror used to skip the kernel launch when no request replays.
         self.use_trace = np.zeros(max_num_reqs, dtype=bool)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         trace = sampling_params.trace_decode_token_ids
-        if trace:
-            if len(trace) > MAX_TRACE_LEN:
-                raise ValueError(
-                    f"trace_decode_token_ids is too long: {len(trace)}. "
-                    f"The max length is {MAX_TRACE_LEN}."
-                )
+        if trace is not None:
             self.trace_len.np[req_idx] = len(trace)
-            if self.trace_token_ids is None:
-                self.trace_token_ids = StagedWriteTensor(
-                    (self.max_num_reqs, MAX_TRACE_LEN),
-                    dtype=torch.int32,
-                    device=self.device,
-                )
             self.trace_token_ids.stage_write(req_idx, 0, trace)
             self.use_trace[req_idx] = True
         else:
@@ -54,7 +44,7 @@ class TraceReplayState:
 
     def apply_staged_writes(self) -> None:
         self.trace_len.copy_to_uva()
-        if self.trace_token_ids is not None:
+        if np.any(self.use_trace):
             self.trace_token_ids.apply_write()
 
     def apply_trace(
@@ -65,14 +55,12 @@ class TraceReplayState:
         total_len: torch.Tensor,
         prompt_len: torch.Tensor,
     ) -> None:
-        trace_token_ids = self.trace_token_ids
-        if trace_token_ids is None or not np.any(self.use_trace[idx_mapping_np]):
-            # No request in this batch replays a trace. Skip the kernel launch.
+        if not np.any(self.use_trace[idx_mapping_np]):
             return
         apply_trace_tokens(
             sampled,
             idx_mapping,
-            trace_token_ids.gpu,
+            self.trace_token_ids.gpu,
             self.trace_len.gpu,
             total_len,
             prompt_len,
@@ -82,8 +70,8 @@ class TraceReplayState:
 @triton.jit
 def _trace_replay_kernel(
     sampled_ptr,  # [num_reqs], int64, mutated in place
-    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx; negative means skip
-    trace_token_ids_ptr,  # [max_num_reqs, MAX_TRACE_LEN], int32
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx
+    trace_token_ids_ptr,  # [max_num_reqs, max_model_len], int32
     trace_token_ids_stride,
     trace_len_ptr,  # [max_num_reqs], int32
     total_len_ptr,  # [max_num_reqs], int32
