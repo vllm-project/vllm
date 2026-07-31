@@ -876,6 +876,10 @@ class SamplingParams(
                 "trace_decode_token_ids must contain non-negative integers."
             )
 
+        if self.prompt_logprobs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with prompt_logprobs."
+            )
         if speculative_config is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with speculative decoding."
