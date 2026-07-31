@@ -1151,3 +1151,192 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+# ============================================================================
+# Sub-connector composition (`compose_connectors`)
+# ============================================================================
+
+
+def _composing_mc(compose: bool) -> MultiConnector:
+    """MultiConnector over two mocked connectors, composition on or off."""
+    mock_connector_config = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+    }
+    extra_config: dict[str, Any] = {
+        "connectors": [mock_connector_config, mock_connector_config],
+    }
+    if compose:
+        extra_config["compose_connectors"] = True
+
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config=extra_config,
+    )
+    return MultiConnector(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.SCHEDULER,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+        ),
+    )
+
+
+def _stub_matches(mc: MultiConnector, results: list[tuple[int | None, bool]]) -> None:
+    """Make sub-connector i report `results[i]` from get_num_new_matched_tokens.
+
+    Each return value is recorded against the `num_computed_tokens` it was
+    called with, so tests can assert what each connector was offered.
+    """
+    for connector, result in zip(mc._connectors, results):
+        connector.get_num_new_matched_tokens.return_value = result
+
+
+def _offered(mc: MultiConnector, index: int) -> int:
+    """The `num_computed_tokens` sub-connector `index` was last called with."""
+    return mc._connectors[index].get_num_new_matched_tokens.call_args[0][1]
+
+
+def _granted(mc: MultiConnector, index: int) -> int:
+    """The `num_external_tokens` sub-connector `index` was last handed."""
+    return mc._connectors[index].update_state_after_alloc.call_args[0][2]
+
+
+def test_compose_off_first_hit_takes_the_request():
+    """Default behaviour: the second connector contributes nothing."""
+    mc = _composing_mc(compose=False)
+    _stub_matches(mc, [(8, True), (4, True)])
+    request = MagicMock()
+    request.request_id = "req-0"
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (8, True)
+
+    # Both are still asked, but from the same starting point.
+    assert _offered(mc, 0) == 0
+    assert _offered(mc, 1) == 0
+    mc.update_state_after_alloc(request, MagicMock(), 8)
+    assert _granted(mc, 0) == 8
+    assert _granted(mc, 1) == 0
+    # A single loader needs no extra-load accounting.
+    assert mc._extra_async_loads == {}
+
+
+def test_compose_on_sums_and_offers_the_remainder():
+    """Each connector is asked only about what the earlier ones did not cover."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(8, True), (4, True)])
+    request = MagicMock()
+    request.request_id = "req-0"
+
+    assert mc.get_num_new_matched_tokens(request, 16) == (12, True)
+
+    assert _offered(mc, 0) == 16
+    assert _offered(mc, 1) == 16 + 8
+    mc.update_state_after_alloc(request, MagicMock(), 12)
+    assert _granted(mc, 0) == 8
+    assert _granted(mc, 1) == 4
+    # Two loaders: the scheduler must see only the last report.
+    assert mc._extra_async_loads == {"req-0": 1}
+
+
+def test_compose_on_skips_connectors_with_no_hit():
+    """A connector reporting 0 opts out and is granted nothing."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(0, False), (4, True)])
+    request = MagicMock()
+    request.request_id = "req-0"
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (4, True)
+
+    mc.update_state_after_alloc(request, MagicMock(), 4)
+    assert _granted(mc, 0) == 0
+    assert _granted(mc, 1) == 4
+    assert mc._extra_async_loads == {}
+
+
+def test_compose_on_refuses_to_mix_load_modes():
+    """The scheduler tracks one load mode per request, so a sync loader cannot
+    be combined with an async one."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(8, True), (4, False)])
+    request = MagicMock()
+    request.request_id = "req-0"
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (8, True)
+
+    mc.update_state_after_alloc(request, MagicMock(), 8)
+    assert _granted(mc, 1) == 0
+    assert mc._extra_async_loads == {}
+
+
+def test_compose_on_pending_lookup_still_defers():
+    """A `None` from any connector means "ask again later"."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(8, True), (None, False)])
+    request = MagicMock()
+    request.request_id = "req-0"
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert mc._requests_to_connector == {}
+
+
+def test_compose_on_respects_a_reduced_allocation():
+    """The scheduler can allocate fewer tokens than we asked for; the tail
+    connectors are the ones that lose them."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(8, True), (4, True)])
+    request = MagicMock()
+    request.request_id = "req-0"
+    mc.get_num_new_matched_tokens(request, 0)
+
+    mc.update_state_after_alloc(request, MagicMock(), 10)
+
+    assert _granted(mc, 0) == 8
+    assert _granted(mc, 1) == 2
+
+
+def test_extra_async_loads_reach_the_worker():
+    """The count is computed scheduler-side and drained worker-side, so it
+    travels in the connector metadata like `extra_async_saves` does."""
+    mc = _composing_mc(compose=True)
+    _stub_matches(mc, [(8, True), (4, True)])
+    request = MagicMock()
+    request.request_id = "req-0"
+    mc.get_num_new_matched_tokens(request, 0)
+
+    metadata = mc.build_connector_meta(MagicMock())
+
+    assert metadata.extra_async_loads == {"req-0": 1}
+    # Handed off, so it is not shipped twice.
+    assert mc._extra_async_loads == {}
+
+
+def test_get_finished_reports_recving_only_after_the_last_loader():
+    """Two loaders means two reports; the scheduler must see exactly one, or
+    the second trips `assert RequestStatus.is_finished(req.status)` in
+    `Scheduler._update_from_kv_xfer_finished` and kills EngineCore."""
+    mc = _composing_mc(compose=True)
+    mc._extra_async_loads = {"req-0": 1}
+    mc._connectors[0].get_finished.return_value = (None, {"req-0"})
+    mc._connectors[1].get_finished.return_value = (None, None)
+
+    _, recving = mc.get_finished(set())
+    assert recving is None, "first of two loaders must not be forwarded"
+
+    mc._connectors[0].get_finished.return_value = (None, None)
+    mc._connectors[1].get_finished.return_value = (None, {"req-0"})
+    _, recving = mc.get_finished(set())
+    assert recving == {"req-0"}, "last loader completes the load"
+    assert mc._extra_async_loads == {}
+
+
+def test_get_finished_forwards_a_lone_loader_immediately():
+    """A single loader has no extra-load entry and is forwarded as-is."""
+    mc = _composing_mc(compose=True)
+    mc._connectors[0].get_finished.return_value = (None, {"req-0"})
+    mc._connectors[1].get_finished.return_value = (None, None)
+
+    _, recving = mc.get_finished(set())
+    assert recving == {"req-0"}
