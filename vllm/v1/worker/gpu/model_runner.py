@@ -292,7 +292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
-            logger.info("Loading model from scratch...")
+            logger.info_once("Loading model from scratch...")
 
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
