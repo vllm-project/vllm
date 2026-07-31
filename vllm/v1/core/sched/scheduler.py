@@ -24,6 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
+    SupportsKVConnectorSidecar,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsManager,
@@ -341,11 +344,19 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
+        self.routed_experts_sidecar: SupportsKVConnectorSidecar | None = None
 
         if self.enable_return_routed_experts:
             sidecar_config = None
             if self.connector is not None:
-                sidecar_config = self.connector.get_block_sidecar_config()
+                if not isinstance(self.connector, SupportsKVConnectorSidecar):
+                    raise ValueError(
+                        "--enable-return-routed-experts requires a KV connector "
+                        "that supports block sidecars; "
+                        f"{type(self.connector).__name__} does not"
+                    )
+                self.routed_experts_sidecar = self.connector
+                sidecar_config = self.routed_experts_sidecar.get_block_sidecar_config()
                 if sidecar_config is None:
                     raise ValueError(
                         "--enable-return-routed-experts requires a KV connector "
@@ -1688,10 +1699,10 @@ class Scheduler(SchedulerInterface):
                 routing_offsets[request_id] = offset
                 offset += num_scheduled_tokens[request_id]
 
-        if self.enable_return_routed_experts and self.connector is not None:
+        if self.enable_return_routed_experts and self.routed_experts_sidecar is not None:
             connector_metadata = scheduler_output.kv_connector_metadata
             if connector_metadata is not None:
-                transfers = self.connector.get_block_sidecar_transfers(
+                transfers = self.routed_experts_sidecar.get_block_sidecar_transfers(
                     connector_metadata,
                     kv_group_id=self.routed_experts_manager.full_attn_group_id,
                 )

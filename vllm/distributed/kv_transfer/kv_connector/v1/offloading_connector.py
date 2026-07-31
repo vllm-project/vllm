@@ -12,11 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-    KVConnectorSidecarConfig,
-    KVConnectorSidecarTransferPlan,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -44,6 +40,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.sidecar import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
+    KVConnectorSidecarConfig,
+    KVConnectorSidecarTransferPlan,
+    SupportsKVConnectorSidecar,
+)
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -54,7 +55,11 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 
-class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+class OffloadingConnector(
+    KVConnectorBase_V1,
+    SupportsHMA,
+    SupportsKVConnectorSidecar,
+):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -89,9 +94,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         kv_group_id: int,
     ) -> KVConnectorSidecarTransferPlan:
         if self._block_sidecar_config is None:
-            return super().get_block_sidecar_transfers(
-                connector_metadata,
-                kv_group_id,
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support KV block sidecars "
+                "with this offloading spec"
             )
         if not isinstance(connector_metadata, OffloadingConnectorMetadata):
             raise RuntimeError(
