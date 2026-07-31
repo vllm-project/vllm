@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Literal, Union
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
@@ -15,7 +14,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     RoutedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -118,7 +116,6 @@ class Mxfp4MoeBackend(Enum):
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
-    AITER_SITU_MXFP4_BF16 = "AITER_SITU_MXFP4_BF16"  # W4A16: SiTU activation, gfx950
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -137,7 +134,6 @@ AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_MXFP4_FP8,
     Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-    Mxfp4MoeBackend.AITER_SITU_MXFP4_BF16,
 )
 
 
@@ -302,7 +298,6 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
-        "aiter_situ": [Mxfp4MoeBackend.AITER_SITU_MXFP4_BF16],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
@@ -572,28 +567,6 @@ def select_mxfp4_moe_backend(
     )
 
 
-def _is_situ_aiter(config: FusedMoEConfig) -> bool:
-    """Return True when the SiTU activation variant of the AITER W4A16 kernel
-    should be used.  All conditions must hold simultaneously:
-    - ROCm platform
-    - gfx950 GPU (the CK SiTU kernel only ships for that target)
-    - SiTU activation with a non-None linear beta (distinguishes SiTU from SILU)
-    - AITER MoE enabled and the SiTU activation type resolvable
-    """
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms.rocm import on_gfx950
-
-    return (
-        rocm_aiter_ops.is_fused_moe_enabled()
-        and on_gfx950()
-        and config.activation == MoEActivation.SITU
-        and config.activation_situ_linear_beta is not None
-        and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
-    )
-
-
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -601,25 +574,6 @@ def select_deepseek_v4_mxfp4_moe_backend(
     Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
-    # SiTU W4A16 on gfx950 uses a dedicated backend that the generic priority
-    # list does not cover (AiterExperts explicitly excludes SITU activation).
-    if _is_situ_aiter(config):
-        logger.info_once(
-            "Using AITER_SITU_MXFP4_BF16 for SiTU MXFP4 MoE.", scope="local"
-        )
-        return _return_or_raise(
-            Mxfp4MoeBackend.AITER_SITU_MXFP4_BF16,
-            config,
-            kMxfp4Static,
-            None,
-            (
-                mk.FusedMoEActivationFormat.BatchedExperts
-                if config.moe_parallel_config.use_batched_activation_format
-                else mk.FusedMoEActivationFormat.Standard
-            ),
-            scope="local",
-        )
-
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -721,11 +675,6 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     ):
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
-    elif backend == Mxfp4MoeBackend.AITER_SITU_MXFP4_BF16:
-        # SiTU FlyDSL kernel pads per gate/up half internally; rounding up to
-        # 256 here would inflate weight tensors and OOM on native sizes
-        # (e.g. moe_intermediate=3072 → 384/partition at TP8 is not 256-aligned).
-        pass
     elif current_platform.is_rocm():
         intermediate_size = round_up(intermediate_size, 256)
         hidden_size = round_up(hidden_size, 256)
@@ -1546,7 +1495,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             ),
             requires_grad=False,
         )
-        # use_gu_interleave
         shuffled_w2_scale = _shuf_s(
             w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
             num_experts,
@@ -1786,7 +1734,6 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        Mxfp4MoeBackend.AITER_SITU_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
