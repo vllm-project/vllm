@@ -1734,6 +1734,24 @@ class VllmConfig:
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
             )
 
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and self.compilation_config.pass_config.fuse_allreduce_rms
+        ):
+            # The pass replaces tensor_model_parallel_all_reduce with a fused
+            # FlashInfer all-reduce that never enters the device communicator,
+            # so neither should_custom_ar() nor the order-fixed 1-stage kernel
+            # applies and the reduction order is not fixed. This is validated
+            # here rather than in the communicator so it is caught even when
+            # custom all-reduce is disabled and no communicator is built.
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 is incompatible with the "
+                "fuse_allreduce_rms compilation pass: the fused FlashInfer "
+                "all-reduce it installs does not have a fixed reduction "
+                "order. Set compilation_config.pass_config.fuse_allreduce_rms"
+                "=False, or unset VLLM_BATCH_INVARIANT."
+            )
+
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in [
