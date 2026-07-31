@@ -270,6 +270,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -1215,6 +1216,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Shared with the AITER runtime, which reads the same env var directly.
     "AITER_SITUV2_A8W4": lambda: (
         os.getenv("AITER_SITUV2_A8W4", "0").lower() in ("true", "1")
+    ),
+    # Use rowwise OCP-E4M3 weights in the gfx950 Kimi-K3 B1 latent-MoE tail.
+    "VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8": lambda: (
+        os.getenv("VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8", "0").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass

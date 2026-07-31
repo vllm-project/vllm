@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -129,6 +130,35 @@ class KimiRoutedOutputTransform(nn.Module):
         super().__init__()
         self.norm = norm
         self.up_proj = up_proj
+        self.register_buffer("_latent_tail_fp8_weight", None, persistent=False)
+        self.register_buffer("_latent_tail_fp8_scale", None, persistent=False)
+
+    @torch.no_grad()
+    def finalize_fp8_weight(self) -> None:
+        if not envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8:
+            return
+        try:
+            from aiter.ops.flydsl.latent_moe_tail_fp8 import (
+                quantize_latent_moe_tail_weight,
+            )
+        except (ImportError, ModuleNotFoundError):
+            logger.warning_once(
+                "AITER does not provide the Kimi-K3 FP8 latent-tail kernel; "
+                "using the BF16 latent-tail path."
+            )
+            return
+
+        try:
+            (
+                self._latent_tail_fp8_weight,
+                self._latent_tail_fp8_scale,
+            ) = quantize_latent_moe_tail_weight(self.up_proj.weight)
+        except ValueError as error:
+            logger.warning_once(
+                "Kimi-K3 FP8 latent-tail prepack is unsupported (%s); "
+                "using the BF16 latent-tail path.",
+                error,
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.norm is not None:
@@ -145,6 +175,35 @@ class KimiRoutedOutputTransform(nn.Module):
 
         if self.norm is None or not rocm_aiter_ops.is_enabled():
             return None
+        if (
+            envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8
+            and self._latent_tail_fp8_weight is not None
+            and self._latent_tail_fp8_scale is not None
+        ):
+            try:
+                from aiter.ops.flydsl.latent_moe_tail_fp8 import (
+                    latent_moe_tail_fp8,
+                    supports_latent_moe_tail_fp8,
+                )
+            except (ImportError, ModuleNotFoundError):
+                pass
+            else:
+                if supports_latent_moe_tail_fp8(
+                    hidden_states,
+                    shared_output,
+                    self.norm.weight,
+                    self._latent_tail_fp8_weight,
+                    self._latent_tail_fp8_scale,
+                    self.norm.variance_epsilon,
+                ):
+                    return latent_moe_tail_fp8(
+                        hidden_states,
+                        shared_output,
+                        self.norm.weight,
+                        self._latent_tail_fp8_weight,
+                        self._latent_tail_fp8_scale,
+                        self.norm.variance_epsilon,
+                    )
         try:
             from aiter.ops.flydsl.latent_moe_tail import (
                 latent_moe_tail,
@@ -1018,6 +1077,16 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             loaded_params.add(name)
         return loaded_params
 
+    def finalize_latent_tail_fp8_weights(self) -> None:
+        if not envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8:
+            return
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            if not isinstance(layer, KimiDecoderLayer):
+                continue
+            mlp = layer.mlp
+            if isinstance(mlp, KimiMoE) and mlp.routed_output_transform is not None:
+                mlp.routed_output_transform.finalize_fp8_weight()
+
 
 class KimiLinearForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
@@ -1119,4 +1188,6 @@ class KimiLinearForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self.model.finalize_latent_tail_fp8_weights()
+        return loaded
