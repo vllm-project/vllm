@@ -135,6 +135,7 @@ ENV VLLM_CPU_X86=${VLLM_CPU_X86}
 # Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
 ARG VLLM_CPU_ARM_BF16=0
 ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
+ARG ENABLE_AMX_FP8=1
 
 WORKDIR /vllm-workspace
 
@@ -166,6 +167,7 @@ RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    CMAKE_ARGS="-DENABLE_AMX_FP8=${ENABLE_AMX_FP8}" \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TRITON-CPU BUILD IMAGE #########################

@@ -7,9 +7,10 @@
 //   QK phase: native FP8×FP8 MMA via _tile_dpfp8ps / _tile_dpbf8ps
 //             Q is quantized from BF16 to FP8-E4M3 in copy_q_heads_tile().
 //             K cache is stored in the native AMX-FP8 layout (1 byte/element).
-//   PV phase: reuses the BF16 MMA path (_tile_dpbf16ps) with FP8 V dequanted
-//             to BF16 on-the-fly (same as AMX_BF16+FP8KV in cpu_attn_amx.hpp).
-//             V cache uses the same halfword-packed layout as commit 22524f7a92.
+//   PV phase (E4M3 V cache): native narrow FP8 MMA (_tile_dphf8ps, colsb=32).
+//             P quantized with fixed scale (448, softmax P in [0,1]) — enables AMX
+//             tile accumulation across all k-steps; scale-correct once at the end.
+//   PV phase (E5M2 V cache): falls back to BF16 MMA with on-the-fly deq (TODO).
 //
 // Scale bookkeeping for QK:
 //   true_score = Q_fp32 · K_fp32
@@ -18,9 +19,16 @@
 //   execute_attention() applies: scale *= q_dynamic_scale * k_scale
 //   where q_dynamic_scale is computed per-tile in copy_q_heads_tile().
 //
-// Scale bookkeeping for PV (same as AMX_BF16+FP8KV):
-//   V_bf16 = V_fp8 * v_scale * bias   (bias = 2^120 for E4M3, 2^112 for E5M2)
-//   output corrected via output_v_scale in get_output_v_scale().
+// Scale bookkeeping for PV (E4M3, native path):
+//   raw_C = dot(P_fp8, V_fp8)
+//          ≈ dot(P/p_scale, V_real/v_scale)
+//          = dot(P, V_real) / (p_scale * v_scale)
+//   Inside gemm<PV>: C += raw_C * p_scale  → C ≈ dot(P, V_real) / v_scale
+//   In final_output: multiply by output_v_scale = v_scale  → correct output.
+//
+// Scale bookkeeping for PV (E5M2, BF16 dequant fallback):
+//   V_bf16 = V_fp8 * v_scale * bias   (bias = 2^112 for E5M2)
+//   output corrected via output_v_scale = v_scale * 2^112 in get_output_v_scale().
 
 #ifndef CPU_ATTN_AMX_FP8_HPP
 #define CPU_ATTN_AMX_FP8_HPP
@@ -90,10 +98,15 @@ inline void reshape_and_cache_k_amx_fp8_impl(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // TileGemm224<uint8_t, kv_cache_t>:  2-2-4 pattern for AMX_FP8.
 //
-// QK phase: native FP8 × FP8 MMA (_tile_dpfp8ps / _tile_dpbf8ps).
-// PV phase: delegate to the BF16×FP8(dequant) path in TileGemm224<BF16,FP8>.
+// QK phase: native FP8 × FP8 MMA (_tile_dphf8ps / _tile_dpbf8ps).
+// PV phase: native narrow FP8 MMA (colsb=32 tiles) for E4M3 V cache.
+//   P (BF16 softmax probs) → quantized to FP8 E4M3 on-the-fly per sub-tile.
+//   V (FP8 E4M3) loaded directly from cache (no dequant).
+//   Result correction: output *= p_scale (v_scale applied globally in final_output).
+//   E5M2 V cache: falls back to BF16×FP8 dequant path (TODO: native E5M2).
 // ---------------------------------------------------------------------------
 template <typename kv_cache_t>
 class TileGemm224<uint8_t, kv_cache_t> {
@@ -101,16 +114,79 @@ class TileGemm224<uint8_t, kv_cache_t> {
                     std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
                 "kv_cache_t must be Float8_e4m3fn or Float8_e5m2");
 
-  // For PV we reuse the BF16 dequant path (V cache is halfword-packed).
-  using pv_gemm_t = TileGemm224<c10::BFloat16, kv_cache_t>;
+  // For PV E5M2 fallback: BF16 probs × FP8 E5M2 V (dequant to BF16).
+  using pv_gemm_fallback_t = TileGemm224<c10::BFloat16, kv_cache_t>;
 
   // FP8 tile size in uint8_t elements (= AMX_TILE_BYTES, one per byte).
   static constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES;  // 1024
 
+  // Narrow P FP8 tile: AMX_TILE_ROW_NUM rows × (AMX_TILE_ROW_BYTES/2) FP8.
+  static constexpr int32_t p_tile_cols = AMX_TILE_ROW_BYTES / 2;  // 32
+  static constexpr int32_t p_tile_bytes = AMX_TILE_ROW_NUM * p_tile_cols;  // 512
+
+  // AMX tile reconfiguration needed: QK uses colsb=64, PV uses colsb=32.
+  static constexpr bool pv_uses_separate_tile_config = true;
+
+  // Quantise one P sub-tile: [rows × 32] BF16 → [rows × 32] FP8 E4M3.
+  // Fixed scale 448 (softmax P ∈ [0,1], FP8 E4M3 max=448).
+  // Direct BF16→FP8 via AVX-512: no intermediate fp32 buffer, one pass.
+  FORCE_INLINE static void quant_p_tile_e4m3(
+      const c10::BFloat16* __restrict__ src,
+      int64_t row_stride_bytes,
+      uint8_t* __restrict__ dst,
+      int32_t rows) {
+    // 448 * 2^-120 fuses inv_scale and FP32→FP8 exponent-bias shift.
+    const __m512  kScale      = _mm512_set1_ps(448.0f * 0x1p-120f);
+    const __m512i kPayloadMask = _mm512_set1_epi32(0x7FFFFFu);
+    const __m512i kSignMask    = _mm512_set1_epi32(static_cast<int>(0x80000000u));
+    const __m512i kMaxPayload  = _mm512_set1_epi32(0x7E);  // clamp NaN sentinel
+
+    for (int32_t r = 0; r < rows; ++r) {
+      const auto* row = reinterpret_cast<const __m256i*>(
+          reinterpret_cast<const uint8_t*>(src) + r * row_stride_bytes);
+      uint8_t* d = dst + r * p_tile_cols;
+
+      // Process two halves of 16 BF16 → 16 FP8 each
+      for (int half = 0; half < 2; ++half) {
+        __m512 fp32 = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256(row + half)), 16));
+        __m512i vi   = _mm512_castps_si512(_mm512_mul_ps(fp32, kScale));
+        __m512i sign = _mm512_srli_epi32(_mm512_and_si512(vi, kSignMask), 24);
+        __m512i pay  = _mm512_min_epu32(
+            _mm512_srli_epi32(_mm512_and_si512(vi, kPayloadMask), 20), kMaxPayload);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + half * 16),
+                         _mm512_cvtepi32_epi8(_mm512_or_si512(sign, pay)));
+      }
+    }
+  }
+
  public:
+  // Configure AMX tiles for narrow FP8 PV: colsb=32 (32 FP8/row) for A,B;
+  // colsb=64 (16 FP32/row) for C.  Called once before the PV block.
+  FORCE_INLINE static void setup_for_pv(int32_t m) {
+    const int32_t m_0 = std::min(m, static_cast<int32_t>(AMX_TILE_ROW_NUM));
+    const int32_t m_1 = m - m_0;
+    __tilecfg config{};
+    // A tiles (P FP8 narrow) and B tiles (V FP8 narrow): 32 bytes/row
+    for (int i = 0; i < 4; ++i) config.colsb[i] = AMX_TILE_ROW_BYTES / 2;
+    // C tiles (FP32 output): 64 bytes/row = 16 FP32
+    for (int i = 4; i < 8; ++i) config.colsb[i] = AMX_TILE_ROW_BYTES;
+    config.rows[0] = m_0; config.rows[1] = m_1;
+    config.rows[2] = AMX_TILE_ROW_NUM; config.rows[3] = AMX_TILE_ROW_NUM;
+    config.rows[4] = m_0; config.rows[5] = m_0;
+    config.rows[6] = m_1; config.rows[7] = m_1;
+    _tile_loadconfig(&config);
+  }
+
+  // Restore wide AMX tile config (colsb=64) for the next QK phase.
+  FORCE_INLINE static void teardown_pv(int32_t m) {
+    __tilecfg config{};
+    init_tile_config(m, config);
+  }
+
   // ------------------------------------------------------------------
   // QK: k_times = head_dim / 64 (each FP8 tile covers 64 k-elements).
-  // PV: delegate to BF16 specialisation (a_tile = BF16 probs).
+  // PV: native narrow FP8 MMA for E4M3; BF16 dequant fallback for E5M2.
   // ------------------------------------------------------------------
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size, void* __restrict__ a_tile,
@@ -121,12 +197,104 @@ class TileGemm224<uint8_t, kv_cache_t> {
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::PV) {
-      // PV uses BF16 probs × FP8 V (dequant to BF16 on the fly).
-      pv_gemm_t::template gemm<phase, k_size>(
-          m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
-          reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
-          block_size,
-          dynamic_k_size, accum_c);
+      if constexpr (!std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+        // E5M2 V cache: fall back to BF16×FP8 dequant path until native
+        // E5M2 PV is implemented (TODO).
+        pv_gemm_fallback_t::template gemm<phase, k_size>(
+            m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
+            reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
+            block_size, dynamic_k_size, accum_c);
+        return;
+      }
+
+      // -------- Native narrow FP8 PV (E4M3 × E4M3 → FP32) --------
+      // Tile config: colsb=32 set by setup_for_pv() before this block.
+      //
+      // Fixed p_scale = 1/448: softmax P ∈ [0,1] always fits in FP8 E4M3 max=448.
+      // This lets us accumulate across all k-steps in the AMX tile (no per-step
+      // tile_stored / scale-accumulate), then apply the correction once at the end.
+      // get_output_v_scale() returns just v_scale.
+
+      const int32_t m_0 = std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
+      const int32_t m_1 = m_size - m_0;
+
+      c10::BFloat16* a0 = reinterpret_cast<c10::BFloat16*>(a_tile);
+      c10::BFloat16* a1 = a0 + lda * AMX_TILE_ROW_NUM;
+      const int64_t a_row_bytes = lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+
+      uint8_t* v2 = reinterpret_cast<uint8_t*>(b_tile);
+      uint8_t* v3 = v2 + (block_size * AMX_TILE_ROW_BYTES / 4);
+      constexpr int32_t v_stride = AMX_TILE_ROW_BYTES / 2;  // 32 bytes
+
+      float* c4 = c_tile;
+      float* c5 = c4 + AMX_TILE_ROW_BYTES / sizeof(float);
+      float* c6 = c_tile + AMX_TILE_ROW_NUM * ldc;
+      float* c7 = c6 + AMX_TILE_ROW_BYTES / sizeof(float);
+
+      // k_times: 32 tokens per k-step (narrow tiles)
+      const int32_t k_times =
+          dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
+
+      alignas(64) uint8_t ps0[p_tile_bytes];
+      alignas(64) uint8_t ps1[p_tile_bytes];
+      alignas(64) float t4[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+      alignas(64) float t5[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+      alignas(64) float t6[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+      alignas(64) float t7[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+
+      constexpr int32_t a_advance = p_tile_cols;
+      constexpr int32_t v_advance = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+
+      // Initialize result tiles once; accumulate across all k-steps.
+      _tile_zero(4); _tile_zero(5);
+      if (m_1 > 0) { _tile_zero(6); _tile_zero(7); }
+
+      for (int32_t k = 0; k < k_times; ++k) {
+        quant_p_tile_e4m3(a0, a_row_bytes, ps0, m_0);
+        _tile_loadd(0, ps0, v_stride);
+        _tile_stream_loadd(2, v2, v_stride);
+        _tile_stream_loadd(3, v3, v_stride);
+        _tile_dphf8ps(4, 0, 2);
+        _tile_dphf8ps(5, 0, 3);
+        if (m_1 > 0) {
+          quant_p_tile_e4m3(a1, a_row_bytes, ps1, m_1);
+          _tile_loadd(1, ps1, v_stride);
+          _tile_dphf8ps(6, 1, 2);
+          _tile_dphf8ps(7, 1, 3);
+        }
+        a0 += a_advance; a1 += a_advance;
+        v2 += v_advance; v3 += v_advance;
+      }
+
+      // Store and apply fixed p_scale correction, accumulating with existing c_tile.
+      _tile_stored(4, t4, AMX_TILE_ROW_BYTES);
+      _tile_stored(5, t5, AMX_TILE_ROW_BYTES);
+      constexpr float p_scale = 1.0f / 448.0f;
+      const vec_op::FP32Vec16 ps_v(p_scale);
+      for (int32_t r = 0; r < m_0; ++r) {
+        const vec_op::FP32Vec16 o4 = accum_c ? vec_op::FP32Vec16(c4 + r * ldc)
+                                              : vec_op::FP32Vec16(0.0f);
+        const vec_op::FP32Vec16 o5 = accum_c ? vec_op::FP32Vec16(c5 + r * ldc)
+                                              : vec_op::FP32Vec16(0.0f);
+        (o4 + vec_op::FP32Vec16(t4 + r * AMX_TILE_ROW_NUM) * ps_v)
+            .save(c4 + r * ldc);
+        (o5 + vec_op::FP32Vec16(t5 + r * AMX_TILE_ROW_NUM) * ps_v)
+            .save(c5 + r * ldc);
+      }
+      if (m_1 > 0) {
+        _tile_stored(6, t6, AMX_TILE_ROW_BYTES);
+        _tile_stored(7, t7, AMX_TILE_ROW_BYTES);
+        for (int32_t r = 0; r < m_1; ++r) {
+          const vec_op::FP32Vec16 o6 = accum_c ? vec_op::FP32Vec16(c6 + r * ldc)
+                                                : vec_op::FP32Vec16(0.0f);
+          const vec_op::FP32Vec16 o7 = accum_c ? vec_op::FP32Vec16(c7 + r * ldc)
+                                                : vec_op::FP32Vec16(0.0f);
+          (o6 + vec_op::FP32Vec16(t6 + r * AMX_TILE_ROW_NUM) * ps_v)
+              .save(c6 + r * ldc);
+          (o7 + vec_op::FP32Vec16(t7 + r * AMX_TILE_ROW_NUM) * ps_v)
+              .save(c7 + r * ldc);
+        }
+      }
       return;
     }
 
@@ -242,7 +410,29 @@ class TileGemm122<uint8_t, kv_cache_t> {
   using pv_gemm_t = TileGemm122<c10::BFloat16, kv_cache_t>;
   static constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES;
 
+  // Narrow P FP8 tile dimensions (colsb=32)
+  static constexpr int32_t p_tile_cols  = AMX_TILE_ROW_BYTES / 2;  // 32
+  static constexpr int32_t p_tile_bytes = AMX_TILE_ROW_NUM * p_tile_cols;
+
  public:
+  // QK uses colsb=64; PV uses colsb=32 narrow tiles.
+  static constexpr bool pv_uses_separate_tile_config = true;
+
+  FORCE_INLINE static void setup_for_pv(int32_t m) {
+    __tilecfg config{};
+    for (int i = 0; i < 4; ++i) config.colsb[i] = AMX_TILE_ROW_BYTES / 2;
+    for (int i = 4; i < 8; ++i) config.colsb[i] = AMX_TILE_ROW_BYTES;
+    config.rows[0] = m;  // A (P FP8)
+    config.rows[2] = AMX_TILE_ROW_NUM; config.rows[3] = AMX_TILE_ROW_NUM;  // B (V)
+    config.rows[6] = m; config.rows[7] = m;  // C
+    _tile_loadconfig(&config);
+  }
+
+  FORCE_INLINE static void teardown_pv(int32_t m) {
+    __tilecfg config{};
+    init_tile_config(m, config);
+  }
+
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size, void* __restrict__ a_tile,
                                 void* __restrict__ b_tile,
@@ -252,11 +442,79 @@ class TileGemm122<uint8_t, kv_cache_t> {
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
     if constexpr (phase == AttentionGemmPhase::PV) {
-      pv_gemm_t::template gemm<phase, k_size>(
-          m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
-          reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
-          block_size,
-          dynamic_k_size, accum_c);
+      if constexpr (!std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+        pv_gemm_t::template gemm<phase, k_size>(
+            m_size, reinterpret_cast<c10::BFloat16*>(a_tile),
+            reinterpret_cast<kv_cache_t*>(b_tile), c_tile, lda, ldb, ldc,
+            block_size, dynamic_k_size, accum_c);
+        return;
+      }
+
+      // Native narrow FP8 PV (E4M3, 1-2-2 pattern)
+      // Tile config: colsb=32 set by setup_for_pv() before this block.
+      // Fixed p_scale=1/448 enables AMX tile accumulation across all k-steps.
+      constexpr int32_t v_stride  = AMX_TILE_ROW_BYTES / 2;  // 32
+      constexpr int32_t a_advance = p_tile_cols;
+      constexpr int32_t v_advance = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      const int32_t k_times =
+          dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
+
+      c10::BFloat16* a = reinterpret_cast<c10::BFloat16*>(a_tile);
+      const int64_t a_row_bytes = lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+      uint8_t* v2 = reinterpret_cast<uint8_t*>(b_tile);
+      uint8_t* v3 = v2 + (block_size * AMX_TILE_ROW_BYTES / 4);
+      float* c6 = c_tile;
+      float* c7 = c6 + AMX_TILE_ROW_BYTES / sizeof(float);
+
+      alignas(64) uint8_t ps[p_tile_bytes];
+      alignas(64) float t6[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+      alignas(64) float t7[AMX_TILE_ROW_NUM * AMX_TILE_ROW_NUM];
+
+      // AVX-512 constants: 448 * 2^-120 fuses inv_scale + FP32->FP8 bias shift
+      const __m512  kScale       = _mm512_set1_ps(448.0f * 0x1p-120f);
+      const __m512i kPayloadMask = _mm512_set1_epi32(0x7FFFFFu);
+      const __m512i kSignMask    = _mm512_set1_epi32(static_cast<int>(0x80000000u));
+      const __m512i kMaxPayload  = _mm512_set1_epi32(0x7E);
+
+      _tile_zero(6); _tile_zero(7);
+
+      for (int32_t k = 0; k < k_times; ++k) {
+        for (int32_t r = 0; r < m_size; ++r) {
+          const auto* row = reinterpret_cast<const __m256i*>(
+              reinterpret_cast<const uint8_t*>(a) + r * a_row_bytes);
+          uint8_t* d = ps + r * p_tile_cols;
+          for (int half = 0; half < 2; ++half) {
+            __m512 fp32 = _mm512_castsi512_ps(_mm512_slli_epi32(
+                _mm512_cvtepu16_epi32(_mm256_loadu_si256(row + half)), 16));
+            __m512i vi   = _mm512_castps_si512(_mm512_mul_ps(fp32, kScale));
+            __m512i sign = _mm512_srli_epi32(_mm512_and_si512(vi, kSignMask), 24);
+            __m512i pay  = _mm512_min_epu32(
+                _mm512_srli_epi32(_mm512_and_si512(vi, kPayloadMask), 20),
+                kMaxPayload);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(d + half * 16),
+                             _mm512_cvtepi32_epi8(_mm512_or_si512(sign, pay)));
+          }
+        }
+        _tile_loadd(0, ps, v_stride);
+        _tile_stream_loadd(2, v2, v_stride);
+        _tile_stream_loadd(3, v3, v_stride);
+        _tile_dphf8ps(6, 0, 2);
+        _tile_dphf8ps(7, 0, 3);
+        a += a_advance; v2 += v_advance; v3 += v_advance;
+      }
+
+      _tile_stored(6, t6, AMX_TILE_ROW_BYTES);
+      _tile_stored(7, t7, AMX_TILE_ROW_BYTES);
+      constexpr float p_scale = 1.0f / 448.0f;
+      const vec_op::FP32Vec16 ps_v(p_scale);
+      for (int32_t r = 0; r < m_size; ++r) {
+        const vec_op::FP32Vec16 o6 =
+            accum_c ? vec_op::FP32Vec16(c6 + r * ldc) : vec_op::FP32Vec16(0.0f);
+        const vec_op::FP32Vec16 o7 =
+            accum_c ? vec_op::FP32Vec16(c7 + r * ldc) : vec_op::FP32Vec16(0.0f);
+        (o6 + vec_op::FP32Vec16(t6 + r * AMX_TILE_ROW_NUM) * ps_v).save(c6 + r * ldc);
+        (o7 + vec_op::FP32Vec16(t7 + r * AMX_TILE_ROW_NUM) * ps_v).save(c7 + r * ldc);
+      }
       return;
     }
 
@@ -418,13 +676,20 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     // per-tile in copy_q_heads_tile().
   }
 
-  // Correction factor for the PV output:
-  // AMX FP8→BF16 dequant shifts exponent bias by (127 - FP8_bias).
-  // E4M3 bias=7  → 2^120; E5M2 bias=15 → 2^112.
+  // Output scale for the PV result.
+  // E4M3 V (native FP8 PV): no bias correction needed; the AMX FP8 instruction
+  //   computes correct arithmetic.  Return just v_scale.
+  // E5M2 V (BF16 dequant fallback): deq_tile_amx uses bit-widening which shifts
+  //   the FP8 exponent bias, giving values 2^112 too large.  Correct by
+  //   including the 2^112 bias factor.
   float get_output_v_scale() const noexcept {
-    constexpr float bias =
-        std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
-    return v_scale * bias;
+    if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+      // E5M2 fallback path still uses BF16 dequant with 2^112 bias correction.
+      return v_scale * 0x1p112f;
+    } else {
+      // E4M3 native FP8 PV: correct arithmetic, no bias correction needed.
+      return v_scale;
+    }
   }
 
   template <template <typename tile_gemm_t> typename attention>
