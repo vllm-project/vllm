@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -81,7 +82,7 @@ def test_validate_trace_replay_rejects_out_of_vocab():
     # The non-negative check passes at construction, but the token id exceeds
     # the vocabulary; verify() must reject it before it reaches the sampler.
     params = SamplingParams(trace_decode_token_ids=[0, 100])
-    with pytest.raises(ValueError, match="out-of-vocab"):
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
         params._validate_trace_replay(
             _make_model_config(vocab_size=100), speculative_config=None
         )
