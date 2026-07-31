@@ -25,6 +25,8 @@ from vllm.parser import llama_json
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.llama_json import (
+    PYTHON_END,
+    PYTHON_START,
     LlamaJsonParser,
     _args_value_span,
     _closeable_prefix,
@@ -1789,3 +1791,105 @@ class TestNamedChoiceOnParameterlessTool:
 
         assert names == ["ping"]
         assert [json.loads(a) for a in args.values()] == [{}]
+
+
+class TestLlama4PythonMarkers:
+    """Llama 4 wraps tool calls in ``<|python_start|>``/``<|python_end|>``.
+
+    The engine sets ``skip_special_tokens=False`` so the detokenizer no
+    longer strips special tokens, and the engine's own drop machinery only
+    covers ``tokenizer.all_special_tokens`` -- on a real Llama tokenizer
+    that is just begin_of_text and eot_id.  Without explicit terminals the
+    wrappers reached the client as content, next to a correctly parsed call.
+    The sibling llama4_pythonic parser strips them for the same reason.
+    """
+
+    VOCAB = {
+        PYTHON_START: 200000,
+        PYTHON_END: 200001,
+        "<|eot_id|>": 128009,
+    }
+    CALL = '{"name": "get_weather", "parameters": {"city": "SF"}}'
+
+    @pytest.fixture
+    def tokenizer(self):
+        # Deliberately no <|python_tag|>: Llama 4 tokenizers lack it, which
+        # is the case the parser must not depend on.  The markers are in the
+        # vocab but NOT in all_special_tokens, which is how a real Llama
+        # tokenizer reports them -- on Llama-3.1-8B-Instruct
+        # all_special_tokens is exactly [begin_of_text, eot_id] while
+        # <|python_tag|> is in the vocab.  Marking them special instead would
+        # let the engine drop them for free and make these tests vacuous.
+        return make_mock_tokenizer(self.VOCAB, special_tokens=["<|eot_id|>"])
+
+    @classmethod
+    def _tokenize(cls, text: str) -> list[tuple[int, str]]:
+        markers = sorted(cls.VOCAB, key=len, reverse=True)
+        tokens: list[tuple[int, str]] = []
+        i = 0
+        while i < len(text):
+            for marker in markers:
+                if text.startswith(marker, i):
+                    tokens.append((cls.VOCAB[marker], marker))
+                    i += len(marker)
+                    break
+            else:
+                tokens.append((ord(text[i]), text[i]))
+                i += 1
+        return tokens
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 10_000])
+    @pytest.mark.parametrize(
+        "body",
+        ["<|python_start|>{call}<|python_end|>", "<|python_start|>{call}"],
+        ids=["wrapped", "unterminated-wrapper"],
+    )
+    def test_markers_never_reach_content_as_tokens(
+        self, tokenizer, mock_request, chunk_size, body
+    ):
+        text = body.format(call=self.CALL)
+        parser = LlamaJsonParser(tokenizer)
+
+        content, calls = _accumulate(
+            _stream_tokens(parser, mock_request, self._tokenize(text), chunk_size)
+        )
+
+        assert [c["name"] for c in calls] == ["get_weather"]
+        assert json.loads(calls[0]["args"]) == {"city": "SF"}
+        assert "<|python_" not in content
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 10_000])
+    def test_markers_never_reach_content_as_text(
+        self, tokenizer, mock_request, chunk_size
+    ):
+        """Markers split across text chunks must still be consumed."""
+        text = f"<|python_start|>{self.CALL}<|python_end|>"
+        parser = LlamaJsonParser(tokenizer)
+
+        content, calls = _accumulate(
+            _stream_text_only(parser, mock_request, text, chunk_size)
+        )
+
+        assert [c["name"] for c in calls] == ["get_weather"]
+        assert "<|python_" not in content
+
+    def test_wrapped_prose_keeps_the_prose_and_drops_the_markers(
+        self, tokenizer, mock_request
+    ):
+        """No call here -- the text survives, the wrappers do not."""
+        text = "<|python_start|>no call here<|python_end|>"
+        parser = LlamaJsonParser(tokenizer)
+
+        content, calls = _accumulate(
+            _stream_tokens(parser, mock_request, self._tokenize(text), 3)
+        )
+
+        assert calls == []
+        assert content == "no call here"
+
+    def test_non_streaming_agrees(self, tokenizer, mock_request):
+        text = f"<|python_start|>{self.CALL}<|python_end|>"
+        result = LlamaJsonParser(tokenizer).extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+        assert "<|python_" not in (result.content or "")
