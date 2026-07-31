@@ -53,27 +53,23 @@ def test_profiled_batches_seed_cost_curves_via_consumer():
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
-    manager._profile_samples = []
     curves: dict[str, list[tuple[int, float]]] = {}
     manager.set_cost_curves = lambda draft, verify: curves.update(
         draft=draft, verify=verify
     )
 
-    for batch in manager.batches_to_profile([8, 1024]):
-        assert batch["timing_enabled"]
-        num_tokens = batch["num_tokens"]
-        manager.consume_step_timing(
-            StepTimingSample(
-                forward_ms=float(num_tokens),
-                drafter_ms=1.0,
-                num_target_tokens=num_tokens,
-                num_reqs=num_tokens // 8,
-                # Only the captured sizes replay a graph; the tail sizes
-                # run eager.
-                full_cudagraph=num_tokens <= 1024,
-            )
+    timings = [
+        StepTimingSample(
+            forward_ms=float(batch["num_tokens"]),
+            drafter_ms=1.0,
+            num_target_tokens=batch["num_tokens"],
+            num_reqs=batch["num_tokens"] // 8,
+            # Only the captured sizes replay a graph; the tail sizes run eager.
+            full_cudagraph=batch["num_tokens"] <= 1024,
         )
-    manager.set_initial_cost_curves()
+        for batch in manager.batches_to_profile([8, 1024])
+    ]
+    manager.set_initial_cost_curves(timings)
 
     # Tail beyond the last capture size: 1.5x then doubling to the max.
     assert curves["verify"] == [
@@ -87,7 +83,6 @@ def test_profiled_batches_seed_cost_curves_via_consumer():
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
-    assert manager._profile_samples == []
 
 
 def test_compact_batch_preserves_totals_and_bounds():

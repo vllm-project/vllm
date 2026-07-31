@@ -11,7 +11,6 @@ import torch
 
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -28,62 +27,41 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
 
-@triton.jit
-def _keyed_product(left_value, left_key, right_value, right_key):
-    value = tl.where(left_key == right_key, left_value * right_value, right_value)
-    return value, right_key
+def _assign_draft_token_budget(
+    confidence_probs: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    capacities: torch.Tensor,
+    draft_budget: int,
+    num_steps: int,
+) -> None:
+    """Admit the globally best `draft_budget` draft slots, in place.
+
+    Every (request, step) slot is scored by its survival probability, the running
+    product of that request's per-position confidences, and the highest scores win.
+    Survival only decreases along a request, so a global top-k always admits
+    continuously along steps with a request.
+
+    `capacities` enters holding each request's scheduled draft count (which bounds its
+    eligible slots) and leaves holding the admitted count.
+    """
+    survival = confidence_probs[idx_mapping].cumprod(dim=1)
+    steps = torch.arange(num_steps, device=survival.device)
+    valid = steps[None, :] < capacities[:, None]
+    survival = survival.masked_fill(~valid, -float("inf"))
+    order = survival.flatten().argsort(descending=True, stable=True)
+    # Invalid slots score -inf and sort last, so the valid ones occupy exactly the first
+    # valid.sum() ranks; everything between the budget and there is a real draft that
+    # missed the cut. Decrementing keeps this sync-free.
+    ranks = torch.arange(order.shape[0], device=survival.device)
+    rejected = (ranks >= draft_budget) & (ranks < valid.sum())
+    capacities.scatter_add_(
+        0, order // num_steps, torch.where(rejected, -1, 0).to(capacities.dtype)
+    )
 
 
-@triton.jit(do_not_specialize=["num_reqs", "draft_token_budget"])
-def _assign_draft_token_budget_kernel(
-    confidence_probs_ptr,
-    confidence_probs_stride,
-    idx_mapping_ptr,
-    capacities_ptr,
-    num_reqs,
-    draft_token_budget,
-    NUM_STEPS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    candidate_idx = tl.arange(0, BLOCK_SIZE)
-    req_idx = candidate_idx // NUM_STEPS
-    step = candidate_idx % NUM_STEPS
-    valid_candidate = req_idx < num_reqs
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx, mask=valid_candidate, other=0)
-    probability = tl.load(
-        confidence_probs_ptr + req_state_idx * confidence_probs_stride + step,
-        mask=valid_candidate,
-        other=0.0,
-    )
-    survival, _ = tl.associative_scan(
-        (probability, req_idx),
-        axis=0,
-        combine_fn=_keyed_product,
-    )
-    num_valid = tl.load(
-        capacities_ptr + req_idx,
-        mask=valid_candidate,
-        other=0,
-    )
-    survival = tl.where(valid_candidate & (step < num_valid), survival, -float("inf"))
-
-    min_int32: tl.constexpr = -2147483648
-    score_bits = survival.to(tl.int32, bitcast=True)
-    sort_key = tl.where(
-        score_bits >> 31 == 0,
-        score_bits ^ -1,
-        score_bits ^ min_int32,
-    )
-    packed = ((sort_key.to(tl.int64) & 0xFFFFFFFF) << 32) | candidate_idx.to(tl.int64)
-    admitted_idx = (tl.sort(packed) & 0xFFFFFFFF).to(tl.int32)
-
-    tl.store(capacities_ptr + candidate_idx, 0, mask=candidate_idx < num_reqs)
-    tl.debug_barrier()
-    tl.atomic_add(
-        capacities_ptr + admitted_idx // NUM_STEPS,
-        1,
-        mask=candidate_idx < draft_token_budget,
-    )
+_assign_draft_token_budget_compiled = torch.compile(
+    _assign_draft_token_budget, dynamic=True
+)
 
 
 def build_cost_tables_from_curves(
@@ -156,7 +134,6 @@ class AdaptiveVerificationManager:
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
         self._cudagraph_limit = 0
-        self._profile_samples: list[StepTimingSample] = []
         self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
         max_num_reqs = req_states.max_num_reqs
         # Current per-slot confidences
@@ -192,10 +169,6 @@ class AdaptiveVerificationManager:
             (max_num_reqs, self.num_speculative_steps), dtype=np.float32
         )
 
-    def consume_step_timing(self, sample: StepTimingSample) -> None:
-        """Collect startup profiling timings; only profiling steps are timed."""
-        self._profile_samples.append(sample)
-
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
         self._pending_resets.append(req_idx)
@@ -205,8 +178,8 @@ class AdaptiveVerificationManager:
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
-        Timings flow back through consume_step_timing; call
-        set_initial_cost_curves once every batch has run."""
+        Run these inside StepTimingCollector.collect(), then hand the block's
+        timings to set_initial_cost_curves."""
         max_num_tokens = self.req_states.max_num_batched_tokens
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
@@ -224,12 +197,9 @@ class AdaptiveVerificationManager:
                 yield {
                     "num_tokens": num_tokens,
                     "context_len": _PROFILE_CONTEXT_LEN,
-                    "timing_enabled": True,
                 }
 
-    def set_initial_cost_curves(self) -> None:
-        samples, self._profile_samples = self._profile_samples, []
-
+    def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
             points: Iterable[tuple[int, float]],
         ) -> list[tuple[int, float]]:
@@ -420,25 +390,20 @@ class AdaptiveVerificationManager:
         num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
 
         # Rank draft slots by survival probability and admit the best prefix.
+        # capacities enters holding each request's valid draft count (the kernel
+        # uses it to bound eligible slots) and leaves holding the admitted count.
         capacities = self._batch_draft_capacity[:num_reqs]
         if draft_budget == 0:
             capacities.zero_()
         else:
             async_copy_to_gpu(scheduled_drafts, out=capacities)
             if draft_budget != int(scheduled_drafts.sum()):
-                block_size = triton.next_power_of_2(
-                    num_reqs * self.num_speculative_steps
-                )
-                _assign_draft_token_budget_kernel[(1,)](
+                _assign_draft_token_budget_compiled(
                     self._confidence_probs,
-                    self._confidence_probs.stride(0),
                     idx_mapping,
                     capacities,
-                    num_reqs,
                     draft_budget,
-                    NUM_STEPS=self.num_speculative_steps,
-                    BLOCK_SIZE=block_size,
-                    num_warps=4 if block_size <= 256 else 8,
+                    self.num_speculative_steps,
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]

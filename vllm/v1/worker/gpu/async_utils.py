@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -31,39 +31,58 @@ class StepTimingSample:
     full_cudagraph: bool
 
 
-class StepTimingEvents(NamedTuple):
-    forward_start: torch.cuda.Event
-    forward_end: torch.cuda.Event
-    drafter_start: torch.cuda.Event
-    drafter_end: torch.cuda.Event
+def _timing_event() -> torch.cuda.Event:
+    return torch.cuda.Event(enable_timing=True)
+
+
+@dataclass
+class StepTimingEvents:
+    forward_start: torch.cuda.Event = field(default_factory=_timing_event)
+    forward_end: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_start: torch.cuda.Event = field(default_factory=_timing_event)
+    drafter_end: torch.cuda.Event = field(default_factory=_timing_event)
 
 
 class StepTimingCollector:
-    """Times startup profiling steps, which run strictly one at a time.
+    """Times the steps run inside ``collect``; record calls no-op outside it.
 
-    Only enabled alongside a drafter, so every step it times has one. Record
-    calls no-op unless ``start`` armed the collector, so callers need no guards.
-    Each step gets its own events, so the timed steps queue back-to-back and
-    ``flush`` resolves them all behind a single sync.
+    Every step gets its own events, so the steps queue back-to-back and the
+    block resolves them all behind one sync on the way out.
     """
 
-    def __init__(self, enabled: bool):
-        self._enabled = enabled
-        self._armed: StepTimingEvents | None = None
+    def __init__(self):
+        self._collecting = False
+        self._step: StepTimingEvents | None = None
         self._batch = (False, 0, 0)
-        self._pending: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
-        self.consumer: Callable[[StepTimingSample], None] | None = None
+        self._timed: list[tuple[StepTimingEvents, tuple[bool, int, int]]] = []
 
-    def start(self, enabled: bool) -> None:
-        self._armed = (
-            StepTimingEvents(
-                *(
-                    torch.cuda.Event(enable_timing=True)
-                    for _ in StepTimingEvents._fields
-                )
+    @contextlib.contextmanager
+    def collect(self) -> Iterator[list[StepTimingSample]]:
+        """Time every step run in this block.
+
+        The yielded list holds one sample per timed step once the block exits;
+        it stays empty inside the block, where the timings are still on device.
+        """
+        samples: list[StepTimingSample] = []
+        self._collecting = True
+        try:
+            yield samples
+        finally:
+            self._collecting = False
+            timed, self._timed, self._step = self._timed, [], None
+        if not timed:
+            return
+        # Same stream, issue order: once the last step is done, so are the rest.
+        timed[-1][0].drafter_end.synchronize()
+        samples.extend(
+            StepTimingSample(
+                events.forward_start.elapsed_time(events.forward_end),
+                events.drafter_start.elapsed_time(events.drafter_end),
+                num_target_tokens,
+                num_reqs,
+                full_cudagraph,
             )
-            if enabled and self._enabled
-            else None
+            for events, (full_cudagraph, num_target_tokens, num_reqs) in timed
         )
 
     def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
@@ -71,46 +90,24 @@ class StepTimingCollector:
         self._batch = (full_cudagraph, input_batch.num_tokens, input_batch.num_reqs)
 
     def forward_start(self) -> None:
-        if self._armed is not None:
-            self._armed.forward_start.record()
+        if self._collecting:
+            self._step = StepTimingEvents()
+            self._step.forward_start.record()
 
     def forward_end(self) -> None:
-        if self._armed is not None:
-            self._armed.forward_end.record()
+        if self._step is not None:
+            self._step.forward_end.record()
 
     def drafter_start(self) -> None:
-        if self._armed is not None:
-            self._armed.drafter_start.record()
+        if self._step is not None:
+            self._step.drafter_start.record()
 
     def drafter_end(self) -> None:
-        if self._armed is not None:
-            self._armed.drafter_end.record()
-
-    def finish(self) -> None:
-        events, self._armed = self._armed, None
-        if events is not None:
-            self._pending.append((events, self._batch))
-
-    def flush(self) -> None:
-        """Hand every timed step to the consumer.
-
-        Timed steps are recorded in issue order on one stream, so waiting on
-        the last drafter event leaves all the earlier ones ready to read.
-        """
-        pending, self._pending = self._pending, []
-        if not pending or self.consumer is None:
-            return
-        pending[-1][0].drafter_end.synchronize()
-        for events, (full_cudagraph, num_target_tokens, num_reqs) in pending:
-            self.consumer(
-                StepTimingSample(
-                    events.forward_start.elapsed_time(events.forward_end),
-                    events.drafter_start.elapsed_time(events.drafter_end),
-                    num_target_tokens,
-                    num_reqs,
-                    full_cudagraph,
-                )
-            )
+        """Ends the step: only steps that reach here have a draft cost."""
+        if self._step is not None:
+            self._step.drafter_end.record()
+            self._timed.append((self._step, self._batch))
+            self._step = None
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
