@@ -242,9 +242,11 @@ class InputProcessingContext:
             # Bind to a Tensor-typed local: reassigning the `object`-typed
             # parameter would discard the isinstance narrowing.
             tensor = x
+
             # This mimics the behavior of transformers.BatchFeature
             if tensor.is_floating_point():
                 tensor = tensor.to(dtype=self.model_config.dtype)
+
             if not tensor.is_cpu and not keep_on_device:
                 tensor = tensor.cpu()
 
