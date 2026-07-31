@@ -10,6 +10,7 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarConfig,
     KVConnectorSidecarTransfer,
     KVConnectorSidecarTransfers,
 )
@@ -108,6 +109,20 @@ def test_routed_experts_manager_applies_public_sidecar_transfers():
         manager._blocks_view[2],
         np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),
     )
+
+
+@pytest.mark.parametrize(
+    "sidecar_config",
+    [
+        KVConnectorSidecarConfig(0, 1),
+        KVConnectorSidecarConfig(1, 0),
+    ],
+)
+def test_routed_experts_manager_rejects_invalid_sidecar_layout(
+    sidecar_config: KVConnectorSidecarConfig,
+):
+    with pytest.raises(ValueError, match="sidecar block counts must be positive"):
+        RoutedExpertsManager(Mock(), Mock(), sidecar_config)
 
 
 def _capturer_with_buffer(

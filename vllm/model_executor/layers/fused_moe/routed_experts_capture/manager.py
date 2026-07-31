@@ -11,6 +11,7 @@ import numpy.typing as npt
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarConfig,
     KVConnectorSidecarTransfer,
     KVConnectorSidecarTransfers,
 )
@@ -44,15 +45,29 @@ class RoutedExpertsManager:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
-        num_offload_blocks: int | None = None,
-        block_size_factor: int = 1,
+        sidecar_config: KVConnectorSidecarConfig | None = None,
     ) -> None:
+        if (
+            sidecar_config is not None
+            and min(
+                sidecar_config.num_connector_blocks,
+                sidecar_config.blocks_per_connector_block,
+            )
+            <= 0
+        ):
+            raise ValueError(
+                "routed-experts sidecar block counts must be positive, got "
+                f"{sidecar_config}"
+            )
+
         self.full_attn_group_id = require_full_attn_group_id(kv_cache_config)
         full_attn_group = kv_cache_config.kv_cache_groups[self.full_attn_group_id]
         self.block_size = full_attn_group.kv_cache_spec.block_size
-        if block_size_factor < 1:
-            raise ValueError(f"block_size_factor must be >= 1, got {block_size_factor}")
-        self.block_size_factor = block_size_factor
+        self.block_size_factor = (
+            sidecar_config.blocks_per_connector_block
+            if sidecar_config is not None
+            else 1
+        )
 
         hf_config = vllm_config.model_config.hf_text_config
         moe_top_k = get_num_experts_per_token(hf_config)
@@ -79,10 +94,10 @@ class RoutedExpertsManager:
         )
         # Indexed by offloaded block id, then sub-block within that block.
         self.routed_experts_by_offload_block: np.ndarray | None = None
-        if num_offload_blocks is not None:
+        if sidecar_config is not None:
             self.routed_experts_by_offload_block = _allocate_zeroed_mmap(
                 (
-                    num_offload_blocks,
+                    sidecar_config.num_connector_blocks,
                     self.block_size_factor,
                     self.block_size,
                     self.num_layers,
@@ -103,7 +118,7 @@ class RoutedExpertsManager:
             self.routed_experts_by_offload_block.nbytes / 1e9
             if self.routed_experts_by_offload_block is not None
             else 0.0,
-            num_offload_blocks,
+            sidecar_config.num_connector_blocks if sidecar_config is not None else None,
             self.block_size_factor,
         )
 
