@@ -39,7 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import get_draft_quant_config
-from vllm.models.deepseek_v4.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
