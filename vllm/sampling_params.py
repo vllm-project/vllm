@@ -613,17 +613,6 @@ class SamplingParams(
             raise ValueError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
-        if self.trace_decode_token_ids is not None:
-            if not self.trace_decode_token_ids:
-                raise ValueError("trace_decode_token_ids must be a non-empty list.")
-            if self.n != 1:
-                raise ValueError("trace_decode_token_ids requires n=1.")
-            if not all(
-                isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids
-            ):
-                raise ValueError(
-                    "trace_decode_token_ids must contain non-negative integers."
-                )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
@@ -860,6 +849,15 @@ class SamplingParams(
         """Validate trace replay request compatibility."""
         if self.trace_decode_token_ids is None:
             return
+
+        if not self.trace_decode_token_ids:
+            raise ValueError("trace_decode_token_ids must be a non-empty list.")
+        if self.n != 1:
+            raise ValueError("trace_decode_token_ids requires n=1.")
+        if not all(isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids):
+            raise ValueError(
+                "trace_decode_token_ids must contain non-negative integers."
+            )
 
         if speculative_config is not None:
             raise ValueError(
