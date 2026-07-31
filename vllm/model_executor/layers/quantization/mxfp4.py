@@ -539,6 +539,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
+        if self.is_k3_situ_aiter:
+            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,

@@ -479,10 +479,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
                 return False
         return True
 
-    def __init__(self, moe_config, quant_config, **kwargs):
-        super().__init__(moe_config, quant_config, **kwargs)
-        self.is_situ = moe_config.activation == MoEActivation.SITU
-
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
