@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    get_marlin_workspace,
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
@@ -101,7 +101,7 @@ def _fused_marlin_moe(
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
     if workspace is None:
-        workspace = marlin_make_workspace_new(hidden_states.device, 4)
+        workspace = get_marlin_workspace(hidden_states.device)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(

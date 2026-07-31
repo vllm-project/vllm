@@ -9,7 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     marlin_moe_padded_intermediate,
     marlin_pad_dim,
     marlin_pad_qweight,
@@ -131,11 +130,6 @@ def prepare_fp8_layer_for_marlin(
 
     device = layer.weight.device
 
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, existing=getattr(layer, "workspace", None)
-    )
-
     # WEIGHT
     # Repack weights to marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
@@ -245,13 +239,7 @@ def prepare_fp8_moe_layer_for_marlin(
     w13_weight_scale: torch.Tensor,
     w2_weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Shuffle weights and scales into marlin format.
-
-    Note that this function has the side effect of adding a `workspace`
-    attribute to the layer. This `workspace` does not need to be
-    registered as a Parameter as it is not used during weight reloading.
-    """
+    """Shuffle weights and scales into marlin format."""
 
     logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
@@ -278,11 +266,7 @@ def prepare_fp8_moe_layer_for_marlin(
         w13_weight = _moe_pad_shard_rows(w13_weight, n, padded_n)
         w2_weight = _moe_pad_last(w2_weight, n, padded_n)
 
-    # WORKSPACE
     device = layer.w13_weight.device
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
@@ -464,11 +448,6 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     device = layer.weight.device
 
-    # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(
-        device, existing=getattr(layer, "workspace", None)
-    )
-
     # WEIGHT - repack FP8 weights to Marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = pack_fp8_to_int32(layer.weight, size_k_first=False)
@@ -525,7 +504,7 @@ def prepare_mxfp8_moe_layer_for_marlin(
     """Repack MXFP8 MoE weights and scales into Marlin kernel format.
 
     Args:
-        layer: MoE layer (used to read params_dtype and attach workspace).
+        layer: MoE layer used to read params_dtype.
         w13: [E, 2*N, K] float8_e4m3fn weights.
         w2:  [E, K, N] float8_e4m3fn weights.
         w13_scale: [E, 2*N, K//32] uint8 e8m0 scales.
@@ -552,10 +531,6 @@ def prepare_mxfp8_moe_layer_for_marlin(
     device = w13.device
     param_dtype = torch.get_default_dtype()
     perm = torch.empty(0, dtype=torch.int, device=device)
-
-    layer.workspace = marlin_make_workspace_new(
-        device, 4, existing=getattr(layer, "workspace", None)
-    )
 
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         if "w13" in name:

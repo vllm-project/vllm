@@ -9,6 +9,9 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_workspace,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     is_fp8_marlin_supported,
@@ -97,7 +100,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             input=x,
             weight=layer.weight,
             weight_scale=weight_scale,
-            workspace=layer.workspace,
+            workspace=get_marlin_workspace(x.device),
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             input_dtype=self.marlin_input_dtype,

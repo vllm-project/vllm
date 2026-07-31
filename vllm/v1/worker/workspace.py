@@ -3,6 +3,7 @@
 
 import inspect
 import os
+from collections.abc import Hashable
 from itertools import accumulate
 from math import prod
 
@@ -31,8 +32,8 @@ _manager: "WorkspaceManager | None" = None
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages one workspace buffer per active ubatch slot.
-    Can be locked to prevent further growth during execution.
+    Manages shared and persistent workspace buffers per active ubatch slot.
+    Can be locked to prevent further allocation during execution.
     """
 
     def __init__(self, device: torch.device, num_ubatches: int | None = None):
@@ -42,6 +43,7 @@ class WorkspaceManager:
         self._current_workspaces: list[torch.Tensor | None] = [
             None
         ] * self._num_ubatches
+        self._persistent_workspaces: dict[Hashable, list[torch.Tensor]] = {}
         self._locked: bool = False
 
     @staticmethod
@@ -52,10 +54,9 @@ class WorkspaceManager:
         return workspace.numel() * workspace.element_size()
 
     def lock(self) -> None:
-        """Lock the workspace to prevent further growth.
+        """Lock the workspace to prevent growth or new persistent allocations.
 
-        After locking, any attempt to allocate a larger workspace will raise
-        an assertion error. This ensures workspace size is fixed during execution.
+        This ensures workspace storage is fixed during execution.
         """
         self._locked = True
         if envs.VLLM_DEBUG_WORKSPACE:
@@ -115,6 +116,46 @@ class WorkspaceManager:
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
+
+    def get_persistent(
+        self,
+        key: Hashable,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        *,
+        zero_init: bool = False,
+    ) -> torch.Tensor:
+        """Get a keyed workspace with stable storage.
+
+        Args:
+            key: Workspace identifier.
+            shape: Tensor shape.
+            dtype: Tensor dtype.
+            zero_init: Whether to zero newly allocated tensors.
+
+        Returns:
+            The workspace for the current ubatch slot.
+        """
+        workspaces = self._persistent_workspaces.get(key)
+        if workspaces is None:
+            if self._locked:
+                raise AssertionError(
+                    f"Workspace is locked but {key!r} was not allocated during warmup."
+                )
+            factory = torch.zeros if zero_init else torch.empty
+            workspaces = [
+                factory(shape, dtype=dtype, device=self._device)
+                for _ in range(self._num_ubatches)
+            ]
+            self._persistent_workspaces[key] = workspaces
+
+        workspace = workspaces[dbo_current_ubatch_id()]
+        if workspace.shape != shape or workspace.dtype != dtype:
+            raise ValueError(
+                f"Persistent workspace {key!r} has shape={workspace.shape}, "
+                f"dtype={workspace.dtype}; requested shape={shape}, dtype={dtype}."
+            )
+        return workspace
 
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.

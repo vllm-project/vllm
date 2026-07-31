@@ -3,6 +3,10 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_workspace,
+)
+
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
@@ -46,7 +50,7 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            workspace=layer.workspace,
+            workspace=get_marlin_workspace(x.device),
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,

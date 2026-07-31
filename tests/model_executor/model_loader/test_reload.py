@@ -250,10 +250,9 @@ def _random_g_idx(generator):
     )
 
 
-def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
-    """Marlin workspace and act-order sort indices must be recomputed into
-    the same storage when weights are reloaded (RL weight sync), so device
-    addresses captured by CUDA graphs remain valid."""
+def test_marlin_post_load_preserves_sort_indices_address(monkeypatch, dist_init):
+    """Act-order sort indices must be recomputed into the same storage when
+    weights are reloaded so CUDA graphs keep a valid device address."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
 
     _stub_marlin_ops(monkeypatch)
@@ -267,15 +266,12 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
     _load_marlin_checkpoint_format_weights(layer, first_g_idx)
     kernel.process_weights_after_loading(layer)
 
-    workspace_ptr = kernel.workspace.data_ptr()
     sort_indices_ptr = layer.g_idx_sort_indices.data_ptr()
 
     # Reload: fresh checkpoint-format tensors with a different act-order
     _load_marlin_checkpoint_format_weights(layer, second_g_idx)
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.workspace.data_ptr() == workspace_ptr
-    assert torch.all(kernel.workspace == 0)
     assert layer.g_idx_sort_indices.data_ptr() == sort_indices_ptr
     expected_sort_indices = marlin_utils.marlin_sort_g_idx(second_g_idx)[1]
     assert torch.equal(layer.g_idx_sort_indices.data, expected_sort_indices)
@@ -284,19 +280,16 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
 
 
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
-def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
-    """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold."""
+def test_marlin_prepare_layer_does_not_own_workspace(monkeypatch, variant):
+    """Weight preparation must not attach runtime workspace to model layers."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
-        marlin_utils,
         marlin_utils_fp4,
         marlin_utils_fp8,
     )
 
     size_k, size_n = 128, 64
 
-    monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
     monkeypatch.setattr(
         ops,
         "gptq_marlin_repack",
@@ -352,34 +345,43 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
     load_checkpoint_format_weights()
     prepare(layer)
-    workspace_ptr = layer.workspace.data_ptr()
+    assert not hasattr(layer, "workspace")
 
     # Reload: fresh checkpoint-format tensors, prepare runs again
     load_checkpoint_format_weights()
     prepare(layer)
-
-    assert layer.workspace.data_ptr() == workspace_ptr
-    assert torch.all(layer.workspace == 0)
+    assert not hasattr(layer, "workspace")
 
 
-def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
-    """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that."""
+def test_marlin_workspace_uses_persistent_workspace_manager(monkeypatch):
+    """Marlin borrows maximum-sized graph-stable storage from the manager."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.utils import torch_utils
+    from vllm.v1.worker import workspace as workspace_module
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
     device = torch.device("cpu")
+    manager = workspace_module.WorkspaceManager(device)
+    monkeypatch.setattr(
+        workspace_module, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(workspace_module, "current_workspace_manager", lambda: manager)
+    stream = "main"
+    monkeypatch.setattr(torch_utils, "current_stream", lambda: stream)
 
-    workspace = marlin_utils.marlin_make_workspace_new(device)
-    reused = marlin_utils.marlin_make_workspace_new(device, existing=workspace)
-    assert reused is workspace
+    workspace = marlin_utils.get_marlin_workspace(device)
+    assert workspace.shape == (4 * marlin_utils.MARLIN_MAX_BLOCKS_PER_SM,)
+    assert workspace.dtype == torch.int32
+    assert torch.count_nonzero(workspace) == 0
 
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(device, 4, existing=workspace)
-    with pytest.raises(ValueError, match="incompatible"):
-        marlin_utils.marlin_make_workspace_new(
-            device, existing=workspace.to(torch.int64)
-        )
+    workspace.fill_(1)
+    assert marlin_utils.get_marlin_workspace(device) is workspace
+    assert torch.all(workspace == 1)
+
+    stream = "aux"
+    aux_workspace = marlin_utils.get_marlin_workspace(device)
+    assert aux_workspace is not workspace
+    assert torch.count_nonzero(aux_workspace) == 0
 
 
 def test_marlin_act_order_layerwise_reload_accounting(monkeypatch, dist_init):

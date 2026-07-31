@@ -9,10 +9,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
     check_marlin_supports_shape,
+    get_marlin_workspace,
     marlin_act_int8_process_scales,
     marlin_is_k_full,
     marlin_make_empty_g_idx,
-    marlin_make_workspace_new,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -111,11 +111,6 @@ class MarlinLinearKernel(MPLinearKernel):
             padded_n, padded_k = size_n, size_k
         else:
             padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
-
-        # Allocate marlin workspace, reusing existing storage on reload.
-        self.workspace = marlin_make_workspace_new(
-            device, existing=getattr(self, "workspace", None)
-        )
 
         # Default names since marlin requires empty parameters for these,
         # TODO: remove this requirement from marlin (allow optional tensors)
@@ -239,7 +234,7 @@ class MarlinLinearKernel(MPLinearKernel):
             weight_zp=w_zp,  # type: ignore
             g_idx=w_gidx,  # type: ignore
             g_idx_sort_indices=layer.g_idx_sort_indices,
-            workspace=self.workspace,
+            workspace=get_marlin_workspace(x.device),
             wtype=c.weight_type,
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],

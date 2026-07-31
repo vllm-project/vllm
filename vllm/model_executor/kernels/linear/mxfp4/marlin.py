@@ -4,6 +4,9 @@
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_workspace,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -58,7 +61,7 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             weight_global_scale=None,
-            workspace=layer.workspace,
+            workspace=get_marlin_workspace(x.device),
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,
