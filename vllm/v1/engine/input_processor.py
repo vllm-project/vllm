@@ -156,6 +156,7 @@ class InputProcessor:
         sampling_params.min_tokens = 0
         sampling_params.ignore_eos = True
         sampling_params._eos_token_id = None
+        sampling_params.stop = []
         sampling_params.stop_token_ids = []
         sampling_params._all_stop_token_ids = set()
 
