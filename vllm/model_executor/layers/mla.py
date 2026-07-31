@@ -71,6 +71,7 @@ class MLAModules:
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    g_proj: torch.nn.Module | None = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -109,6 +110,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -131,6 +134,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.g_proj = mla_modules.g_proj
 
         # Whether to skip top-k token selection computation in this layer.
         # When True, the indexer will not be called, and the layer will reuse
@@ -162,8 +166,28 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
-
+        indexer_op = getattr(self.indexer, "indexer_op", None)
+        if indexer_op is not None and hasattr(
+            indexer_op, "dense_mha_metadata_layer_name"
+        ):
+            enable_short_prefill_scoring_skip = (
+                allow_short_prefill_indexer_scoring_skip
+                and not self.skip_topk
+                and not getattr(indexer_op, "use_pcp", False)
+                and current_platform.is_cuda()
+            )
+            # The indexer and main MLA use independent decode thresholds and
+            # may classify the same short extend differently. Bind the main
+            # MLA layer name so the eager indexer op can check whether the
+            # batch's top-k indices will be consumed.
+            # PCP is excluded because indexer cache/scoring ownership differs
+            # across ranks and the no-consumer invariant has not been
+            # established there.
+            indexer_op.dense_mha_metadata_layer_name = (
+                self.mla_attn.layer_name if enable_short_prefill_scoring_skip else ""
+            )
         self.prefix = prefix
 
         vllm_config = get_current_vllm_config()
@@ -274,5 +298,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_dcp_replicated=q_dcp_replicated,
             kv_cache_dummy_dep=kv_cache_dummy_dep,
         )
+
+        if self.g_proj is not None:
+            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
 
         return self.o_proj(attn_out)[0]
