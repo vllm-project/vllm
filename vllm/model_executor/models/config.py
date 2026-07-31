@@ -339,6 +339,39 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
+
+    Kimi-K3 ships its routed experts as compressed-tensors
+    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
+    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
+    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
+    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    checkpoint is left untouched. Covers both the main model and the MTP draft.
+
+    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
+    ``ModelConfig.__init__`` before this hook runs, and it is what
+    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    alongside the hf configs so the rewrite lands before resolution; otherwise
+    the main model still resolves to compressed-tensors.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        for cfg in (
+            model_config.hf_config,
+            model_config.hf_text_config,
+            model_config.model_arch_config,
+        ):
+            quant_config = getattr(cfg, "quantization_config", None)
+            if (
+                isinstance(quant_config, dict)
+                and quant_config.get("quant_method") == "compressed-tensors"
+                and quant_config.get("format") == "mxfp4-pack-quantized"
+            ):
+                quant_config["quant_method"] = "mxfp4"
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -439,6 +472,37 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
         pooler_config = model_config.pooler_config
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
+
+
+class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
+    """Config handler for Jina Embeddings V5 embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Reject checkpoints whose backbone is not the Qwen3 decoder.
+
+        The V5 family ships more than one backbone under a single
+        `architectures` entry: the `-small` variants are Qwen3 decoders, while
+        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
+        `configuration_*.py` per repository, so the config carries no backbone
+        field and the encoder variants are only identifiable by
+        `is_decoder=False`. `JinaEmbeddingsV5Model` extends `Qwen3ForCausalLM`
+        and has no path to an encoder backbone, so without this check such a
+        checkpoint fails later with every `q_norm` and `k_norm` weight reported
+        as uninitialized, which does not point at the actual problem.
+
+        Raises:
+            NotImplementedError: If the checkpoint uses an encoder backbone.
+        """
+        if getattr(model_config.hf_config, "is_decoder", True):
+            return
+
+        raise NotImplementedError(
+            "This jina-embeddings-v5 checkpoint uses a bidirectional encoder "
+            "backbone (is_decoder=False). JinaEmbeddingsV5Model is built on "
+            "Qwen3 and cannot serve it, so only the Qwen3-based decoder "
+            "variants are supported, such as jina-embeddings-v5-text-small."
+        )
 
 
 class JinaForRankingConfig(VerifyAndUpdateConfig):
@@ -882,8 +946,11 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
+    "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
