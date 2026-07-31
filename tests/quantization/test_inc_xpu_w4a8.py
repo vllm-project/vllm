@@ -5,7 +5,7 @@
 The w4a8 path keeps int4 weights but dynamically quantizes activations to
 per-token symmetric int8, so the GEMM stays on the int8 datapath instead of
 upconverting weights to the activation dtype. It is opt-in through
-``VLLM_XPU_INC_W4A16_BACKEND`` because which kernel is fastest depends on the
+``VLLM_XPU_INC_WNA16_BACKEND`` because which kernel is fastest depends on the
 device: ARK can use XMX int8 on some XPUs, and the default ("auto") preference
 order is deliberately left unchanged.
 
@@ -25,14 +25,16 @@ import torch
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import INCWna16Scheme
+from vllm.model_executor.layers.quantization.inc.schemes.inc_w4a8_linear import (
+    INCXPUW4A8LinearMethod,
+)
 from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import (
     INCARKLinearMethod,
     INCXPULinearMethod,
-    INCXPUW4A8LinearMethod,
 )
 from vllm.platforms import current_platform
 
-_BACKEND_ENV = "VLLM_XPU_INC_W4A16_BACKEND"
+_BACKEND_ENV = "VLLM_XPU_INC_WNA16_BACKEND"
 _ARK_STATE = (
     "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state"
 )
@@ -292,7 +294,7 @@ def test_invalid_backend_value_raises(monkeypatch) -> None:
 
     monkeypatch.setenv(_BACKEND_ENV, "onednn")
     with pytest.raises(ValueError, match=_BACKEND_ENV):
-        _ = envs.VLLM_XPU_INC_W4A16_BACKEND
+        _ = envs.VLLM_XPU_INC_WNA16_BACKEND
 
 
 # ---------------------------------------------------------------------------
