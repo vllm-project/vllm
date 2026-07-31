@@ -45,7 +45,7 @@ When `trace_decode_token_ids` is set:
 `trace_decode_token_ids` is incompatible with the following features (raises `ValueError`):
 
 | Feature | Reason |
-|---|---|
+| --- | --- |
 | `n > 1` | Trace replay produces a single deterministic sequence |
 | `prompt_logprobs` | Expanded logit layout conflicts with trace kernel indexing |
 | Speculative decoding | Multi-token speculation conflicts with single-token trace stepping |
