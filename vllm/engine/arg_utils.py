@@ -1697,27 +1697,30 @@ class EngineArgs:
         while translating args into configs. "auto" needs both the EC role and
         the tensor transport, which are only available together here.
 
-        An explicit `device` in `--mm-processor-kwargs` always wins.
+        An explicit `device` in `--mm-processor-kwargs` always wins, and is
+        checked by the same warning below, so both entry points are covered.
         """
-        if self.mm_processor_device == "cpu":
-            return
+        original = self.mm_processor_kwargs or {}
+        kwargs = dict(original)
 
-        if self.mm_processor_device == "auto":
-            ec_config = self.ec_transfer_config
-            # An EC producer that is not also a consumer runs no decoder and
-            # allocates no KV cache, so frontend work does not compete with the
-            # language model.
-            is_encoder_instance = (
-                ec_config is not None
-                and ec_config.is_ec_producer
-                and not ec_config.is_ec_consumer
-            )
-            if not is_encoder_instance:
-                return
-            # Any other transport serializes host bytes, so the output would be
-            # copied back and the copy costs more than running on device saves.
-            if self.mm_tensor_ipc != "torch_shm":
-                if is_encoder_instance:
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no decoder and
+        # allocates no KV cache -- `GPUModelRunner.get_kv_cache_spec` returns {}
+        # for it -- so frontend GPU work has the device to itself.
+        is_encoder_instance = (
+            ec_config is not None
+            and ec_config.is_ec_producer
+            and not ec_config.is_ec_consumer
+        )
+
+        if "device" not in kwargs:
+            if self.mm_processor_device == "cuda":
+                kwargs["device"] = "cuda"
+            elif self.mm_processor_device == "auto" and is_encoder_instance:
+                # Any other transport serializes host bytes, so the output would
+                # be copied back, and that copy costs more than running the
+                # transform on device saves.
+                if self.mm_tensor_ipc != "torch_shm":
                     logger.info_once(
                         "EPD encoder instance: keeping the multi-modal "
                         "processor on CPU because mm_tensor_ipc=%s cannot carry "
@@ -1725,23 +1728,40 @@ class EngineArgs:
                         "it on the accelerator.",
                         self.mm_tensor_ipc,
                     )
-                return
+                else:
+                    from vllm.platforms import current_platform
 
-            from vllm.platforms import current_platform
+                    if current_platform.is_cuda_alike():
+                        kwargs["device"] = "cuda"
 
-            if not current_platform.is_cuda_alike():
-                return
+        device = kwargs.get("device")
+        on_accelerator = isinstance(device, str) and device.startswith("cuda")
 
-        kwargs = dict(self.mm_processor_kwargs or {})
-        if "device" in kwargs:
-            return
-        kwargs["device"] = "cuda"
-        self.mm_processor_kwargs = kwargs
-        logger.info_once(
-            "Running the multi-modal processor on the accelerator "
-            "(mm_processor_kwargs['device'] = 'cuda'). Override with "
-            "--mm-processor-device=cpu."
-        )
+        if on_accelerator and not is_encoder_instance:
+            raise ValueError(
+                f"Cannot run the multi-modal processor on {device}: this "
+                "instance also runs the language model. The processor would "
+                "share the device with the model's forward pass, so its "
+                "transform kernels contend with that compute, and because it "
+                "runs in the API-server process its allocations are outside the "
+                "memory the engine profiled for its KV cache -- risking OOM or "
+                "a silently shrunken cache.\n"
+                "Accelerator preprocessing is only supported on an encode-only "
+                "instance of an encode/prefill/decode deployment (an EC "
+                "producer that is not also a consumer), which runs no forward "
+                "pass and allocates no KV cache.\n"
+                'Use --mm-processor-device=cpu, or drop "device" from '
+                "--mm-processor-kwargs."
+            )
+        if on_accelerator:
+            logger.info_once(
+                "Running the multi-modal processor on %s. Override with "
+                "--mm-processor-device=cpu.",
+                device,
+            )
+
+        if kwargs != original:
+            self.mm_processor_kwargs = kwargs
 
     def create_model_config(self) -> ModelConfig:
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
