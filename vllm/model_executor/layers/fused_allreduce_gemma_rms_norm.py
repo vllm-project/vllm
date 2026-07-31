@@ -43,7 +43,7 @@ try:
         if flashinfer_comm is not None
         else None
     )
-except ImportError:
+except (ImportError, AttributeError):
     flashinfer_trtllm_fused_allreduce_norm = None  # type: ignore[assignment]
     get_fi_ar_workspace = None  # type: ignore[assignment]
     _AR_RESIDUAL_RMS_NORM = None
