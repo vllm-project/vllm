@@ -313,8 +313,8 @@ def test_named_tool_choice_without_any_tools_rejected():
 
 
 def test_named_tool_choice_with_message_level_tools_allowed():
-    # A named tool_choice without request-level tools is allowed when the
-    # named tool may be declared at the message level (not cross-checked).
+    # A named tool_choice matching a message-level declaration is allowed
+    # without request-level tools.
     request = ChatCompletionRequest.model_validate(
         {
             "messages": [
@@ -331,11 +331,79 @@ def test_named_tool_choice_with_message_level_tools_allowed():
     assert request.tool_choice.function.name == "get_weather"
 
 
+def test_named_tool_choice_mismatched_message_level_tools_rejected():
+    # A named tool_choice that matches NO declaration anywhere is rejected,
+    # even when message-level tools are present.
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the declared `tools`"
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {"role": "system", "content": "", "tools": [SAMPLE_TOOL]},
+                    {"role": "user", "content": "Hello"},
+                ],
+                "model": "facebook/opt-125m",
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "nondefined_function_name"},
+                },
+            }
+        )
+
+
+def test_named_tool_choice_matches_message_level_among_request_tools():
+    # Mixed sources: the named tool may come from a message even when
+    # unrelated request-level tools are present.
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "system", "content": "", "tools": [SAMPLE_TOOL]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+            "tools": [_SAMPLE_TOOL_DICT],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+    )
+    assert request.tool_choice.function.name == "get_weather"
+
+
+def test_malformed_message_level_tools_not_a_tool_source():
+    # Malformed declarations like [{}] do not count as a tool source:
+    # no "auto" default, and required is still rejected.
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "system", "content": "", "tools": [{}]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert request.tool_choice == "none"
+
+    with pytest.raises(VLLMValidationError, match="tools must be declared"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {"role": "system", "content": "", "tools": [{}]},
+                    {"role": "user", "content": "Hello"},
+                ],
+                "model": "facebook/opt-125m",
+                "tool_choice": "required",
+            }
+        )
+
+
 def test_named_tool_choice_must_match_declared_tools():
     # When request-level tools ARE present, a named tool_choice must still
     # match one of them.
     with pytest.raises(
-        VLLMValidationError, match="does not match any of the specified `tools`"
+        VLLMValidationError, match="does not match any of the declared `tools`"
     ):
         ChatCompletionRequest.model_validate(
             {

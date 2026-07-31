@@ -3227,7 +3227,7 @@ def test_parse_message_level_tools_passed_through(role):
 
 @pytest.mark.parametrize("role", ["user", "assistant", "tool"])
 def test_parse_message_level_tools_not_passed_for_other_roles(role):
-    """tools on non-system/developer roles are not passed through."""
+    """Tools on non-system/developer roles are not passed through."""
     from vllm.entrypoints.chat_utils import _parse_chat_message_content
 
     result = _parse_chat_message_content(
