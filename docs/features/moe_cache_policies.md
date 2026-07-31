@@ -10,10 +10,6 @@ experts in a fixed-size GPU scratch buffer.
 | `--moe-expert-cache-split` | `token` | How to evaluate a forward that needs more experts than the cache holds: `token` or `expert` |
 
 !!! note
-    Expert caching requires `--enforce-eager`. CUDA graph capture is
-    incompatible with the dynamic Python bookkeeping in `prepare()`.
-
-!!! note
     Expert caching is not compatible with expert parallelism (EP > 1),
     data parallelism, or sequence parallelism.
 
@@ -22,8 +18,7 @@ experts in a fixed-size GPU scratch buffer.
 ```bash
 # OLMoE-1B-7B: 64 experts, fits on 8 GB GPU with 16 cached per layer
 vllm serve allenai/OLMoE-1B-7B-0924 \
-    --moe-expert-cache-size 16 \
-    --enforce-eager
+    --moe-expert-cache-size 16
 ```
 
 ### Python API
@@ -37,7 +32,6 @@ llm = LLM(
     model="allenai/OLMoE-1B-7B-0924",
     moe_expert_cache_size=16,
     moe_expert_cache_split="token",  # or "expert"
-    enforce_eager=True,
 )
 ```
 
@@ -91,12 +85,35 @@ Either way the cache must hold at least `top_k` experts — one token's experts
 have to be resident together, which no split can avoid. That is checked at
 startup.
 
+## CUDA graphs
+
+The cache is compatible with piecewise CUDA graphs, which is the default
+when `--moe-expert-cache-size` is set without `--enforce-eager`. vLLM adds
+the MoE op (`vllm.moe_forward`) to `splitting_ops` and caps
+`cudagraph_mode` at `PIECEWISE`: every non-MoE segment of the model is
+captured and replayed, while the MoE layer — routing, cache management,
+H2D copies, and the grouped GEMM — runs eagerly between segments. The
+cache's GPU buffers and its `expert_map` are allocated once and updated
+in place, so captured segments never observe a stale address.
+
+Full-graph capture (`FULL`, `FULL_AND_PIECEWISE`) is not supported: a
+capture would freeze one forward's cache state into every replay.
+`--enforce-eager` remains available and is required when compilation is
+disabled (`-O0`).
+
+## Known costs
+
+Each MoE layer performs one device sync per forward to read the routing
+decision onto the host (`topk_ids.unique()`); this is the latency floor of
+the current design. Overlapping it with a routing-ahead prefetch is
+planned as a follow-up (see RFC #38256).
+
 ## Observability
 
 ### DEBUG-level hit/miss log
 
 Set `VLLM_LOGGING_LEVEL=DEBUG` to get a per-layer running hit/miss total,
-logged on every `prepare()` call:
+logged every 1000 `prepare()` calls:
 
 ```text
 DEBUG vllm...expert_weight_provider: Expert cache: 1234 hits, 56 misses (95.7% hit rate)
