@@ -82,6 +82,22 @@ class Sampler:
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
 
+    def warmup_compact_output_expansion(self) -> None:
+        """JIT-compile compact-output expansion kernel variants."""
+        device = self.req_states.device
+        cu_num_values = torch.tensor([0, 1, 1], dtype=torch.int32, device=device)
+        _expand_compact_values(
+            torch.empty(1, dtype=torch.int64, device=device),
+            cu_num_values,
+            fill_value=-1,
+        )
+        if self.compute_nans:
+            _expand_compact_values(
+                torch.empty(1, dtype=torch.int32, device=device),
+                cu_num_values,
+                fill_value=0,
+            )
+
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
