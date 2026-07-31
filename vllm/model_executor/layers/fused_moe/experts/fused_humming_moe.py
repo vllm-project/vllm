@@ -724,11 +724,8 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            outputs=buffers["output"],
+            outputs=output,
         )
-
-        # buffers["output"] aliases the output supplied by the modular kernel.
-
 
 class HummingGroupedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -836,15 +833,12 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
 
         moe_unpermute(
-            out=buffers["output"],
+            out=output,
             permuted_hidden_states=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
         )
-
-        # buffers["output"] aliases the output supplied by the modular kernel.
-
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -937,12 +931,9 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             inputs=inputs,
             weight=w2,
             input_scale=input_scale,
-            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
+            outputs=output.view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
         )
-
-        # buffers["down_output"] aliases the output supplied by the modular
-        # kernel.
