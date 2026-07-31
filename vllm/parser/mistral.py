@@ -526,14 +526,18 @@ class MistralParser(ParserEngine):
     def _legacy_extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | None,
     ) -> ExtractedToolCallInformation:
         """Pre-v11 non-streaming extraction.
 
         Handles ``[TOOL_CALLS][{...}]`` and guided bare-array formats.
         """
-        tool_choice = getattr(request, "tool_choice", None)
-        tools = getattr(request, "tools", None)
+        if request is None:
+            tool_choice = None
+            tools = None
+        else:
+            tool_choice = request.tool_choice
+            tools = request.tools
 
         # tool_choice="none" with tools: never produce tool calls.
         if tool_choice == "none" and tools:
