@@ -294,6 +294,7 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self._pp_missing_count: dict[str, int] = {}
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -1758,7 +1759,55 @@ class Scheduler(SchedulerInterface):
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = model_runner_output.req_id_to_index.get(req_id)
+            if req_index is None:
+                miss_count = self._pp_missing_count.get(req_id, 0) + 1
+                self._pp_missing_count[req_id] = miss_count
+
+                if miss_count <= 3:
+                    request.num_computed_tokens -= num_tokens_scheduled
+                    logger.warning(
+                        "PP output missing req %s (attempt %d/3), "
+                        "rolling back num_computed_tokens",
+                        req_id, miss_count)
+                    continue
+
+                del self._pp_missing_count[req_id]
+                logger.warning(
+                    "PP output missing req %s after 3 retries, "
+                    "force-terminating request", req_id)
+                if request.has_encoder_inputs:
+                    self._free_encoder_inputs(request)
+                status_before_stop = request.status
+                request.status = RequestStatus.FINISHED_STOPPED
+                finish_reason = request.get_finished_reason()
+                finished = self._handle_stopped_request(request)
+                kv_transfer_params = None
+                ec_transfer_params = None
+                if finished:
+                    kv_transfer_params, ec_transfer_params = (
+                        self._free_request(request))
+                if status_before_stop == RequestStatus.RUNNING:
+                    stopped_running_reqs.add(request)
+                else:
+                    stopped_preempted_reqs.add(request)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=finish_reason,
+                        new_logprobs=None,
+                        new_prompt_logprobs_tensors=None,
+                        pooling_output=None,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                        ec_transfer_params=ec_transfer_params,
+                        trace_headers=request.trace_headers,
+                    )
+                )
+                continue
+            self._pp_missing_count.pop(req_id, None)
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )

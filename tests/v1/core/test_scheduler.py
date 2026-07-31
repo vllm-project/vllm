@@ -5730,3 +5730,59 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     # Must resume at the convergent boundary (block 0), not the deep FA hit.
     assert replay.num_tokens - num_scheduled == block_size
+
+
+def test_update_from_output_missing_req_id_no_crash():
+    """With PP>1, a request may be scheduled but absent from the model
+    runner output (e.g. preemption/abort race between scheduling and
+    execution).  The scheduler must not raise a KeyError and should
+    roll back num_computed_tokens so the request can be retried.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/32701
+    """
+    scheduler = create_scheduler()
+
+    [req] = create_requests(num_requests=1, num_tokens=10)
+    scheduler.add_request(req)
+
+    num_computed_before = req.num_computed_tokens
+    scheduler_output = scheduler.schedule()
+    assert req.request_id in scheduler_output.num_scheduled_tokens
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert req.num_computed_tokens == num_computed_before
+    assert req.request_id in scheduler._pp_missing_count
+    assert scheduler._pp_missing_count[req.request_id] == 1
+
+
+def test_update_from_output_missing_req_id_force_terminate():
+    """After 3 consecutive misses from the model runner output, the
+    scheduler should force-terminate the request to prevent infinite retry.
+    """
+    scheduler = create_scheduler()
+
+    [req] = create_requests(num_requests=1, num_tokens=10)
+    scheduler.add_request(req)
+
+    for attempt in range(4):
+        scheduler_output = scheduler.schedule()
+        if req.request_id not in scheduler_output.num_scheduled_tokens:
+            break
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+        )
+
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert req.is_finished()
+    assert req.request_id not in scheduler._pp_missing_count
