@@ -360,7 +360,7 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
-#if defined(__GFX12__)
+#if defined(__gfx1201__)
 
 // Selectors used by the SWMMAC sparse A operand. Even/odd lanes choose
 // different 16-bit pairs from the A fragment.
