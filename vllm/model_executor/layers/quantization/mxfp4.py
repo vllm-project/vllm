@@ -511,7 +511,7 @@ def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
     there. Requantizing to groupwise int4 lets AITER's bf16 x int4 FlyDSL path
     serve the model, at the cost of a lossy weight conversion. That trade is the
     user's to make, so it is opt-in through
-    ``--quantization-config.moe.weight int4`` rather than inferred from the
+    ``--quantization-config.moe.weight int4_per_group_32`` rather than inferred from the
     hardware.
     """
     from vllm.platforms import current_platform
@@ -534,8 +534,8 @@ def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
 def _moe_weight_override_is_int4() -> bool:
     """True when the user asked for int4 MoE weights on the command line.
 
-    Set with ``--quantization-config.moe.weight int4``. The requantization is
-    lossy, so it never happens unless it was requested.
+    Set with ``--quantization-config.moe.weight int4_per_group_32``. The
+    requantization is lossy, so it never happens unless it was requested.
     """
     from vllm.config import get_current_vllm_config
 
@@ -545,7 +545,13 @@ def _moe_weight_override_is_int4() -> bool:
     quant_args = getattr(vllm_config.model_config, "quantization_config", None)
     moe_spec = getattr(quant_args, "moe", None)
     weight = getattr(moe_spec, "weight", None)
-    return str(weight) == "int4"
+    if weight is None:
+        return False
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+    )
+
+    return weight == kInt4Static32
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
