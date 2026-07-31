@@ -978,6 +978,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 np.save(buf, output.routed_experts)
                 routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
+            sampling_mask = None
+            if output.sampling_mask is not None:
+                sampling_mask = output.sampling_mask.token_ids
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
@@ -994,6 +998,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                sampling_mask=sampling_mask,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

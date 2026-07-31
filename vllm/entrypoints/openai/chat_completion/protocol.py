@@ -110,6 +110,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    sampling_mask: list[list[int]] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
