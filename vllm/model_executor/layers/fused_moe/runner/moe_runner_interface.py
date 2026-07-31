@@ -62,7 +62,7 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     ########################################################################
     #
-    # FusedMoE layer methods
+    # FusedMoEFactory layer methods
     #
     ########################################################################
 
