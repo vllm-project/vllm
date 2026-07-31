@@ -17,9 +17,6 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorSidecarConfig,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -48,58 +45,6 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
-
-
-def test_routed_experts_uses_public_connector_sidecar_config():
-    connector = Mock()
-    connector.get_block_sidecar_config.return_value = KVConnectorSidecarConfig(
-        num_connector_blocks=17,
-        blocks_per_connector_block=3,
-    )
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.connector = connector
-
-    assert scheduler._get_routed_experts_sidecar_config() == (17, 3)
-    connector.get_block_sidecar_config.assert_called_once_with()
-
-
-@pytest.mark.parametrize(
-    ("config", "match"),
-    [
-        pytest.param(
-            None,
-            "supports block sidecars",
-            id="unsupported-connector",
-        ),
-        pytest.param(
-            KVConnectorSidecarConfig(
-                num_connector_blocks=0,
-                blocks_per_connector_block=1,
-            ),
-            "non-empty connector block pool",
-            id="empty-connector-block-pool",
-        ),
-        pytest.param(
-            KVConnectorSidecarConfig(
-                num_connector_blocks=1,
-                blocks_per_connector_block=0,
-            ),
-            "positive blocks-per-connector-block",
-            id="invalid-block-size-factor",
-        ),
-    ],
-)
-def test_routed_experts_rejects_invalid_connector_sidecar_config(
-    config: KVConnectorSidecarConfig | None,
-    match: str,
-):
-    connector = Mock()
-    connector.get_block_sidecar_config.return_value = config
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.connector = connector
-
-    with pytest.raises(ValueError, match=match):
-        scheduler._get_routed_experts_sidecar_config()
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

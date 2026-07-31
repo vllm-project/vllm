@@ -343,18 +343,20 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
-            num_offload_blocks = None
-            block_size_factor = 1
+            sidecar_config = None
             if self.connector is not None:
-                num_offload_blocks, block_size_factor = (
-                    self._get_routed_experts_sidecar_config()
-                )
+                sidecar_config = self.connector.get_block_sidecar_config()
+                if sidecar_config is None:
+                    raise ValueError(
+                        "--enable-return-routed-experts requires a KV connector "
+                        "that supports block sidecars; "
+                        f"{type(self.connector).__name__} does not"
+                    )
 
             self.routed_experts_manager = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
-                num_offload_blocks=num_offload_blocks,
-                block_size_factor=block_size_factor,
+                sidecar_config=sidecar_config,
             )
             # Snapshot block IDs before forward because async scheduling may
             # release or reassign them before model output is processed.
@@ -365,31 +367,6 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
-
-    def _get_routed_experts_sidecar_config(self) -> tuple[int, int]:
-        """Return a connector's public block-sidecar storage layout."""
-        assert self.connector is not None
-        config = self.connector.get_block_sidecar_config()
-        if config is None:
-            raise ValueError(
-                "--enable-return-routed-experts requires a KV connector "
-                "that supports block sidecars; "
-                f"{type(self.connector).__name__} does not"
-            )
-        if config.num_connector_blocks <= 0:
-            raise ValueError(
-                "--enable-return-routed-experts with KV offload requires "
-                "a non-empty connector block pool"
-            )
-        if config.blocks_per_connector_block <= 0:
-            raise ValueError(
-                "--enable-return-routed-experts with KV offload requires "
-                "a positive blocks-per-connector-block value"
-            )
-        return (
-            config.num_connector_blocks,
-            config.blocks_per_connector_block,
-        )
 
     def _mamba_block_aligned_split(
         self,
