@@ -1016,6 +1016,9 @@ class LlamaJsonParser(ParserEngine):
         """
         out: list[SemanticEvent] = []
         pending: dict[int, list[str]] = {}
+        # Where each call's first event of this batch landed in ``out``, so a
+        # retraction rescans only that call rather than everything before it.
+        call_start: dict[int, int] = {}
         for event in events:
             if event.type == EventType.TEXT_CHUNK:
                 if self._suppress_content:
@@ -1050,11 +1053,9 @@ class LlamaJsonParser(ParserEngine):
                 ):
                     # Phantom: retract this batch's (remapped) events for
                     # the call and restore the full text as content.
-                    out = [
-                        e
-                        for e in out
-                        if e.type == EventType.TEXT_CHUNK or e.tool_index != dense_idx
-                    ]
+                    self._retract_call(
+                        out, call_start.pop(dense_idx, len(out)), dense_idx
+                    )
                     if dense_idx < len(self._tool_slots):
                         self._tool_slots[dense_idx] = ToolCallSlot()
                     self._phantom_count += 1
@@ -1065,10 +1066,30 @@ class LlamaJsonParser(ParserEngine):
                     continue
                 self._drop_content = True
                 self._held_ws.clear()
+            call_start.setdefault(dense_idx, len(out))
             out.append(SemanticEvent(event.type, event.value, dense_idx))
         if finished and not self._suppress_content:
             self._flush_held_ws(out)
         return out
+
+    @staticmethod
+    def _retract_call(out: list[SemanticEvent], start: int, dense_idx: int) -> None:
+        """Drop this batch's events for a call that turned out to be prose.
+
+        A call's events are appended contiguously from *start*, so only that
+        suffix is examined.  Rebuilding the whole list instead made a document
+        of N prose-JSON objects cost O(N^2) -- 128 KB of JSON lines took
+        seconds of CPU in a single parse.
+        """
+        if start >= len(out):
+            return
+        kept = [
+            e
+            for e in out[start:]
+            if e.type == EventType.TEXT_CHUNK or e.tool_index != dense_idx
+        ]
+        del out[start:]
+        out.extend(kept)
 
     @staticmethod
     def _coalesce_arg_events(
