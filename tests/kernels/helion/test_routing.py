@@ -51,10 +51,8 @@ def test_routed_op_schema_matches_native(helion_name: str, native_name: str):
 @pytest.mark.parametrize(
     "name",
     [
-        "rms_norm_dynamic_per_token_quant",
         "rms_norm_per_block_quant",
         "silu_and_mul_per_block_quant",
-        "fused_qk_norm_rope",
     ],
 )
 def test_compiled_route_uses_native_then_captures_helion(name: str):

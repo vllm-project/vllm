@@ -18,10 +18,8 @@ import vllm.envs as envs
 # remaining registered Helion kernels have eager call sites or an incompatible
 # schema and need a different routing path.
 _HELION_TO_NATIVE_OP: dict[str, str] = {
-    "rms_norm_dynamic_per_token_quant": "rms_norm_dynamic_per_token_quant",
     "rms_norm_per_block_quant": "rms_norm_per_block_quant",
     "silu_and_mul_per_block_quant": "silu_and_mul_per_block_quant",
-    "fused_qk_norm_rope": "fused_qk_norm_rope",
     # Also emitted directly (not only by fusion) — a standalone activation quant
     # that survives fusion is retargeted here; its eager call sites are routed
     # separately in input_quant_fp8.QuantFP8.forward_cuda.
