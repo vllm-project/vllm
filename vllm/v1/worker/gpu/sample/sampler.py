@@ -135,9 +135,8 @@ class Sampler:
 
         sampling_mask_tensors = None
         if self.enable_return_sampling_mask:
-            keep = torch.isfinite(processed_logits)
+            keep = torch.isfinite(processed_logits)[num_sampled.bool()]
             counts = keep.sum(dim=-1, dtype=torch.int32)
-            keep = keep[num_sampled.bool()]
             token_ids = keep.flatten().nonzero(as_tuple=True)[0]
             token_ids = token_ids.remainder(keep.shape[1]).to(torch.int32)
             sampling_mask_tensors = SamplingMaskTensors(token_ids, counts)
