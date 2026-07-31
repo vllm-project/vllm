@@ -162,6 +162,11 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny_reduce_counting:
+        # wvSplitKrc takes the ACTIVATION as in_a (note the argument order differs
+        # from wvSplitK) and the guard above checks only weight.is_contiguous().
+        # These kernels index the operand linearly; see the comment below.
+        if not x.is_contiguous():
+            x = x.contiguous()
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
     # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
@@ -184,7 +189,20 @@ def rocm_unquantized_gemm_impl(
 
     if use_skinny:
         x_view = x.reshape(-1, x.size(-1))
-        if m > 8 and 0 < n <= 5:
+        # wvSplitK's LDS preload reads the activation LINEARLY for
+        # (row_stride * N) elements -- it never indexes by row, it assumes a
+        # dense N x row_stride block. For a contiguous tensor row_stride == K
+        # and that lands exactly on the last element; for a strided view it runs
+        # (row_stride - K) elements past the end of the storage. Since it is a
+        # read it corrupts nothing and only faults when the over-read crosses an
+        # unmapped page, so it presents as an allocator-layout-dependent crash.
+        # skinny_gemms.cu states the constraint itself: these kernels "do not
+        # take strides, and are unable to handle PyTorch tensors that return
+        # is_contiguous() as False". The affected tensors here are tiny (N <= 5
+        # rows), so materialising costs a few KB and keeps the fast kernel.
+        if not x_view.is_contiguous():
+            x_view = x_view.contiguous()
+        if m > 8 and 0 < n <= 5 and weight.is_contiguous():
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
