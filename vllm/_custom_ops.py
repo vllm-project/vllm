@@ -2391,17 +2391,6 @@ def topk_softmax(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2447,21 +2436,6 @@ def topk_hash_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softplus_sqrt(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-        )
-        return
-
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -3517,6 +3491,7 @@ def chunk_gated_delta_rule_cpu(
     cu_seqlens: torch.Tensor,
     head_first: bool,
     use_qk_l2norm_in_kernel: bool,
+    initial_state_indices: torch.Tensor,
     eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.chunk_gated_delta_rule_cpu(
@@ -3530,6 +3505,7 @@ def chunk_gated_delta_rule_cpu(
         cu_seqlens,
         head_first,
         use_qk_l2norm_in_kernel,
+        initial_state_indices,
         eps,
     )
 
