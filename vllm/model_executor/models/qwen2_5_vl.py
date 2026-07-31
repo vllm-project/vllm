@@ -1365,6 +1365,10 @@ class Qwen2_5_VLForConditionalGeneration(
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            if multimodal_config.mm_device_do_normalize:
+                self.input_norm = make_input_norm(Qwen2VLImageProcessor)
+            else:
+                self.input_norm = nn.Identity()
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1376,11 +1380,6 @@ class Qwen2_5_VLForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-        if multimodal_config.mm_device_do_normalize:
-            self.input_norm = make_input_norm(Qwen2VLImageProcessor)
-        else:
-            self.input_norm = None
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -2039,7 +2038,10 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.multimodal_config.mm_device_do_normalize:
+            autoloaded_weights.update({'input_norm.weight', 'input_norm.bias'})
+        return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
