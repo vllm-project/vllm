@@ -298,6 +298,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS: bool = False
 
 
 def get_default_cache_root():
@@ -1114,11 +1115,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # retains only the latest completed prompt boundary. Positive values retain
     # checkpoints at the specified interval boundaries (rounded up to the
     # prefix-cache alignment).
-    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
+    # Applies to sliding-window and Mamba/linear attention.
     "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
+    ),
+    # Under sparse retention, retain up to two additional scheduler-aligned
+    # checkpoints in the committed decode prefix of Mamba `align` groups.
+    # Older additional local entries are withdrawn from the prefix-cache hash
+    # map; interval checkpoints and remote KV-store copies keep their own
+    # eviction policy.
+    "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

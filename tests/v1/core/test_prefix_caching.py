@@ -3388,6 +3388,164 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
     assert len(computed_blocks.blocks[1]) == 0
 
 
+@pytest.mark.parametrize(
+    ("retain_decode_checkpoints", "expected_cached", "expected_hits"),
+    [
+        (False, {0}, (4, 4)),
+        (True, {0, 3, 4}, (16, 20)),
+    ],
+)
+def test_hybrid_local_kv_retention_reuses_decode_checkpoints(
+    monkeypatch,
+    retain_decode_checkpoints,
+    expected_cached,
+    expected_hits,
+):
+    """Only the latest two committed decode states remain locally reusable."""
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    monkeypatch.setenv(
+        "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS",
+        str(int(retain_decode_checkpoints)),
+    )
+    block_size = 4
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(
+            block_size,
+            100,
+            ["full", "mamba_align"],
+        ),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    req = make_request("producer", list(range(8)), block_size, sha256)
+
+    def compute(num_tokens):
+        manager.new_step_starts()
+        blocks = manager.allocate_slots(req, num_tokens)
+        assert blocks is not None
+        req.num_computed_tokens += num_tokens
+
+    # Materialize the prompt replay boundary, then three aligned decode
+    # checkpoints. Align-mode Mamba rotates its running-state block; the third
+    # decode checkpoint withdraws the first from the local prefix cache.
+    compute(4)
+    compute(4)
+    for token_ids in (range(8, 12), range(12, 16), range(16, 20)):
+        req.append_output_token_ids(list(token_ids))
+        compute(4)
+
+    manager.new_step_starts()
+    manager.free(req)
+
+    pool = manager.block_pool
+    cached = {
+        i
+        for i in range(5)
+        if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+        is not None
+    }
+    assert cached == expected_cached
+
+    shorter_branch = make_request(
+        "shorter_branch",
+        req.all_token_ids[:16] + [100, 101, 102, 103],
+        block_size,
+        sha256,
+    )
+    full_replay = make_request(
+        "full_replay",
+        list(req.all_token_ids) + [100, 101, 102, 103],
+        block_size,
+        sha256,
+    )
+    _, shorter_hit, _ = manager.get_computed_blocks(shorter_branch)
+    _, full_hit, _ = manager.get_computed_blocks(full_replay)
+    assert (shorter_hit, full_hit) == expected_hits
+
+
+@pytest.mark.parametrize(
+    ("retention_interval", "spec_types", "expected_match"),
+    [
+        (
+            None,
+            ["full", "mamba_align"],
+            "requires VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        ),
+        ("0", ["full", "mamba"], "requires a Mamba KV cache group"),
+        ("0", ["full", "sliding_window"], "requires a Mamba KV cache group"),
+    ],
+)
+def test_decode_checkpoint_retention_rejects_unsupported_config(
+    monkeypatch,
+    retention_interval,
+    spec_types,
+    expected_match,
+):
+    """Decode checkpoint retention is an opt-in Mamba-align sparse policy."""
+    if retention_interval is not None:
+        monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", retention_interval)
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+
+    with pytest.raises(ValueError, match=expected_match):
+        make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(4, 100, spec_types),
+            max_model_len=1024,
+            enable_caching=True,
+            hash_block_size=4,
+        )
+
+
+def test_decode_checkpoint_retention_excludes_rejected_draft_tokens(monkeypatch):
+    """Only committed speculative-decode tokens can form a checkpoint."""
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+    block_size = 4
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(
+            block_size,
+            100,
+            ["full", "mamba_align"],
+        ),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    def compute_prompt(request):
+        for _ in range(2):
+            manager.new_step_starts()
+            blocks = manager.allocate_slots(request, block_size)
+            assert blocks is not None
+            request.num_computed_tokens += block_size
+
+    req = make_request("producer", list(range(8)), block_size, sha256)
+    compute_prompt(req)
+
+    # The sampled token is committed, while the proposed suffix is not part of
+    # request.num_tokens and must not create a decode checkpoint.
+    req.append_output_token_ids([8])
+    req.spec_token_ids = list(range(9, 17))
+    manager.new_step_starts()
+    blocks = manager.allocate_slots(req, len(req.spec_token_ids))
+    assert blocks is not None
+    assert manager.block_pool.get_cached_block(req.block_hashes[0], [1]) is not None
+    assert manager.block_pool.get_cached_block(req.block_hashes[1], [1]) is None
+
+    # Accept the whole scheduled span. On the next step, boundary 16 is both
+    # committed and backed by the Mamba state materialized above, so it can be
+    # admitted. The newly proposed suffix is still excluded by the cap.
+    req.append_output_token_ids(list(range(9, 17)))
+    req.num_computed_tokens += len(req.spec_token_ids)
+    req.spec_token_ids = list(range(17, 25))
+    manager.new_step_starts()
+    blocks = manager.allocate_slots(req, len(req.spec_token_ids))
+    assert blocks is not None
+    assert manager.block_pool.get_cached_block(req.block_hashes[3], [1]) is not None
+
+    manager.free(req)
+
+
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
     """Verify MTP/EAGLE SWA retention keeps the extra proof block.
 

@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -429,6 +430,7 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_decode_checkpoints: bool = False,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -440,7 +442,11 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval: Sparse local-checkpoint granularity. ``None``
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
-                a tail once per that-sized segment. Only SWA acts on it.
+                a tail once per that-sized segment.
+            retain_decode_checkpoints: Under sparse retention for Mamba
+                ``align`` mode, admit scheduler-aligned boundaries in the
+                committed decode prefix. The Mamba manager limits these to the
+                latest two checkpoints per request.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -454,6 +460,20 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries = [request.num_prompt_tokens - 1]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
+        decode_boundary = 0
+        if (
+            retention_interval is not None
+            and retain_decode_checkpoints
+            and isinstance(self.kv_cache_spec, MambaSpec)
+            and self.kv_cache_spec.mamba_cache_mode == "align"
+        ):
+            decode_boundary = (
+                num_tokens // self.scheduler_block_size * self.scheduler_block_size
+            )
+            if decode_boundary <= request.num_prompt_tokens:
+                decode_boundary = 0
+            else:
+                reachable_boundaries.append(decode_boundary)
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -781,8 +801,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_decode_checkpoints: bool = False,
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            retain_decode_checkpoints=retain_decode_checkpoints,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -1275,6 +1301,13 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
+            # Latest scheduler-aligned checkpoints admitted from the committed
+            # decode prefix. Each entry records the physical block plus its
+            # exact hash so recycling cannot cause us to evict an unrelated
+            # cache entry.
+            self._decode_checkpoints: dict[
+                str, list[tuple[int, BlockHashWithGroupId]]
+            ] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1655,6 +1688,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._decode_checkpoints.pop(request_id, None)
             # A hand-off whose request died in this same scheduling pass must
             # not reach the connector: its unpin hook (free) has already run.
             self._pending_partial_tail_offloads = [
@@ -1677,10 +1711,25 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_decode_checkpoints: bool = False,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            retain_decode_checkpoints=retain_decode_checkpoints,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
+        if num_cached_blocks_after > num_cached_blocks_before:
+            checkpoint_hash = self._record_decode_checkpoint(
+                request,
+                num_tokens,
+                retention_interval,
+                retain_decode_checkpoints,
+            )
+            if checkpoint_hash is not None:
+                self.cached_blocks_this_step.add(checkpoint_hash)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
             if partial_hash is not None:
@@ -1699,6 +1748,86 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def _record_decode_checkpoint(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None,
+        retain_decode_checkpoints: bool,
+    ) -> BlockHashWithGroupId | None:
+        """Retain at most two committed, scheduler-aligned decode states.
+
+        The scheduler can only materialize recurrent state at boundaries it
+        actually computes. Keeping the latest two such boundaries covers the
+        common response-end alignment ambiguity without accumulating every
+        decode state for the lifetime of the request.
+
+        Older entries are withdrawn from the local prefix-cache hash map.
+        ``BlockPool.evict_blocks`` deliberately leaves referenced physical
+        blocks alive, and external stores retain any copies under their own
+        eviction policy.
+        """
+        if (
+            self.mamba_cache_mode != "align"
+            or retention_interval is None
+            or not retain_decode_checkpoints
+        ):
+            return None
+
+        decode_boundary = (
+            num_tokens // self.scheduler_block_size * self.scheduler_block_size
+        )
+        if decode_boundary <= request.num_prompt_tokens:
+            return None
+
+        block_idx = decode_boundary // self.block_size - 1
+        blocks = self.req_to_blocks[request.request_id]
+        if block_idx >= len(blocks):
+            return None
+        block = blocks[block_idx]
+        if block.is_null:
+            return None
+
+        block_hashes = resolve_block_hashes(
+            request.block_hashes,
+            self.block_pool.hash_block_size,
+            self.block_size,
+        )
+        if block_idx >= len(block_hashes):
+            return None
+        checkpoint_hash = make_block_hash_with_group_id(
+            block_hashes[block_idx], self.kv_cache_group_id
+        )
+        if not self.block_pool.cached_block_hash_to_block.contain(
+            checkpoint_hash, block.block_id
+        ):
+            return None
+
+        # A periodic segment checkpoint is retained independently of this
+        # decode policy, so it neither consumes one of the two extra slots nor
+        # gets withdrawn when newer decode checkpoints arrive.
+        if retention_interval > 0 and decode_boundary % retention_interval == 0:
+            return checkpoint_hash
+
+        checkpoints = self._decode_checkpoints.setdefault(request.request_id, [])
+        checkpoint = (block.block_id, checkpoint_hash)
+        if checkpoints and checkpoints[-1] == checkpoint:
+            return checkpoint_hash
+        checkpoints.append(checkpoint)
+
+        while len(checkpoints) > 2:
+            old_block_id, old_hash = checkpoints.pop(0)
+            retained_block_ids = {block_id for block_id, _ in checkpoints}
+            if (
+                old_block_id not in retained_block_ids
+                and self.block_pool.cached_block_hash_to_block.contain(
+                    old_hash, old_block_id
+                )
+            ):
+                self.block_pool.evict_blocks({old_block_id})
+
+        return checkpoint_hash
 
     def _cache_partial_tail_block(
         self,
@@ -1772,6 +1901,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_decode_checkpoints: bool = False,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.

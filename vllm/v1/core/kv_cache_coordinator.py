@@ -29,9 +29,27 @@ from vllm.v1.request import Request
 
 def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
+    retain_decode_checkpoints: bool,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> None:
+    if retain_decode_checkpoints:
+        if retention_interval is None:
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires "
+                "VLLM_PREFIX_CACHE_RETENTION_INTERVAL to enable sparse "
+                "retention."
+            )
+        if not any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            for g in kv_cache_config.kv_cache_groups
+        ):
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS requires a "
+                "Mamba KV cache group using mamba_cache_mode='align'."
+            )
+
     if retention_interval is None:
         return
 
@@ -123,8 +141,14 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        self.retain_decode_checkpoints = (
+            envs.VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS
+        )
         _validate_prefix_cache_retention_interval(
-            self.retention_interval, self.scheduler_block_size, kv_cache_config
+            self.retention_interval,
+            self.retain_decode_checkpoints,
+            self.scheduler_block_size,
+            kv_cache_config,
         )
 
     def get_num_blocks_to_allocate(
@@ -285,6 +309,7 @@ class KVCacheCoordinator(ABC):
                 request,
                 num_computed_tokens,
                 retention_interval=self.retention_interval,
+                retain_decode_checkpoints=self.retain_decode_checkpoints,
             )
 
     def free(self, request_id: str) -> None:
@@ -680,6 +705,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                retain_decode_checkpoints=self.retain_decode_checkpoints,
             )
 
     def find_longest_cache_hit(
