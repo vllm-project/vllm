@@ -19,8 +19,10 @@ from tests.parser.engine.streaming_helpers import (
     collect_function_name,
     collect_tool_arguments,
 )
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
-from vllm.parser.inkling import InklingParser, _inkling_arg_converter
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
 
 MSG_MODEL = "<|message_model|>"
@@ -454,6 +456,245 @@ class TestPromptSeededState:
         )
         assert second is not None
         assert second.content == "plain answer"
+
+
+# ── Issue #50512: a turn that never opens a thinking block ────────────
+# `<|message_model|>` is prefilled by the generation prompt, so generation
+# starts in MESSAGE_HEADER. Which state TOOL_START then fires from depends
+# only on what the turn emits first; it is verified per test name below.
+
+_TOOL_TURN = _tool_block("get_weather", '{"city":"Seattle"}')
+
+# TOOL_START from MESSAGE_HEADER — the reported trigger.
+BARE_TOOL_TURN = _TOOL_TURN
+# Same, plus the optional function-name header the renderer emits between
+# `<|message_model|>` and the content-kind marker; exercises the
+# MESSAGE_HEADER buffer on the way out.
+NAMED_TOOL_TURN = "get_weather" + _TOOL_TURN
+# Text block, a fresh message header, then the tool call: still
+# MESSAGE_HEADER, but with visible text that must survive intact.
+TEXT_HEADER_TOOL_TURN = (
+    f"{TEXT_START}Let me check.{END_MESSAGE}{MSG_MODEL}" + _TOOL_TURN
+)
+# Text block, tool block, no intervening `<|message_model|>`: TOOL_START
+# fires from CONTENT instead — the same hole, one state over.
+TEXT_TOOL_TURN = f"{TEXT_START}Let me check.{END_MESSAGE}" + _TOOL_TURN
+# Control: opens with reasoning, so REASONING_END already arrives from
+# `(REASONING, THINK_END)`. This path always worked.
+REASONING_TOOL_TURN = (
+    f"{THINK_START}I should check.{END_MESSAGE}{MSG_MODEL}" + _TOOL_TURN
+)
+
+# One token per delta and the whole turn in one delta — the two
+# boundaries. Intermediate sizes add cost without adding a code path.
+CHUNK_BOUNDARIES = [1, 4096]
+
+SINGLE_TURN_PROMPT = f"{TEXT_START}hi{END_MESSAGE}{MSG_MODEL}"
+# A prior assistant tool call plus its result, i.e. the shape that exists
+# from turn 2 onwards. Both prompts share the
+# `<|end_message|><|message_model|>` tail the renderer always emits.
+MULTI_TURN_PROMPT = (
+    f"{TEXT_START}hi{END_MESSAGE}"
+    f"{MSG_MODEL}" + _tool_block("get_weather", '{"city":"SF"}') + f"{TEXT_START}sunny"
+    f"{END_MESSAGE}{MSG_MODEL}"
+)
+
+
+def _delegating_parser(mock_tokenizer, *, reasoning: bool = True):
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="inkling",
+        reasoning_parser_name="inkling" if reasoning else None,
+        enable_auto_tools=True,
+    )
+    return parser_cls(mock_tokenizer, [])
+
+
+def _stream_delta(parser, request, text: str, chunk_size: int, prompt: str):
+    """Drive ``parse_delta`` the way the serving layer does — one call per
+    delta, ``prompt_token_ids`` passed every time, ``finished`` on the last.
+
+    This is the entry point where the reasoning-pass → tool-pass handoff
+    lives, which is why these cases cannot go through ``_stream``.
+    Results are shaped like ``_stream``'s so the shared collectors apply.
+    """
+    prompt_token_ids = [token_id for token_id, _ in _tokenize(prompt)]
+    tokens = _tokenize(text)
+    results = []
+    for start in range(0, len(tokens), chunk_size):
+        batch = tokens[start : start + chunk_size]
+        delta = parser.parse_delta(
+            delta_text="".join(t for _, t in batch),
+            delta_token_ids=[token_id for token_id, _ in batch],
+            request=request,
+            prompt_token_ids=prompt_token_ids,
+            finished=start + chunk_size >= len(tokens),
+        )
+        results.append((delta, text))
+    return results
+
+
+def _assert_get_weather_call(results, expected_content: str) -> None:
+    """The tool block became a ``get_weather`` call and content is exactly
+    ``expected_content``.
+
+    When a text block precedes the tool call, a trailing bare
+    ``<|end_message|>`` is tolerated: that is the separate end-of-block
+    leakage of #49865, which travels the ``(CONTENT, THINK_END)`` path and
+    is out of scope here. A turn with no text block cannot trigger #49865,
+    so it gets no such amnesty and content must be exactly empty.
+    """
+    content = collect_content(results)
+    assert collect_function_name(results) == "get_weather", (
+        f"no get_weather call; content={content!r}"
+    )
+    assert json.loads(collect_tool_arguments(results)) == {"city": "Seattle"}
+    if expected_content:
+        content = content.removesuffix(END_MESSAGE)
+    assert content == expected_content
+
+
+class TestToolStartWithoutThinking:
+    """Issue #50512: a turn reaching its tool block without first closing a
+    thinking block leaked the whole tool markup into ``delta.content`` and
+    emitted no tool calls.
+
+    The discriminant is the missing leading thinking block, not turn count.
+    The reasoning pass runs with ``skip_tool_parsing`` and hands off to the
+    tool pass only once it has seen a REASONING_END; a turn opening with a
+    thinking block gets one from ``(REASONING, THINK_END)``, and a turn that
+    does not used to get none at all.
+    """
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_BOUNDARIES)
+    def test_tool_start_from_message_header(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            BARE_TOOL_TURN,
+            chunk_size,
+            SINGLE_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, "")
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_BOUNDARIES)
+    def test_tool_start_from_content(self, mock_tokenizer, mock_request, chunk_size):
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            TEXT_TOOL_TURN,
+            chunk_size,
+            SINGLE_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, "Let me check.")
+
+    @pytest.mark.parametrize("chunk_size", CHUNK_BOUNDARIES)
+    def test_visible_text_survives_exactly_once(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        """Text block, fresh header, tool call: the text must reach content
+        once — neither dropped nor replayed by the handoff."""
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            TEXT_HEADER_TOOL_TURN,
+            chunk_size,
+            SINGLE_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, "Let me check.")
+
+    def test_function_name_header_before_tool_block(self, mock_tokenizer, mock_request):
+        """The buffered header name must be discarded, not emitted."""
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            NAMED_TOOL_TURN,
+            1,
+            SINGLE_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, "")
+
+    @pytest.mark.parametrize(
+        "turn, expected_content",
+        [
+            pytest.param(BARE_TOOL_TURN, "", id="from_message_header"),
+            pytest.param(TEXT_TOOL_TURN, "Let me check.", id="from_content"),
+        ],
+    )
+    def test_multi_turn_prompt_is_no_different(
+        self, mock_tokenizer, mock_request, turn, expected_content
+    ):
+        """Turn depth is not the discriminant: the same turns behave the
+        same after a prompt that already contains a tool call and result."""
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            turn,
+            1,
+            MULTI_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, expected_content)
+
+    @pytest.mark.parametrize(
+        "turn, expected_content",
+        [
+            pytest.param(BARE_TOOL_TURN, None, id="from_message_header"),
+            pytest.param(TEXT_TOOL_TURN, "Let me check.", id="from_content"),
+        ],
+    )
+    def test_non_streaming_agrees_with_streaming(
+        self, parser, mock_request, turn, expected_content
+    ):
+        """Streaming and non-streaming must reach the same answer. The
+        single-pass path never sets ``skip_tool_parsing``, so it was always
+        correct; this is the invariant the issue is really about."""
+        _, content, tools = parser.parse(turn, mock_request)
+        assert [t.name for t in tools] == ["get_weather"]
+        assert json.loads(tools[0].arguments) == {"city": "Seattle"}
+        assert content == expected_content
+
+    def test_tool_only_parser_is_unaffected(self, mock_tokenizer, mock_request):
+        """With no reasoning parser there is no handoff to get wrong, so
+        this cell must stay green independently of the reasoning pass."""
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer, reasoning=False),
+            mock_request,
+            BARE_TOOL_TURN,
+            1,
+            SINGLE_TURN_PROMPT,
+        )
+        _assert_get_weather_call(results, "")
+
+    def test_reasoning_first_turn_still_hands_off(self, mock_tokenizer, mock_request):
+        """Control: the path that already worked must keep working, and the
+        second REASONING_END on the tool terminal must stay a no-op."""
+        results = _stream_delta(
+            _delegating_parser(mock_tokenizer),
+            mock_request,
+            REASONING_TOOL_TURN,
+            1,
+            SINGLE_TURN_PROMPT,
+        )
+        assert _collect_reasoning(results) == "I should check."
+        _assert_get_weather_call(results, "")
+
+
+class TestMessageHeaderExitsWithoutReasoningEnd:
+    """``<|end_message|>`` and ``<|content_model_end_sampling|>`` also leave
+    MESSAGE_HEADER through the ``skip_tool_parsing`` gate, but carry no
+    REASONING_END. They pin the reordered branch on Inkling's real table:
+    the generic config in ``test_engine.py`` cannot show that.
+    """
+
+    @pytest.mark.parametrize("terminator", [END_MESSAGE, END_SAMPLING])
+    def test_no_reasoning_end_and_header_discarded(self, mock_tokenizer, terminator):
+        engine = StreamingParserEngine(inkling_config(), mock_tokenizer)
+        engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+        engine.skip_tool_parsing = True
+        events = engine.parse_complete(f"get_weather{terminator}")
+        assert EventType.REASONING_END not in [event.type for event in events]
+        assert engine._message_header_buffer == ""
 
 
 class TestToolCallFiltering:

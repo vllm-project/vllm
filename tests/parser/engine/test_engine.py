@@ -844,3 +844,67 @@ class TestSkipToolParsing:
         engine.skip_tool_parsing = True
         engine.reset()
         assert engine.skip_tool_parsing is True
+
+
+def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
+    """MESSAGE_HEADER-based config whose tool terminal optionally carries
+    REASONING_END, mirroring the two shapes a transition table can take."""
+    tool_events = (
+        (EventType.REASONING_END, EventType.TOOL_CALL_START)
+        if reasoning_end
+        else (EventType.TOOL_CALL_START,)
+    )
+    return ParserEngineConfig(
+        name=f"message_header_test_{reasoning_end}",
+        initial_state=ParserState.MESSAGE_HEADER,
+        terminals={"HEADER_END": "<|header_end|>", "TOOL_START": "<tool_call>"},
+        transitions={
+            (ParserState.MESSAGE_HEADER, "HEADER_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                tool_events,
+            ),
+        },
+    )
+
+
+class TestSkipToolParsingFromMessageHeader:
+    """``skip_tool_parsing`` must let REASONING_END out of MESSAGE_HEADER.
+
+    The reasoning pass hands off to the tool pass only once it has seen a
+    REASONING_END, so swallowing it in MESSAGE_HEADER strands the whole
+    tool block in content (issue #50512).
+    """
+
+    @staticmethod
+    def _skip_parse(config: ParserEngineConfig, text: str):
+        engine = StreamingParserEngine(config, tokenizer=None)
+        engine.skip_tool_parsing = True
+        return engine, engine.parse_complete(text)
+
+    def test_emits_reasoning_end_when_transition_carries_it(self):
+        _, events = self._skip_parse(
+            _message_header_config(reasoning_end=True), "name<tool_call>{}"
+        )
+        assert EventType.REASONING_END in [e.type for e in events]
+
+    def test_silent_when_transition_omits_it(self):
+        """Configs whose table has no REASONING_END are unaffected."""
+        _, events = self._skip_parse(
+            _message_header_config(reasoning_end=False), "name<tool_call>{}"
+        )
+        types = [e.type for e in events]
+        assert EventType.REASONING_END not in types
+        assert EventType.TEXT_CHUNK in types
+
+    @pytest.mark.parametrize("reasoning_end", [True, False])
+    def test_header_buffer_is_discarded(self, reasoning_end):
+        """The buffered header must not survive to prefix a later header."""
+        engine, _ = self._skip_parse(
+            _message_header_config(reasoning_end), "name<tool_call>{}"
+        )
+        assert engine._message_header_buffer == ""
+        assert engine.state == ParserState.CONTENT
