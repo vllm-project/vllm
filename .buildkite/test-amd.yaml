@@ -971,7 +971,7 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
@@ -1576,10 +1576,14 @@ steps:
   - vllm/third_party/flash_linear_attention/ops/kda.py
   - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
   - vllm/third_party/flash_linear_attention/ops/l2norm.py
-  - tests/kernels/test_kda.py
+  - vllm/models/kimi_k3/nvidia/kda.py
+  - vllm/models/kimi_k3/nvidia/kda_metadata.py
+  - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/test_kda.py
+  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
 - label: Kernels Mamba Test # TBD
   timeout_in_minutes: 180
