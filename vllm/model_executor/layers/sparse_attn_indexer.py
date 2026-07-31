@@ -765,11 +765,31 @@ class SparseAttnIndexer(CustomOp):
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
-        parallel_config = get_current_vllm_config().parallel_config
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        # The ROCm AITER sparse-MLA decode-logits workspace (rocm_fp8_paged_mqa_
+        # logits) only holds the decode rows of a batch (num_decode_tokens),
+        # never the full max_num_batched_tokens (which also covers prefill). Cap
+        # the reservation at the max decode-row bound so it does not scale with
+        # the prefill token budget, freeing that memory for the KV cache. A
+        # decode request has query len <= 1 + num_speculative_tokens (x2 for
+        # parallel drafting), so num_decode_tokens <= max_num_seqs * that.
+        scheduler_config = vllm_config.scheduler_config
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            and speculative_config.num_speculative_tokens is not None
+            else 0
+        )
+        self.max_decode_tokens = min(
+            scheduler_config.max_num_batched_tokens,
+            scheduler_config.max_num_seqs * (1 + 2 * num_speculative_tokens),
+        )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -864,6 +884,7 @@ class SparseAttnIndexer(CustomOp):
                 self.head_dim,
                 self.max_model_len,
                 self.max_total_seq_len,
+                self.max_decode_tokens,
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
             )

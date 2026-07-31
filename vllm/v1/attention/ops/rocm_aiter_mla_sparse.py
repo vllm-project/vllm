@@ -429,6 +429,10 @@ def rocm_fp8_paged_mqa_logits(
             (out_logits,) = current_workspace_manager().get_simultaneous(
                 ((batch_size * next_n, max_model_len), torch.float32),
             )
+            # A caller-side -inf is not needed on gfx950. Skipping it drops a
+            # full-width buffer memset every decode step.
+            if not _ON_GFX950:
+                out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -605,6 +609,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
+    max_decode_tokens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
@@ -625,6 +630,7 @@ def rocm_aiter_sparse_attn_indexer(
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
+    max_decode_tokens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
@@ -650,16 +656,18 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
 
-        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits. The decode
+        # path never produces more than max_decode_tokens rows
+        # (batch_size * next_n <= max_num_seqs * next_n), so reserve that
+        # instead of the full max_num_batched_tokens (== hidden_states.shape[0]).
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+                ((max_decode_tokens, max_model_len), torch.float32),
             )
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    (q_fp8.shape[1], max_decode_tokens, max_model_len),
                     torch.float32,
                 ),
             )
@@ -686,6 +694,7 @@ def rocm_aiter_sparse_attn_indexer(
             head_dim,
             max_model_len,
             total_seq_lens,
+            max_decode_tokens,
             topk_indices_buffer,
             skip_k_cache_insert,
         )
