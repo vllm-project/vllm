@@ -951,7 +951,13 @@ class KimiDecoderLayer(nn.Module):
         return hidden_states, prefix_sum, residual
 
 
-class KimiLinearModel(nn.Module, EagleModelMixin):
+class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
+        "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1221,6 +1227,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
+
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
         # them ``.weight_packed``. Rebind so the expert mapping resolves; scales
