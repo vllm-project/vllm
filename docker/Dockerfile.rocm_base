@@ -127,13 +127,22 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && sccache --version; \
     fi
 
-# Setup sccache wrappers for HIP compilation
+# Setup sccache for HIP compilation via HIP_CLANG_PATH
+# This creates wrapper scripts in a separate directory and points HIP to use
+# them
+# This avoids modifying the original ROCm binaries which can break detection
+# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images
+# (Dockerfile.rocm)
+# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers
+# if USE_SCCACHE=1
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        mkdir -p /opt/sccache-wrappers \
+        echo "Setting up sccache wrappers for HIP compilation..." \
+        && mkdir -p /opt/sccache-wrappers \
         && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang++ "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang++ \
         && chmod +x /opt/sccache-wrappers/clang++ \
         && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang \
-        && chmod +x /opt/sccache-wrappers/clang; \
+        && chmod +x /opt/sccache-wrappers/clang \
+        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
 
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
