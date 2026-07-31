@@ -66,6 +66,13 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 PYTHON_TAG = "<|python_tag|>"
+# Llama 4 wraps tool calls in these instead of prefixing <|python_tag|>.
+# They must be consumed rather than left as content: the engine sets
+# skip_special_tokens=False so the detokenizer no longer strips them, and
+# the drop machinery only covers tokenizer.all_special_tokens, which on a
+# real Llama tokenizer is just begin_of_text/eot_id.
+PYTHON_START = "<|python_start|>"
+PYTHON_END = "<|python_end|>"
 _WS = " \t\r\n"
 _HEX = "0123456789abcdefABCDEF"
 _STRUCTURAL_RE = re.compile(r'["{}\[\]]')
@@ -797,13 +804,26 @@ def llama_json_config() -> ParserEngineConfig:
         name="llama_json",
         terminals={
             "PYTHON_TAG": PYTHON_TAG,
+            "PYTHON_START": PYTHON_START,
+            "PYTHON_END": PYTHON_END,
             "OPEN_BRACE": "{",
         },
-        token_id_terminals={"PYTHON_TAG": PYTHON_TAG},
+        # Llama 3 tokenizers lack the Llama 4 markers and vice versa;
+        # token-id resolution silently skips the ones it cannot resolve.
+        token_id_terminals={
+            "PYTHON_TAG": PYTHON_TAG,
+            "PYTHON_START": PYTHON_START,
+            "PYTHON_END": PYTHON_END,
+        },
         transitions={
             # The tag alone opens nothing: ipython-style non-JSON after
             # <|python_tag|> stays content; the "{" starts the call.
             (ParserState.CONTENT, "PYTHON_TAG"): Transition(ParserState.CONTENT, ()),
+            # Llama 4's wrappers are consumed the same way, so they never
+            # surface as content on either the streaming or the
+            # non-streaming path.
+            (ParserState.CONTENT, "PYTHON_START"): Transition(ParserState.CONTENT, ()),
+            (ParserState.CONTENT, "PYTHON_END"): Transition(ParserState.CONTENT, ()),
             (ParserState.CONTENT, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 # ARG_VALUE_CHUNK re-injects the consumed "{" into the
