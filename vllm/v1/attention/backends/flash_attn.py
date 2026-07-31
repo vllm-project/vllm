@@ -4,21 +4,12 @@
 
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
 
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.pcp_manager import PCPRowPlan
-
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.pcp import (
-    dcp_q_gather_size,
-    maybe_all_gather_q_for_dcp,
-    maybe_gather_cache_inputs,
-    resolve_dcp_combine_fn,
-)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
@@ -38,8 +29,14 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPPlan
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
@@ -56,10 +53,6 @@ from vllm.config import (
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
-from vllm.forward_context import (
-    get_forward_context,
-    is_forward_context_available,
-)
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
@@ -279,16 +272,11 @@ class FlashAttentionMetadata:
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
 
-    # PCP per-step state, stamped by PCPManager.populate_attn_metadata (not via
-    # forward_context). pcp_row_plan selects _forward_pcp_dcp vs _forward_with_dcp;
-    # pcp_has_prefill gates the rank-invariant cache-write all-gather.
-    pcp_has_prefill: bool = False
-    pcp_row_plan: "PCPRowPlan | None" = None
-
-    # Per-segment is_prefilling flag (rank-local view). Used by the builder to
-    # detect prefill vs decode batches under DualChunkSwap (a prefill chunk can
-    # be a single token, so max_query_len is unreliable).
-    is_prefilling: torch.Tensor | None = None
+    # MRv2 PCP. Stamped per step by PCPManager.populate_attn_metadata (never via
+    # forward_context). Non-None only on a PCP+DCP step whose global batch has a
+    # cached context, which is also how forward() picks _forward_pcp_dcp over
+    # _forward_with_dcp.
+    pcp_plan: "PCPPlan | None" = None
 
     # Split counts for FA2 DCP context attention. num_prefill_* tracks
     # context-bearing extend rows; pure prefills do not attend to DCP context.
@@ -384,11 +372,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
-        # Under PCP, do_kv_cache_update runs a PCP all-gather to materialize the
-        # full replicated KV cache before attention. That collective is not
-        # captureable into a CUDA graph, so force NEVER and let the runner use
-        # piecewise graphs (rest of the model captured, attention eager) when
-        # PCP is on.
+        # PCP runs an all-gather inside the KV cache update, which cannot be
+        # captured. Fall back to piecewise graphs (attention stays eager).
         if vllm_config.parallel_config.prefill_context_parallel_size > 1:
             return AttentionCGSupport.NEVER
         return cls._cudagraph_support
@@ -428,21 +413,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        try:
-            from vllm.distributed.parallel_state import get_pcp_group
-
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group
-        except AssertionError:
-            # PCP might not be initialized in testing.
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
-
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
         )
-
-        self.use_pcp = self.pcp_world_size > 1
+        self.use_pcp = self.parallel_config.prefill_context_parallel_size > 1
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -472,7 +446,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
 
         if self.dcp_world_size > 1:
-            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            # DualChunkSwap gives the rank-local batch up to two rows per
+            # prefilling request, so under PCP it can hold 2x max_num_seqs rows.
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs * (
+                2 if self.use_pcp else 1
+            )
             self._dcp_context_kv_lens = torch.zeros(
                 max_num_reqs,
                 dtype=torch.int32,
@@ -495,37 +473,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.persistent_rswa_window_tensor = torch.tensor(
                 [self.rswa_window], dtype=torch.int32, device=self.device
             )
-
-    def _build_dcp_context_lens(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-    ) -> tuple[torch.Tensor, int]:
-        """This rank's DCP shard of each row's cached-context length.
-
-        The cached context (seq_lens - query_lens) is interleave-sharded
-        across DCP ranks; each rank attends only its shard. The returned max
-        is the aligned per-rank upper bound, ceil(L / (N * I)) * I with
-        L = max_seq_len, N = dcp_world_size, I = interleave size, which avoids
-        a GPU->CPU sync while minimizing workspace over-allocation.
-        """
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
-        context_kv_lens = seq_lens - query_lens
-        local_context_kv_lens = get_dcp_local_seq_lens(
-            context_kv_lens,
-            self.dcp_world_size,
-            self.dcp_rank,
-            self.cp_kv_cache_interleave_size,
-        )
-        self._dcp_context_kv_lens[:num_reqs] = local_context_kv_lens
-        self._dcp_context_kv_lens[num_reqs:] = 0
-        num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
-        max_dcp_context_kv_len = (
-            (max_seq_len + num_partitions - 1) // num_partitions
-        ) * self.cp_kv_cache_interleave_size
-        return self._dcp_context_kv_lens[:num_reqs], max_dcp_context_kv_len
 
     def build(
         self,
@@ -585,28 +532,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             max_num_splits = 1
 
         def schedule(
-            batch_size,
-            cu_query_lens,
-            max_query_len,
-            seqlens,
-            max_seq_len,
-            causal,
+            batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
             cache_dtype = self.cache_config.cache_dtype
             if is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = current_platform.fp8_dtype()
             else:
                 qkv_dtype = self.kv_cache_dtype
-            # The kernel sees whatever maybe_all_gather_q_for_dcp() hands it.
-            num_heads_q = self.num_heads_q * dcp_q_gather_size(
-                self.dcp_world_size, self.pcp_world_size
-            )
             if aot_schedule:
                 return get_scheduler_metadata(
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=num_heads_q,
+                    num_heads_q=self.num_heads_q * self.dcp_world_size,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -635,60 +573,68 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            # Sharded (1/dcp) KV cache: every row's cached context
-            # (seq_lens - query_lens) is attended via this rank's interleaved
-            # shard. Pure-DCP batches and PCP+DCP decode batches both use
-            # this metadata; PCP+DCP prefill/mixed steps run on the
-            # PCPRowPlan from the forward context instead.
-            dcp_context_kv_lens, max_dcp_context_kv_len = self._build_dcp_context_lens(
-                num_reqs, query_start_loc, seq_lens, max_seq_len
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            context_kv_lens = seq_lens - query_lens
+            local_context_kv_lens = get_dcp_local_seq_lens(
+                context_kv_lens,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
             )
-            scheduler_metadata = None
-            if self.use_pcp:
-                # Detect prefill vs decode for the cache-write gather. Under
-                # DualChunkSwap a prefill chunk can be as small as 1 token, so
-                # max_query_len is unreliable -- use the is_prefilling flag.
-                is_prefilling = common_attn_metadata.is_prefilling
-                if is_prefilling is not None:
-                    is_prefill_batch = bool(is_prefilling.any().item())
-                else:
-                    is_prefill_batch = max_query_len > 1
-                if is_prefill_batch:
-                    num_prefill_tokens = num_actual_tokens
-                else:
-                    num_decode_tokens = num_actual_tokens
+            self._dcp_context_kv_lens[:num_reqs] = local_context_kv_lens
+            self._dcp_context_kv_lens[num_reqs:] = 0
+            dcp_context_kv_lens = self._dcp_context_kv_lens[:num_reqs]
+
+            skip_dcp_context_attention = False
+            if (
+                not self.use_pcp
+                and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            ):
+                query_lens_cpu = (
+                    common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+                    - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+                )
+                context_kv_lens_cpu = (
+                    common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
+                    - query_lens_cpu
+                )
+                skip_dcp_context_attention = should_skip_dcp_context_attention(
+                    context_kv_lens_cpu
+                )
+
+            if max_query_len > 1 and not self.use_pcp:
+                (
+                    num_decode_reqs,
+                    num_prefill_reqs,
+                    num_decode_tokens,
+                    num_prefill_tokens,
+                ) = split_dcp_context_queries(
+                    common_attn_metadata.query_start_loc_cpu,
+                    common_attn_metadata.seq_lens_cpu_upper_bound,
+                    max_query_len,
+                    num_actual_tokens,
+                )
+
+            # After DCP distribution, the maximum number of tokens for any rank is
+            # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
+            # and I is cp_kv_cache_interleave_size.
+            # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
+            if skip_dcp_context_attention:
+                max_dcp_context_kv_len = 0
+                scheduler_metadata = None
             else:
-                skip_dcp_context_attention = False
-                if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
-                    query_lens_cpu = (
-                        common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
-                        - common_attn_metadata.query_start_loc_cpu[:num_reqs]
-                    )
-                    context_kv_lens_cpu = (
-                        common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
-                        - query_lens_cpu
-                    )
-                    skip_dcp_context_attention = should_skip_dcp_context_attention(
-                        context_kv_lens_cpu
-                    )
+                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                max_dcp_context_kv_len = (
+                    (max_seq_len + num_partitions - 1) // num_partitions
+                ) * self.cp_kv_cache_interleave_size
 
-                if max_query_len > 1:
-                    (
-                        num_decode_reqs,
-                        num_prefill_reqs,
-                        num_decode_tokens,
-                        num_prefill_tokens,
-                    ) = split_dcp_context_queries(
-                        common_attn_metadata.query_start_loc_cpu,
-                        common_attn_metadata.seq_lens_cpu_upper_bound,
-                        max_query_len,
-                        num_actual_tokens,
-                    )
-
-                if skip_dcp_context_attention:
-                    max_dcp_context_kv_len = 0
-                else:
-                    scheduler_metadata = schedule(
+                # Under PCP the DCP group holds replicated query heads, so the
+                # `num_heads_q * dcp_world_size` sizing schedule() assumes does
+                # not hold. Let FA schedule itself instead.
+                scheduler_metadata = (
+                    None
+                    if self.use_pcp
+                    else schedule(
                         batch_size=num_reqs,
                         cu_query_lens=query_start_loc,
                         max_query_len=max_query_len,
@@ -696,6 +642,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                         max_seq_len=max_dcp_context_kv_len,
                         causal=False,
                     )
+                )
         elif use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -761,7 +708,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
-            is_prefilling=common_attn_metadata.is_prefilling,
             num_decode_reqs=num_decode_reqs,
             num_prefill_reqs=num_prefill_reqs,
             num_decode_tokens=num_decode_tokens,
@@ -904,22 +850,31 @@ class FlashAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
         vllm_config = get_current_vllm_config_or_none()
-        # self.pcp_world_size / self.pcp_rank are auto-populated by
-        # AttentionImplBase.__new__ from get_pcp_group().
+        dcp_a2a = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
+        # self.pcp_world_size is populated by AttentionImplBase.__new__.
         self.use_pcp = self.pcp_world_size > 1
-        # Per-layer write-gathered K/V from do_kv_cache_update, reused by the
-        # suffix attention in _forward_pcp_dcp. Keyed by layer_name because this
-        # impl is shared across the layers of an attention group.
-        self._pcp_gathered_kv: dict[str, tuple[torch.Tensor, torch.Tensor] | None] = {}
-        # How Q and the partials move across the DCP group is decided by the
-        # PCP/DCP topology alone; both backends share the rule (see pcp.py).
-        self.dcp_combine = resolve_dcp_combine_fn(vllm_config)
+        if dcp_a2a:
+            self.dcp_combine = dcp_a2a_lse_reduce
+        elif self.use_pcp:
+            # Under PCP the DCP group spans the PCP ranks, so every rank holds
+            # the full head set: all-reduce instead of reduce-scatter.
+            self.dcp_combine = cp_lse_ag_out_ar
+        else:
+            self.dcp_combine = cp_lse_ag_out_rs
         if self.use_pcp and self.dcp_world_size > 1:
             assert self.dcp_world_size == self.pcp_world_size, (
-                "FlashAttention MRv2 PCP+DCP requires dcp == pcp (the DCP "
-                "group spans exactly the PCP ranks), got "
-                f"dcp={self.dcp_world_size}, pcp={self.pcp_world_size}."
+                "FlashAttention PCP+DCP requires dcp == pcp (the DCP group spans "
+                f"exactly the PCP ranks), got dcp={self.dcp_world_size}, "
+                f"pcp={self.pcp_world_size}."
             )
+        # Write-gathered K/V from do_kv_cache_update, reused by the new-token
+        # pass of _forward_pcp_dcp. Keyed by layer because this impl is shared
+        # across the layers of an attention group.
+        self._pcp_kv: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
         self._dcp_dtype: torch.dtype | None = None
         self._dcp_max_num_tokens: int = 0
@@ -1039,20 +994,14 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale = layer._v_scale.expand(descale_shape)
 
             if self.dcp_world_size > 1:
-                # Sharded (1/dcp) KV cache. One path covers pure DCP and
-                # PCP+DCP decode batches (rows replicated across ranks, so the
-                # topology helpers make the Q gather a no-op and the combine an
-                # all-reduce); only a PCP+DCP prefill/mixed step -- where
-                # DualChunkSwap partitions the queries and the manager builds
-                # a row plan -- goes to _forward_pcp_dcp.
-                plan = attn_metadata.pcp_row_plan if self.use_pcp else None
+                # Sharded (1/dcp) KV cache. A PCP+DCP step whose global batch
+                # has a cached context needs the queries replicated across the
+                # group before the LSE combine; everything else (pure DCP, and
+                # PCP steps with no cached context) attends its own rows.
+                plan = attn_metadata.pcp_plan
                 if plan is not None:
-                    # MRv2 PCP+DCP prefill (dcp == pcp): every row is a
-                    # (cached prefix, new-token span) pair -- the suffix
-                    # attends the write-gathered new K/V, the prefix attends
-                    # the local cache shard + LSE-combine.
                     self._forward_pcp_dcp(
-                        query[:num_actual_tokens],
+                        query,
                         key[:num_actual_tokens],
                         value[:num_actual_tokens],
                         key_cache,
@@ -1065,23 +1014,21 @@ class FlashAttentionImpl(AttentionImpl):
                         k_descale=k_descale,
                         v_descale=v_descale,
                     )
-                else:
-                    self._forward_with_dcp(
-                        query[:num_actual_tokens],
-                        key[:num_actual_tokens],
-                        value[:num_actual_tokens],
-                        key_cache,
-                        value_cache,
-                        output[:num_actual_tokens],
-                        attn_metadata,
-                        q_descale=q_descale,
-                        k_descale=k_descale,
-                        v_descale=v_descale,
-                    )
+                    return output
+                self._forward_with_dcp(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
                 return output
             else:
-                # dcp_world_size <= 1 (no DCP): pure PCP or unparallelized --
-                # the normal FA path is correct for both decode and prefill.
                 window = (
                     attn_metadata.sliding_window
                     if attn_metadata.sliding_window is not None
@@ -1218,24 +1165,6 @@ class FlashAttentionImpl(AttentionImpl):
         )
         return output
 
-    def _get_attn_metadata_for_layer(
-        self, layer: torch.nn.Module
-    ) -> FlashAttentionMetadata | None:
-        """Fetch this layer's FlashAttentionMetadata from the forward context.
-
-        ``do_kv_cache_update`` does not receive ``attn_metadata``, so under PCP
-        we look it up by ``layer_name`` (the same key the runner uses to store
-        per-layer metadata in ``forward_context.attn_metadata``).
-        """
-        if self.pcp_world_size <= 1 or not is_forward_context_available():
-            return None
-        attn_metadata_map = get_forward_context().attn_metadata
-        layer_name = getattr(layer, "layer_name", None)
-        if not isinstance(attn_metadata_map, dict) or layer_name is None:
-            return None
-        meta = attn_metadata_map.get(layer_name)
-        return meta if isinstance(meta, FlashAttentionMetadata) else None
-
     def do_kv_cache_update(
         self,
         layer: torch.nn.Module,
@@ -1249,52 +1178,25 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        if self.use_pcp:
-            # All-gather the prefill K/V across PCP ranks (decode writes stay
-            # local) so every rank's cache gets the full prefill KV. K/V are
-            # gathered separately to stay contiguous (cache kernel head-stride).
-            attn_metadata = self._get_attn_metadata_for_layer(layer)
-            num_decode_tokens = (
-                attn_metadata.num_decode_tokens if attn_metadata is not None else 0
-            )
-            # Rank-invariant gather decision: per-rank num_decode_tokens can differ
-            # under DualChunkSwap and desync the all-gather, so if the global batch
-            # has any prefill every rank gathers the whole batch.
-            if attn_metadata is not None and attn_metadata.pcp_has_prefill:
-                num_decode_tokens = 0
-            key_cache, value_cache = kv_cache.transpose(1, 2).split(
-                self.head_size, dim=-1
-            )
-            (cache_key, cache_value), cache_slot_mapping = maybe_gather_cache_inputs(
-                (key, value),
-                slot_mapping,
-                num_decode_tokens,
-                self.use_pcp,
-            )
-            # Stash the write-gathered K/V for the suffix attention of the
-            # sharded PCP+DCP path (a gather only happens on prefill steps).
-            # Keyed by layer on the impl (shared across an attention group), so a
-            # layer whose cache update is skipped (kv sharing) cannot pick up
-            # stale tensors.
-            self._pcp_gathered_kv[layer.layer_name] = (
-                (cache_key, cache_value) if num_decode_tokens == 0 else None
-            )
-            reshape_and_cache_flash(
-                cache_key,
-                cache_value,
-                key_cache,
-                value_cache,
-                cache_slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-            return
-
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
         # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
+        if self.use_pcp and slot_mapping.shape[0] > key.shape[0]:
+            # PCP partitions the new tokens across ranks, so a slot mapping
+            # wider than this rank's tokens means the manager laid it out for
+            # the whole (all-gathered) batch: materialize it. Duplicate decode
+            # rows and padding are already masked to PAD_SLOT_ID by the manager.
+            # K and V are gathered separately to keep each output contiguous,
+            # which the cache kernel's head-stride assumes.
+            num_local_tokens = slot_mapping.shape[0] // self.pcp_world_size
+            pcp_group = get_pcp_group()
+            key = pcp_group.all_gather(key[:num_local_tokens], dim=0)
+            value = pcp_group.all_gather(value[:num_local_tokens], dim=0)
+            # The new-token pass of _forward_pcp_dcp reuses this gather instead
+            # of paying for a second one.
+            self._pcp_kv[layer.layer_name] = (key, value)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
@@ -1314,24 +1216,6 @@ class FlashAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
-    def _fa_common_kwargs(
-        self,
-        q_descale: torch.Tensor | None,
-        k_descale: torch.Tensor | None,
-        v_descale: torch.Tensor | None,
-    ) -> dict:
-        sw = list(self.sliding_window) if self.sliding_window is not None else None
-        return dict(
-            softmax_scale=self.scale,
-            alibi_slopes=self.alibi_slopes,
-            window_size=sw,
-            softcap=self.logits_soft_cap,
-            fa_version=self.vllm_flash_attn_version,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
-        )
-
     def _forward_pcp_dcp(
         self,
         query: torch.Tensor,
@@ -1342,110 +1226,110 @@ class FlashAttentionImpl(AttentionImpl):
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
-        plan: "PCPRowPlan",
+        plan: "PCPPlan",
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """MRv2 PCP+DCP GQA prefill/mixed attention over a sharded KV cache.
+        """PCP + DCP (dcp == pcp) attention over a sharded KV cache.
 
-        Every rank-local row (decode or DualChunkSwap prefill chunk) is a
-        (cached prefix, new-token span) pair and is evaluated as:
+        Same two-pass split as :meth:`_forward_with_dcp`, but PCP has scattered
+        the new tokens across ranks:
 
-          - suffix: causal attention of the row against the write-gathered new
-            K/V -- the same all-gather the cache write already performs, so no
-            extra collective, and every rank computes only its own rows;
-          - prefix: non-causal attention of the PCP-gathered prefix-row
-            queries against this rank's DCP cache shard, then an LSE
-            all-reduce combine across the group (same-queries requirement),
-            sliced back to this rank's rows;
-          - merge_attn_states folds the two.
-
-        Pure-decode batches do not reach here: no prefill means no row plan,
-        and forward() routes those steps to _forward_with_dcp.
+        - new tokens: this rank's rows attend the write-gathered new K/V (the
+          all-gather ``do_kv_cache_update`` already paid for), so no collective
+          and every rank computes only its own rows;
+        - cached context: the LSE combine requires identical queries on every
+          rank, so the queries are all-gathered back into global batch order and
+          attended against this rank's cache shard with the *global* batch's
+          rows, then sliced back. Replicating the queries costs nothing overall:
+          the pcp-fold query replication is cancelled by the dcp-fold KV shard.
         """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
-        query = query.contiguous()
-        fa_kw = self._fa_common_kwargs(q_descale, k_descale, v_descale)
+        sliding_window = (
+            list(self.sliding_window) if self.sliding_window is not None else None
+        )
+        fa_kwargs: dict[str, Any] = dict(
+            softmax_scale=self.scale,
+            alibi_slopes=self.alibi_slopes,
+            window_size=sliding_window,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            num_splits=attn_metadata.max_num_splits,
+        )
 
-        n = query.shape[0]
-        suffix_lse = None
-        if n > 0:
-            # Suffix: local rows vs the write-gathered new K/V. The gather is
-            # the one do_kv_cache_update already did for the cache write.
-            gathered_kv = self._pcp_gathered_kv.get(layer.layer_name)
-            assert gathered_kv is not None, (
-                "PCP+DCP prefill step without write-gathered K/V: "
-                "do_kv_cache_update did not run for this layer (kv sharing?)."
-            )
-            k_g, v_g = gathered_kv
-            _, suffix_lse = flash_attn_varlen_func(
-                q=query,
-                k=k_g[plan.suffix_kv_idx],
-                v=v_g[plan.suffix_kv_idx],
-                out=output,
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                cu_seqlens_k=plan.suffix_cu_k,
-                max_seqlen_k=plan.suffix_max_k,
-                causal=attn_metadata.causal,
-                return_softmax_lse=True,
-                num_splits=attn_metadata.max_num_splits,
-                **fa_kw,
-            )
-        prefix = plan.prefix
-        if prefix is None:
+        num_tokens = output.shape[0]
+        # Consumed, not just read: a layer that shares an earlier layer's cache
+        # never runs do_kv_cache_update, and must not pick up a stale gather.
+        gathered_kv = self._pcp_kv.pop(layer.layer_name, None)
+        assert gathered_kv is not None, (
+            "PCP+DCP step without write-gathered K/V: do_kv_cache_update did "
+            "not run for this layer (kv sharing?)."
+        )
+        k_gathered, v_gathered = gathered_kv
+        _, new_lse = flash_attn_varlen_func(
+            q=query[:num_tokens].contiguous(),
+            k=k_gathered[plan.new_kv_idx],
+            v=v_gathered[plan.new_kv_idx],
+            out=output,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            max_seqlen_q=attn_metadata.max_query_len,
+            cu_seqlens_k=plan.new_cu_kv,
+            max_seqlen_k=plan.new_max_kv,
+            causal=attn_metadata.causal,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            **fa_kwargs,
+        )
+
+        ctx = plan.ctx
+        if ctx is None:
+            # Nothing was cached before this step, so the new-token pass above
+            # already covered every key. Skip the context pass and both of its
+            # collectives (rank-invariant: the global batch decides).
             return output
 
-        # Prefix: gather the prefix-row queries (extend chunks + decode rows)
-        # so every rank evaluates the same rows against its DCP cache shard,
-        # then LSE all-reduce the partials.
-        num_prefix_rows = prefix.cu_q.shape[0] - 1
-        pfx_descale_shape = (num_prefix_rows, self.num_kv_heads)
-        pfx_fa_kw = self._fa_common_kwargs(
-            layer._q_scale.expand(pfx_descale_shape)
-            if self.supports_quant_query_input
-            else None,
-            layer._k_scale.expand(pfx_descale_shape),
-            layer._v_scale.expand(pfx_descale_shape),
-        )
-        if n > 0:
-            q_local = query[prefix.q_local_idx]
-        else:
-            # This rank holds no rows; still must join the collectives.
-            q_local = query.new_zeros(
-                (prefix.padded_num_tokens, self.num_heads, self.head_size)
-            )
-        q_g = get_pcp_group().all_gather(q_local, dim=0)[prefix.q_restore_idx]
+        assert query.shape[0] >= ctx.padded_num_tokens
+        query_global = get_pcp_group().all_gather(
+            query[: ctx.padded_num_tokens], dim=0
+        )[ctx.restore_idx]
+        descale_shape = (ctx.cu_q.shape[0] - 1, self.num_kv_heads)
         ctx_out, ctx_lse = flash_attn_varlen_func(
-            q=q_g,
+            q=query_global,
             k=key_cache,
             v=value_cache,
-            cu_seqlens_q=prefix.cu_q,
-            max_seqlen_q=prefix.max_q,
-            seqused_k=prefix.dcp_ctx_lens,
-            max_seqlen_k=prefix.max_ctx,
+            cu_seqlens_q=ctx.cu_q,
+            max_seqlen_q=ctx.max_q,
+            seqused_k=ctx.ctx_lens,
+            max_seqlen_k=ctx.max_ctx,
             causal=False,
-            block_table=prefix.block_table,
-            return_softmax_lse=True,
-            num_splits=attn_metadata.max_num_splits,
-            **pfx_fa_kw,
+            block_table=ctx.block_table,
+            q_descale=layer._q_scale.expand(descale_shape)
+            if self.supports_quant_query_input
+            else None,
+            k_descale=layer._k_scale.expand(descale_shape),
+            v_descale=layer._v_scale.expand(descale_shape),
+            **fa_kwargs,
         )
-        ctx_out_cor, ctx_lse_cor = self.dcp_combine(
+        # Rows whose cache shard holds no context attended nothing; neutralize
+        # them before the combine so undefined partials cannot poison it.
+        mask_empty_context(ctx_lse, ctx_out, ctx.cu_q, ctx.ctx_cu)
+        ctx_out, ctx_lse = self.dcp_combine(
             ctx_out, ctx_lse.transpose(0, 1), get_dcp_group(), return_lse=True
         )
-        if n == 0:
-            return output
-        assert suffix_lse is not None
-        ctx_lse_cor = ctx_lse_cor.transpose(0, 1).contiguous()
-        pfx_out = output.new_zeros((n, self.num_heads, self.head_size))
-        pfx_lse = suffix_lse.new_full((suffix_lse.shape[0], n), float("-inf"))
-        pfx_out[prefix.local_token_idx] = ctx_out_cor[prefix.local_out_idx]
-        pfx_lse[:, prefix.local_token_idx] = ctx_lse_cor[:, prefix.local_out_idx]
-        # Rows without a prefix row keep their suffix output (lse -inf -> 0 weight).
-        merge_attn_states(output, pfx_out, pfx_lse, output, suffix_lse)
+        ctx_lse = ctx_lse.transpose(0, 1).contiguous()
+
+        merge_attn_states(
+            output,
+            ctx_out[ctx.local_idx],
+            ctx_lse[:, ctx.local_idx],
+            output,
+            new_lse,
+        )
         return output
 
     def _forward_with_dcp(
@@ -1461,13 +1345,6 @@ class FlashAttentionImpl(AttentionImpl):
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Sharded-cache attention for pure DCP and PCP+DCP decode batches.
-
-        Attend the DCP-sharded cached context with the topology-appropriate
-        query gather (no-op when DCP spans exactly the PCP ranks, i.e. decode
-        rows are replicated), LSE-combine across the group, then merge with
-        causal attention over the new tokens.
-        """
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
@@ -1503,13 +1380,15 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
-        query_for_context = maybe_all_gather_q_for_dcp(
-            query, self.dcp_world_size, self.pcp_world_size
+        # Under PCP the DCP group *is* the PCP group, whose ranks already hold
+        # every query head, so the head gather is a no-op.
+        query_across_dcp = (
+            query if self.use_pcp else get_dcp_group().all_gather(query, dim=1)
         )
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        n, context_num_heads = query_for_context.shape[:2]
+        n, context_num_heads = query_across_dcp.shape[:2]
         num_reqs = cu_seqlens_q.shape[0] - 1
         num_decodes = attn_metadata.num_decode_reqs
         num_context_prefills = attn_metadata.num_prefill_reqs
@@ -1540,14 +1419,14 @@ class FlashAttentionImpl(AttentionImpl):
             # TODO: Remove this DCP + FA2 mixed decode/prefill workaround once
             # FA4 supports this Qwen3.5 shape.
             assert not self.use_pcp, (
-                "FA2 split-DCP context path does not support PCP+DCP; use FA3/FA4."
+                "The FA2 split-DCP context path does not support PCP; use FA3/FA4."
             )
             assert attn_metadata.dcp_context_kv_lens is not None
             assert attn_metadata.max_dcp_context_kv_len is not None
             assert self.vllm_flash_attn_version is not None
             context_attn_out, context_lse = run_split_fa2_dcp_context_attention(
                 flash_attn_varlen_func,
-                query_for_context,
+                query_across_dcp,
                 key_cache,
                 value_cache,
                 dcp_context_out,
@@ -1574,7 +1453,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
         else:
             context_attn_out, context_lse = flash_attn_varlen_func(
-                q=query_for_context,
+                q=query_across_dcp,
                 k=key_cache,
                 v=value_cache,
                 out=dcp_context_out,

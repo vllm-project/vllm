@@ -1295,6 +1295,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # indices from the previous real batch.
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
+            if self.pcp_manager is not None:
+                self.pcp_manager.populate_attn_metadata(attn_metadata)
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
@@ -1380,8 +1382,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                if self.pcp_manager is not None:
-                    self.pcp_manager.populate_attn_metadata(attn_metadata)
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable

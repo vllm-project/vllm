@@ -211,6 +211,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_tp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -226,10 +227,8 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention.pcp import (
-    cp_reconcile_heads,
-    maybe_all_gather_q_for_dcp,
-    maybe_gather_cache_inputs,
-    resolve_dcp_combine_fn,
+    finalize_mla_pcp_decode,
+    maybe_gather_mla_latent_cache_inputs,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
@@ -275,6 +274,8 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_merge_attn_states import mask_empty_context
 from vllm.v1.attention.selector import get_attn_backend
@@ -340,24 +341,6 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     ):
         return "fp8_ds_mla"
     return kv_cache_dtype
-
-
-def _gather_latent_cache_inputs(
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    slot_mapping: torch.Tensor | None,
-    num_decode_tokens: int | None,
-    use_pcp: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """PCP latent-cache write gather; flattens k_pe for the all-gather."""
-    if not use_pcp or num_decode_tokens is None:
-        return kv_c_normed, k_pe, slot_mapping
-    assert slot_mapping is not None
-    k_pe_flat = k_pe.reshape(kv_c_normed.shape[0], -1)
-    (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = maybe_gather_cache_inputs(
-        (kv_c_normed, k_pe_flat), slot_mapping, num_decode_tokens, use_pcp
-    )
-    return cache_kv_c, cache_k_pe_flat.view(-1, *k_pe.shape[1:]), cache_slot_mapping
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):
@@ -567,7 +550,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
-        self.dcp_combine = resolve_dcp_combine_fn(get_current_vllm_config_or_none())
+        _vllm_config = get_current_vllm_config_or_none()
+        self.dcp_a2a = (
+            _vllm_config is not None
+            and _vllm_config.parallel_config.decode_context_parallel_size > 1
+            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
 
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -643,7 +631,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
-                _gather_latent_cache_inputs(
+                maybe_gather_mla_latent_cache_inputs(
                     kv_c_normed,
                     k_pe,
                     layer_slot_mapping,
@@ -887,15 +875,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
-                if not self.use_pcp and isinstance(mqa_q, tuple):
-                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                    mqa_q = torch.cat(mqa_q, dim=-1)
-                mqa_q = maybe_all_gather_q_for_dcp(
-                    mqa_q,
-                    self.impl.dcp_world_size,
-                    self.impl.pcp_world_size,
-                    already_replicated=qrep_decode and not self.use_pcp,
-                )
+                if self.use_pcp:
+                    if self.impl.dcp_world_size > self.impl.pcp_world_size:
+                        if isinstance(mqa_q, tuple):
+                            mqa_q = torch.cat(mqa_q, dim=-1)
+                        mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
+                else:
+                    if isinstance(mqa_q, tuple):
+                        # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
+                        mqa_q = torch.cat(mqa_q, dim=-1)
+                    if not qrep_decode:
+                        # mqa_q do allgather in head dim.
+                        mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not self.impl.is_sparse:
@@ -905,14 +896,29 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                attn_out = self.dcp_combine(
-                    attn_out,
-                    lse,
-                    get_dcp_group(),
-                    is_lse_base_on_e=self.impl.lse_base_on_e,
-                )
+                if self.dcp_a2a:
+                    attn_out = dcp_a2a_lse_reduce(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                    )
+                elif self.use_pcp:
+                    attn_out = cp_lse_ag_out_ar(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                    )
+                else:
+                    attn_out = cp_lse_ag_out_rs(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                    )
                 if self.use_pcp:
-                    attn_out = cp_reconcile_heads(attn_out, self.num_heads)
+                    attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -1160,7 +1166,7 @@ def unified_mla_kv_cache_update(
         layer_name
     )
     if layer_slot_mapping is not None:
-        kv_c_normed, k_pe, layer_slot_mapping = _gather_latent_cache_inputs(
+        kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
             layer_slot_mapping,
