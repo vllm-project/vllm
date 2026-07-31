@@ -84,6 +84,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import make_input_norm, maybe_do_input_norm
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -530,10 +531,6 @@ class Qwen2VisionTransformer(nn.Module):
         }
     )
 
-    image_mean = Qwen2VLImageProcessor.image_mean
-    image_std = Qwen2VLImageProcessor.image_std
-    rescale_factor = Qwen2VLImageProcessor.rescale_factor
-
     def __init__(
         self,
         vision_config: Qwen2VLVisionConfig,
@@ -600,10 +597,6 @@ class Qwen2VisionTransformer(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
-
-        # mm_device_do_normalize
-        self.image_mean_tensor = torch.tensor(self.image_mean) * (1.0 / self.rescale_factor)
-        self.image_std_tensor = torch.tensor(self.image_std) * (1.0 /  self.rescale_factor)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1305,6 +1298,11 @@ class Qwen2VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        if multimodal_config.mm_device_do_normalize:
+            self.input_norm = make_input_norm(Qwen2VLImageProcessor)
+        else:
+            self.input_norm = None
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Qwen2VLImageInputs | None:
@@ -1363,6 +1361,7 @@ class Qwen2VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"]
         else:
             pixel_values = image_input["pixel_values"]
+            pixel_values = maybe_do_input_norm(pixel_values, self.input_norm)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
@@ -1386,6 +1385,9 @@ class Qwen2VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"]
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = maybe_do_input_norm(
+                pixel_values_videos, self.input_norm
+            )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,

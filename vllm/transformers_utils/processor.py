@@ -6,6 +6,8 @@ import inspect
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
+import torch
+import torch.nn as nn
 from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
@@ -582,3 +584,43 @@ def call_hf_processor_mm_only(
         data={**audio_inputs, **images_inputs, **videos_inputs},
         tensor_type=kwargs.get("return_tensors"),
     )
+
+
+def make_input_norm(processor) -> nn.BatchNorm1d:
+    image_mean = processor.image_mean
+    image_std = processor.image_std
+    rescale_factor = processor.rescale_factor
+
+    image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
+        1.0 / rescale_factor
+    )
+    image_std_tensor = torch.tensor(image_std, dtype=torch.float32) * (
+        1.0 / rescale_factor
+    )
+
+    bn = nn.BatchNorm1d(3, eps=0.0).to(torch.float32)
+    bn.weight.data = 1.0 / image_std_tensor
+    bn.bias.data = -image_mean_tensor / image_std_tensor
+    bn.running_mean.zero_()
+    bn.running_var.fill_(1.0)
+    bn.eval()
+    for p in bn.parameters():
+        p.requires_grad = False
+
+    return bn
+
+
+def maybe_do_input_norm(
+    grid_thw: torch.Tensor, input_norm: nn.BatchNorm1d | None, channel: int = 3
+) -> torch.Tensor:
+    if input_norm is None:
+        return grid_thw
+
+    assert grid_thw.ndim == 2
+    patches, size = grid_thw.shape
+    patch_size = size // channel
+    dtype = grid_thw.dtype
+
+    grid_thw = grid_thw.view(patches, channel, patch_size)
+    grid_thw = input_norm(grid_thw.to(torch.float32))
+    return grid_thw.view(patches, size).to(dtype)
