@@ -520,10 +520,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
         } else {
           float2 g = __bfloat1622float2(s_gate_comp[k]);
           float2 u = __bfloat1622float2(s_up_comp[k]);
-          float g0 = situ_beta * tanhf(g.x * inv_situ_beta) /
-                     (1.f + expf(-g.x));
-          float g1 = situ_beta * tanhf(g.y * inv_situ_beta) /
-                     (1.f + expf(-g.y));
+          float g0 =
+              situ_beta * tanhf(g.x * inv_situ_beta) / (1.f + expf(-g.x));
+          float g1 =
+              situ_beta * tanhf(g.y * inv_situ_beta) / (1.f + expf(-g.y));
           float u0 = situ_clamp_up
                          ? situ_linear_beta * tanhf(u.x * inv_situ_linear_beta)
                          : u.x;
@@ -669,7 +669,7 @@ void persistent_masked_m_silu_mul_quant(
   static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
 
   #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,  \
-                 STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT, STAGES)      \
+                 STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT, STAGES)       \
     static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
     int sms = SILU_V2_BLOCK_COUNT;                                             \
     static constexpr int max_shared_mem_bytes =                                \
@@ -681,7 +681,7 @@ void persistent_masked_m_silu_mul_quant(
         y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
           vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
               BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t, THREAD_COUNT, \
-              Idx_t, CEIL_UE8M0, IS_SITU, GROUP_SIZE, STAGES>                 \
+              Idx_t, CEIL_UE8M0, IS_SITU, GROUP_SIZE, STAGES>                  \
               <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
                   reinterpret_cast<const __nv_bfloat16*>(                      \
                       input.const_data_ptr()),                                 \
@@ -691,8 +691,7 @@ void persistent_masked_m_silu_mul_quant(
                       tokens_per_expert.const_data_ptr()),                     \
                   E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
-                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e,                   \
-                  sb, slb);                                                    \
+                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e, sb, slb);         \
         });
 
   #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \
@@ -702,14 +701,13 @@ void persistent_masked_m_silu_mul_quant(
       static constexpr int NUM_STAGES = 4;                                    \
       static constexpr int THREAD_COUNT = 256;                                \
       KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT,    \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT,     \
              NUM_STAGES);                                                     \
     } else {                                                                  \
       /* 1 warp config */                                                     \
       static constexpr int THREAD_COUNT = 32;                                 \
       KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT,    \
-             2);                                                              \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT, 2); \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);

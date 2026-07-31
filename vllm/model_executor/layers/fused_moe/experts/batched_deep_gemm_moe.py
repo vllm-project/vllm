@@ -223,8 +223,7 @@ def persistent_masked_m_silu_mul_quant(
 
     if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0,
-            situ_beta, situ_linear_beta
+            y, tokens_per_expert, y_q, y_s, ceil_ue8m0, situ_beta, situ_linear_beta
         )
     else:
         # Triton fallback for ROCm -- the C++ kernel is guarded by
