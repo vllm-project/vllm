@@ -285,6 +285,20 @@ torch::stable::Tensor moe_wna16_gemm(
     int64_t bit) {
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
+
+  // `b_scales` and `output` are fetched through the untyped `const_data_ptr()`
+  // / `mutable_data_ptr()` overloads and then reinterpret_cast to `scalar_t`,
+  // which is selected from `input.scalar_type()` alone. Their own scalar types
+  // are never consulted, so a mismatched tensor is silently type-punned — and
+  // for a dtype narrower than 2 bytes it is also read (or written) out of
+  // bounds. The other tensors are already covered by the templated
+  // `const_data_ptr<T>()` accessors, which check the scalar type themselves.
+  // Validate before `zero_()` so a rejected `output` is left untouched.
+  STD_TORCH_CHECK(b_scales.scalar_type() == input.scalar_type(),
+                  "scalar type of b_scales must match input");
+  STD_TORCH_CHECK(output.scalar_type() == input.scalar_type(),
+                  "scalar type of output must match input");
+
   torch::stable::zero_(output);
 
   const int num_experts = b_qweight.size(0);
