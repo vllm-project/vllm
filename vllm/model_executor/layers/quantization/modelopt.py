@@ -136,6 +136,16 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
+    # Drop an on-disk activation input_scale on weight-only NVFP4 (W4A16), where
+    # resolve() sets activation=None and registers no such param. Covers the
+    # simple linears (down_proj, o_proj) via the loader's unexpected-key check;
+    # merged linears (qkv_proj, gate_up_proj) also rely on the LinearBase
+    # `param is self` skip. To instead *use* the scales (run as W4A4), set the
+    # activation_dtype override (see resolve()).
+    _ignore_unexpected_suffixes = QuantizationConfig._ignore_unexpected_suffixes + (
+        ".input_scale",
+    )
+
     def __init__(
         self,
         exclude_modules: list[str],
@@ -704,12 +714,25 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        activation_dtype: str | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        # Serve-time activation-precision override (see resolve()). Lets a
+        # W4A16_NVFP4 checkpoint that carries an on-disk activation input_scale
+        # run as pure W4A4 without hand-editing quant_algo. dtype-valued so it
+        # can grow other activation granularities later; only "nvfp4" today.
+        self.activation_dtype = (
+            activation_dtype.lower() if activation_dtype else None
+        )
+        if self.activation_dtype not in (None, *ACTIVATION_DTYPE_OVERRIDES):
+            raise ValueError(
+                f"Unsupported ModelOpt activation_dtype: {activation_dtype!r}. "
+                f"Supported: {sorted(ACTIVATION_DTYPE_OVERRIDES)}."
+            )
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
                 "Detected ModelOpt NVFP4 checkpoint (quant_algo=%s). Please "
@@ -765,6 +788,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     ) -> "ModelOptNvFp4Config":
         is_checkpoint_nvfp4_serialized = "NVFP4" in quant_method
 
+        # activation_dtype override lives beside quant_algo in either the nested
+        # ({"quantization": {...}}) or flat (config.json quantization_config) form.
+        quant_cfg = original_config.get("quantization", original_config)
+        activation_dtype = quant_cfg.get("activation_dtype")
+
         if group_size is None:
             group_size = 16  # Default value
 
@@ -788,6 +816,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            activation_dtype,
         )
 
 
@@ -2246,6 +2275,40 @@ class FormatScheme:
         """Run after the key schemes' ``process``, before the kernel's."""
 
 
+class _DropInputScale(FormatScheme):
+    """W4A16 NVFP4: register a placeholder ``input_scale`` param, then discard it.
+
+    A W4A16 spec has ``activation=None`` (no ``input_scale`` param), but a
+    W4A4-shaped checkpoint carries ``*_proj.input_scale`` tensors — and for merged
+    linears the stacked loader renames them (e.g. ``qkv_proj.input_scale``) and
+    looks the param up *unconditionally*, so a missing param crashes rather than
+    being skipped by ``_ignore_unexpected_suffixes``. Registering the placeholder
+    gives that lookup a target; ``post_process`` deletes it (the weight-only
+    kernel never reads it). Native W4A16 (no on-disk scale) leaves it unfilled and
+    it is deleted anyway. Mirrors the old ``ModelOptNvFp4W4A16LinearMethod`` (C4).
+
+    Scope-A alternative to the load-time drop (``_ignore_unexpected_suffixes`` +
+    the ``LinearBase`` skip) that ``resolve()`` currently uses; kept for the final
+    approach choice. Wire by returning it as the format scheme from ``resolve()``.
+    """
+
+    def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
+        layer.register_parameter(
+            "input_scale",
+            PerTensorScaleParameter(
+                data=torch.empty(shapes.nparts, dtype=torch.float32),
+                weight_loader=wl,
+            ),
+        )
+
+    def post_process(self, layer) -> None:
+        if hasattr(layer, "input_scale"):
+            del layer.input_scale
+
+
+_DROP_INPUT_SCALE = _DropInputScale()
+
+
 @register_weight_loader_v2_supported_method
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
@@ -2327,6 +2390,15 @@ class ModelOptLinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
+# activation_dtype override -> activation QuantKey slot. A W4A16_NVFP4 checkpoint
+# that ships an on-disk activation input_scale can be served as pure W4A4 by
+# setting activation_dtype (see ModelOptNvFp4Config). Extend with other
+# activation granularities (e.g. an fp8 static input scale) as needed.
+ACTIVATION_DTYPE_OVERRIDES: dict[str, "QuantKey"] = {
+    "nvfp4": kNvfp4Dynamic,
+}
+
+
 def resolve(algo: str, subcfg, prefix: str):
     """Turn an existing (untouched) sub-config into (QuantSpec, CkptCtx,
     format_scheme). Strictly read-only over ``subcfg`` — the one real hazard in
@@ -2374,8 +2446,24 @@ def resolve(algo: str, subcfg, prefix: str):
         return QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic), ctx, None
     if algo == "W4A16_NVFP4":
         # W4A16: same fp4 weight, no activation quant. activation=None drives
-        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha. The
-        # old method's placeholder input_scale is intentionally dropped (C4).
+        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha. Any
+        # on-disk activation input_scale is dropped on load (see
+        # _ignore_unexpected_suffixes + the LinearBase `param is self` skip);
+        # the _DropInputScale FormatScheme below is the Scope-A alternative.
+        act_override = getattr(subcfg, "activation_dtype", None)
+        if act_override is not None:
+            # Promote to W4A4: consume the on-disk activation input_scale as a
+            # dynamic fp4 activation (same QuantSpec as algo == "NVFP4"). The
+            # scale is used, not orphaned — no drop needed. alpha fuses via
+            # maybe_fuse_global_scales; select_linear_kernel picks the fp4 GEMM.
+            return (
+                QuantSpec(
+                    weight=kNvfp4Static,
+                    activation=ACTIVATION_DTYPE_OVERRIDES[act_override],
+                ),
+                ctx,
+                None,
+            )
         return QuantSpec(weight=kNvfp4Static, activation=None), ctx, None
     raise NotImplementedError(f"resolve: unsupported ModelOpt linear algo {algo!r}")
 
