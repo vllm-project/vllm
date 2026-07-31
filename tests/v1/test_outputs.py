@@ -45,6 +45,22 @@ def test_sampling_mask_tensors_tolist():
     assert result.cu_num_generated_tokens == [0, 1, 1]
 
 
+def test_sampling_mask_tensors_from_logits():
+    tensors = SamplingMaskTensors.from_logits(
+        logits=torch.tensor(
+            [
+                [1.0, float("-inf"), 2.0],
+                [3.0, 4.0, float("-inf")],
+                [float("-inf"), 5.0, 6.0],
+            ]
+        ),
+        num_sampled_tokens=torch.tensor([1, 0, 1]),
+    )
+
+    assert tensors.token_ids.tolist() == [0, 2, 1, 2]
+    assert tensors.counts.tolist() == [2, 2]
+
+
 class TestLogprobsLists(TestCase):
     def setUp(self):
         self.logprobsLists = LogprobsLists(
