@@ -1720,7 +1720,7 @@ class Qwen2VLForConditionalGeneration(
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         if self.multimodal_config.mm_device_do_normalize:
-            autoloaded_weights.update({'input_norm.weight', 'input_norm.bias'})
+            autoloaded_weights.update({"input_norm.weight", "input_norm.bias"})
         return autoloaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
