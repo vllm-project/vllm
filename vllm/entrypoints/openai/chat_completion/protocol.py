@@ -188,6 +188,22 @@ class ChatCompletionNamedFunction(OpenAIBaseModel):
     name: str
 
 
+def _has_message_level_tools(messages: Any) -> bool:
+    """Whether any message carries a message-level tool declaration.
+
+    Mirrors the roles that `parse_chat_messages` passes through to the chat
+    template ("system", "developer").
+    """
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(msg, dict)
+        and msg.get("role") in ("system", "developer")
+        and bool(msg.get("tools"))
+        for msg in messages
+    )
+
+
 class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     function: ChatCompletionNamedFunction
     type: Literal["function"] = "function"
@@ -568,8 +584,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # No-tools requests default to tool_choice="none" at the API
             # layer. Collapse that default before rendering, so K3 emits a
             # model-visible tool-choice instruction only for requests with a
-            # tools block.
-            tool_choice=self.tool_choice if self.tools else None,
+            # tools block. Message-level tool declarations count as tools
+            # here, and an explicitly provided tool_choice is always kept.
+            tool_choice=(
+                self.tool_choice
+                if self.tools
+                or _has_message_level_tools(self.messages)
+                or "tool_choice" in self.model_fields_set
+                else None
+            ),
             response_format=self.response_format,
         )
 
@@ -872,9 +895,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 parameter="tools",
             )
 
-        # if "tool_choice" is not specified but tools are provided,
-        # default to "auto" tool_choice
-        if "tool_choice" not in data and data.get("tools"):
+        # Extend the tool_choice="auto" default to tools declared on
+        # individual messages, not just request-level `tools`. Otherwise the
+        # field default "none" would make templates instruct the model NOT to
+        # call the very tools the client just declared.
+        if "tool_choice" not in data and (
+            data.get("tools") or _has_message_level_tools(data.get("messages"))
+        ):
             data["tool_choice"] = "auto"
 
         # if "tool_choice" is "none" -- no validation is needed for tools
@@ -883,10 +910,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is specified -- validation
         if "tool_choice" in data and data["tool_choice"] is not None:
-            # ensure that if "tool choice" is specified, tools are present
-            if "tools" not in data or data["tools"] is None:
+            # "required"/named tool_choice is contradictory without any tool
+            # source (request-level `tools` OR message-level declarations).
+            # "auto"/"none" without tools are harmless no-ops.
+            if (
+                data["tool_choice"] == "required"
+                or isinstance(data["tool_choice"], dict)
+            ) and not (
+                data.get("tools") or _has_message_level_tools(data.get("messages"))
+            ):
                 raise VLLMValidationError(
-                    "When using `tool_choice`, `tools` must be set.",
+                    "When using `tool_choice`, tools must be declared either "
+                    "at the request level or on individual messages.",
                     parameter="tool_choice",
                 )
 
@@ -930,11 +965,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         f" in `tool_choice`! {correct_usage_message}",
                         parameter="tool_choice.function.name",
                     )
-                for tool in data["tools"]:
+                # Only cross-check the name against request-level `tools`
+                # when they are present; the named tool may be declared at
+                # the message level, which is not visible here.
+                for tool in data.get("tools") or []:
                     if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
-                if not valid_tool:
+                if data.get("tools") and not valid_tool:
                     raise VLLMValidationError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`",

@@ -2806,3 +2806,46 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
+
+
+_MESSAGE_LEVEL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_parse_message_level_tools_passed_through(role):
+    """Message-level tool declarations survive chat message parsing: tools
+    on "system"/"developer" messages pass through for the chat template /
+    encoding layer to expand.
+    """
+    from vllm.entrypoints.chat_utils import _parse_chat_message_content
+
+    result = _parse_chat_message_content(
+        {"role": role, "content": "instructions", "tools": _MESSAGE_LEVEL_TOOLS},
+        MagicMock(),
+        "string",
+        True,
+    )
+    assert result[0]["tools"] == _MESSAGE_LEVEL_TOOLS
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "tool"])
+def test_parse_message_level_tools_not_passed_for_other_roles(role):
+    """tools on non-system/developer roles are not passed through."""
+    from vllm.entrypoints.chat_utils import _parse_chat_message_content
+
+    result = _parse_chat_message_content(
+        {"role": role, "content": "text", "tools": _MESSAGE_LEVEL_TOOLS},
+        MagicMock(),
+        "string",
+        True,
+    )
+    assert "tools" not in result[0]
