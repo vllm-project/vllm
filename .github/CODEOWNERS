@@ -47,6 +47,7 @@
 
 # Rust Frontend
 /rust/ @BugenZhao @njhill
+/rust/src/bench @esmeetu
 /build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
 /.buildkite/test_areas/rust* @BugenZhao @njhill
