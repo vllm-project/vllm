@@ -31,6 +31,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
@@ -202,6 +203,13 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         # the kernel only sees weight tensors. Drop uncalibrated (zero) scales.
         self._input_scale = self._take_act_scale(layer, "input_scale")
         self._output_scale = self._take_act_scale(layer, "output_scale")
+        arena = get_reload_arena(layer)
+        if self._input_scale is not None:
+            self._input_scale = arena.put("wna8o8.input_scale", self._input_scale)
+        if self._output_scale is not None:
+            self._output_scale = arena.put(
+                "wna8o8.output_scale", self._output_scale
+            )
         self.has_input_act = self._input_scale is not None
         self.has_output_act = self._output_scale is not None
 

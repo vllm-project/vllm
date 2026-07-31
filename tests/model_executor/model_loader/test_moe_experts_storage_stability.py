@@ -52,6 +52,8 @@ _ORACLES = [
      "Fp8MoeBackend", "backend_to_kernel_cls"),
     ("vllm.model_executor.layers.fused_moe.oracle.nvfp4",
      "NvFp4MoeBackend", "backend_to_kernel_cls"),
+    ("vllm.model_executor.layers.fused_moe.oracle.mxfp4",
+     "Mxfp4MoeBackend", "backend_to_kernel_cls"),
     ("vllm.model_executor.layers.fused_moe.oracle.int_wna16",
      "WNA16MoEBackend", "backend_to_kernel_cls"),
     ("vllm.model_executor.layers.fused_moe.oracle.unquantized",
@@ -117,6 +119,9 @@ _KNOWN_NO_RUNTIME_TENSORS = {
     "TritonExperts", "BatchedTritonExperts", "TritonOrDeepGemmExperts",
     "BatchedDeepGemmExperts", "MarlinExperts", "CPUExpertsFp8",
     "TritonOrCutlassExperts",  # thin wrapper; inner class is swept separately
+    # Constructor temporaries are promoted to registered layer parameters by
+    # PWAL before graph capture, so reload copy-back owns their final storage.
+    "TrtLlmNvFp4ExpertsModular", "TrtLlmNvFp4ExpertsMonolithic",
 }
 
 
@@ -191,23 +196,12 @@ def test_report_moe_experts_worklist(capsys):
 # regression (one silently disappearing from the registry, or being
 # mislabeled arena without a real migration) is visible, and so the debt is
 # explicit rather than buried in a print.
-_KNOWN_RAW_WORKLIST = {
-    "FlashInferExperts",           # gemm1_alpha/beta/clamp_limit constants
-    "TrtLlmFp8ExpertsModular",     # SM100 expert constants
-    "TrtLlmFp8ExpertsMonolithic",
-}
-
-
-@pytest.mark.parametrize("cls_name", sorted(_KNOWN_RAW_WORKLIST))
-def test_known_worklist_backends_are_still_flagged(cls_name):
+def test_no_enumerated_moe_backend_has_raw_runtime_allocations():
     classes = enumerate_experts_classes()
-    if cls_name not in classes:
-        pytest.skip(f"{cls_name} not selectable in this build")
-    kind = classify(classes[cls_name])
-    assert kind == "raw", (
-        f"{cls_name} classified '{kind}', expected 'raw'. If it was migrated "
-        "to the arena, move it off the worklist; if the classifier now "
-        "misreads it, tighten the heuristic.")
+    raw = sorted(name for name, cls in classes.items() if classify(cls) == "raw")
+    assert not raw, (
+        "MoE backends allocate graph-visible runtime tensors without the "
+        f"reload arena: {raw}")
 
 
 # ---------------------------------------------------------------------------

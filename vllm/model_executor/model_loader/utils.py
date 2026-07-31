@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.reload import (
     set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.reload_arena import arena_scope, get_reload_arena
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -104,7 +105,10 @@ def process_weights_after_loading(
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            with (
+                device_loading_context(module, target_device),
+                arena_scope(get_reload_arena(module)),
+            ):
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -124,7 +128,10 @@ def process_weights_after_loading(
         if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
-            with device_loading_context(module, target_device):
+            with (
+                device_loading_context(module, target_device),
+                arena_scope(get_reload_arena(module)),
+            ):
                 module.process_weights_after_loading(model_config.dtype)
 
     # Process HPC modules (HpcRopeNorm, etc.) that rely on

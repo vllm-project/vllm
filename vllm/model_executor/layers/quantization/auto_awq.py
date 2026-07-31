@@ -60,6 +60,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -644,7 +645,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
         device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        layer.workspace = get_reload_arena(layer).put(
+            "marlin.workspace", marlin_make_workspace_new(device, 4)
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         converted = convert_to_wna16_moe_kernel_format(

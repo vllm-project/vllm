@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
@@ -92,6 +93,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.w2_sf_mma: torch.Tensor | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        arena = get_reload_arena(layer)
         # Normalise block scales to absorb the per-expert weight global scale
         # (w_gs).  vLLM's NVFP4 convention stores:
         #   block_scale = max_abs * w_gs / fp4_max,  g1_alphas = 1/w_gs
@@ -129,10 +131,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             # 1.0 scale per expert is equivalent to the bake-in above for
             # static-quant checkpoints. Allocate once here so apply() stays
             # alloc-free.
-            self._fc2_input_scale = torch.ones(
-                self.num_local_experts,
-                device=layer.w13_weight.device,
-                dtype=torch.float32,
+            self._fc2_input_scale = arena.put(
+                "flashinfer_b12x.fc2_input_scale",
+                torch.ones(
+                    self.num_local_experts,
+                    device=layer.w13_weight.device,
+                    dtype=torch.float32,
+                ),
             )
 
         # Precompute MMA-layout views of the weight scale factors once here
@@ -140,21 +145,27 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.w1_scale is not None
         num_experts_w1, m1, k1_sf = self.w1_scale.shape
         k1 = k1_sf * 16
-        self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
+        self.w1_sf_mma = arena.put(
+            "flashinfer_b12x.w1_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
+                m=m1,
+                k=k1,
+                num_groups=num_experts_w1,
+            ),
         )
 
         assert self.w2_scale is not None
         num_experts_w2, m2, k2_sf = self.w2_scale.shape
         k2 = k2_sf * 16
-        self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
+        self.w2_sf_mma = arena.put(
+            "flashinfer_b12x.w2_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
+                m=m2,
+                k=k2,
+                num_groups=num_experts_w2,
+            ),
         )
 
     @staticmethod
