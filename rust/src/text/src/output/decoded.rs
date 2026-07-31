@@ -306,6 +306,12 @@ pub async fn decoded_text_event_stream(
 /// If stop string matches, returns tuple
 /// (index into stop string vec, byte index of first byte of stop string in
 /// output)
+///
+/// When several stop strings match within the newly generated text (for example
+/// when a step appends multiple tokens, or one token decodes to several
+/// characters), the stop string that completes earliest in the text is selected,
+/// so the result matches appending one character at a time. Ties are broken by
+/// stop-list order.
 fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Option<(usize, usize)> {
     // We compare byte subslices to avoid utf8 boundary problem
     let output = output.as_bytes();
@@ -314,12 +320,15 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .iter()
         .map(|ss| (ss.as_bytes(), ss.len(), next_off.saturating_sub(ss.len())))
         .enumerate()
-        .find_map(|(ss_idx, (ss, len, start_off))| {
+        .filter_map(|(ss_idx, (ss, len, start_off))| {
             output[start_off..]
                 .windows(len)
                 .position(|w| w == ss)
-                .map(|pos| (ss_idx, start_off + pos))
+                .map(|pos| (ss_idx, start_off + pos, start_off + pos + len))
         })
+        // `min_by_key` keeps the first minimum, so ties fall back to stop-list order.
+        .min_by_key(|&(_, _, end)| end)
+        .map(|(ss_idx, start, _)| (ss_idx, start))
 }
 
 #[cfg(test)]
@@ -524,9 +533,47 @@ mod tests {
     #[test]
     fn stop_string_matches_first_of_multiple() {
         let stops = vec!["wor".to_string(), "say".to_string()];
-        // "say" appears earlier but "wor" is checked first (index 0)
+        // Only "wor" can complete in the 1-new-byte window; the "say" at index 0
+        // is behind the window start and is not a candidate.
         let result = matches_stop_string(&stops, "say wor", 1);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    /// Several stop strings can land in the same window when a step appends
+    /// multiple tokens (speculative decoding) or when one token decodes to
+    /// several characters. The earliest-completing one must win over stop-list
+    /// order, so that a batched step agrees with character-at-a-time appending.
+    #[test]
+    fn stop_string_earliest_completing_wins_regardless_of_list_order() {
+        // " The user is a": " is a" (5 bytes) was appended in one step. Both
+        // "is" (index 10, completes at 12) and " a" (index 12, completes at 14)
+        // land in the window. "is" completes earlier, so it wins either order.
+        for stops in [vec!["a", "is"], vec!["is", "a"]] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let is_idx = stops.iter().position(|s| *s == "is").unwrap();
+            let result = matches_stop_string(&owned, " The user is a", " is a".len());
+            assert_eq!(result, Some((is_idx, 10)), "stop list order {stops:?}");
+        }
+    }
+
+    /// Both stops complete at the same offset, so stop-list order decides. This
+    /// pins `min_by_key`'s first-minimum behavior, which is what implements the
+    /// tie-break.
+    #[test]
+    fn stop_string_ties_broken_by_list_order() {
+        for (stops, expected) in [(vec!["ab", "b"], (0, 0)), (vec!["b", "ab"], (0, 1))] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let result = matches_stop_string(&owned, "ab", "ab".len());
+            assert_eq!(result, Some(expected), "stop list order {stops:?}");
+        }
+    }
+
+    #[test]
+    fn stop_string_completion_position_not_start_position() {
+        // "b" starts later than "abc" but completes earlier, so it must win.
+        let stops = vec!["abc".to_string(), "b".to_string()];
+        let result = matches_stop_string(&stops, "abc", 3);
+        assert_eq!(result, Some((1, 1)));
     }
 
     #[test]
