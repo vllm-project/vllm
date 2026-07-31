@@ -701,6 +701,10 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         )
 
         vllm_config = get_current_vllm_config()
+        # Skip layers would remap unchanged indices; spec decode permutes them.
+        self.needs_index_remap: bool = (
+            indexer is not None or vllm_config.speculative_config is not None
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -777,19 +781,20 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
-        # Get topk indices
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        if self.needs_index_remap:
+            # Get topk indices
+            assert self.topk_indices_buffer is not None
+            topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
-        )
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token,
+                attn_metadata.block_table,
+                topk_indices,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+            )
 
         # write the latent and rope to kv cache
         if fp8_attention:
