@@ -12,6 +12,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
@@ -31,8 +32,7 @@ class LatentTailTier(IntEnum):
     # ``_small_batch_tail``. Decode-sized (<= the op's max_num_tokens): one
     # CuTeDSL collective fuses the latent reduce, RMSNorm and the shared
     # reduce-scatter, then a sharded up-projection multicasts through a Lamport
-    # copy. Requires SM100, TP 8/16, BF16 and
-    # VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION.
+    # copy. Requires SM100, TP 8/16, BF16
     TAIL_FUSION = 0
 
     # ``_overlay_allreduce_tail``. The portable default: reduce the latent,
@@ -64,11 +64,17 @@ class LatentMoERunner(MoERunner):
     def __init__(
         self,
         *args,
-        enable_k3_latent_moe_tail_fusion: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.enable_k3_latent_moe_tail_fusion = enable_k3_latent_moe_tail_fusion
+
+        # The tail-fusion kernels are tcgen05-based, so they require an
+        # SM100 NVIDIA device; the runner falls back to the default latent
+        # MoE path everywhere else.
+        self.enable_k3_latent_moe_tail_fusion = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
         # Overlap the shared-expert all-reduce with the tier-1 up-projection.
         self._shared_ar_events = (torch.cuda.Event(), torch.cuda.Event())
         use_fused_path = self._use_fused_path()

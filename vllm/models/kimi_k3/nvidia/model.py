@@ -553,13 +553,6 @@ class KimiMoE(nn.Module):
                 activation_linear_beta=activation_situ_linear_beta,
             )
         else:
-            # The tail-fusion kernels are tcgen05-based, so they require an
-            # SM100 NVIDIA device; the runner falls back to the default latent
-            # MoE path everywhere else.
-            enable_tail_fusion = (
-                current_platform.is_cuda()
-                and current_platform.is_device_capability_family(100)
-            )
             self.experts = FusedMoE(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
@@ -586,11 +579,6 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
-                runner_args=(
-                    {"enable_k3_latent_moe_tail_fusion": enable_tail_fusion}
-                    if self.use_latent_moe
-                    else None
-                ),
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
