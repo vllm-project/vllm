@@ -372,6 +372,9 @@ class ResponsesRequest(OpenAIBaseModel):
         if (
             response_format.type == "json_schema"
             and response_format.schema_ is not None
+            # strict=false means prompt-instruction-only: no grammar
+            # constraint is applied.
+            and getattr(response_format, "strict", None) is not False
         ):
             return StructuredOutputsParams(
                 json=response_format.schema_  # type: ignore[call-arg]
