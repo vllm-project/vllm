@@ -989,7 +989,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
-        self.data_parser = self.info.build_data_parser()
+        self.data_parser = self.info.get_data_parser()
 
     def __call__(
         self,

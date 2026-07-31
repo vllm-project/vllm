@@ -1279,6 +1279,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
+            info=self,
         )
 
     def get_hf_processor(self, **kwargs: object):
@@ -1543,7 +1544,8 @@ class LlavaOnevision2MultiModalProcessor(
         # Retained for symmetry; vLLM actually fetches the parser via
         # info.get_data_parser() (see ProcessingInfo override above).
         return LlavaOnevision2MultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
+            self.info.get_hf_config().vision_config.spatial_merge_size,
+            info=self.info,
         )
 
     def _call_hf_processor(

@@ -42,6 +42,8 @@ _I = TypeVar("_I")
 
 if TYPE_CHECKING:
     import PIL.Image as PILImage
+
+    from .processing.context import BaseProcessingInfo
 else:
     PILImage = LazyLoader("PILImage", globals(), "PIL.Image")
 
@@ -556,42 +558,34 @@ class MultiModalDataParser:
             embedding inputs. If provided, validates that user-supplied
             embeddings have the correct hidden size to prevent crashes
             during model inference.
+        info (BaseProcessingInfo, optional): The model's processing info. Pass
+            it to support pre-computed embeddings delivered out of band, e.g.
+            published through an EC connector by an EPD encoder instance.
     """
 
-    allow_out_of_band_embeds: bool = False
-    """Whether `*_embeds` may be absent from a pre-computed-embedding input.
+    @property
+    def allow_out_of_band_embeds(self) -> bool:
+        """Whether `*_embeds` may be absent from a pre-computed-embedding input.
 
-    Not a constructor argument: `BaseProcessingInfo.build_data_parser` stamps it
-    from `MultiModalConfig.mm_embeds_out_of_band` after the model has built its
-    parser, so subparsers get the setting without every model having to thread
-    it through `get_data_parser`.
-    """
-
-    placeholder_metadata_fields: Mapping[str, Set[str]] | None = None
-    """Per modality, the keys declared by
-    `BaseProcessingInfo.get_placeholder_metadata_fields`.
-
-    Stamped by `build_data_parser` alongside `allow_out_of_band_embeds`; `None`
-    means it was never stamped. Read it through `metadata_fields`.
-    """
+        True only on an EC consumer, where the embeddings arrive through the
+        connector instead of the request.
+        """
+        if self.info is None:
+            return False
+        mm_config = self.info.ctx.model_config.multimodal_config
+        return mm_config is not None and mm_config.mm_embeds_out_of_band
 
     def metadata_fields(self, modality: str) -> set[str]:
         """The keys that size `modality`'s placeholder range.
 
         These stay required even when the embeddings arrive out of band, since
-        they are all the consumer has left to work from. Declared once on the
-        model's `BaseProcessingInfo` so that an EC connector reporting them and
-        a parser requiring them cannot drift apart.
+        they are all the consumer has left to work from. Declared once by
+        `BaseProcessingInfo.get_placeholder_metadata_fields` so that an EC
+        connector reporting them and a parser requiring them cannot drift apart.
         """
-        if self.placeholder_metadata_fields is None:
-            raise RuntimeError(
-                f"{type(self).__name__} was not built through "
-                "`BaseProcessingInfo.build_data_parser`, so the placeholder "
-                "metadata fields declared by the model never reached it. "
-                "Construct parsers through `build_data_parser` rather than "
-                "calling `get_data_parser` directly."
-            )
-        return set(self.placeholder_metadata_fields.get(modality, ()))
+        if self.info is None:
+            return set()
+        return set(self.info.get_placeholder_metadata_fields(modality))
 
     def __init__(
         self,
@@ -601,8 +595,14 @@ class MultiModalDataParser:
         audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
+        info: "BaseProcessingInfo | None" = None,
     ) -> None:
         super().__init__()
+
+        # Passing the info in is what enables out-of-band embedding delivery for
+        # this model: both `allow_out_of_band_embeds` and `metadata_fields` are
+        # read from it. Omitting it means the model does not support that path.
+        self.info = info
 
         self.audio_resampler = AudioResampler(
             target_sr=target_sr,

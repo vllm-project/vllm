@@ -379,29 +379,12 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            info=self,
         )
-
-    def build_data_parser(self) -> MultiModalDataParser:
-        """Build the model's parser and stamp deployment-derived settings on it.
-
-        `get_data_parser` is the model-facing hook; anything that depends on the
-        deployment rather than the model is applied here, so models don't have
-        to thread it through their own constructors.
-        """
-        parser = self.get_data_parser()
-        mm_config = self.ctx.model_config.multimodal_config
-        parser.allow_out_of_band_embeds = (
-            mm_config is not None and mm_config.mm_embeds_out_of_band
-        )
-        parser.placeholder_metadata_fields = {
-            modality: self.get_placeholder_metadata_fields(modality)
-            for modality in self.get_supported_mm_limits()
-        }
-        return parser
 
     @cached_property
     def data_parser(self) -> MultiModalDataParser:
-        return self.build_data_parser()
+        return self.get_data_parser()
 
     @property
     def skip_prompt_length_check(self) -> bool:

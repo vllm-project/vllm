@@ -594,6 +594,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return HunYuanVLMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            info=self,
         )
 
     def get_placeholder_metadata_fields(self, modality: str) -> set[str]:

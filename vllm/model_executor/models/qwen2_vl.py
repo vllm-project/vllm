@@ -850,6 +850,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
+            info=self,
         )
 
     def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
