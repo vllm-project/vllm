@@ -8,6 +8,8 @@ Tests are split into two layers:
 1. Unit tests (no server): covers ``_detokenize_delta`` correctness
    (chunked == one-shot) and ``derender_completion_stream`` /
    ``derender_chat_stream`` logic via a real tokenizer on a tiny model.
+   The parser path is covered both with a deterministic stub parser and
+   with the real ``HarmonyParser`` (skipped without ``openai_harmony``).
 
 2. Integration tests (require a running render server): covers the full
    HTTP round-trip through the streaming endpoint.  Marked with
@@ -28,6 +30,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
+    GenerateResponse,
+    GenerateResponseChoice,
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
 )
@@ -508,7 +512,8 @@ def _chat_request(**kwargs):
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
     kwargs.setdefault("messages", [{"role": "user", "content": "hi"}])
-    return ChatCompletionRequest(model=MODEL_NAME, **kwargs)
+    kwargs.setdefault("model", MODEL_NAME)
+    return ChatCompletionRequest(**kwargs)
 
 
 class TestDerenderChatStreamParsed:
@@ -696,6 +701,193 @@ class TestDerenderChatStreamParsed:
         delta = chunk.choices[0].delta
         assert delta.reasoning is None
         assert delta.content == "c"
+
+
+# ---------------------------------------------------------------------------
+# Harmony / GPT-OSS replay — unit, no server
+# ---------------------------------------------------------------------------
+
+HARMONY_MODEL = "openai/gpt-oss-20b"
+HARMONY_REASONING = "The user wants 2 plus 3."
+HARMONY_ANSWER = "The answer is 5."
+HARMONY_PROMPT = "<|start|>user<|message|>Add 2 and 3.<|end|><|start|>assistant"
+HARMONY_OUTPUT = (
+    f"<|channel|>analysis<|message|>{HARMONY_REASONING}<|end|>"
+    f"<|start|>assistant<|channel|>final<|message|>{HARMONY_ANSWER}<|return|>"
+)
+
+
+@pytest.fixture(scope="module")
+def harmony_encode():
+    """Encoder for canned GPT-OSS harmony token sequences."""
+    pytest.importorskip("openai_harmony")
+
+    # Pre-caches the o200k_base BPE file that openai-harmony's Rust backend
+    # downloads on first use, same as the sibling suite's E2E harmony tests.
+    from tests.entrypoints.scale_out.derender.test_derender import (
+        _ensure_harmony_vocab,
+    )
+    from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+
+    _ensure_harmony_vocab()
+    encoding = get_encoding()
+
+    def _encode(harmony_str: str) -> list[int]:
+        return encoding.encode(harmony_str, allowed_special="all")
+
+    return _encode
+
+
+@pytest.fixture(scope="module")
+def harmony_tokenizer():
+    pytest.importorskip("openai_harmony")
+    from vllm.tokenizers import get_tokenizer
+
+    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+
+
+@pytest.fixture(scope="module")
+def harmony_derenderer(harmony_tokenizer):
+    """OnlineDerenderer whose parser resolves to the real `HarmonyParser`.
+
+    Same shape as `parsed_derenderer` (mocked renderer, real executor) but
+    with a real tokenizer and parser, so the replay path is exercised
+    against Harmony's actual channel grammar rather than a stub.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import MagicMock
+
+    from vllm.parser.harmony import HarmonyParser
+    from vllm.renderers.online_derenderer import OnlineDerenderer
+
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = harmony_tokenizer
+    renderer._executor = ThreadPoolExecutor(max_workers=2)
+
+    model_config = MagicMock()
+    model_config.model = HARMONY_MODEL
+    model_config.hf_config.model_type = "gpt_oss"
+    model_config.hf_text_config.model_type = "gpt_oss"
+    model_config.hf_overrides = None
+
+    dr = OnlineDerenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+        enable_auto_tools=True,
+        tool_parser="openai",
+        reasoning_parser="openai_gptoss",
+    )
+    assert dr.use_harmony
+    assert dr.parser is HarmonyParser
+    return dr
+
+
+async def _stream_harmony_deltas(
+    derenderer,
+    chat_request,
+    output_ids: list[int],
+    prompt_ids: list[int],
+    chunk_size: int,
+) -> list[DeltaMessage]:
+    """Drive `output_ids` through the parser path in fixed size chunks.
+
+    Returns the per chunk `DeltaMessage`s in order so callers can assert on
+    intermediate emissions, not just the assembled result.
+    """
+    deltas: list[DeltaMessage] = []
+    state = None
+    for start in range(0, len(output_ids), chunk_size):
+        tids = output_ids[start : start + chunk_size]
+        is_last = start + chunk_size >= len(output_ids)
+        chunk, state = await derenderer.derender_chat_stream(
+            model=HARMONY_MODEL,
+            generate_chunk=_make_stream_chunk(
+                tids, finish_reason="stop" if is_last else None
+            ),
+            state=state,
+            chat_request=chat_request,
+            prompt_token_ids=prompt_ids,
+        )
+        deltas.append(chunk.choices[0].delta)
+    return deltas
+
+
+class TestDerenderChatStreamHarmony:
+    """derender_chat_stream: replay + `parse_delta` against real HarmonyParser.
+
+    Skipped where `openai_harmony` is not installed. `prompt_token_ids` is
+    threaded through for call shape fidelity only, since HarmonyParser
+    derives its state from the output tokens alone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reasoning_never_leaks_as_content_midstream(
+        self, harmony_derenderer, harmony_encode
+    ):
+        """Regression guard for the RFC's original replay + diff design.
+
+        `HarmonyParser.parse()` always flushes to EOS. Mid-stream that
+        raises `HarmonyError` and the recovery branch re-emits the in
+        flight message on the `final` channel, so partial analysis surfaces
+        as content. Replay + `parse_delta` must never do that. Driven one
+        token per chunk, the finest granularity a client can produce.
+        """
+        output_ids = harmony_encode(HARMONY_OUTPUT)
+        prompt_ids = harmony_encode(HARMONY_PROMPT)
+        chat_request = _chat_request(model=HARMONY_MODEL, include_reasoning=True)
+
+        deltas = await _stream_harmony_deltas(
+            harmony_derenderer, chat_request, output_ids, prompt_ids, chunk_size=1
+        )
+
+        reasoning = ""
+        content = ""
+        for i, delta in enumerate(deltas):
+            reasoning += delta.reasoning or ""
+            content += delta.content or ""
+            # Any analysis text emitted as content breaks the prefix
+            # property, since the two channels share no prefix here.
+            assert HARMONY_ANSWER.startswith(content), (
+                f"content after chunk {i} is not a prefix of the final "
+                f"channel text: {content!r}"
+            )
+            assert HARMONY_REASONING.startswith(reasoning)
+            assert not delta.tool_calls
+
+        assert reasoning == HARMONY_REASONING
+        assert content == HARMONY_ANSWER
+
+    @pytest.mark.asyncio
+    async def test_stream_matches_batch(self, harmony_derenderer, harmony_encode):
+        """Streamed assembly equals one shot `/derender` over the same IDs."""
+        output_ids = harmony_encode(HARMONY_OUTPUT)
+        prompt_ids = harmony_encode(HARMONY_PROMPT)
+        chat_request = _chat_request(model=HARMONY_MODEL, include_reasoning=True)
+
+        deltas = await _stream_harmony_deltas(
+            harmony_derenderer, chat_request, output_ids, prompt_ids, chunk_size=3
+        )
+        reasoning = "".join(d.reasoning or "" for d in deltas)
+        content = "".join(d.content or "" for d in deltas)
+
+        batch_choices = await harmony_derenderer.derender_chat(
+            GenerateResponse(
+                request_id="test-harmony-batch",
+                choices=[
+                    GenerateResponseChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+            ),
+            chat_request,
+        )
+        message = batch_choices[0].message
+
+        assert reasoning == message.reasoning
+        assert content == message.content
 
 
 class TestDerenderStreamStateValidation:
