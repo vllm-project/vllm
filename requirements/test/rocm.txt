@@ -497,7 +497,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.5
+mistral-common==1.11.6
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -956,7 +956,7 @@ rapidfuzz==3.12.1
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.54.0
+ray==2.55.1
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
@@ -1214,7 +1214,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.13.1
+transformers==5.14.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
