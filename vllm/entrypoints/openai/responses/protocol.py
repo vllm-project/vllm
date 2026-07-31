@@ -118,6 +118,31 @@ def serialize_messages(msgs):
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
+def _text_format_to_chat_response_format(
+    text: ResponseTextConfig | None,
+) -> dict[str, Any] | None:
+    """Adapt Responses API ``text.format`` to the Chat Completions
+    ``response_format`` shape (schema nested under the ``json_schema`` key)
+    that chat renderers consuming ``response_format`` expect.
+    """
+    if text is None or text.format is None:
+        return None
+    fmt = text.format
+    if fmt.type == "json_schema":
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": getattr(fmt, "name", None),
+                "description": getattr(fmt, "description", None),
+                "schema": getattr(fmt, "schema_", None),
+                "strict": getattr(fmt, "strict", None),
+            },
+        }
+    if fmt.type == "json_object":
+        return {"type": "json_object", "json_schema": None}
+    return None
+
+
 class ResponseRawMessageAndToken(OpenAIBaseModel):
     """Class to show the raw message.
     If message / tokens diverge, tokens is the source of truth"""
@@ -338,6 +363,9 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            # Forward the response format so templates that render it into
+            # the prompt can see it.
+            response_format=_text_format_to_chat_response_format(self.text),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
