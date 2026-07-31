@@ -218,7 +218,6 @@ class KimiK3ToolParser(ToolParser):
         """
         call_attrs = self._attrs(attrs)
         tool_name = call_attrs.get("tool", "")
-        tool_index = call_attrs.get("index", "")
         arguments: dict = {}
         for arg_match in self._arg_re.finditer(body):
             arg_attrs = self._attrs(arg_match["attrs"])
@@ -234,16 +233,7 @@ class KimiK3ToolParser(ToolParser):
                     arguments[key] = raw_value
         if not tool_name:
             return None
-        tool_call_id = tool_name
-        if tool_index:
-            try:
-                tool_call_id = f"{tool_name}:{int(tool_index) - 1}"
-            except ValueError:
-                tool_call_id = f"{tool_name}:{tool_index}"
-        # id uses the API-side zero-based call ordinal; XTML's message index
-        # stays one-based when rendering tool result messages.
         return ToolCall(
-            id=tool_call_id,
             type="function",
             function=FunctionCall(
                 name=tool_name,

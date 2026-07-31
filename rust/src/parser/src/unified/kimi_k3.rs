@@ -148,9 +148,8 @@ enum KimiK3Mode {
 pub struct KimiK3UnifiedParser {
     buffer: String,
     mode: KimiK3Mode,
-    /// Parser-provided tool-call IDs (`{tool}:{zero_based_index}`) by tool
-    /// index; its length is also the count of emitted calls.
-    call_ids: Vec<String>,
+    /// Number of calls emitted in the current response.
+    emitted_call_count: usize,
     tokenizer: DynTokenizer,
     open_token_id: u32,
     sep_token_id: u32,
@@ -165,7 +164,7 @@ impl KimiK3UnifiedParser {
         Ok(Self {
             buffer: String::new(),
             mode: KimiK3Mode::default(),
-            call_ids: Vec::new(),
+            emitted_call_count: 0,
             tokenizer,
             open_token_id,
             sep_token_id,
@@ -226,7 +225,7 @@ impl KimiK3UnifiedParser {
             }
             KimiK3Event::CallComplete { arguments } => {
                 let mode = std::mem::replace(&mut self.mode, KimiK3Mode::Tools);
-                let KimiK3Mode::Call { name, index, .. } = mode else {
+                let KimiK3Mode::Call { name, .. } = mode else {
                     return Err(parsing_failed!(
                         "Kimi K3 call completion without an active tool call"
                     ));
@@ -237,8 +236,8 @@ impl KimiK3UnifiedParser {
                     return Ok(());
                 }
 
-                let tool_index = self.call_ids.len();
-                self.call_ids.push(tool_call_id_for(&name, index.as_deref()));
+                let tool_index = self.emitted_call_count;
+                self.emitted_call_count += 1;
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(name),
@@ -251,7 +250,7 @@ impl KimiK3UnifiedParser {
 
     fn reset_state(&mut self) -> String {
         self.mode = KimiK3Mode::Idle;
-        self.call_ids.clear();
+        self.emitted_call_count = 0;
         std::mem::take(&mut self.buffer)
     }
 }
@@ -266,7 +265,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         self.buffer.clear();
-        self.call_ids.clear();
+        self.emitted_call_count = 0;
         self.initialize_mode(prompt_token_ids);
         Ok(())
     }
@@ -277,10 +276,6 @@ impl UnifiedParser for KimiK3UnifiedParser {
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         Some(&KIMI_K3_STRUCTURAL_TAG_BUILDER)
-    }
-
-    fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
-        self.call_ids.get(tool_index).map(String::as_str)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut UnifiedParserOutput) -> Result<()> {
@@ -313,27 +308,12 @@ impl UnifiedParser for KimiK3UnifiedParser {
             }
         }
 
-        // Keep call_ids so tool_call_id() stays available after the stream ends.
         self.mode = KimiK3Mode::Idle;
         Ok(output)
     }
 
     fn reset(&mut self) -> String {
         self.reset_state()
-    }
-}
-
-/// Build the API-side tool-call ID from the XTML one-based `index` attribute.
-///
-/// The ID uses the zero-based call ordinal; XTML's message index stays
-/// one-based when rendering tool result messages.
-fn tool_call_id_for(name: &str, index: Option<&str>) -> String {
-    match index {
-        None => name.to_string(),
-        Some(raw) => match raw.parse::<i64>() {
-            Ok(one_based) => format!("{name}:{}", one_based - 1),
-            Err(_) => format!("{name}:{raw}"),
-        },
     }
 }
 
@@ -762,7 +742,6 @@ mod tests {
                 "hours": [8, 20],
             })
         );
-        assert_eq!(parser.tool_call_id(0), Some("get_weather:0"));
     }
 
     #[test]
@@ -929,8 +908,6 @@ mod tests {
         assert_eq!(calls[1].tool_index, 1);
         assert_eq!(calls[1].name.as_deref(), Some("get_time"));
         assert_eq!(calls[1].arguments, "{}");
-        assert_eq!(parser.tool_call_id(0), Some("get_weather:0"));
-        assert_eq!(parser.tool_call_id(1), Some("get_time:1"));
     }
 
     #[test]
@@ -1018,11 +995,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_index, 0);
         assert_eq!(calls[0].name.as_deref(), Some("real"));
-        assert_eq!(parser.tool_call_id(0), Some("real:1"));
     }
 
     #[test]
-    fn kimi_k3_tool_call_id_follows_index_attribute() {
+    fn kimi_k3_tool_indices_ignore_xtml_index_attribute() {
         let tools_body = format!(
             "{}{}{}",
             call("tool=\"first\" index=\"3\"", ""),
@@ -1032,11 +1008,12 @@ mod tests {
         let text = thinking_output("t", "", &tools_body);
 
         let mut parser = test_parser();
-        parser.parse_complete(&text).unwrap();
+        let output = parser.parse_complete(&text).unwrap();
 
-        assert_eq!(parser.tool_call_id(0), Some("first:2"));
-        assert_eq!(parser.tool_call_id(1), Some("second"));
-        assert_eq!(parser.tool_call_id(2), Some("third:x"));
+        assert_eq!(
+            output.calls().iter().map(|call| call.tool_index).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
     }
 
     #[test]
