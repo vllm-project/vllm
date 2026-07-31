@@ -3,13 +3,13 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, final
+from typing import Any, Literal, TypeAlias, TypedDict, cast, final
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config.utils import config
+from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -61,7 +61,21 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
+MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
+
+
+def _get_mm_hasher_algorithm() -> MMHasherAlgorithm:
+    env_value = get_from_deprecated_env_if_set(
+        "VLLM_MM_HASHER_ALGORITHM",
+        "v0.27",
+        "mm_hasher_algorithm",
+    )
+    env_value = "blake3" if env_value is None else env_value
+    return cast(MMHasherAlgorithm, env_value.lower())
+
+
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
 A dictionary containing an entry for each modality type of dummy data.
@@ -133,6 +147,11 @@ class MultiModalConfig:
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_hasher_algorithm: MMHasherAlgorithm = Field(
+        default_factory=_get_mm_hasher_algorithm
+    )
+    """Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
+    `"sha512"` for FIPS-compliant deployments."""
     mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
@@ -189,9 +208,14 @@ class MultiModalConfig:
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
     video_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
-    """Sets pruning rate for video pruning via Efficient Video Sampling.
-    Value sits in range [0;1) and determines fraction of media tokens
-    from each video to be pruned.
+    """Fraction of video tokens to prune from each video. Value sits in range
+    [0;1); pruning is enabled when it is greater than 0. The pruning algorithm
+    is selected by `video_pruning_method`.
+    """
+    video_pruning_method: VideoPruningMethod = "evs"
+    """Video token pruning algorithm applied when `video_pruning_rate` > 0:
+    - "evs": Efficient Video Sampling.
+    - "vidcom2": Video Compression Commander.
     """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
@@ -360,4 +384,11 @@ class MultiModalConfig:
         )
 
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return self.get_video_pruning_spec() is not None
+
+    def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
+        """Return `(method, rate)` when video pruning is enabled, else None.
+        `rate` is the fraction of video tokens to prune."""
+        if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
+            return (self.video_pruning_method, float(self.video_pruning_rate))
+        return None
