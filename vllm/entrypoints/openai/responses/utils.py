@@ -155,12 +155,70 @@ def should_continue_final_message(
     return False
 
 
+def _is_reasoning_item(item: ResponseInputOutputItem) -> bool:
+    """True if a response input item is a reasoning item (typed or dict form)."""
+    if isinstance(item, ResponseReasoningItem):
+        return True
+    return isinstance(item, dict) and item.get("type") == "reasoning"
+
+
+def _is_user_message(item: ResponseInputOutputItem) -> bool:
+    """True if a response input item is a user-role message.
+
+    Marks a turn boundary in the flat `input` list: reasoning items after the
+    last user message belong to the current turn, earlier ones to prior turns.
+    """
+    # Key on role only: assistant/system messages also carry type=="message",
+    # so a type-based check would misplace the boundary.
+    if isinstance(item, dict):
+        return item.get("role") == "user"
+    return getattr(item, "role", None) == "user"
+
+
+def filter_reasoning_by_context(
+    input_items: list[ResponseInputOutputItem],
+    reasoning_context: str | None,
+) -> list[ResponseInputOutputItem]:
+    """Apply ``reasoning.context`` to the input items before rendering.
+
+    ``current_turn`` keeps only reasoning from the active (final) turn and drops
+    reasoning items carried in from earlier turns, so they are not re-rendered
+    into the prompt (and re-verbalized by reasoning parsers). ``all_turns``,
+    ``auto`` and ``None`` preserve every reasoning item (current behavior).
+
+    The turn boundary is the last user message in ``input_items``: reasoning
+    after it is current-turn; reasoning before it is prior-turn.
+
+    Args:
+        input_items: The request's ``input`` items, in order.
+        reasoning_context: The ``reasoning.context`` value, if any.
+
+    Returns:
+        The input items with prior-turn reasoning removed when
+        ``reasoning_context == "current_turn"``; otherwise the input unchanged.
+    """
+    if reasoning_context != "current_turn":
+        return input_items
+
+    last_user_idx = -1
+    for idx, item in enumerate(input_items):
+        if _is_user_message(item):
+            last_user_idx = idx
+
+    return [
+        item
+        for idx, item in enumerate(input_items)
+        if idx > last_user_idx or not _is_reasoning_item(item)
+    ]
+
+
 def construct_input_messages(
     *,
     request_instructions: str | None = None,
     request_input: str | list[ResponseInputOutputItem],
     prev_msg: list[ChatCompletionMessageParam] | None = None,
     prev_response_output: list[ResponseOutputItem] | None = None,
+    reasoning_context: str | None = None,
 ):
     messages: list[ChatCompletionMessageParam] = []
     if request_instructions:
@@ -195,6 +253,7 @@ def construct_input_messages(
     if isinstance(request_input, str):
         messages.append({"role": "user", "content": request_input})
     else:
+        request_input = filter_reasoning_by_context(request_input, reasoning_context)
         input_messages = construct_chat_messages_with_tool_call(request_input)
         messages.extend(input_messages)
     return messages

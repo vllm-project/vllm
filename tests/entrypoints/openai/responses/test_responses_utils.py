@@ -18,9 +18,11 @@ from openai.types.responses.response_reasoning_item import (
 
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    _is_reasoning_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
     convert_tool_responses_to_completions_format,
+    filter_reasoning_by_context,
     should_continue_final_message,
 )
 
@@ -921,3 +923,92 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+def make_user_message(text: str) -> dict:
+    return {"role": "user", "type": "message", "content": text}
+
+
+def make_assistant_dict_message(text: str) -> dict:
+    # Assistant messages also carry type=="message"; used to check the turn
+    # boundary keys on role, not type.
+    return {"role": "assistant", "type": "message", "content": text}
+
+
+class TestFilterReasoningByContext:
+    """`reasoning.context` handling on the Responses input path.
+
+    `current_turn` drops reasoning carried in from earlier turns (so it is not
+    re-rendered into the prompt and re-verbalized by reasoning parsers), while
+    keeping the active turn's reasoning. `all_turns`/`auto`/`None` preserve all
+    reasoning (current behavior).
+    """
+
+    def _items(self):
+        # turn 1: user -> reasoning -> answer ; turn 2: user -> reasoning
+        return [
+            make_user_message("q1"),
+            make_reasoning_item(content_text="prior thinking", id="r1"),
+            make_output_message("a1", id="m1"),
+            make_user_message("q2"),
+            make_reasoning_item(content_text="current thinking", id="r2"),
+        ]
+
+    def test_current_turn_drops_prior_reasoning_keeps_active(self):
+        out = filter_reasoning_by_context(self._items(), "current_turn")
+        ids = [getattr(i, "id", None) for i in out if _is_reasoning_item(i)]
+        assert ids == ["r2"], "prior-turn reasoning dropped, current-turn kept"
+        # non-reasoning items are untouched
+        assert len(out) == 4
+
+    @pytest.mark.parametrize("ctx", ["all_turns", "auto", None])
+    def test_non_current_turn_preserves_all_reasoning(self, ctx):
+        out = filter_reasoning_by_context(self._items(), ctx)
+        assert out == self._items()
+
+    def test_current_turn_with_no_user_message_keeps_all(self):
+        # No user boundary -> everything is "after" -1 -> all kept.
+        items = [make_reasoning_item(content_text="t", id="r1")]
+        assert filter_reasoning_by_context(items, "current_turn") == items
+
+    def test_current_turn_dict_form_reasoning(self):
+        items = [
+            {"type": "reasoning", "id": "r1", "content": []},
+            make_user_message("q"),
+            {"type": "reasoning", "id": "r2", "content": []},
+        ]
+        out = filter_reasoning_by_context(items, "current_turn")
+        assert [i["id"] for i in out if _is_reasoning_item(i)] == ["r2"]
+
+    def test_current_turn_dict_assistant_message_is_not_a_boundary(self):
+        # Assistant/system messages also have type=="message"; the turn boundary
+        # must key on role, not type, or current-turn reasoning after an
+        # assistant dict message would be wrongly dropped.
+        items = [
+            make_user_message("q1"),
+            make_reasoning_item(content_text="prior", id="r1"),
+            make_user_message("q2"),
+            make_reasoning_item(content_text="cur1", id="r2"),
+            make_assistant_dict_message("partial"),
+            make_reasoning_item(content_text="cur2", id="r3"),
+        ]
+        out = filter_reasoning_by_context(items, "current_turn")
+        ids = [getattr(i, "id", None) for i in out if _is_reasoning_item(i)]
+        assert ids == ["r2", "r3"], "both current-turn reasoning items kept"
+
+    def test_end_to_end_no_reasoning_rendered_for_dropped_item(self):
+        # Through construct_input_messages, the dropped prior reasoning must not
+        # surface as a `reasoning` assistant field in the rendered messages.
+        msgs = construct_input_messages(
+            request_input=self._items(),
+            reasoning_context="current_turn",
+        )
+        reasonings = [m.get("reasoning") for m in msgs if isinstance(m, dict)]
+        assert "prior thinking" not in reasonings
+        assert "current thinking" in reasonings
+
+    def test_end_to_end_default_renders_all_reasoning(self):
+        msgs = construct_input_messages(request_input=self._items())
+        reasonings = [m.get("reasoning") for m in msgs if isinstance(m, dict)]
+        assert "prior thinking" in reasonings
+        assert "current thinking" in reasonings
