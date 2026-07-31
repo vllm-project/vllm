@@ -10,9 +10,9 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
-    KVConnectorSidecarTransfer,
-    KVConnectorSidecarTransfers,
+    KVConnectorSidecarTransferPlan,
 )
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
@@ -81,13 +81,13 @@ def test_routed_experts_manager_applies_public_sidecar_transfers():
         dtype=np.uint8,
     )
     manager._blocks_view = np.arange(6, dtype=np.uint8).reshape(3, 2, 1, 1)
-    stores = KVConnectorSidecarTransfer(
+    stores = KVConnectorSidecarBlockMap(
         gpu_block_ids=np.array([0, 1]),
         connector_block_ids=np.array([1, 1]),
         connector_block_offsets=np.array([0, 1]),
     )
 
-    manager.apply_offload_transfers(KVConnectorSidecarTransfers(store=stores))
+    manager.apply_offload_transfers(KVConnectorSidecarTransferPlan(store=stores))
 
     np.testing.assert_array_equal(
         manager.routed_experts_by_offload_block[1, 0],
@@ -99,12 +99,12 @@ def test_routed_experts_manager_applies_public_sidecar_transfers():
     )
 
     manager._blocks_view[2].fill(0)
-    loads = KVConnectorSidecarTransfer(
+    loads = KVConnectorSidecarBlockMap(
         gpu_block_ids=np.array([2]),
         connector_block_ids=np.array([1]),
         connector_block_offsets=np.array([1]),
     )
-    manager.apply_offload_transfers(KVConnectorSidecarTransfers(load=loads))
+    manager.apply_offload_transfers(KVConnectorSidecarTransferPlan(load=loads))
     np.testing.assert_array_equal(
         manager._blocks_view[2],
         np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),

@@ -5,9 +5,9 @@
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
-    KVConnectorSidecarTransfer,
-    KVConnectorSidecarTransfers,
+    KVConnectorSidecarTransferPlan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -46,7 +46,7 @@ def _normalize_transfer(
     kv_group_id: int,
     expected_num_groups: int,
     blocks_per_connector_block: int,
-) -> KVConnectorSidecarTransfer:
+) -> KVConnectorSidecarBlockMap:
     if not isinstance(gpu_spec, GPULoadStoreSpec):
         raise RuntimeError(f"expected GPULoadStoreSpec, got {type(gpu_spec).__name__}")
     if not isinstance(connector_spec, CPULoadStoreSpec):
@@ -97,7 +97,7 @@ def _normalize_transfer(
         gpu_spec.block_ids[gpu_block_offset : gpu_block_offset + num_gpu_blocks]
     )
     if num_gpu_blocks == 0:
-        return KVConnectorSidecarTransfer(
+        return KVConnectorSidecarBlockMap(
             np.empty(0, dtype=np.int64),
             np.empty(0, dtype=np.int64),
             np.empty(0, dtype=np.int64),
@@ -115,7 +115,7 @@ def _normalize_transfer(
     connector_block_ids = np.asarray(connector_spec.block_ids)[
         connector_block_offset + local_connector_indices
     ]
-    return KVConnectorSidecarTransfer(
+    return KVConnectorSidecarBlockMap(
         gpu_block_ids,
         connector_block_ids,
         connector_block_offsets,
@@ -123,14 +123,14 @@ def _normalize_transfer(
 
 
 def _merge_transfers(
-    transfers: list[KVConnectorSidecarTransfer],
-) -> KVConnectorSidecarTransfer | None:
+    transfers: list[KVConnectorSidecarBlockMap],
+) -> KVConnectorSidecarBlockMap | None:
     non_empty = [transfer for transfer in transfers if len(transfer.gpu_block_ids)]
     if not non_empty:
         return None
     if len(non_empty) == 1:
         return non_empty[0]
-    return KVConnectorSidecarTransfer(
+    return KVConnectorSidecarBlockMap(
         gpu_block_ids=np.concatenate(
             [transfer.gpu_block_ids for transfer in non_empty]
         ),
@@ -149,12 +149,12 @@ def normalize_sidecar_transfers(
     config: KVConnectorSidecarConfig,
     kv_group_id: int,
     expected_num_groups: int,
-) -> KVConnectorSidecarTransfers:
+) -> KVConnectorSidecarTransferPlan:
     """Convert native offloading jobs into the public sidecar contract."""
 
     def normalize(
         gpu_spec: LoadStoreSpec, connector_spec: LoadStoreSpec
-    ) -> KVConnectorSidecarTransfer:
+    ) -> KVConnectorSidecarBlockMap:
         return _normalize_transfer(
             gpu_spec,
             connector_spec,
@@ -169,4 +169,4 @@ def normalize_sidecar_transfers(
     store = _merge_transfers(
         [normalize(job.src_spec, job.dst_spec) for job in metadata.store_jobs.values()]
     )
-    return KVConnectorSidecarTransfers(load=load, store=store)
+    return KVConnectorSidecarTransferPlan(load=load, store=store)

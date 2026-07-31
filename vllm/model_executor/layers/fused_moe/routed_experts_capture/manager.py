@@ -11,9 +11,9 @@ import numpy.typing as npt
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
-    KVConnectorSidecarTransfer,
-    KVConnectorSidecarTransfers,
+    KVConnectorSidecarTransferPlan,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
     get_num_experts_per_token,
@@ -145,7 +145,7 @@ class RoutedExpertsManager:
             )
         return self.routed_experts_by_offload_block
 
-    def store_to_offload_blocks(self, block_map: KVConnectorSidecarTransfer) -> None:
+    def store_to_offload_blocks(self, block_map: KVConnectorSidecarBlockMap) -> None:
         """Copy GPU block rows to offloaded sub-block rows."""
         offload_blocks = self._get_offload_blocks()
         if len(block_map.gpu_block_ids) == 0:
@@ -155,7 +155,7 @@ class RoutedExpertsManager:
             block_map.connector_block_offsets,
         ] = self._blocks_view[block_map.gpu_block_ids]
 
-    def load_from_offload_blocks(self, block_map: KVConnectorSidecarTransfer) -> None:
+    def load_from_offload_blocks(self, block_map: KVConnectorSidecarBlockMap) -> None:
         """Copy offloaded sub-block rows to GPU block rows."""
         offload_blocks = self._get_offload_blocks()
         if len(block_map.gpu_block_ids) == 0:
@@ -165,7 +165,9 @@ class RoutedExpertsManager:
             block_map.connector_block_offsets,
         ]
 
-    def apply_offload_transfers(self, transfers: KVConnectorSidecarTransfers) -> None:
+    def apply_offload_transfers(
+        self, transfers: KVConnectorSidecarTransferPlan
+    ) -> None:
         """Move routing rows according to a connector's public block mapping.
 
         Runs after the worker writes this step's slots and before request

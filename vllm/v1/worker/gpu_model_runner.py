@@ -271,7 +271,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         routed_experts_write_task: RoutedExpertsWriteTask | None = None,
         check_ep_fault: bool = False,
-    ) -> None:
+    ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
         self._routed_experts_write_task = routed_experts_write_task
@@ -7647,7 +7647,7 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-    def init_routed_experts_capturer(self) -> None:
+    def init_routed_experts_capturer(self):
         logger.info(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
@@ -7663,9 +7663,7 @@ class GPUModelRunner(
 
         # Only the scheduler-visible rank stages routing for the shared slot
         # buffer; other ranks only need the capturer (for the SP all_gather).
-        parallel_config = self.parallel_config
-        self.routed_experts_writer = None
-        if parallel_config.rank != get_routed_experts_output_rank():
+        if self.parallel_config.rank != get_routed_experts_output_rank():
             return
 
         # Pinned memory keeps the routing D2H copy non-blocking.
@@ -7712,11 +7710,7 @@ class GPUModelRunner(
                 continue
             layer_id = module.layer_id
 
-            def _capture_fn(
-                topk_ids: torch.Tensor,
-                _layer_id: int = layer_id,
-                _capturer: RoutedExpertsCapturer = capturer,
-            ) -> None:
+            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
                 _capturer.capture(_layer_id, topk_ids)
 
             quant_method = module._quant_method

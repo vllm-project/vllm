@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
 import torch
 
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
@@ -35,22 +34,6 @@ class RoutedExpertsTensors(NamedTuple):
             self.slot_mapping.to("cpu", non_blocking=True),
         )
 
-    def tolists(self) -> RoutedExpertsLists:
-        """Convert the tensors to the numpy-backed worker representation."""
-        return RoutedExpertsLists(
-            self.routing_data.cpu().numpy(),
-            self.slot_mapping.cpu().numpy(),
-        )
-
-
-class RoutedExpertsLists(NamedTuple):
-    """Store one step of CPU routed-experts data and slot indices."""
-
-    # (num_scheduled_tokens, num_layers, moe_top_k)
-    routing_data: np.ndarray
-    # (num_scheduled_tokens,)
-    slot_mapping: np.ndarray
-
 
 @dataclass
 class RoutedExpertsWriteTask:
@@ -73,9 +56,10 @@ class RoutedExpertsWriteTask:
         assert self._routed_experts_tensors_cpu is not None, (
             "routed-experts CPU tensors are unavailable; call start_copy first"
         )
-        routed_experts = self._routed_experts_tensors_cpu.tolists()
+        routing_data = self._routed_experts_tensors_cpu.routing_data.numpy()
+        slot_mapping = self._routed_experts_tensors_cpu.slot_mapping.numpy()
         self.writer.store_batch(
-            routed_experts.routing_data,
-            routed_experts.slot_mapping,
+            routing_data,
+            slot_mapping,
         )
-        output.routed_experts_slots = routed_experts.slot_mapping
+        output.routed_experts_slots = slot_mapping
