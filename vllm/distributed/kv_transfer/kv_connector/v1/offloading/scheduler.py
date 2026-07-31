@@ -882,6 +882,7 @@ class OffloadingConnectorScheduler:
             return complete_hit
 
         pending = False
+        lookup_results: dict[OffloadKey, LookupResult] = {}
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
             group_plans: list[GroupLoadPlan] = []
             boundary_pending = False
@@ -901,7 +902,10 @@ class OffloadingConnectorScheduler:
                 if group_config.sliding_window_size_in_chunks is not None:
                     keys = keys[-group_config.sliding_window_size_in_chunks :]
                 for key in keys:
-                    result = self.manager.lookup(key, req_status.req_context)
+                    result = lookup_results.get(key)
+                    if result is None:
+                        result = self.manager.lookup(key, req_status.req_context)
+                        lookup_results[key] = result
                     if result is LookupResult.MISS:
                         boundary_missed = True
                         break
@@ -1250,15 +1254,14 @@ class OffloadingConnectorScheduler:
             accepted = [candidate_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self.config.kv_group_configs)
             block_indices = [0] * len(self.config.kv_group_configs)
-            src_block_ids: list[int] = []
+            source_blocks: list[int] = []
             for candidate in accepted:
                 group_sizes[candidate.group_idx] = 1
                 block_indices[candidate.group_idx] = candidate.block_idx
-                src_block_ids.append(candidate.block_id)
+                source_blocks.append(candidate.block_id)
 
             job_id = self._generate_job_id()
             req_status.transfer_jobs.add(job_id)
-            source_blocks = [candidate.block_id for candidate in accepted]
             for block_id in source_blocks:
                 self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
             self._jobs[job_id] = TransferJobStatus(
@@ -1271,7 +1274,7 @@ class OffloadingConnectorScheduler:
             store_jobs[job_id] = TransferJob(
                 req_id=req_id,
                 src_spec=GPULoadStoreSpec(
-                    src_block_ids,
+                    source_blocks,
                     group_sizes=group_sizes,
                     block_indices=block_indices,
                 ),

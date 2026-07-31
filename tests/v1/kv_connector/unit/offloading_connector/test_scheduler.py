@@ -66,6 +66,20 @@ def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
+def _make_partial_tail_request(
+    scheduler: OffloadingConnectorScheduler,
+) -> MagicMock:
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_prompt_tokens = 30
+    request.num_tokens = 30
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
+    request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
+
+
 def _reduce_kv_connector_stats(runner):
     reduced: dict[str, int | float] = {}
     for payload in runner.kv_connector_stats:
@@ -81,14 +95,7 @@ def _reduce_kv_connector_stats(runner):
 
 def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     scheduler = _make_partial_tail_scheduler()
-    request = MagicMock()
-    request.request_id = "req"
-    request.kv_transfer_params = None
-    request.num_prompt_tokens = 30
-    request.num_tokens = 30
-    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
-    request.is_finished.return_value = False
-    scheduler.on_new_request(request)
+    _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
@@ -114,13 +121,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     scheduler = _make_partial_tail_scheduler()
-    request = MagicMock()
-    request.request_id = "req"
-    request.kv_transfer_params = None
-    request.num_prompt_tokens = 30
-    request.num_tokens = 30
-    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
-    scheduler.on_new_request(request)
+    request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     req_status.num_locally_computed_tokens = 0
     req_status.update_offload_keys()
@@ -154,13 +155,7 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
 
 def test_partial_lookup_requires_every_cache_group():
     scheduler = _make_partial_tail_scheduler()
-    request = MagicMock()
-    request.request_id = "req"
-    request.kv_transfer_params = None
-    request.num_prompt_tokens = 30
-    request.num_tokens = 30
-    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
-    scheduler.on_new_request(request)
+    _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     req_status.update_offload_keys()
 
