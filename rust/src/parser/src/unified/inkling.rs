@@ -94,6 +94,8 @@ pub struct InklingUnifiedParser {
     message_model_token_id: u32,
     content_text_token_id: u32,
     content_thinking_token_id: u32,
+    content_model_end_sampling_token_id: Option<u32>,
+    end_message_token_id: Option<u32>,
 }
 
 impl InklingUnifiedParser {
@@ -102,6 +104,8 @@ impl InklingUnifiedParser {
         let message_model_token_id = token_id(tokenizer.as_ref(), MESSAGE_MODEL)?;
         let content_text_token_id = token_id(tokenizer.as_ref(), CONTENT_TEXT)?;
         let content_thinking_token_id = token_id(tokenizer.as_ref(), CONTENT_THINKING)?;
+        let content_model_end_sampling_token_id = tokenizer.token_to_id(CONTENT_MODEL_END_SAMPLING);
+        let end_message_token_id = tokenizer.token_to_id(END_MESSAGE);
 
         Ok(Self {
             buffer: String::new(),
@@ -112,6 +116,8 @@ impl InklingUnifiedParser {
             message_model_token_id,
             content_text_token_id,
             content_thinking_token_id,
+            content_model_end_sampling_token_id,
+            end_message_token_id,
         })
     }
 
@@ -229,6 +235,47 @@ impl UnifiedParser for InklingUnifiedParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    fn reasoning_start_str(&self) -> Option<&str> {
+        Some(CONTENT_THINKING)
+    }
+
+    fn reasoning_end_str(&self) -> Option<&str> {
+        Some(END_MESSAGE)
+    }
+
+    fn is_reasoning_end(&self, input_ids: &[u32]) -> bool {
+        for token_id in input_ids.iter().rev() {
+            if *token_id == self.content_thinking_token_id
+                || *token_id == self.message_model_token_id
+            {
+                return false;
+            }
+            if *token_id == self.content_text_token_id
+                || Some(*token_id) == self.content_model_end_sampling_token_id
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn count_reasoning_tokens(&self, input_ids: &[u32]) -> usize {
+        let mut in_reasoning = false;
+        let mut count = 0;
+        for token_id in input_ids {
+            if *token_id == self.content_thinking_token_id {
+                in_reasoning = true;
+            } else if Some(*token_id) == self.end_message_token_id
+                || Some(*token_id) == self.content_model_end_sampling_token_id
+            {
+                in_reasoning = false;
+            } else if in_reasoning {
+                count += 1;
+            }
+        }
+        count
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut UnifiedParserOutput) -> Result<()> {
@@ -585,6 +632,18 @@ mod tests {
         assert_eq!(output.reasoning_text(), "reason");
         assert_eq!(output.normal_text(), "answer");
         assert!(output.calls().is_empty());
+    }
+
+    #[test]
+    fn inkling_counts_reasoning_tokens_across_typed_blocks() {
+        let parser = test_parser();
+
+        assert_eq!(
+            parser.count_reasoning_tokens(&[
+                200008, 101, 102, 200010, 200004, 103, 200010, 200008, 104, 200006,
+            ]),
+            3
+        );
     }
 
     #[test]

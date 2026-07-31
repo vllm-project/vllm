@@ -12,7 +12,6 @@ from vllm.parser.deepseek_v32 import DeepSeekV32Parser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
-from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.mistral import MistralParser
@@ -64,11 +63,6 @@ from vllm.parser.seed_oss import SeedOssParser
     KimiK2ParserReasoningAdapter,
     KimiK2ParserToolAdapter,
 ) = make_adapters(KimiK2Parser)
-
-(
-    InklingParserReasoningAdapter,
-    InklingParserToolAdapter,
-) = make_adapters(InklingParser)
 
 (
     MistralParserReasoningAdapter,

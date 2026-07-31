@@ -74,10 +74,6 @@ def _discover_parsers() -> list[_ParserInfo]:
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
-        if cfg.name == "inkling":
-            # Inkling opts out of token-id terminal matching and has typed
-            # structural blocks; its replay coverage lives in test_inkling.py.
-            continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
             raise RuntimeError(
@@ -309,12 +305,7 @@ _TOOL_CALL_SAMPLES = [
     (p.parser_cls, s, p.think_end, p.tool_start)
     for p in _PARSERS
     for s in p.samples
-    if s.expected_tool_calls
-    and s.expected_reasoning
-    # Inkling's typed-block format (structural role/kind tokens, shared
-    # block-end token) doesn't fit the generic reasoning/tool split
-    # below; its filtering modes are covered in test_inkling.py instead.
-    and p.name != "inkling"
+    if s.expected_tool_calls and s.expected_reasoning
 ]
 
 

@@ -7,11 +7,13 @@ mod combined;
 mod gemma4;
 mod inkling;
 mod kimi_k3;
+mod minimax_m3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
+pub use minimax_m3::MiniMaxM3CombinedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::DynTokenizer;
@@ -171,6 +173,26 @@ pub trait UnifiedParser: Send {
     /// Return whether decoded output must preserve tokenizer special tokens.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the reasoning start marker owned by this parser, if any.
+    fn reasoning_start_str(&self) -> Option<&str> {
+        None
+    }
+
+    /// Return the reasoning end marker owned by this parser, if any.
+    fn reasoning_end_str(&self) -> Option<&str> {
+        None
+    }
+
+    /// Return whether the latest reasoning boundary in `input_ids` is an end.
+    fn is_reasoning_end(&self, _input_ids: &[u32]) -> bool {
+        false
+    }
+
+    /// Count generated tokens that belong to reasoning sections.
+    fn count_reasoning_tokens(&self, _input_ids: &[u32]) -> usize {
+        0
     }
 
     /// Return the xgrammar structural-tag builder used for strict tool calling.

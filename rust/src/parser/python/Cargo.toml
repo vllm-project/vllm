@@ -14,6 +14,7 @@ pythonize = { workspace = true, features = ["serde_json"] }
 serde_json.workspace = true
 thiserror-ext.workspace = true
 vllm-parser.workspace = true
+vllm-tokenizer.workspace = true
 
 [lints]
 workspace = true

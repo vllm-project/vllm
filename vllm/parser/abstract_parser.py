@@ -7,6 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
@@ -37,6 +38,9 @@ from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.mcp.tool_server import ToolServer
 
 logger = init_logger(__name__)
 
@@ -223,6 +227,23 @@ class Parser:
             The extracted content token IDs.
         """
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if self._reasoning_parser is None:
+            return 0
+        return self._reasoning_parser.count_reasoning_tokens(token_ids)
+
+    def prepare_structured_tag(
+        self,
+        original_tag: str | None,
+        tool_server: "ToolServer | None",
+    ) -> str | None:
+        if self._reasoning_parser is None:
+            return original_tag
+        return self._reasoning_parser.prepare_structured_tag(
+            original_tag,
+            tool_server,
+        )
+
     @abstractmethod
     def extract_reasoning(
         self,
@@ -340,6 +361,7 @@ class Parser:
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse a complete model output, extracting reasoning and tool calls.
 
@@ -348,6 +370,7 @@ class Parser:
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
             model_output_token_ids: The generated raw output token IDs.
+            prompt_token_ids: The rendered prompt token IDs.
 
         Returns:
             A tuple of (reasoning, content, tool_calls).
@@ -788,6 +811,7 @@ class DelegatingParser(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
         reasoning, content = self.extract_reasoning(model_output, request)

@@ -105,6 +105,37 @@ class ParserManager:
         tool_parser_cls = cls.get_tool_parser(
             tool_parser_name, enable_auto_tools, model_name
         )
+        from vllm.reasoning.rust_unified_reasoning_parser import (
+            RustUnifiedReasoningParser,
+        )
+        from vllm.tool_parsers.rust_unified_tool_parser import RustUnifiedToolParser
+
+        uses_rust_reasoning = reasoning_parser_cls is not None and issubclass(
+            reasoning_parser_cls,
+            RustUnifiedReasoningParser,
+        )
+        uses_rust_tools = tool_parser_cls is not None and issubclass(
+            tool_parser_cls, RustUnifiedToolParser
+        )
+        if uses_rust_reasoning or uses_rust_tools:
+            if (
+                not uses_rust_reasoning
+                or not uses_rust_tools
+                or reasoning_parser_name != tool_parser_name
+            ):
+                raise ValueError(
+                    "Rust unified parsers require matching reasoning and tool "
+                    "parser names; got "
+                    f"{reasoning_parser_name=} and {tool_parser_name=}"
+                )
+
+            assert reasoning_parser_name is not None
+            from vllm.parser.rust_unified_parser import configured_rust_parser
+
+            return configured_rust_parser(
+                reasoning_parser_name,
+                enable_auto_tools=enable_auto_tools,
+            )
 
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None

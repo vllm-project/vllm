@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Thin PyO3 bindings for `vllm_parser::tool`.
+//! Thin PyO3 bindings for Rust unified parsers.
 //!
-//! This crate exposes the Rust tool parser trait and data shapes to Python
-//! while keeping parser state, grammar, and schema-aware argument conversion in
-//! Rust. Python callers should use this module as a typed bridge and keep any
-//! vLLM protocol adaptation outside the binding.
+//! Parser state and model-specific grammar stay in Rust. Python supplies tool
+//! schemas and an immutable tokenizer metadata snapshot, then adapts ordered
+//! parser events to its serving protocol.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -14,38 +16,108 @@ use pyo3::types::{PyAny, PyModule};
 use pythonize::{depythonize, pythonize};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use vllm_parser::tool::{Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use vllm_parser::tool::{Tool, ToolCallDelta};
+use vllm_parser::unified::{
+    InklingUnifiedParser, MiniMaxM3CombinedParser, UnifiedParser, UnifiedParserEvent,
+    UnifiedParserOutput,
+};
+use vllm_tokenizer::{DynTokenizer, Tokenizer, TokenizerError};
 
-macro_rules! tool_parser_factory {
-    ($($parser:ident),+ $(,)?) => {
-        fn create_tool_parser(
+macro_rules! unified_parser_registry {
+    ($($name:literal => $parser:ty),+ $(,)?) => {
+        const UNIFIED_PARSER_NAMES: &[&str] = &[$($name),+];
+
+        /// Construct one registered Rust unified parser.
+        fn create_unified_parser(
             name: &str,
             tools: &[Tool],
-        ) -> PyResult<Box<dyn ToolParser>> {
-            match name {
-                $(
-                    stringify!($parser) => {
-                        <vllm_parser::tool::$parser as ToolParser>::create(tools)
-                    }
-                )+
+            tokenizer: DynTokenizer,
+        ) -> PyResult<Box<dyn UnifiedParser>> {
+            let result = match name {
+                $($name => <$parser>::create(tools, tokenizer),)+
                 _ => {
                     return Err(PyValueError::new_err(format!(
-                        "unsupported tool parser `{name}`"
+                        "unsupported unified parser `{name}`"
                     )));
                 }
-            }
-            .map_err(|error| PyValueError::new_err(error.to_report_string()))
+            };
+            result.map_err(|error| PyValueError::new_err(error.to_report_string()))
         }
     };
 }
 
-// Export a tool parser to Python by registering it here.
-tool_parser_factory! {
-    MinimaxM3ToolParser,
+unified_parser_registry! {
+    "inkling" => InklingUnifiedParser,
+    "minimax_m3" => MiniMaxM3CombinedParser,
+}
 
-    // Below are the parsers just for testing purposes on Python side.
-    DeepSeekV4ToolParser,
-    KimiK2ToolParser,
+/// Immutable tokenizer data required by the registered unified parsers.
+struct MetadataTokenizer {
+    token_to_id: HashMap<String, u32>,
+    id_to_token: HashMap<u32, String>,
+    special_ids: HashSet<u32>,
+}
+
+impl Tokenizer for MetadataTokenizer {
+    fn encode(&self, _text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
+        Err(TokenizerError(
+            "metadata tokenizer does not support encode".to_string(),
+        ))
+    }
+
+    fn encode_ordinary(&self, _text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+        Err(TokenizerError(
+            "metadata tokenizer does not support encode_ordinary".to_string(),
+        ))
+    }
+
+    fn decode(
+        &self,
+        _token_ids: &[u32],
+        _skip_special_tokens: bool,
+    ) -> vllm_tokenizer::Result<String> {
+        Err(TokenizerError(
+            "metadata tokenizer does not support decode".to_string(),
+        ))
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.token_to_id.get(token).copied()
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        self.id_to_token.get(&id).cloned()
+    }
+
+    fn vocab_size(&self) -> usize {
+        self.token_to_id.len()
+    }
+
+    fn is_special_id(&self, token_id: u32) -> bool {
+        self.special_ids.contains(&token_id)
+    }
+}
+
+#[pyclass(
+    name = "TokenizerMetadata",
+    module = "vllm._rust_tool_parser",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+struct PyTokenizerMetadata(DynTokenizer);
+
+#[pymethods]
+impl PyTokenizerMetadata {
+    #[new]
+    fn new(token_to_id: HashMap<String, u32>, special_ids: HashSet<u32>) -> Self {
+        let id_to_token =
+            token_to_id.iter().map(|(token, token_id)| (*token_id, token.clone())).collect();
+        Self(Arc::new(MetadataTokenizer {
+            token_to_id,
+            id_to_token,
+            special_ids,
+        }))
+    }
 }
 
 #[pyclass(name = "Tool", module = "vllm._rust_tool_parser", skip_from_py_object)]
@@ -89,7 +161,8 @@ impl PyTool {
     fn parameters(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         pythonize(py, &self.0.parameters).map(Bound::unbind).map_err(|error| {
             PyValueError::new_err(format!(
-                "failed to convert tool parameters from JSON to Python: {error}"
+                "failed to convert tool parameters from JSON to Python: \
+                     {error}"
             ))
         })
     }
@@ -110,16 +183,6 @@ struct PyToolCallDelta(ToolCallDelta);
 
 #[pymethods]
 impl PyToolCallDelta {
-    #[new]
-    #[pyo3(signature = (tool_index, name, arguments))]
-    fn new(tool_index: usize, name: Option<String>, arguments: String) -> Self {
-        Self(ToolCallDelta {
-            tool_index,
-            name,
-            arguments,
-        })
-    }
-
     #[getter]
     fn tool_index(&self) -> usize {
         self.0.tool_index
@@ -137,50 +200,91 @@ impl PyToolCallDelta {
 }
 
 #[pyclass(
-    name = "ToolParserOutput",
+    name = "UnifiedParserEvent",
     module = "vllm._rust_tool_parser",
     skip_from_py_object
 )]
 #[derive(Clone)]
-struct PyToolParserOutput(ToolParserOutput);
+struct PyUnifiedParserEvent {
+    kind: &'static str,
+    text: Option<String>,
+    tool_call: Option<PyToolCallDelta>,
+}
 
-#[pymethods]
-impl PyToolParserOutput {
-    #[new]
-    #[pyo3(signature = (normal_text="", calls=None))]
-    fn new(py: Python<'_>, normal_text: &str, calls: Option<Vec<Py<PyToolCallDelta>>>) -> Self {
-        let mut output = ToolParserOutput::default();
-        output.push_text(normal_text);
-        for call in calls.unwrap_or_default() {
-            output.push_call(call.borrow(py).0.clone());
+impl From<UnifiedParserEvent> for PyUnifiedParserEvent {
+    fn from(event: UnifiedParserEvent) -> Self {
+        match event {
+            UnifiedParserEvent::Text(text) => Self {
+                kind: "text",
+                text: Some(text),
+                tool_call: None,
+            },
+            UnifiedParserEvent::Reasoning(text) => Self {
+                kind: "reasoning",
+                text: Some(text),
+                tool_call: None,
+            },
+            UnifiedParserEvent::ToolCall(tool_call) => Self {
+                kind: "tool_call",
+                text: None,
+                tool_call: Some(PyToolCallDelta(tool_call)),
+            },
         }
-        Self(output)
-    }
-
-    #[getter]
-    fn normal_text(&self) -> String {
-        self.0.normal_text()
-    }
-
-    #[getter]
-    fn calls(&self) -> Vec<PyToolCallDelta> {
-        self.0.calls().into_iter().cloned().map(PyToolCallDelta).collect()
-    }
-
-    fn append(&mut self, other: PyRef<'_, PyToolParserOutput>) {
-        self.0.append(other.0.clone());
-    }
-
-    fn coalesce(&self) -> Self {
-        Self(self.0.clone().coalesce())
     }
 }
 
-#[pyclass(name = "ToolParser", module = "vllm._rust_tool_parser", unsendable)]
-struct PyToolParser(Box<dyn ToolParser>);
+#[pymethods]
+impl PyUnifiedParserEvent {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
 
-impl PyToolParser {
-    fn parse_into_output(&mut self, chunk: &str, output: &mut PyToolParserOutput) -> PyResult<()> {
+    #[getter]
+    fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    #[getter]
+    fn tool_call(&self) -> Option<PyToolCallDelta> {
+        self.tool_call.clone()
+    }
+}
+
+#[pyclass(
+    name = "UnifiedParserOutput",
+    module = "vllm._rust_tool_parser",
+    skip_from_py_object
+)]
+#[derive(Clone, Default)]
+struct PyUnifiedParserOutput(UnifiedParserOutput);
+
+#[pymethods]
+impl PyUnifiedParserOutput {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    #[getter]
+    fn events(&self) -> Vec<PyUnifiedParserEvent> {
+        self.0.events.iter().cloned().map(PyUnifiedParserEvent::from).collect()
+    }
+
+    fn append(&mut self, other: PyRef<'_, PyUnifiedParserOutput>) {
+        self.0.append(other.0.clone());
+    }
+}
+
+#[pyclass(name = "UnifiedParser", module = "vllm._rust_tool_parser", unsendable)]
+struct PyUnifiedParser(Box<dyn UnifiedParser>);
+
+impl PyUnifiedParser {
+    fn parse_into_output(
+        &mut self,
+        chunk: &str,
+        output: &mut PyUnifiedParserOutput,
+    ) -> PyResult<()> {
         self.0
             .parse_into(chunk, &mut output.0)
             .map_err(|error| PyValueError::new_err(error.to_report_string()))
@@ -188,25 +292,37 @@ impl PyToolParser {
 }
 
 #[pymethods]
-impl PyToolParser {
+impl PyUnifiedParser {
     #[new]
-    fn new(py: Python<'_>, parser_name: &str, tools: Vec<Py<PyTool>>) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        parser_name: &str,
+        tools: Vec<Py<PyTool>>,
+        tokenizer: Py<PyTokenizerMetadata>,
+    ) -> PyResult<Self> {
         let tools = tools.iter().map(|tool| tool.borrow(py).0.clone()).collect::<Vec<_>>();
-        create_tool_parser(parser_name, &tools).map(Self)
+        let tokenizer = tokenizer.borrow(py).0.clone();
+        create_unified_parser(parser_name, &tools, tokenizer).map(Self)
+    }
+
+    fn initialize(&mut self, prompt_token_ids: Vec<u32>) -> PyResult<()> {
+        self.0
+            .initialize(&prompt_token_ids)
+            .map_err(|error| PyValueError::new_err(error.to_report_string()))
     }
 
     fn parse_into(
         &mut self,
         chunk: &str,
-        mut output: PyRefMut<'_, PyToolParserOutput>,
+        mut output: PyRefMut<'_, PyUnifiedParserOutput>,
     ) -> PyResult<()> {
         self.parse_into_output(chunk, &mut output)
     }
 
-    fn finish(&mut self) -> PyResult<PyToolParserOutput> {
+    fn finish(&mut self) -> PyResult<PyUnifiedParserOutput> {
         self.0
             .finish()
-            .map(PyToolParserOutput)
+            .map(PyUnifiedParserOutput)
             .map_err(|error| PyValueError::new_err(error.to_report_string()))
     }
 
@@ -218,17 +334,41 @@ impl PyToolParser {
         self.0.preserve_special_tokens()
     }
 
+    fn reasoning_start_str(&self) -> Option<&str> {
+        self.0.reasoning_start_str()
+    }
+
+    fn reasoning_end_str(&self) -> Option<&str> {
+        self.0.reasoning_end_str()
+    }
+
+    fn is_reasoning_end(&self, input_ids: Vec<u32>) -> bool {
+        self.0.is_reasoning_end(&input_ids)
+    }
+
+    fn count_reasoning_tokens(&self, input_ids: Vec<u32>) -> usize {
+        self.0.count_reasoning_tokens(&input_ids)
+    }
+
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
         self.0.tool_call_id(tool_index)
     }
 }
 
+#[pyfunction]
+fn list_unified_parsers() -> Vec<&'static str> {
+    UNIFIED_PARSER_NAMES.to_vec()
+}
+
 #[pymodule]
 fn _rust_tool_parser(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(list_unified_parsers, m)?)?;
+    m.add_class::<PyTokenizerMetadata>()?;
     m.add_class::<PyTool>()?;
     m.add_class::<PyToolCallDelta>()?;
-    m.add_class::<PyToolParserOutput>()?;
-    m.add_class::<PyToolParser>()?;
+    m.add_class::<PyUnifiedParserEvent>()?;
+    m.add_class::<PyUnifiedParserOutput>()?;
+    m.add_class::<PyUnifiedParser>()?;
     Ok(())
 }
 
@@ -243,154 +383,128 @@ mod tests {
         Python::attach(f)
     }
 
-    fn tool_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "user_id": {"type": "integer"},
-                "shipping": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "zip": {"type": "integer"}
-                    }
-                }
-            }
-        })
+    fn metadata(
+        py: Python<'_>,
+        vocab: impl IntoIterator<Item = (&'static str, u32)>,
+    ) -> PyResult<Py<PyTokenizerMetadata>> {
+        let token_to_id = vocab
+            .into_iter()
+            .map(|(token, token_id)| (token.to_string(), token_id))
+            .collect::<HashMap<_, _>>();
+        let special_ids = token_to_id.values().copied().collect();
+        Py::new(py, PyTokenizerMetadata::new(token_to_id, special_ids))
     }
 
-    fn build_call() -> String {
-        r#"<｜DSML｜tool_calls>
-<｜DSML｜invoke name="create_order">
-<｜DSML｜parameter name="user_id" string="false">42</｜DSML｜parameter>
-<｜DSML｜parameter name="shipping" string="false">{"city":"Singapore","zip":18956}</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜tool_calls>"#
-            .to_owned()
-    }
-
-    fn make_py_tool(py: Python<'_>) -> PyResult<Py<PyTool>> {
-        let parameters = pythonize(py, &tool_schema()).map_err(|error| {
-            PyValueError::new_err(format!(
-                "failed to convert test schema from JSON to Python: {error}"
-            ))
-        })?;
-        Py::new(
+    fn tool(py: Python<'_>, name: &str) -> PyResult<Py<PyTool>> {
+        let parameters = pythonize(
             py,
-            PyTool::new(
-                "create_order".to_owned(),
-                Some("Create an order".to_owned()),
-                &parameters,
-                None,
-            )?,
-        )
+            &json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            }),
+        )?;
+        Py::new(py, PyTool::new(name.to_string(), None, &parameters, None)?)
     }
 
     #[test]
-    fn tool_round_trips_typed_fields() {
-        with_python(|py| {
-            let tool = make_py_tool(py)?;
-            let borrowed = tool.borrow(py);
-            assert_eq!(borrowed.name(), "create_order");
-            assert_eq!(borrowed.description(), Some("Create an order"));
-            assert_eq!(borrowed.strict(), None);
-
-            let parameters = borrowed.parameters(py)?;
-            let parameters = depythonize::<Value>(parameters.bind(py))?;
-            assert_eq!(parameters, tool_schema());
-            PyResult::Ok(())
-        })
-        .unwrap();
+    fn registry_lists_python_supported_unified_parsers() {
+        assert_eq!(list_unified_parsers(), ["inkling", "minimax_m3"]);
     }
 
     #[test]
-    fn output_append_and_coalesce() {
+    fn minimax_m3_emits_reasoning_text_and_tool_events() {
         with_python(|py| {
-            let first = Py::new(
-                py,
-                PyToolCallDelta::new(0, Some("create_order".to_owned()), "{\"a\"".to_owned()),
+            let tokenizer = metadata(py, [("<mm:think>", 256), ("</mm:think>", 257)])?;
+            let tools = vec![tool(py, "get_weather")?];
+            let mut parser = PyUnifiedParser::new(py, "minimax_m3", tools, tokenizer)?;
+            parser.initialize(vec![256])?;
+
+            let mut output = PyUnifiedParserOutput::new();
+            parser.parse_into_output(
+                "plan</mm:think>answer\
+                 ]<]minimax[>[<tool_call>\
+                 ]<]minimax[>[<invoke name=\"get_weather\">\
+                 ]<]minimax[>[<city>Paris]<]minimax[>[</city>\
+                 ]<]minimax[>[</invoke>\
+                 ]<]minimax[>[</tool_call>",
+                &mut output,
             )?;
-            let second = Py::new(py, PyToolCallDelta::new(0, None, ":1}".to_owned()))?;
-            let mut output = PyToolParserOutput::new(py, "text", Some(vec![first]));
-            let other = Py::new(py, PyToolParserOutput::new(py, "", Some(vec![second])))?;
-            output.append(other.borrow(py));
+            output.0.append(parser.finish()?.0);
 
-            let coalesced = output.coalesce();
-            assert_eq!(coalesced.normal_text(), "text");
-            let calls = coalesced.calls();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].tool_index(), 0);
-            assert_eq!(calls[0].name(), Some("create_order"));
-            assert_eq!(calls[0].arguments(), "{\"a\":1}");
-            PyResult::Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn parser_parse_finish_and_preserve_special_tokens() {
-        with_python(|py| {
-            let tool = make_py_tool(py)?;
-            let mut parser = PyToolParser::new(py, "DeepSeekV4ToolParser", vec![tool])?;
-            assert!(parser.preserve_special_tokens());
-
-            let mut output = PyToolParserOutput::new(py, "", None);
-            parser.parse_into_output(&build_call(), &mut output)?;
-            let finish = Py::new(py, parser.finish()?)?;
-            output.append(finish.borrow(py));
-            let output = output.coalesce();
-
-            assert_eq!(output.normal_text(), "");
-            let calls = output.calls();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name(), Some("create_order"));
             assert_eq!(
-                serde_json::from_str::<Value>(calls[0].arguments()).unwrap(),
-                json!({
-                    "user_id": 42,
-                    "shipping": {
-                        "city": "Singapore",
-                        "zip": 18956
-                    }
-                })
+                output.0.events,
+                vec![
+                    UnifiedParserEvent::Reasoning("plan".to_string()),
+                    UnifiedParserEvent::Text("answer".to_string()),
+                    UnifiedParserEvent::ToolCall(ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("get_weather".to_string()),
+                        arguments: r#"{"city":"Paris"}"#.to_string(),
+                    }),
+                ]
             );
-
-            assert_eq!(parser.reset(), "");
             PyResult::Ok(())
         })
         .unwrap();
     }
 
     #[test]
-    fn parser_exposes_model_emitted_tool_call_ids() {
+    fn inkling_uses_native_unified_parser() {
         with_python(|py| {
-            let tool = make_py_tool(py)?;
-            let mut parser = PyToolParser::new(py, "KimiK2ToolParser", vec![tool])?;
+            let tokenizer = metadata(
+                py,
+                [
+                    ("<|message_model|>", 200001),
+                    ("<|content_text|>", 200004),
+                    ("<|content_thinking|>", 200008),
+                ],
+            )?;
+            let tools = vec![tool(py, "get_weather")?];
+            let mut parser = PyUnifiedParser::new(py, "inkling", tools, tokenizer)?;
+            parser.initialize(Vec::new())?;
 
-            let input = "<|tool_calls_section_begin|>\
-                <|tool_call_begin|>functions.create_order:0<|tool_call_argument_begin|>\
-                {\"user_id\":42}<|tool_call_end|>\
-                <|tool_calls_section_end|>";
-            let mut output = PyToolParserOutput::new(py, "", None);
-            parser.parse_into_output(input, &mut output)?;
+            let mut output = PyUnifiedParserOutput::new();
+            parser.parse_into_output(
+                "<|content_thinking|>plan<|end_message|>\
+                 <|content_text|>answer<|end_message|>\
+                 <|content_invoke_tool_json|>\
+                 {\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}\
+                 <|end_message|>",
+                &mut output,
+            )?;
+            output.0.append(parser.finish()?.0);
 
-            assert_eq!(parser.tool_call_id(0), Some("functions.create_order:0"));
-            assert_eq!(parser.tool_call_id(1), None);
+            assert_eq!(
+                output.0.events,
+                vec![
+                    UnifiedParserEvent::Reasoning("plan".to_string()),
+                    UnifiedParserEvent::Text("answer".to_string()),
+                    UnifiedParserEvent::ToolCall(ToolCallDelta {
+                        tool_index: 0,
+                        name: Some("get_weather".to_string()),
+                        arguments: String::new(),
+                    }),
+                    UnifiedParserEvent::ToolCall(ToolCallDelta {
+                        tool_index: 0,
+                        name: None,
+                        arguments: r#"{"city":"Paris"}"#.to_string(),
+                    }),
+                ]
+            );
             PyResult::Ok(())
         })
         .unwrap();
     }
 
     #[test]
-    fn parser_errors_for_unknown_name() {
+    fn parser_rejects_unknown_name() {
         with_python(|py| {
-            let tool = make_py_tool(py)?;
-            let error = match PyToolParser::new(py, "missing", vec![tool]) {
-                Ok(_) => panic!("missing parser name unexpectedly succeeded"),
+            let tokenizer = metadata(py, [])?;
+            let error = match PyUnifiedParser::new(py, "missing", Vec::new(), tokenizer) {
+                Ok(_) => panic!("missing unified parser unexpectedly succeeded"),
                 Err(error) => error,
             };
-            let message = format!("{error}");
-            assert!(message.contains("unsupported tool parser `missing`"));
+            assert!(error.to_string().contains("unsupported unified parser `missing`"));
             PyResult::Ok(())
         })
         .unwrap();

@@ -488,7 +488,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if (
                 context.response_parser is not None
-                and context.response_parser.reasoning_parser is not None
+                and context.response_parser.reasoning_parser_cls is not None
             ):
                 reasoning_parser_kwargs = {
                     "chat_template_kwargs": chat_template_kwargs,
@@ -503,7 +503,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     sampling_params.structured_outputs = replace(
                         struct_out,
                         structural_tag=(
-                            context.response_parser.reasoning_parser.prepare_structured_tag(
+                            context.response_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
                             )
                         ),
@@ -865,6 +865,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 final_output,
                 tokenizer,
                 parser=context.response_parser,
+                prompt_token_ids=final_res.prompt_token_ids or (),
             )
 
             if request.enable_response_messages:
@@ -888,13 +889,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_reasoning_tokens == 0
             and isinstance(context, (SimpleContext, ParsableContext))
             and context.response_parser is not None
-            and context.response_parser.reasoning_parser is not None
+            and context.response_parser.reasoning_parser_cls is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.reasoning_parser.count_reasoning_tokens(
-                    accumulated
-                )
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(
@@ -1039,6 +1038,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
+        prompt_token_ids: Sequence[int] = (),
     ) -> list[ResponseOutputItem]:
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -1068,6 +1068,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request,
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
+                prompt_token_ids=prompt_token_ids,
             )
             if not request.include_reasoning:
                 reasoning = None

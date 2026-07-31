@@ -97,13 +97,19 @@ class OnlineDerenderer:
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
-        return await self._derender_chat_async(generate_response, chat_request)
+        return await self._derender_chat_async(
+            generate_response,
+            chat_request,
+            prompt_token_ids,
+        )
 
     def _derender_chat(
         self,
         generate_response: GenerateResponse,
         chat_request: ChatCompletionRequest | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
         tokenizer = self.renderer.get_tokenizer()
         choices: list[ChatCompletionResponseChoice] = []
@@ -147,6 +153,7 @@ class OnlineDerenderer:
                     chat_request,
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=choice.token_ids,
+                    prompt_token_ids=prompt_token_ids or (),
                 )
 
                 if not getattr(chat_request, "include_reasoning", True):
