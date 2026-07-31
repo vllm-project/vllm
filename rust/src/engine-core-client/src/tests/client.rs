@@ -223,6 +223,7 @@ fn request_output(
         request_id: request_id.to_string(),
         new_token_ids,
         new_logprobs: None,
+        new_sampling_mask: None,
         new_prompt_logprobs_tensors: None,
         pooling_output: None,
         finish_reason,
@@ -2593,6 +2594,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                             8,
                         ],
                         new_logprobs: None,
+                        new_sampling_mask: None,
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(

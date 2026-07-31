@@ -85,6 +85,8 @@ pub struct EngineCoreOutput {
     /// output.
     #[serde(default)]
     pub new_logprobs: Option<MaybeWireLogprobs>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
     /// Decoded prompt logprobs for the scored prompt positions emitted in this
     /// output.
     #[serde(default)]
@@ -373,6 +375,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![42],
                 new_logprobs: None,
+                new_sampling_mask: None,
                 new_prompt_logprobs_tensors: None,
                 pooling_output: None,
                 finish_reason: Some(EngineCoreFinishReason::Length),
@@ -426,6 +429,7 @@ mod tests {
                                 7,
                             ],
                             new_logprobs: None,
+                            new_sampling_mask: None,
                             new_prompt_logprobs_tensors: None,
                             pooling_output: None,
                             finish_reason: None,

@@ -42,7 +42,7 @@ def test_sampling_mask_tensors_tolist():
 
     assert result.token_ids.tolist() == [3, 5, 7]
     assert result.offsets.tolist() == [0, 2, 3]
-    assert result.cu_num_generated_tokens == [0, 1, 1]
+    assert result.cu_num_generated_tokens == [0, 1, 1, 2]
 
 
 def test_sampling_mask_tensors_from_logits():
