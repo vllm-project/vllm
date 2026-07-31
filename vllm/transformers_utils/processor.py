@@ -586,10 +586,14 @@ def call_hf_processor_mm_only(
     )
 
 
-def make_input_norm(processor) -> nn.BatchNorm1d:
-    image_mean = processor.image_mean
-    image_std = processor.image_std
-    rescale_factor = processor.rescale_factor
+def make_input_norm(processor: type[BaseImageProcessor]) -> nn.BatchNorm1d:
+    image_mean = getattr(processor, "image_mean", None)
+    image_std = getattr(processor, "image_std", None)
+    rescale_factor = getattr(processor, "rescale_factor", None)
+
+    assert image_mean is not None
+    assert image_std is not None
+    assert rescale_factor is not None
 
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor

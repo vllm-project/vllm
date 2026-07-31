@@ -734,6 +734,25 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
+            if envs.VLLM_USE_RUST_FRONTEND:
+                logger.debug(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            elif not self._model_info.supports_mm_device_do_normalize:
+                logger.debug(
+                    "Model does not support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            else:
+                logger.debug(
+                    "mm_device_do_normalize is %s.",
+                    "enabled" if mm_device_do_normalize else "disabled",
+                )
+
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
@@ -757,8 +776,7 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
-                mm_device_do_normalize=mm_device_do_normalize
-                and self._model_info.supports_mm_device_do_normalize,
+                mm_device_do_normalize=mm_device_do_normalize,
             )
 
             mm_config_kwargs = {
