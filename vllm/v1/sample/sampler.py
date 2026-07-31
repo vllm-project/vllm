@@ -368,28 +368,12 @@ class Sampler(nn.Module):
         trace_decode_token_ids: list[list[int]],
         output_token_ids: list[list[int]],
     ) -> None:
-        """Overwrite sampled[req_idx] with the trace token for the current step.
-
-        Called only when trace_decode_token_ids is not None.
-        Mutates ``sampled`` in-place (dtype must be int64 / long).
-
-        Args:
-            sampled: 1-D tensor of shape [batch_size], dtype int64.
-            trace_decode_token_ids: Per-request list of token IDs to replay.
-                An empty inner list means this request is not using trace-replay.
-            output_token_ids: Per-request list of tokens already produced.
-                The step index is the number of real (non-placeholder) tokens.
-                Trace-replay is disabled for speculative decoding (see
-                ``EngineCore.add_request``), so async scheduling appends at most
-                a single ``-1`` placeholder, always at the end of the list, for
-                a token whose CPU copy is not yet available. That trailing
-                sentinel must not be counted when computing the replay step.
-        """
+        """Overwrite sampled tokens with the current trace tokens in place."""
         for req_idx, trace_tokens in enumerate(trace_decode_token_ids):
             if not trace_tokens:
                 continue
             produced = output_token_ids[req_idx]
-            # At most one trailing -1 placeholder (no spec decode in trace mode).
+            # Ignore the trailing async placeholder.
             step_idx = len(produced)
             if step_idx and produced[-1] == -1:
                 step_idx -= 1
