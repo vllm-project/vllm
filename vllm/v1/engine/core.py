@@ -349,12 +349,17 @@ class EngineCore:
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             compilation_times = self.model_executor.compile_or_warm_up_model()
         if use_extensible_kv_cache:
-            if vllm_config.cache_config.kv_cache_memory_bytes is None:
+            if (
+                vllm_config.cache_config.kv_cache_memory_bytes is None
+                and compilation_times
+            ):
                 # Automatic sizing: re-derive the KV cache size from the
                 # memory actually consumed by warmup and CUDA graph capture.
                 # With an explicit kv_cache_memory_bytes, the requested size
                 # is committed as-is (the extensible path still defers the
-                # commit until after warmup).
+                # commit until after warmup). When warmup was skipped
+                # (VLLM_ELASTIC_EP_SCALE_UP_LAUNCH) there is no measurement,
+                # so the first-pass size is committed as-is too.
                 # One CompilationTimes result per worker (zip strict).
                 final_available_gpu_memory = [
                     max(
