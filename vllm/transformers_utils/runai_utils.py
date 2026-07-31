@@ -53,8 +53,8 @@ class ObjectStorageModel:
         pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self, url: str) -> None:
-        if envs.VLLM_ASSETS_CACHE_MODEL_CLEAN:
+    def __init__(self, url: str, install_signal_handlers: bool = True) -> None:
+        if envs.VLLM_ASSETS_CACHE_MODEL_CLEAN and install_signal_handlers:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 existing_handler = signal.getsignal(sig)
                 signal.signal(sig, self._close_by_signal(existing_handler))
