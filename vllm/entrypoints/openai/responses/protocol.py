@@ -360,13 +360,20 @@ class ResponsesRequest(OpenAIBaseModel):
         if self.text is None or self.text.format is None:
             return self.structured_outputs
 
+        response_format = self.text.format
+        if (
+            response_format.type == "json_schema"
+            and getattr(response_format, "strict", None) is False
+        ):
+            # strict=false contributes no decoding constraint, so an
+            # explicit structured_outputs coexists with it without conflict.
+            return self.structured_outputs
+
         if self.structured_outputs is not None:
             raise VLLMValidationError(
                 "Cannot specify both structured_outputs and text.format",
                 parameter="structured_outputs",
             )
-
-        response_format = self.text.format
         if response_format.type == "json_object":
             return StructuredOutputsParams(json_object=True)
         if (

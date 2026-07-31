@@ -9,9 +9,6 @@ prompt need the field at the renderer layer; the forwarding is inert for
 renderers that don't read it.
 """
 
-import pytest
-from pydantic import ValidationError
-
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -100,6 +97,17 @@ class TestResponsesStrictFalse:
     def test_strict_false_disables_guided_decoding(self):
         assert self._guided_json(self._build_responses_request(False)) is None
 
+    def test_strict_false_keeps_explicit_structured_outputs(self):
+        # strict=false contributes no decoding constraint, so an explicit
+        # structured_outputs coexists with it without conflict.
+        from vllm.sampling_params import StructuredOutputsParams
+
+        request = self._build_responses_request(False)
+        explicit = StructuredOutputsParams(regex=r"\d+")
+        request = request.model_copy(update={"structured_outputs": explicit})
+        params = request.to_sampling_params(default_max_tokens=100)
+        assert params.structured_outputs is explicit
+
     def test_strict_true_keeps_guided_decoding(self):
         assert self._guided_json(self._build_responses_request(True)) == (
             _WEATHER_SCHEMA
@@ -109,4 +117,3 @@ class TestResponsesStrictFalse:
         assert self._guided_json(self._build_responses_request(...)) == (
             _WEATHER_SCHEMA
         )
-
