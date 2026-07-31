@@ -1,15 +1,23 @@
 ARG BASE_IMAGE=ubuntu:22.04
+ARG PYTHON_VERSION=3.12
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 # TheRock configuration
-ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ARG ROCM_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/
 ARG ROCM_SDK_VERSION=7.14.0
 ARG TORCH_VERSION=2.11.0+rocm7.14.0
 ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
 ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0
+
+# Build configuration
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ARG AITER_ROCM_ARCH="gfx942;gfx950"
+ARG MAX_JOBS=128
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -21,17 +29,17 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
-ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ARG PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
-ARG AITER_ROCM_ARCH="gfx942;gfx950"
+ARG AITER_ROCM_ARCH
 ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
-ARG MAX_JOBS=128
+ARG MAX_JOBS
 ENV MAX_JOBS=${MAX_JOBS}
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
@@ -58,18 +66,17 @@ RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cyth
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install ROCm SDK via TheRock
-ARG PIP_EXTRA_INDEX_URL
-ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ARG ROCM_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
-RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+RUN pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels
+# Install PyTorch wheels via TheRock
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
-RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+RUN pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}"
@@ -86,11 +93,10 @@ RUN if [ -n "${ROCM_SDK_VERSION}" ] && [ -n "${PYTORCH_ROCM_ARCH}" ]; then \
             PKGS="${PKGS} rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}"; \
         done; \
         echo "Installing device packages for arches: ${PYTORCH_ROCM_ARCH}"; \
-        pip install --index-url ${PIP_EXTRA_INDEX_URL} ${PKGS}; \
+        pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} ${PKGS}; \
     fi
-SHELL ["/bin/sh", "-c"]
 
-ENV SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ARG SITE_PACKAGES
 ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
     ROCM_HOME="$SITE_PACKAGES/_rocm_sdk_devel" \
     HIP_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
