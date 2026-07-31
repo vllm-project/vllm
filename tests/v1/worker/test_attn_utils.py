@@ -1,11 +1,79 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import torch
 
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
+
+
+def test_draft_only_group_does_not_constrain_target_cudagraph_support(monkeypatch):
+    class TargetBackend:
+        cg_support = AttentionCGSupport.ALWAYS
+
+        @staticmethod
+        def full_cls_name():
+            return "TargetBackend"
+
+    class DraftBackend:
+        cg_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+        @staticmethod
+        def full_cls_name():
+            return "DraftBackend"
+
+    layers = {
+        "target": SimpleNamespace(get_attn_backend=lambda: TargetBackend),
+        "draft": SimpleNamespace(get_attn_backend=lambda: DraftBackend),
+    }
+
+    def get_layers(*args):
+        return {name: layers[name] for name in args[-1]}
+
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
+    monkeypatch.setattr(
+        attn_utils, "add_kv_sharing_layers_to_kv_cache_groups", lambda *args: None
+    )
+    monkeypatch.setattr(attn_utils, "prepare_kernel_block_sizes", lambda *args: [1])
+    monkeypatch.setattr(
+        AttentionGroup, "create_metadata_builders", lambda self, **kwargs: None
+    )
+    monkeypatch.setattr(
+        AttentionGroup,
+        "get_metadata_builder",
+        lambda self, index: SimpleNamespace(
+            get_cudagraph_support=lambda *args: self.backend.cg_support
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["target", "draft"], kv_cache_spec=object())
+        ]
+    )
+
+    groups, support, _ = attn_utils.init_attn_backend(
+        kv_cache_config,
+        SimpleNamespace(),
+        torch.device("cpu"),
+        cg_support_exclude_layers={"draft"},
+    )
+
+    assert {group.layer_names[0] for group in groups[0]} == {"target", "draft"}
+    assert support.min_cg_support == AttentionCGSupport.ALWAYS
+
+    _, unfiltered_support, _ = attn_utils.init_attn_backend(
+        kv_cache_config, SimpleNamespace(), torch.device("cpu")
+    )
+    assert (
+        unfiltered_support.min_cg_support
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
 
 class FakeFlashAttentionBackend:
