@@ -52,6 +52,57 @@ def _can_p2p(rank: int, world_size: int) -> bool:
 
 from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
+# Cap on the per-rank IPC buffer we are willing to allocate to keep custom
+# all-reduce batch-invariant. Above this, NCCL (which is used for every
+# all-reduce, hence batch-independent) is the better trade.
+_BATCH_INVARIANT_MAX_BUFFER_BYTES = 256 * 1024 * 1024
+
+# Multiplier applied to the hidden-size-derived bound to absorb paths that
+# all-reduce a padded activation (see _max_batch_invariant_allreduce_bytes).
+_BATCH_INVARIANT_WIDTH_MARGIN = 1.25
+
+
+def _max_batch_invariant_allreduce_bytes() -> int | None:
+    """Largest all-reduce this engine can issue, in bytes.
+
+    Tensor-parallel all-reduces carry `[num_tokens, hidden_size]` activations,
+    so the upper bound is set by the scheduler's token budget and the model
+    width. Returns None when the config is unavailable, in which case the
+    caller must not enable custom all-reduce under batch invariance.
+    """
+    try:
+        # NOTE: get_current_vllm_config() raises when unset; the _or_none
+        # variant is the correct accessor here. Config *is* set at this point
+        # (WorkerWrapperBase.init_device wraps worker.init_device(), which
+        # builds the communicators, in set_current_vllm_config), but we must
+        # not depend on that silently.
+        from vllm.config import get_current_vllm_config_or_none
+
+        config = get_current_vllm_config_or_none()
+        if config is None:
+            return None
+        max_tokens = config.scheduler_config.max_num_batched_tokens
+        text_config = config.model_config.hf_config.get_text_config()
+        hidden_size = text_config.hidden_size
+        dtype_size = torch.tensor([], dtype=config.model_config.dtype).element_size()
+    except Exception:
+        logger.warning(
+            "Could not derive the maximum all-reduce size for batch-invariant "
+            "custom allreduce sizing.",
+            exc_info=True,
+        )
+        return None
+    if not max_tokens or not hidden_size:
+        return None
+    nbytes = int(max_tokens) * int(hidden_size) * int(dtype_size)
+    # hidden_size is a lower bound on the reduced width. Some paths all-reduce
+    # a PADDED activation and truncate afterwards -- e.g. fused MoE pads the
+    # routed hidden dim (2688 -> 2816 for Nemotron-3 Nano under TRTLLM NVFP4)
+    # and strips it after the collective. Add headroom so those do not fall
+    # off the custom path; _assert_batch_invariant_coverage() below is the
+    # backstop if headroom is still not enough.
+    return int(nbytes * _BATCH_INVARIANT_WIDTH_MARGIN)
+
 
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8, 16]
@@ -91,6 +142,15 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self._ptr = 0
         self.disabled = True
+        # Engagement counters. Under VLLM_BATCH_INVARIANT a *silent* fallback
+        # to NCCL is the failure mode we are guarding against, so a run that
+        # merely produces invariant output proves nothing unless the custom
+        # kernel actually fired. Logged from this same instance/process so the
+        # evidence cannot come from a differently-configured run. Initialised
+        # here, above every early `return` in this constructor, so no
+        # construction path can leave them unset.
+        self._custom_ar_calls = 0
+        self._custom_ar_max_bytes = 0
         self.mnnvl_buffer = None
         self.mnnvl_handle = None
         self.mnnvl_peer_buffers: list[torch.Tensor] | None = None
@@ -161,6 +221,49 @@ class CustomAllreduce:
                     CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
+
+        if envs.VLLM_BATCH_INVARIANT:
+            # Batch invariance requires the custom-vs-NCCL choice to be fixed
+            # for the process lifetime. should_custom_ar() gates on
+            # `inp_size < max_size`, and the all-reduce tensor is
+            # [num_tokens, hidden_size], so a size-based gate makes kernel
+            # selection depend on batch composition -- two reduction orders
+            # for the same request. See #50136.
+            #
+            # Size the IPC buffers for the largest all-reduce this engine can
+            # ever issue, so the gate can never flip. If that is not
+            # affordable, refuse to enable custom all-reduce at all rather
+            # than silently falling back to NCCL mid-run.
+            required = _max_batch_invariant_allreduce_bytes()
+            if required is None:
+                logger.warning(
+                    "Custom allreduce is disabled under VLLM_BATCH_INVARIANT: "
+                    "could not determine the maximum all-reduce size, so a "
+                    "batch-independent buffer cannot be guaranteed."
+                )
+                return
+            if required > _BATCH_INVARIANT_MAX_BUFFER_BYTES:
+                logger.warning(
+                    "Custom allreduce is disabled under VLLM_BATCH_INVARIANT: "
+                    "covering the largest possible all-reduce would need "
+                    "%.1f MiB per rank, above the %.1f MiB cap. Falling back "
+                    "to NCCL for every all-reduce, which is batch-invariant.",
+                    required / (1 << 20),
+                    _BATCH_INVARIANT_MAX_BUFFER_BYTES / (1 << 20),
+                )
+                return
+            # Round up to a 16-byte multiple; should_custom_ar() requires it.
+            max_size = max(max_size, (required + 15) & ~15)
+            _prefix_default = 8192 * 1024
+            logger.info(
+                "VLLM_BATCH_INVARIANT: sizing custom allreduce buffers to "
+                "%.1f MiB per rank so kernel selection is batch-independent "
+                "(pre-fix default %.1f MiB; every all-reduce above that "
+                "previously fell through to NCCL and is what made kernel "
+                "selection batch-dependent).",
+                max_size / (1 << 20),
+                _prefix_default / (1 << 20),
+            )
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:
@@ -349,6 +452,20 @@ class CustomAllreduce:
         if self.disabled or self.world_size > 8:
             return False
         inp_size = inp.numel() * inp.element_size()
+        if envs.VLLM_BATCH_INVARIANT and inp_size >= self.max_size:
+            # Falling through to NCCL here would change this tensor's
+            # reduction order relative to smaller tensors in other batches,
+            # i.e. silently break batch invariance -- the bug this sizing
+            # exists to prevent. The init-time bound was supposed to make
+            # this unreachable, so it means the bound was wrong (a padded
+            # all-reduce, an unmodelled path). Fail loudly instead.
+            raise RuntimeError(
+                f"custom all-reduce received a {inp_size} byte tensor, above "
+                f"the {self.max_size} byte batch-invariant buffer. Falling "
+                "back to NCCL would break batch invariance. Re-run with "
+                "VLLM_BATCH_INVARIANT unset, or file a bug with the model "
+                "and max_num_batched_tokens so the bound can be corrected."
+            )
         # custom allreduce requires input byte size to be multiples of 16
         if inp_size % 16 != 0:
             return False
@@ -384,6 +501,27 @@ class CustomAllreduce:
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
+        self._custom_ar_calls += 1
+        nbytes = input.numel() * input.element_size()
+        if nbytes > self._custom_ar_max_bytes:
+            self._custom_ar_max_bytes = nbytes
+        # Emit at milestones so the count is a real number in the log, not a
+        # boolean. `largest` is the load-bearing figure: any value above the
+        # 8 MiB pre-fix default is a tensor that would previously have fallen
+        # through to NCCL, i.e. direct evidence the size gate no longer flips.
+        if envs.VLLM_BATCH_INVARIANT and (
+            self._custom_ar_calls in (1, 10, 100, 1000, 10000)
+            or self._custom_ar_calls % 50000 == 0
+        ):
+            logger.info(
+                "BATCH_INVARIANT_CUSTOM_AR_ENGAGED rank=%s calls=%d "
+                "largest=%d bytes max_size=%d pre_fix_default=%d",
+                self.rank,
+                self._custom_ar_calls,
+                self._custom_ar_max_bytes,
+                self.max_size,
+                8192 * 1024,
+            )
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 return self.all_reduce(input, registered=True)
