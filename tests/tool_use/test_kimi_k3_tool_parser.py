@@ -361,9 +361,63 @@ def test_streaming_split_markers_do_not_leak():
     assert content == "Hi"
     assert OPEN not in content
     assert SEP not in content
-    assert len(tool_deltas) == 1
-    assert tool_deltas[0].function.name == "calc"
-    assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
+    assert [tool_call.function.name for tool_call in tool_deltas if tool_call.id] == [
+        "calc"
+    ]
+    arguments = "".join(tool_call.function.arguments or "" for tool_call in tool_deltas)
+    assert json.loads(arguments) == {"x": 1}
+
+
+def test_streaming_emits_argument_text_as_it_arrives():
+    """A long string argument must stream, not land in one delta at the close."""
+    parser = KimiK3ToolParser(DummyTokenizer())
+    request = _request()
+    value = "word " * 200
+    body_chunks = [value[i : i + 5] for i in range(0, len(value), 5)]
+    chunks = [
+        f"{OPEN}tools{SEP}",
+        f'{OPEN}call tool="write_file" index="1"{SEP}',
+        f'{OPEN}argument key="content" type="string"{SEP}',
+        *body_chunks,
+        f"{CLOSE}argument{SEP}",
+        f"{CLOSE}call{SEP}",
+    ]
+    previous_text = ""
+    previous_ids: list[int] = []
+    messages: list[DeltaMessage] = []
+
+    for i, chunk in enumerate(chunks, start=1):
+        current_text = previous_text + chunk
+        current_ids = previous_ids + [i]
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=previous_ids,
+            current_token_ids=current_ids,
+            delta_token_ids=[i],
+            request=request,
+        )
+        if delta is not None:
+            messages.append(delta)
+        previous_text = current_text
+        previous_ids = current_ids
+
+    tool_deltas = [
+        tool_call for message in messages for tool_call in (message.tool_calls or [])
+    ]
+
+    # the name is announced once, up front, and every body chunk moves the stream
+    assert [tool_call.function.name for tool_call in tool_deltas if tool_call.id] == [
+        "write_file"
+    ]
+    assert len(tool_deltas) >= len(body_chunks)
+    assert all(tool_call.index == 0 for tool_call in tool_deltas)
+
+    arguments = "".join(tool_call.function.arguments or "" for tool_call in tool_deltas)
+    assert json.loads(arguments) == {"content": value}
+    non_streamed = parser.extract_tool_calls(previous_text, request)
+    assert arguments == non_streamed.tool_calls[0].function.arguments
 
 
 def test_tool_call_ids_are_unique_across_messages():
