@@ -430,16 +430,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             layer=layer,
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
-
     def apply(
         self,
         layer: RoutedExperts,
@@ -891,16 +881,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias=w2_bias,
             swiglu_limit=swiglu_limit,
             layer=layer,
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(
