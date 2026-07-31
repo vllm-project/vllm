@@ -112,6 +112,8 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -384,6 +386,7 @@ mod tests {
                 prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
+                new_sampling_mask: None,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -437,6 +440,7 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            new_sampling_mask: None,
                         },
                     ],
                     scheduler_stats: None,
