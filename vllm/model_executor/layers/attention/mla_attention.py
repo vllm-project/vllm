@@ -740,9 +740,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 return quant_output.fill_(0)
             return output.fill_(0)
 
-        if self.impl.dcp_world_size == -1:
-            self.impl.dcp_world_size = get_dcp_group().world_size
-
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
@@ -2531,7 +2528,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_scale: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
-        assert self.dcp_world_size != -1
 
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -2676,8 +2672,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         )
-
-        self.dcp_world_size: int = -1
 
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size

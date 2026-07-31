@@ -22,6 +22,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config.vllm import set_current_vllm_config
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -44,6 +45,7 @@ from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
 )
+from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
@@ -151,6 +153,36 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+def test_mla_impl_reports_dcp_world_size_at_construction(dist_init):
+    """Models that drive the impl directly (e.g. Kimi-K3's
+    MultiHeadLatentAttention) never go through MLAAttention.forward_impl, so every
+    MLACommonImpl must report a usable CP world size as soon as it is built:
+    FLASH_ATTN_MLA passes it to FA3 as `cp_world_size`, which rejects
+    non-positive values.
+    """
+    impl = TritonMLAImpl(
+        num_heads=16,
+        head_size=576,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        qk_head_dim=192,
+        v_head_dim=128,
+        kv_b_proj=None,
+    )
+
+    assert impl.dcp_world_size == get_dcp_group().world_size
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
@@ -1078,11 +1110,6 @@ def run_attention_backend(
         # Process weights on the impl
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
-
-        # Initialize DCP attributes (normally set by MLAAttention.forward
-        # before calling forward_mha, see mla_attention.py:511-512)
-        if impl.dcp_world_size == -1:
-            impl.dcp_world_size = 1
 
         # Create mock MLA layer
         mock_layer = MockMLAAttentionLayer(
