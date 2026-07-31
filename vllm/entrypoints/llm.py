@@ -137,6 +137,15 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             these segments will be offloaded (e.g., {"gate_up_proj", "down_proj"}
             for MLP weights, or {"w13_weight", "w2_weight"} for MoE expert
             weights). If None or empty, all parameters are offloaded.
+        moe_expert_cache_size: Number of MoE expert weight rows to keep in a
+            GPU LRU buffer. When greater than zero, expert weights are stored in
+            CPU pinned memory and only the N most-recently-used experts are
+            mirrored onto the GPU on each forward pass. Requires
+            ``enforce_eager=True``. Default is 0 (disabled).
+        moe_expert_cache_split: How a forward wider than the cache is split:
+            "token" (default) reproduces the uncached output exactly;
+            "expert" is much cheaper at small cache sizes but differs at
+            rounding level.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -199,6 +208,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         offload_num_in_group: int = 1,
         offload_prefetch_step: int = 1,
         offload_params: set[str] | None = None,
+        moe_expert_cache_size: int = 0,
+        moe_expert_cache_split: str = "token",
         enforce_eager: bool = False,
         enable_return_routed_experts: bool = False,
         disable_custom_all_reduce: bool = False,
@@ -315,6 +326,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             offload_num_in_group=offload_num_in_group,
             offload_prefetch_step=offload_prefetch_step,
             offload_params=offload_params or set(),
+            moe_expert_cache_size=moe_expert_cache_size,
+            moe_expert_cache_split=moe_expert_cache_split,
             enforce_eager=enforce_eager,
             enable_return_routed_experts=enable_return_routed_experts,
             disable_custom_all_reduce=disable_custom_all_reduce,

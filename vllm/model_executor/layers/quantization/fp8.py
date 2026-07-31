@@ -28,6 +28,10 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+    ExpertWeightResult,
+    run_with_expert_cache,
+)
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
@@ -471,6 +475,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
+    @property
+    def supports_expert_lru_cache(self) -> bool:
+        # Scales reach the kernel through moe_quant_config, so the cache has to
+        # repoint the layer's scale parameters at its slot-indexed buffers
+        # before that config is built -- see _setup_kernel. That only works for
+        # backends convert_to_fp8_moe_kernel_format() passes through unchanged;
+        # the rest (DEEPGEMM, MARLIN, AITER, FLASHINFER, HUMMING) repack weights
+        # into layouts where a per-expert row is no longer a row.
+        compatible_backends = {
+            Fp8MoeBackend.TRITON,
+            Fp8MoeBackend.BATCHED_TRITON,
+            Fp8MoeBackend.VLLM_CUTLASS,
+            Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
+        }
+        return self.fp8_backend in compatible_backends
+
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
@@ -674,6 +695,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
 
+        # Weights are in their runtime layout now, and the quant config below
+        # captures the scale tensors -- so the cache has to take over both
+        # before that happens, not after.
+        layer._maybe_init_expert_lru_cache(self.weight_scale_name)
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -726,7 +752,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w13, w13_scale, shard_size, layer.local_num_experts
             )
 
-        # Shuffle weights to runtime format and setup kernel.
+        # Shuffle weights to runtime format and setup kernel. The expert cache,
+        # when enabled, is installed inside _setup_kernel -- it has to precede
+        # the quant config that captures the scale tensors.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
@@ -810,6 +838,35 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
+
+        provider = layer.expert_weight_provider
+        if provider is not None:
+
+            def run(
+                result: ExpertWeightResult, rows: slice, include_shared: bool
+            ) -> torch.Tensor:
+                assert self.moe_kernel is not None
+                return self.moe_kernel.apply(
+                    x[rows],
+                    result.w1,
+                    result.w2,
+                    topk_weights[rows],
+                    topk_ids[rows],
+                    activation=layer.activation,
+                    global_num_experts=layer.global_num_experts,
+                    expert_map=result.expert_map,
+                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                    # Shared experts belong to the forward, not to one call.
+                    shared_experts=shared_experts if include_shared else None,
+                    shared_experts_input=(
+                        shared_experts_input[rows]
+                        if include_shared and shared_experts_input is not None
+                        else None
+                    ),
+                )
+
+            return run_with_expert_cache(provider, topk_ids, run)
+
         return self.moe_kernel.apply(
             x,
             layer.w13_weight,
