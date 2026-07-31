@@ -579,6 +579,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         "ascii"
                     )
 
+                sampling_mask = None
+                if output.sampling_mask is not None:
+                    sampling_mask = output.sampling_mask.token_ids
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -593,6 +597,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    sampling_mask=sampling_mask,
                 )
                 choices.append(choice_data)
 
