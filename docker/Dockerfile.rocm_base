@@ -194,7 +194,7 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 ### Final Build
 ###
 
-# Wheel release stage -
+# Wheel release stage - 
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
@@ -215,11 +215,25 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
 
 ARG BASE_IMAGE
+ARG PYTHON_VERSION
+ARG ROCM_SDK_VERSION
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+ARG PYTORCH_ROCM_ARCH
+ARG AITER_ROCM_ARCH
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
+    && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
+    && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
+    && echo "TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}" >> /app/versions.txt \
+    && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
+    && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
+    && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
