@@ -421,12 +421,30 @@ class AnthropicServingMessages(OpenAIServingChat):
                             yield wrap_data_with_event(data, "message_delta")
                             continue
 
+                        # Record the finish reason, but DO NOT skip the chunk
+                        # yet: under MTP speculative decoding the finish-reason
+                        # chunk can also carry the delta payload (content /
+                        # reasoning / tool_calls) because the closing token and
+                        # the tool call land in the same decode step. The
+                        # iquest_coder_v2 tool parser emits a fully-formed tool
+                        # call in one delta, so that call rides along on this
+                        # very chunk. The earlier unconditional ``continue``
+                        # dropped it, leaving the client with a
+                        # ``stop_reason: tool_use`` and no tool_use block. Only
+                        # skip when there is genuinely nothing left to emit.
                         if origin_chunk.choices[0].finish_reason is not None:
                             finish_reason = origin_chunk.choices[0].finish_reason
-                            continue
 
                         delta = origin_chunk.choices[0].delta
                         reasoning_delta = getattr(delta, "reasoning", None)
+
+                        if (
+                            origin_chunk.choices[0].finish_reason is not None
+                            and not reasoning_delta
+                            and not delta.content
+                            and not delta.tool_calls
+                        ):
+                            continue
 
                         # reasoning (DeepSeek R1 etc.) -> Anthropic "thinking" block
                         if reasoning_delta:

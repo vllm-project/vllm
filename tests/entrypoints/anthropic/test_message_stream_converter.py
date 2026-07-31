@@ -318,3 +318,81 @@ def test_empty_content_only_stream_emits_no_text_delta():
     blocks = _blocks(events)
     assert [b["type"] for b in blocks] == ["text"]
     assert blocks[0]["text"] == "real"
+
+
+# --------------------------------------------------------------------------- #
+# The regression: tool_call bundled into the SAME chunk as finish_reason.
+#
+# Under MTP speculative decoding the closing token is accepted in the same
+# decode step as the tool call, so the upstream OpenAI stream emits the
+# tool-call delta and the finish_reason on ONE chunk (see
+# OpenAIServingChat._stream_...: the finished-choice branch sets
+# delta=delta_message together with finish_reason). The converter used to
+# ``continue`` as soon as finish_reason was set, dropping that delta and leaving
+# the client with a ``stop_reason: tool_use`` and no tool_use block.
+# --------------------------------------------------------------------------- #
+def test_tool_call_bundled_with_finish_reason_chunk():
+    async def gen():
+        yield _chunk(DeltaMessage(role="assistant"))
+        yield _chunk(DeltaMessage(reasoning="Let me look."))
+        # The tool call rides along on the finish_reason chunk itself.
+        yield _chunk(
+            DeltaMessage(
+                tool_calls=[_tool_call(0, "call_1", "Glob", '{"pattern":"src/**"}')]
+            ),
+            finish_reason="tool_calls",
+        )
+        yield _usage_chunk()
+        yield "data: [DONE]\n\n"
+
+    events = _collect_events(_make_converter().message_stream_converter(gen()))
+    _assert_well_formed_blocks(events)
+    blocks = _blocks(events)
+    assert [b["type"] for b in blocks] == ["thinking", "tool_use"]
+    assert blocks[1]["name"] == "Glob"
+    assert blocks[1]["id"] == "call_1"
+    assert blocks[1]["partial_json"] == '{"pattern":"src/**"}'
+    assert _stop_reason(events) == "tool_use"
+
+
+def test_content_and_tool_call_bundled_with_finish_reason_chunk():
+    """Same as above but the finish chunk also carries leading text content."""
+
+    async def gen():
+        yield _chunk(DeltaMessage(role="assistant"))
+        yield _chunk(
+            DeltaMessage(
+                content="Done. ",
+                tool_calls=[_tool_call(0, "call_2", "Read", '{"path":"a"}')],
+            ),
+            finish_reason="tool_calls",
+        )
+        yield _usage_chunk()
+        yield "data: [DONE]\n\n"
+
+    events = _collect_events(_make_converter().message_stream_converter(gen()))
+    _assert_well_formed_blocks(events)
+    blocks = _blocks(events)
+    assert [b["type"] for b in blocks] == ["text", "tool_use"]
+    assert blocks[0]["text"] == "Done. "
+    assert blocks[1]["name"] == "Read"
+    assert blocks[1]["partial_json"] == '{"path":"a"}'
+    assert _stop_reason(events) == "tool_use"
+
+
+def test_finish_reason_chunk_with_empty_delta_still_skipped():
+    """A finish chunk with no payload must not emit a spurious content block."""
+
+    async def gen():
+        yield _chunk(DeltaMessage(role="assistant"))
+        yield _chunk(DeltaMessage(content="hello"))
+        yield _chunk(DeltaMessage(), finish_reason="stop")
+        yield _usage_chunk()
+        yield "data: [DONE]\n\n"
+
+    events = _collect_events(_make_converter().message_stream_converter(gen()))
+    _assert_well_formed_blocks(events)
+    blocks = _blocks(events)
+    assert [b["type"] for b in blocks] == ["text"]
+    assert blocks[0]["text"] == "hello"
+    assert _stop_reason(events) == "end_turn"
