@@ -223,25 +223,6 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
-    mm_processor_device: MMProcessorDevice = "auto"
-    """Device the HF multi-modal processor runs the image/video transform on.
-
-    Only takes effect for HF "fast" (torchvision-backed) processors, which
-    accept a `device` argument; other processors ignore this and stay on CPU.
-
-    - "auto": use the accelerator on encoder instances of an
-      encode/prefill/decode (EPD) deployment, i.e. when `--ec-transfer-config`
-      marks this instance as an EC producer but not a consumer. Those instances
-      allocate no KV cache, so the frontend can use the device without
-      competing with it. Everywhere else this resolves to "cpu", which keeps the
-      prefill/decode instance's accelerator free of frontend work.
-    - "cpu": always run the transform on CPU.
-    - "cuda": always run the transform on the accelerator.
-
-    Resolved from "auto" to a concrete device by `VllmConfig.__post_init__`.
-    Outputs are moved back to host memory before leaving the processor, so the
-    inter-process transport is unchanged."""
-
     mm_embeds_out_of_band: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
 

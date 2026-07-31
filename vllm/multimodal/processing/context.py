@@ -273,12 +273,6 @@ class InputProcessingContext:
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
-        mm_config = self.model_config.get_multimodal_config()
-        if mm_config.mm_processor_device == "cuda":
-            # Dropped again by get_allowed_kwarg_only_overrides for processors
-            # that do not accept `device` (i.e. the non-fast, PIL-backed ones).
-            merged_kwargs.setdefault("device", "cuda")
-
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
             merged_kwargs,

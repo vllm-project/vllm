@@ -18,7 +18,6 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
-    MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -390,7 +389,6 @@ class ModelConfig:
     video_pruning_rate: InitVar[float | None] = None
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
-    mm_processor_device: InitVar[MMProcessorDevice] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
@@ -521,7 +519,6 @@ class ModelConfig:
         video_pruning_rate: float | None,
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
-        mm_processor_device: MMProcessorDevice,
         mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -757,7 +754,6 @@ class ModelConfig:
                 video_pruning_rate=video_pruning_rate,
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
-                mm_processor_device=mm_processor_device,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
 

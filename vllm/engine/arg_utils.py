@@ -597,7 +597,7 @@ class EngineArgs:
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
-    mm_processor_device: MMProcessorDevice = MultiModalConfig.mm_processor_device
+    mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
@@ -1356,7 +1356,23 @@ class EngineArgs:
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         multimodal_group.add_argument(
-            "--mm-processor-device", **multimodal_kwargs["mm_processor_device"]
+            "--mm-processor-device",
+            choices=["auto", "cpu", "cuda"],
+            default="auto",
+            help="Device the HF multi-modal processor runs the image/video "
+            "transform on. Convenience for `--mm-processor-kwargs "
+            "'{\"device\": ...}'`: the value is resolved here and stored there, "
+            "it is not kept as separate state. Only takes effect for HF "
+            '"fast" (torchvision-backed) processors, which accept a `device` '
+            "argument; the others ignore it and stay on CPU.\n\n"
+            '"auto" uses the accelerator on encoder instances of an '
+            "encode/prefill/decode deployment -- an EC producer that is not "
+            "also a consumer allocates no KV cache, so its accelerator is not "
+            "contended by the language model -- and then only when "
+            "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
+            "other transport would copy the result back to the host and that "
+            'copy costs more than it saves. "auto" resolves to "cpu" '
+            "everywhere else.",
         )
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
@@ -1674,6 +1690,59 @@ class EngineArgs:
         )
         return engine_args
 
+    def _resolve_mm_processor_device(self) -> None:
+        """Fold `--mm-processor-device` into `mm_processor_kwargs["device"]`.
+
+        The flag is convenience only: no state is kept for it, so this runs once
+        while translating args into configs. "auto" needs both the EC role and
+        the tensor transport, which are only available together here.
+
+        An explicit `device` in `--mm-processor-kwargs` always wins.
+        """
+        if self.mm_processor_device == "cpu":
+            return
+
+        if self.mm_processor_device == "auto":
+            ec_config = self.ec_transfer_config
+            # An EC producer that is not also a consumer runs no decoder and
+            # allocates no KV cache, so frontend work does not compete with the
+            # language model.
+            is_encoder_instance = (
+                ec_config is not None
+                and ec_config.is_ec_producer
+                and not ec_config.is_ec_consumer
+            )
+            if not is_encoder_instance:
+                return
+            # Any other transport serializes host bytes, so the output would be
+            # copied back and the copy costs more than running on device saves.
+            if self.mm_tensor_ipc != "torch_shm":
+                if is_encoder_instance:
+                    logger.info_once(
+                        "EPD encoder instance: keeping the multi-modal "
+                        "processor on CPU because mm_tensor_ipc=%s cannot carry "
+                        "device tensors. Add --mm-tensor-ipc=torch_shm to run "
+                        "it on the accelerator.",
+                        self.mm_tensor_ipc,
+                    )
+                return
+
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda_alike():
+                return
+
+        kwargs = dict(self.mm_processor_kwargs or {})
+        if "device" in kwargs:
+            return
+        kwargs["device"] = "cuda"
+        self.mm_processor_kwargs = kwargs
+        logger.info_once(
+            "Running the multi-modal processor on the accelerator "
+            "(mm_processor_kwargs['device'] = 'cuda'). Override with "
+            "--mm-processor-device=cpu."
+        )
+
     def create_model_config(self) -> ModelConfig:
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
@@ -1683,6 +1752,8 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
+
+        self._resolve_mm_processor_device()
 
         return ModelConfig(
             model=self.model,
@@ -1747,7 +1818,6 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
-            mm_processor_device=self.mm_processor_device,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,

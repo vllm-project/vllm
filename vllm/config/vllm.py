@@ -1492,7 +1492,6 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._resolve_mm_processor_device()
         self._resolve_mm_embeds_out_of_band()
 
         if self.use_v2_model_runner:
@@ -2170,55 +2169,6 @@ class VllmConfig:
             f"compilation_config={self.compilation_config!r}, "
             f"kernel_config={self.kernel_config!r}"
         )
-
-    def _resolve_mm_processor_device(self) -> None:
-        """Turn `mm_processor_device="auto"` into a concrete device.
-
-        "auto" means GPU on EPD encoder instances and CPU everywhere else: an
-        EC producer runs no decoder and allocates no KV cache, so its frontend
-        can use the accelerator, whereas doing this on a prefill/decode
-        instance would put frontend work on the GPU serving the language model.
-        """
-        model_config = self.model_config
-        if model_config is None:
-            return
-        mm_config = model_config.multimodal_config
-        if mm_config is None or mm_config.mm_processor_device != "auto":
-            return
-
-        from vllm.platforms import current_platform
-
-        ec_config = self.ec_transfer_config
-        is_encoder_instance = (
-            ec_config is not None
-            and ec_config.is_ec_producer
-            and not ec_config.is_ec_consumer
-        )
-        # Only worth it when the result can stay on the device: every transport
-        # other than "torch_shm" serializes host bytes, so the processor output
-        # would be copied back, and that copy costs more than running the
-        # transform on the accelerator saves.
-        device_resident_transport = mm_config.mm_tensor_ipc == "torch_shm"
-
-        if (
-            is_encoder_instance
-            and device_resident_transport
-            and current_platform.is_cuda_alike()
-        ):
-            mm_config.mm_processor_device = "cuda"
-            logger.info_once(
-                "EPD encoder instance: running the multi-modal processor on the "
-                "accelerator. Override with --mm-processor-device=cpu."
-            )
-        else:
-            if is_encoder_instance and not device_resident_transport:
-                logger.info_once(
-                    "EPD encoder instance: keeping the multi-modal processor on "
-                    "CPU because mm_tensor_ipc=%s cannot carry device tensors. "
-                    "Add --mm-tensor-ipc=torch_shm to run it on the accelerator.",
-                    mm_config.mm_tensor_ipc,
-                )
-            mm_config.mm_processor_device = "cpu"
 
     def _resolve_mm_embeds_out_of_band(self) -> None:
         """Allow `*_embeds` to be omitted only where they arrive out of band.
