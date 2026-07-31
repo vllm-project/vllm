@@ -916,51 +916,112 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         fp4_dtype = torch.float4_e2m1fn_x2
         e8m0_dtype = torch.float8_e8m0fnu
 
+        # The dequant chain cannot run in place: mxfp4_to_f32 does a
+        # repeat_interleave to split the packed nibbles, then an f32 LUT
+        # gather, so the working tensor grows 8x over the packed weight
+        # before per_1x32_i4_quant shrinks it again. Materializing that for
+        # a whole expert tensor peaks well above 20 GiB per rank, which does
+        # not fit once the weights are resident. Convert a slice of experts
+        # at a time and free each slice before the next, so the transient is
+        # bounded by _CONVERT_CHUNK / num_experts of the full tensor.
+        _CONVERT_CHUNK = 8
+
         def convert(
             weight: torch.nn.Parameter,
             scale: torch.nn.Parameter,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            weight_f32 = fp4_utils.mxfp4_to_f32(weight.data.view(fp4_dtype))
-            scale_f32 = fp4_utils.e8m0_to_f32(scale.data.view(e8m0_dtype))
-            num_experts, output_size, input_size = weight_f32.shape
-            weight_bf16 = (
-                (
-                    weight_f32.view(
-                        num_experts, output_size, input_size // 32, 32
+            # Releases its source parameter before returning: the packed int4
+            # output is the same size as the packed MXFP4 source, so holding
+            # both doubles the expert footprint. Under expert parallel each
+            # rank owns 1/ep_size of the experts and both fit, but under pure
+            # tensor parallel every rank holds all experts and the second copy
+            # does not. The caller must install each result before converting
+            # the next tensor.
+            w_all = weight.data.view(fp4_dtype)
+            s_all = scale.data.view(e8m0_dtype)
+            num_experts = w_all.shape[0]
+
+            # Preallocate the outputs and write each chunk into its slice.
+            # Accumulating chunks in a list and torch.cat-ing at the end holds
+            # the whole result twice at the join, which is what the transient
+            # chunking was meant to avoid in the first place.
+            out_packed: torch.Tensor | None = None
+            out_scale: torch.Tensor | None = None
+            scale_stride = 0
+            for lo in range(0, num_experts, _CONVERT_CHUNK):
+                hi = min(lo + _CONVERT_CHUNK, num_experts)
+                weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
+                scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
+                chunk_experts, output_size, input_size = weight_f32.shape
+                weight_bf16 = (
+                    (
+                        weight_f32.view(
+                            chunk_experts, output_size, input_size // 32, 32
+                        )
+                        * scale_f32.view(
+                            chunk_experts, output_size, input_size // 32, 1
+                        )
                     )
-                    * scale_f32.view(
-                        num_experts, output_size, input_size // 32, 1
-                    )
+                    .view(chunk_experts, output_size, input_size)
+                    .to(torch.bfloat16)
                 )
-                .view(num_experts, output_size, input_size)
-                .to(torch.bfloat16)
-            )
-            del weight_f32, scale_f32
+                del weight_f32, scale_f32
 
-            weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
-            del weight_bf16
-            weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
-                num_experts, output_size, input_size
-            )
-            weight_packed = pack_int8_to_packed_int4(
-                shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
-            )
-            weight_packed = weight_packed.view(
-                num_experts, output_size, input_size // 2
-            ).view(aiter_dtypes.i4x2)
-            weight_scale = (
-                shuffle_scale_for_int4(weight_scale, group_size=32)
-                .view(-1)
-                .contiguous()
-            )
-            return weight_packed, weight_scale
+                weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
+                del weight_bf16
+                weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
+                    chunk_experts, output_size, input_size
+                )
+                weight_packed = pack_int8_to_packed_int4(
+                    shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
+                )
+                del weight_int4
+                chunk_packed = weight_packed.view(
+                    chunk_experts, output_size, input_size // 2
+                ).view(aiter_dtypes.i4x2)
+                chunk_scale = (
+                    shuffle_scale_for_int4(weight_scale, group_size=32)
+                    .view(-1)
+                    .contiguous()
+                )
+                if out_packed is None:
+                    out_packed = torch.empty(
+                        (num_experts,) + tuple(chunk_packed.shape[1:]),
+                        dtype=chunk_packed.dtype,
+                        device=chunk_packed.device,
+                    )
+                    scale_stride = chunk_scale.numel() // chunk_experts
+                    out_scale = torch.empty(
+                        num_experts * scale_stride,
+                        dtype=chunk_scale.dtype,
+                        device=chunk_scale.device,
+                    )
+                out_packed[lo:hi].copy_(chunk_packed)
+                out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
+                del weight_packed, weight_scale, chunk_packed, chunk_scale
+                torch.cuda.empty_cache()
 
+            # Every chunk has been read, so let the source storage go before
+            # the caller converts the next tensor.
+            del w_all, s_all
+            weight.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
+            scale.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
+            torch.cuda.empty_cache()
+            return out_packed, out_scale
+
+        # Install each result before converting the next tensor so only one
+        # source is ever live alongside its output.
         w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
-        w2, w2_scale = convert(layer.w2_weight, layer.w2_weight_scale)
         replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
+        del w13, w13_scale
+        torch.cuda.empty_cache()
+
+        w2, w2_scale = convert(layer.w2_weight, layer.w2_weight_scale)
+        replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
+        del w2, w2_scale
+        torch.cuda.empty_cache()
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
 
