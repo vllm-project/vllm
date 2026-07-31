@@ -95,18 +95,23 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f" and bits: {weight_quant.num_bits}",
                 )
 
-            # Prefer to use the MarlinMoE kernel when it is supported.
+            vllm_config = get_current_vllm_config()
+            moe_backend = vllm_config.kernel_config.moe_backend
             is_actorder = (
                 weight_quant.strategy == QuantizationStrategy.GROUP
                 and weight_quant.actorder
                 in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
             )
-            if (
-                not check_moe_marlin_supports_layer(
+            # The native method is needed for Triton. Other explicit backends
+            # are dispatched by the Marlin wrapper's backend oracle.
+            use_marlin = (
+                moe_backend != "triton"
+                and check_moe_marlin_supports_layer(
                     layer, group_size, allow_tile_padding=not is_actorder
                 )
-                or current_platform.is_rocm()
-            ):
+                and not current_platform.is_rocm()
+            )
+            if not use_marlin:
                 if is_actorder:
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
@@ -122,9 +127,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         )
                     from vllm.platforms.rocm import on_gfx950
 
-                    vllm_config = get_current_vllm_config()
                     is_lora_disabled = vllm_config.lora_config is None
-                    moe_backend = vllm_config.kernel_config.moe_backend
                     if (
                         weight_quant.strategy == QuantizationStrategy.GROUP
                         and weight_quant.type == QuantizationType.INT
