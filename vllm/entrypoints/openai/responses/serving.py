@@ -610,7 +610,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,

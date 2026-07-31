@@ -215,7 +215,7 @@ def iter_response_function_tool_dicts(
                     namespace, namespaced_tool.name
                 )
                 function_tools.append(tool_dict)
-        else:
+        elif isinstance(tool, FunctionTool):
             function_tools.append(tool.model_dump())
     return function_tools
 
