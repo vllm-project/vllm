@@ -48,6 +48,7 @@ Usage:
 import argparse
 import copy
 import gc
+import inspect
 import json
 import statistics
 import sys
@@ -299,6 +300,27 @@ def _reduce(times: list[float], return_mode: str) -> float:
     return _REDUCERS[return_mode](times)
 
 
+def _make_mutated_arg_reset(kernel: Any, inputs: tuple[Any, ...]) -> Callable[[], None]:
+    """Snapshot declared mutable tensor arguments and return a reset hook."""
+    parameter_names = tuple(inspect.signature(kernel.raw_kernel_func).parameters)
+    parameter_indices = {name: index for index, name in enumerate(parameter_names)}
+    snapshots: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    for name in kernel._mutates_args or ():
+        index = parameter_indices[name]
+        value = inputs[index]
+        if isinstance(value, torch.Tensor):
+            snapshots.append(
+                (value, value.detach().clone(memory_format=torch.preserve_format))
+            )
+
+    def reset_inputs() -> None:
+        for value, snapshot in snapshots:
+            value.copy_(snapshot)
+
+    return reset_inputs
+
+
 def _assert_close(actual: object, expected: object, atol: float, rtol: float) -> None:
     """Compare pytrees, allowing the one-ULP FP8 variance used by kernel tests."""
     actual_flat, actual_spec = tree_flatten(actual)
@@ -411,15 +433,67 @@ def check_kernel_correctness(
     return results
 
 
+def do_bench_l2_clear_with_reset(
+    fn: Callable,
+    reset_inputs: Callable[[], None],
+    warmup: int = 25,
+    rep: int = 100,
+    return_mode: str = "mean",
+) -> float:
+    """Benchmark ``fn`` with mutable inputs reset outside the timed interval."""
+    driver = triton.runtime.driver.active
+    device_interface = driver.get_device_interface()
+    cache = driver.get_empty_cache_for_benchmark()
+
+    reset_inputs()
+    driver.clear_cache(cache)
+    start_event = device_interface.Event(enable_timing=True)
+    end_event = device_interface.Event(enable_timing=True)
+    start_event.record()
+    fn()
+    end_event.record()
+    device_interface.synchronize()
+    estimate_ms = start_event.elapsed_time(end_event)
+
+    duration = estimate_ms if estimate_ms > 0 else 1e-3
+    n_warmup = max(1, int(warmup / duration))
+    n_repeat = max(1, int(rep / duration))
+
+    for _ in range(n_warmup):
+        reset_inputs()
+        driver.clear_cache(cache)
+        fn()
+
+    start_events = [device_interface.Event(enable_timing=True) for _ in range(n_repeat)]
+    end_events = [device_interface.Event(enable_timing=True) for _ in range(n_repeat)]
+    for start_event, end_event in zip(start_events, end_events, strict=True):
+        reset_inputs()
+        driver.clear_cache(cache)
+        start_event.record()
+        fn()
+        end_event.record()
+
+    device_interface.synchronize()
+    times = [
+        start.elapsed_time(end)
+        for start, end in zip(start_events, end_events, strict=True)
+    ]
+    return _reduce(times, return_mode)
+
+
 def do_bench_cudagraph_l2_clear(
-    fn: Callable, rep: int = 100, return_mode: str = "mean"
+    fn: Callable,
+    reset_inputs: Callable[[], None],
+    rep: int = 100,
+    return_mode: str = "mean",
 ) -> float:
     """CUDA-graph benchmark that flushes the L2 cache before every call.
 
     ``triton.testing.do_bench_cudagraph`` captures back-to-back kernel launches
     with a warm L2 cache, which over-estimates performance for memory-bound
-    kernels. This clears L2 (via triton's benchmark cache buffer) before each
-    call and subtracts the isolated cache-clear cost from the measured time.
+    kernels. This restores mutable inputs and clears L2 (via triton's benchmark
+    cache buffer) before each call, then subtracts those setup costs from the
+    measured time.
 
     Adapted from tritonbench's ``_do_bench_cudagraph_with_cache_clear`` using
     only triton/torch primitives so no extra dependency is introduced.
@@ -429,6 +503,7 @@ def do_bench_cudagraph_l2_clear(
 
     s = torch.Stream()
     with s:
+        reset_inputs()
         clear_cache()
         fn()
 
@@ -436,6 +511,7 @@ def do_bench_cudagraph_l2_clear(
         end_event = torch.Event(enable_timing=True)
         start_event.record()
         for _ in range(5):
+            reset_inputs()
             clear_cache()
             fn()
         end_event.record()
@@ -446,12 +522,14 @@ def do_bench_cudagraph_l2_clear(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             for _ in range(n_repeat):
+                reset_inputs()
                 clear_cache()
                 fn()
 
         clear_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(clear_graph):
             for _ in range(n_repeat):
+                reset_inputs()
                 clear_cache()
         torch.accelerator.synchronize()
 
@@ -488,9 +566,9 @@ def benchmark(
     return_mode: str,
 ) -> list[Row]:
     kernel = get_kernel_by_name(kernel_name)
-    # do_bench already flushes L2 per call; do_bench_cudagraph does not, so use
-    # the cache-clearing variant to avoid warm-L2 over-estimates.
-    benchmark_fn = do_bench_cudagraph_l2_clear if cudagraph else triton.testing.do_bench
+    benchmark_fn = (
+        do_bench_cudagraph_l2_clear if cudagraph else do_bench_l2_clear_with_reset
+    )
 
     inputs_dict = kernel.get_inputs()
     rows: list[Row] = []
@@ -504,14 +582,18 @@ def benchmark(
         # Kernels may mutate their inputs in place; give each side its own copy.
         kernel_inputs = copy.deepcopy(inputs)
         baseline_inputs = copy.deepcopy(inputs)
+        reset_kernel_inputs = _make_mutated_arg_reset(kernel, kernel_inputs)
+        reset_baseline_inputs = _make_mutated_arg_reset(kernel, baseline_inputs)
 
         kernel_latency = benchmark_fn(
             lambda kernel_inputs=kernel_inputs: kernel(*kernel_inputs),
+            reset_inputs=reset_kernel_inputs,
             rep=repeat,
             return_mode=return_mode,
         )
         baseline_latency = benchmark_fn(
             lambda baseline_inputs=baseline_inputs: baseline_fn(*baseline_inputs),
+            reset_inputs=reset_baseline_inputs,
             rep=repeat,
             return_mode=return_mode,
         )
