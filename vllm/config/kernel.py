@@ -214,12 +214,16 @@ class KernelConfig:
     """
 
     linear_backend: LinearBackend = "auto"
-    """Backend for quantized linear layer GEMM kernels. Available options:
+    """Backend for linear layer GEMM kernels. Available options:
+
+    Layer types without an implementation from the requested backend use
+    automatic selection.
 
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
-    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels (NVFP4, MXFP8)
+    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels
+      (BF16, NVFP4, MXFP8)
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
