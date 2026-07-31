@@ -171,17 +171,23 @@ def test_pooling_runner_releases_aborted_late_interaction_doc() -> None:
     assert not late_interaction_runner._doc_query_keys
 
 
-def test_model_runner_cache_resets_clear_late_interaction_state() -> None:
+def test_encoder_cache_reset_clears_late_interaction_state() -> None:
+    # Cached query embeddings are only invalidated by weight reloads, which
+    # reach the runner via reset_encoder_cache. Resetting the multi-modal
+    # cache is unrelated and must leave them intact.
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.encoder_cache = MagicMock()
     runner.pooling_runner = MagicMock()
 
     runner.reset_mm_cache()
-    runner.reset_encoder_cache()
 
     runner.encoder_cache.reset_mm_cache.assert_called_once_with()
+    runner.pooling_runner.clear.assert_not_called()
+
+    runner.reset_encoder_cache()
+
     runner.encoder_cache.reset_encoder_cache.assert_called_once_with()
-    assert runner.pooling_runner.clear.call_count == 2
+    runner.pooling_runner.clear.assert_called_once_with()
 
 
 def test_pooling_runner_rejects_unsupported_selected_task() -> None:

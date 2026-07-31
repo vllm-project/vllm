@@ -738,8 +738,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
-        if self.pooling_runner is not None:
-            self.pooling_runner.clear()
 
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:
