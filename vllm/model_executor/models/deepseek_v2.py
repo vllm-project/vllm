@@ -855,11 +855,16 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    if scale_inv.ndim == 1:
+        # Per-channel scale: one scale per row of [out, in]
+        group_shape = GroupShape(1, weight_fp8.shape[1])
+    else:
+        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+        group_shape = GroupShape(block_size, block_size)
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
-        group_shape=GroupShape(block_size, block_size),
+        group_shape=group_shape,
         out_dtype=torch.bfloat16,
     )
 
@@ -982,6 +987,7 @@ class DeepseekV2MLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         reduce_results: bool = True,
+        non_causal_multi_token_decode: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1177,6 +1183,10 @@ class DeepseekV2MLAAttention(nn.Module):
             # the V1 proposer. A frozen True would leave the draft reading a
             # never-written topk buffer.
             skip_topk=_skip_topk and not is_mtp_layer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
+            # Do not skip scoring for MTP layers: their top-k buffer may be
+            # reused by later draft iterations through index sharing.
+            allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
 
     def forward(
@@ -1477,8 +1487,6 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
-                # fused_add_rms_norm requires a contiguous residual
-                residual = residual.contiguous()
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
@@ -1503,8 +1511,6 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
-            # fused_add_rms_norm requires a contiguous residual
-            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)

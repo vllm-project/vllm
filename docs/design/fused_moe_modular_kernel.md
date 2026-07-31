@@ -242,4 +242,4 @@ See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2a
 
 ## FusedMoEExpertsModular
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-experts-kernels) for a list of all the available modular experts.
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-experts-kernels) for a list of all the available modular experts.
