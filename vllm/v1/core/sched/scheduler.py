@@ -1699,7 +1699,7 @@ class Scheduler(SchedulerInterface):
                 routing_offsets[request_id] = offset
                 offset += num_scheduled_tokens[request_id]
 
-        if self.routed_experts_sidecar is not None:
+        if self.enable_return_routed_experts and self.routed_experts_sidecar is not None:
             connector_metadata = scheduler_output.kv_connector_metadata
             if connector_metadata is not None:
                 transfers = self.routed_experts_sidecar.get_block_sidecar_transfers(
