@@ -365,7 +365,8 @@ class NixlBaseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.pcp_rank = get_pcp_group().rank_in_group
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
         self.local_worker_key: tuple[int, int] = (self.tp_rank, self.dcp_rank)
 
