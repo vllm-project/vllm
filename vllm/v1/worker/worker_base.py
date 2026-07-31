@@ -34,6 +34,10 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
+    # GPU memory (bytes) consumed by warmup and CUDA graph capture beyond the
+    # profiled baseline; used by the extensible KV cache flow to compute the
+    # final KV cache size from actual usage.
+    warmup_memory: int = 0
 
 
 class WorkerBase:
@@ -99,11 +103,20 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def extend_kv_cache(self, kv_cache_config: Any) -> None:
+        raise RuntimeError(
+            f"{self.__class__.__name__} does not support extensible KV cache."
+        )
+
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        """Return why this worker cannot use the extensible KV cache, or None."""
+        return f"not supported by {self.__class__.__name__}"
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            Compilation times in seconds and warmup memory in bytes.
         """
         raise NotImplementedError
 
@@ -318,11 +331,28 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
 
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_configs: list[Any],
+        extensible: bool = False,
+    ) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
-            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+            if extensible:
+                # Only forward the kwarg when set: worker classes that don't
+                # support the extensible KV cache keep the plain signature.
+                self.worker.initialize_from_config(  # type: ignore
+                    kv_cache_config, extensible=True
+                )
+            else:
+                self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
+    def extend_kv_cache(self, kv_cache_configs: list[Any]) -> None:
+        kv_cache_config = kv_cache_configs[self.global_rank]
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.extend_kv_cache(kv_cache_config)  # type: ignore
 
     def init_device(self):
         assert self.vllm_config is not None

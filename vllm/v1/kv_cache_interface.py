@@ -259,6 +259,35 @@ def compute_layer_kv_cache_shape_bytes(
     return (num_blocks, spec.num_heads, ns, spec.state_content_size_bytes)
 
 
+def num_outer_segments(
+    spec: KVCacheSpec,
+    num_layer_slots: int,
+    layout: KVCacheLayout,
+) -> int:
+    """Number of equal contiguous segments of a KV cache tensor's physical
+    layout that each hold a contiguous run of blocks: the product of the
+    physical dims outer to the block dim. Within each segment, block ``b``
+    occupies bytes ``[b * S, (b + 1) * S)`` where
+    ``S = bytes_per_block / num_segments``, so a grow-only backing (the
+    extensible KV cache) can commit a per-segment prefix of blocks.
+
+    ``layout.stride_order`` is authoritative for every spec: layouts that
+    hoist dims outside the block dim (e.g. LHBNC for separate K/V head
+    groups) are declared by the backend, and ``spec.num_heads`` already
+    reflects the physical H dim (2 for separate K/V groups).
+    """
+    segments = 1
+    for dim in layout.stride_order:
+        if dim == _DIM_B:
+            return segments
+        if dim == _DIM_L:
+            segments *= num_layer_slots
+        else:
+            assert dim == _DIM_H
+            segments *= spec.num_heads
+    raise AssertionError(f"No block dim in stride order {layout.stride_order}")
+
+
 def reshape_kv_cache(
     raw: torch.Tensor,
     spec: KVCacheSpec,

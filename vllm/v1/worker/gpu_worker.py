@@ -176,6 +176,10 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
+        # Set by initialize_from_config when the extensible KV cache defers
+        # KV transfer init until the final cache size is committed.
+        self._deferred_kv_transfer_init = False
+
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
@@ -191,6 +195,17 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
+        extensible_kv_buffers = self.model_runner.extensible_kv_buffers
+        if (
+            extensible_kv_buffers is not None
+            and self.vllm_config.kv_transfer_config is not None
+        ):
+            raise RuntimeError(
+                "Sleep mode with an extensible KV cache and a KV connector is "
+                "not supported: waking remaps physical pages and invalidates "
+                "the connector's memory registration."
+            )
+
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -207,6 +222,11 @@ class Worker(WorkerBase):
                 }
 
         self._get_sleep_mode_backend().suspend(level)
+
+        # The extensible KV cache lives outside the torch/CuMem allocators;
+        # discard its physical memory directly (VA and views stay valid).
+        if extensible_kv_buffers is not None:
+            extensible_kv_buffers.release_physical()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -246,6 +266,9 @@ class Worker(WorkerBase):
             self._sleep_saved_draft_buffers = {}
 
         if tags is None or "kv_cache" in tags:
+            extensible_kv_buffers = self.model_runner.extensible_kv_buffers
+            if extensible_kv_buffers is not None:
+                extensible_kv_buffers.recommit()
             self.model_runner.post_kv_cache_wake_up()
 
     def checkpoint_prepare(self) -> None:
@@ -514,6 +537,7 @@ class Worker(WorkerBase):
         if (
             current_platform.is_cuda_alike()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and not self.cache_config.enable_extensible_kv_cache
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
@@ -648,7 +672,11 @@ class Worker(WorkerBase):
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     @instrument(span_name="Allocate KV cache")
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_config: KVCacheConfig,
+        extensible: bool = False,
+    ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
         # Update local config with adjusted num blocks after profiling,
@@ -660,10 +688,20 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        # With the extensible KV cache, connectors must not register the KV
+        # cache memory before its final size is committed, so KV transfer
+        # init is deferred to `extend_kv_cache` (which receives the final,
+        # pristine kv_cache_config).
+        self._deferred_kv_transfer_init = (
+            extensible and self.vllm_config.kv_transfer_config is not None
+        )
+        if not self._deferred_kv_transfer_init:
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config, extensible=extensible
+            )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -675,6 +713,33 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def extend_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """Commit the final KV cache size after warmup (extensible flow)."""
+        num_blocks = kv_cache_config.num_blocks
+        self.cache_config.num_gpu_blocks = num_blocks
+        # Defragment when a connector will register the memory: UCX cannot
+        # transfer regions spanning multiple VMM allocation handles.
+        self.model_runner.extend_kv_cache(
+            num_blocks, defragment=self._deferred_kv_transfer_init
+        )
+        if self._deferred_kv_transfer_init:
+            # The final size is committed; now the connector may register the
+            # (physically backed) KV cache memory.
+            ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+            from vllm.v1.worker.gpu.model_runner import (
+                GPUModelRunner as GPUModelRunnerV2,
+            )
+
+            # Deferred KV transfer init is gated to the V2 runner in
+            # EngineCore._initialize_kv_caches.
+            assert isinstance(self.model_runner, GPUModelRunnerV2)
+            self.model_runner.init_deferred_kv_connector()
+
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        from vllm.utils.vmm_driver import vmm_unavailable_reason
+
+        return vmm_unavailable_reason()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -816,6 +881,31 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
+        warmup_memory_bytes = cuda_graph_memory_bytes
+        if self.cache_config.enable_extensible_kv_cache and hasattr(
+            self, "available_kv_cache_memory_bytes"
+        ):
+            # With the extensible KV cache, only a small prefix of the KV cache
+            # is committed so far, so the current memory usage reflects
+            # everything else at its post-warmup state: weights, CUDA graphs,
+            # NCCL buffers, and the allocator segments retained from the
+            # worst-case warmup batches (which can far exceed the profiled
+            # activation peak, e.g. with speculative decoding). Report the
+            # measured excess over the profiling estimate so the final KV cache
+            # size is computed from actual usage.
+            torch.accelerator.synchronize()
+            free_memory, _ = torch.accelerator.get_memory_info()
+            non_kv_used_memory = (
+                self.init_snapshot.free_memory
+                - free_memory
+                - self.model_runner.kv_cache_committed_bytes
+            )
+            post_warmup_available = int(self.requested_memory) - non_kv_used_memory
+            warmup_memory_bytes = max(
+                cuda_graph_memory_bytes,
+                int(self.available_kv_cache_memory_bytes) - post_warmup_available,
+            )
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -855,6 +945,7 @@ class Worker(WorkerBase):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+            warmup_memory=warmup_memory_bytes,
         )
 
     def reset_mm_cache(self) -> None:

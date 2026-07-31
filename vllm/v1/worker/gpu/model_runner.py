@@ -53,6 +53,7 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -73,6 +74,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    narrow_kv_caches_to_num_blocks,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import (
@@ -284,6 +286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.extensible_kv_buffers: ExtensibleKVCacheBuffers | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -450,7 +453,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return {}
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, extensible: bool = False
+    ) -> None:
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+        self.extensible_kv_buffers = None
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -547,7 +555,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
+        kv_caches_dict, self.extensible_kv_buffers = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -555,8 +563,64 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.kernel_block_sizes,
             vllm_config=self.vllm_config,
+            extensible=extensible,
         )
+        self._kv_caches_dict = kv_caches_dict
+        # With the extensible flow, KV transfer init is deferred until the
+        # final KV cache size is committed, so this yields a no-op connector
+        # that init_deferred_kv_connector later replaces.
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def init_deferred_kv_connector(self) -> None:
+        """Create and register the KV connector after `extend_kv_cache`.
+
+        With the extensible KV cache, connectors must not register the cache
+        before its final size is physically committed. Registration views are
+        narrowed to the committed block count so connectors only see (and
+        register with e.g. RDMA) backed memory.
+        """
+        assert self.extensible_kv_buffers is not None
+        kv_caches = narrow_kv_caches_to_num_blocks(
+            self._kv_caches_dict,
+            [g for groups in self.attn_groups for g in groups],
+            self.kernel_block_sizes,
+            self.kv_cache_config.num_blocks,
+        )
+        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches)
+
+    def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
+        """Commit at least `num_blocks` KV blocks when the extensible KV cache
+        is in use (no-op otherwise). Warmup paths call this before executing
+        batches that write to a prefix of real block IDs.
+        """
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.commit(
+                min(num_blocks, self.extensible_kv_buffers.num_blocks_capacity)
+            )
+
+    def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
+        """Commit physical pages so the KV cache holds `num_blocks` blocks.
+
+        Grows the KV cache after warmup and CUDA graph capture, once the
+        actual available memory is known. No re-view is needed: the layers
+        already view the full reserved capacity and each block stays at a
+        fixed offset within its layout segment, so captured graphs stay valid
+        as more pages are mapped under the stable base pointer. Newly
+        committed blocks are zeroed. `defragment` discards the warmup-time
+        commits so each segment is backed by a single physical allocation
+        (required before KV-transfer registration).
+        """
+        if self.extensible_kv_buffers is None:
+            raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
+        self.extensible_kv_buffers.commit(num_blocks, defragment=defragment)
+        self.kv_cache_config.num_blocks = num_blocks
+        logger.info("Extended KV cache to %d blocks.", num_blocks)
+
+    @property
+    def kv_cache_committed_bytes(self) -> int:
+        """Physically committed KV cache bytes (0 without extensible KV)."""
+        buffers = self.extensible_kv_buffers
+        return buffers.physical_bytes if buffers is not None else 0
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1707,6 +1771,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+            self.extensible_kv_buffers = None
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

@@ -177,7 +177,7 @@ def test_allocate_compressed_mla_cache(
         kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
     )
 
-    caches = _allocate_and_reshape_kv_cache(
+    caches, _ = _allocate_and_reshape_kv_cache(
         config,
         torch.device("cpu"),
         layout=KVCacheLayout.LBHNC,

@@ -1348,6 +1348,12 @@ class FlexAttentionImpl(AttentionImpl):
 
         else:
             assert self.attn_type == AttentionType.DECODER
+            if 0 < attn_metadata.num_blocks < kv_cache.shape[0]:
+                # The runner's cache view can span more blocks than the KV
+                # cache holds (the extensible KV cache reserves an upper
+                # bound); the block mask covers exactly total_cache_tokens,
+                # so narrow the view to match.
+                kv_cache = kv_cache[: attn_metadata.num_blocks]
             kv_cache = kv_cache.transpose(1, 2)
             key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 

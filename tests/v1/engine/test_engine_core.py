@@ -252,8 +252,12 @@ def test_engine_core_concurrent_batches():
         return request
 
     class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
+        def initialize_from_config(
+            self,
+            kv_cache_configs: list[KVCacheConfig],
+            extensible: bool = False,
+        ) -> None:
+            super().initialize_from_config(kv_cache_configs, extensible=extensible)
 
             # Create a thread pool with a single worker
             self.thread_pool = ThreadPoolExecutor(max_workers=1)
