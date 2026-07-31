@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -860,6 +861,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_args,
         )
         AiterMLAHelper.check_num_heads_validity(num_heads)
+
+        # Decode with fewer than 16 heads is served by AITER's Gluon MLA
+        # kernel. Its fp8 KV regime (bh16bn128) takes a bf16 query and folds
+        # the KV dequant scale into the QK temperature, so a pre-quantized
+        # query is rejected with "q_nope/q_pe must be bf16". Tell the common
+        # layer to leave the query alone, as TritonMLAImpl already does for
+        # its own fp8 KV path.
+        if num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS and is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ):
+            self.supports_quant_query_input = False
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
