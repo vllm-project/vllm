@@ -24,7 +24,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -101,10 +101,6 @@ class InputProcessor:
             )
 
             if self.model_config.enable_return_sampling_mask:
-                if params.output_kind != RequestOutputKind.FINAL_ONLY:
-                    raise ValueError(
-                        "sampling distribution replay requires output_kind=FINAL_ONLY"
-                    )
                 if params.temperature <= 0:
                     raise ValueError(
                         "sampling distribution replay requires temperature > 0"
