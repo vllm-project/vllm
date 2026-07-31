@@ -13,6 +13,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported,
+)
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -220,7 +223,9 @@ class K3DSparkModel(nn.Module):
     def _build_fused_context_kv_buffers(self) -> None:
         """Build a cross-layer KV-only A projection after checkpoint loading."""
         if self.quant_config is not None:
-            self._context_kv_fusion_available = False
+            self._context_kv_fusion_available = (
+                self._build_quantized_context_kv_buffers()
+            )
             return
 
         attentions = [layer.self_attn for layer in self.layers]
@@ -270,6 +275,68 @@ class K3DSparkModel(nn.Module):
         )
         self._context_kv_fusion_available = True
 
+    def _build_quantized_context_kv_buffers(self) -> bool:
+        """Pack post-load per-tensor/channel FP8 KV columns across layers."""
+        if not cutlass_fp8_supported():
+            return False
+        attentions = [layer.self_attn for layer in self.layers]
+        if not attentions:
+            return False
+
+        attn0 = attentions[0]
+        assert attn0.q_lora_rank is not None
+        kv_width = attn0.kv_lora_rank + attn0.qk_rope_head_dim
+        kv_weights = []
+        kv_scales = []
+        for attn in attentions:
+            proj = attn.fused_qkv_a_proj
+            if proj is None or attn.q_lora_rank is None:
+                return False
+            output_width = attn.q_lora_rank + kv_width
+            weight = proj.weight.detach()
+            weight_scale = getattr(proj, "weight_scale", None)
+            if (
+                attn.q_lora_rank != attn0.q_lora_rank
+                or attn.kv_lora_rank != attn0.kv_lora_rank
+                or attn.qk_rope_head_dim != attn0.qk_rope_head_dim
+                or weight.dtype != torch.float8_e4m3fn
+                or weight.shape != (attn.hidden_size, output_width)
+                or weight_scale is None
+                or getattr(proj, "input_scale", None) is not None
+            ):
+                return False
+
+            # only fetch kv from weight, ignoring q which is not used
+            start = attn.q_lora_rank
+            kv_weights.append(weight[:, start : start + kv_width].t())
+            flat_scale = weight_scale.detach().float().reshape(-1)
+            if flat_scale.numel() == 1:
+                kv_scales.append(flat_scale.expand(kv_width))
+            elif flat_scale.numel() == output_width:
+                kv_scales.append(flat_scale[start : start + kv_width])
+            else:
+                return False
+
+        # fuse all layers to a big fused kv weight
+        self._fused_context_kv_weight = torch.cat(kv_weights, dim=0).contiguous().t()
+        self._fused_context_kv_weight_scale = (
+            torch.cat(kv_scales).contiguous().view(1, -1)
+        )
+        self._context_kv_norm_weights = torch.stack(
+            [attn.kv_a_layernorm.weight.detach() for attn in attentions], dim=0
+        ).contiguous()
+        self._num_context_layers = len(attentions)
+        self._context_kv_width = kv_width
+        self._context_kv_lora_rank = attn0.kv_lora_rank
+        self._context_rope_dim = attn0.qk_rope_head_dim
+        self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
+        self._context_positions_repeated = torch.empty(
+            self._num_context_layers * self._max_num_context_tokens,
+            dtype=torch.int64,
+            device=self._fused_context_kv_weight.device,
+        )
+        return True
+
     def _precompute_fused_context_kv(
         self,
         context_states: torch.Tensor,
@@ -281,7 +348,20 @@ class K3DSparkModel(nn.Module):
 
         # One KV-only GEMM replaces five full Q+KV GEMMs. For K3 this projects
         # 5*576 rows rather than 5*2112 rows (72.7% fewer A-projection FLOPs).
-        all_kv = F.linear(context_states, self._fused_context_kv_weight)
+        weight_scale = getattr(self, "_fused_context_kv_weight_scale", None)
+        if weight_scale is None:
+            all_kv = F.linear(context_states, self._fused_context_kv_weight)
+        else:
+            context_fp8, context_scale = ops.scaled_fp8_quant(
+                context_states, use_per_token_if_dynamic=True
+            )
+            all_kv = ops.cutlass_scaled_mm(
+                context_fp8,
+                self._fused_context_kv_weight,
+                context_scale,
+                weight_scale,
+                context_states.dtype,
+            )
         all_kv = all_kv.view(num_ctx, num_layers, self._context_kv_width)
         all_kv_c = all_kv[..., : self._context_kv_lora_rank]
         all_k_pe = all_kv[..., self._context_kv_lora_rank :]
@@ -517,5 +597,6 @@ class K3DSparkForCausalLM(nn.Module):
             skip_substrs=list(self.checkpoint_skip_substrs),
         )
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.model._build_fused_context_kv_buffers()
+        if self.model.quant_config is None:
+            self.model._build_fused_context_kv_buffers()
         return loaded_weights

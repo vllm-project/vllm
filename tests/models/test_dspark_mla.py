@@ -135,9 +135,56 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
     vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(hf_config=config)
-        )
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
     )
 
     K3DSparkModel(vllm_config=vllm_config, start_layer_id=0, prefix="model")
 
     assert len(markov_head_calls) == 1
+
+
+def test_quantized_context_kv_packs_only_fp8_columns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    hidden_size, q_width, kv_width = 8, 4, 4
+    attentions = []
+    for scale in (0.25, 0.5):
+        weight = torch.arange(
+            hidden_size * (q_width + kv_width), dtype=torch.float32
+        ).view(hidden_size, q_width + kv_width)
+        attentions.append(
+            SimpleNamespace(
+                hidden_size=hidden_size,
+                q_lora_rank=q_width,
+                kv_lora_rank=3,
+                qk_rope_head_dim=1,
+                fused_qkv_a_proj=SimpleNamespace(
+                    weight=weight.to(torch.float8_e4m3fn),
+                    weight_scale=torch.tensor(scale),
+                    input_scale=None,
+                ),
+                kv_a_layernorm=SimpleNamespace(
+                    weight=torch.ones(3), variance_epsilon=1e-5
+                ),
+            )
+        )
+
+    model = object.__new__(K3DSparkModel)
+    nn.Module.__init__(model)
+    model.layers = [SimpleNamespace(self_attn=attn) for attn in attentions]
+    model.quant_config = object()
+    model._max_num_context_tokens = 16
+    monkeypatch.setattr(dspark_mla, "cutlass_fp8_supported", lambda: True)
+
+    model._build_fused_context_kv_buffers()
+
+    expected = torch.cat(
+        [attn.fused_qkv_a_proj.weight[:, q_width:].t() for attn in attentions]
+    ).t()
+    assert model._context_kv_fusion_available
+    assert torch.equal(model._fused_context_kv_weight, expected)
+    torch.testing.assert_close(
+        model._fused_context_kv_weight_scale,
+        torch.tensor([[0.25] * kv_width + [0.5] * kv_width]),
+    )
