@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+from itertools import product
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,30 +31,59 @@ def _kv_cache_block_regions(
 
     The DMA backend copies whole blocks by address arithmetic
     (``base + block_id * stride(0)``), so every region must hold one scheduler
-    block's bytes contiguously. ``reshape_kv_cache`` lays each allocation out
-    as a dense stack of such tiles: dimensions physically outside B (layers in
-    a layer-compact layout, head groups under LHBNC) only select a tile, and
+    block's bytes contiguously. Each per-layer view contributes one tile per
+    combination of dims physically outside B (head groups under LHBNC);
     virtual block splitting widens ``block_bytes``.
     """
     regions: dict[str, torch.Tensor] = {}
-    seen: set[tuple[torch.device, int]] = set()
+    seen: set[tuple[torch.device, int, int]] = set()
     for name, tensor in kv_caches.items():
-        storage = tensor.untyped_storage()
-        key = (tensor.device, storage.data_ptr())
-        if key in seen:
-            continue
-        seen.add(key)
-
         physical_per_block, remainder = divmod(tensor.shape[0], num_blocks)
         assert remainder == 0, (
             f"KV cache {name!r} has {tensor.shape[0]} physical blocks, which "
             f"is not divisible by {num_blocks} scheduler blocks"
         )
-        block_bytes = tensor.stride(0) * tensor.element_size() * physical_per_block
-        raw = torch.empty(0, dtype=torch.uint8, device=tensor.device).set_(storage)
-        tiles = raw.view(-1, num_blocks, block_bytes)
-        for tile_idx, tile in enumerate(tiles):
-            regions[name if len(tiles) == 1 else f"{name}.{tile_idx}"] = tile
+        element_size = tensor.element_size()
+        block_bytes = tensor.stride(0) * element_size * physical_per_block
+        storage = tensor.untyped_storage()
+        base = tensor.storage_offset() * element_size
+        # Layers aliasing the same bytes (packed block-major layouts, KV
+        # sharing) are copied once.
+        key = (tensor.device, storage.data_ptr(), base)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Tile geometry comes from the view, never from storage.nbytes():
+        # with the extensible KV cache the storage spans the reserved
+        # virtual-address capacity, not the committed extent the views cover.
+        raw = torch.empty(0, dtype=torch.uint8, device=tensor.device).set_(
+            storage, 0, (storage.nbytes(),)
+        )
+        # Dimensions physically outside the block dim (head groups under
+        # LHBNC) select independent tiles within this view.
+        outer_dims = [
+            dim
+            for dim in range(1, tensor.ndim)
+            if tensor.shape[dim] > 1
+            and tensor.stride(dim) * element_size >= block_bytes
+        ]
+        outer_indices = (
+            product(*(range(tensor.shape[dim]) for dim in outer_dims))
+            if outer_dims
+            else [()]
+        )
+        for tile_idx, indices in enumerate(outer_indices):
+            offset = base + sum(
+                index * tensor.stride(dim) * element_size
+                for dim, index in zip(outer_dims, indices)
+            )
+            end = offset + num_blocks * block_bytes
+            assert end <= storage.nbytes(), (
+                f"KV cache region for {name!r} exceeds its backing storage"
+            )
+            region = raw[offset:end].view(num_blocks, block_bytes)
+            regions[name if not outer_dims else f"{name}.{tile_idx}"] = region
 
     return regions
 
