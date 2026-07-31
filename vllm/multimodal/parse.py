@@ -255,29 +255,69 @@ class DictEmbeddingItems(
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
+        out_of_band_fields: Set[str] = frozenset(),
+        allow_out_of_band: bool = False,
     ) -> None:
+        """
+        Args:
+            data: The dictionary of tensors for this modality.
+            modality: The modality these items belong to.
+            required_fields: Fields the data must always contain. For an item
+                that carries pre-computed embeddings this is the metadata that
+                sizes the prompt's placeholder range, e.g. `"image_grid_thw"`.
+            fields_factory: Builds the field config from the data.
+            out_of_band_fields: Fields whose values reach the engine through a
+                channel other than this request -- an encode/prefill/decode
+                encoder instance publishes embeddings through the EC connector
+                -- so they may be absent from `data` when `allow_out_of_band`
+                is set. Declared explicitly rather than matched by name so the
+                class never has to guess which key holds the embeddings.
+            allow_out_of_band: Whether out-of-band delivery is actually in
+                effect, i.e. whether this instance consumes an EC connector.
+        """
         from transformers.feature_extraction_utils import BatchFeature
 
         super().__init__(data, modality)
 
-        missing_required_data_keys = required_fields - data.keys()
+        declared_fields = required_fields | set(out_of_band_fields)
+
+        # Relaxing the last field would leave nothing to size the placeholder
+        # range from, so the item would parse into zero entries and silently
+        # produce a wrong prompt instead of failing here.
+        if (
+            allow_out_of_band
+            and (set(out_of_band_fields) - data.keys())
+            and not required_fields
+        ):
+            raise ValueError(
+                f"Cannot accept {modality!r} embeddings out of band: "
+                f"{sorted(out_of_band_fields)} are the only declared fields, so "
+                "nothing left in the request sizes the placeholder range. The "
+                "sizing metadata has to be listed in `required_fields`."
+            )
+
+        effective_required = required_fields if allow_out_of_band else declared_fields
+
+        missing_required_data_keys = effective_required - data.keys()
         if missing_required_data_keys:
             data_keys = set(data.keys())
             msg = (
-                f"The data should contain the fields: {required_fields}, "
+                f"The data should contain the fields: {effective_required}, "
                 f"but only found the following keys: {data_keys}"
             )
             raise ValueError(msg)
 
         fields_config = fields_factory(data)
-        missing_required_fields = required_fields - fields_config.keys()
+        # Check every declared field, not just the effective ones: a field that
+        # is optional today still needs a config for when it is supplied.
+        missing_required_fields = declared_fields - fields_config.keys()
         if missing_required_fields:
             fields = set(fields_config.keys())
-            msg = f"{required_fields=} should be a subset of {fields=}"
+            msg = f"{declared_fields=} should be a subset of {fields=}"
             raise ValueError(msg)
 
         self.fields_config = fields_config
-        self.required_fields = required_fields
+        self.required_fields = effective_required
 
         self._kwargs = MultiModalKwargsItems.from_hf_inputs(
             BatchFeature(dict(data)),
@@ -545,22 +585,6 @@ class MultiModalDataParser:
         self.target_channels = target_channels
         self.video_needs_metadata = video_needs_metadata
         self.expected_hidden_size = expected_hidden_size
-
-    def embedding_required_fields(self, embeds_key: str, *others: str) -> set[str]:
-        """Required fields for a `DictEmbeddingItems`, minus out-of-band embeds.
-
-        `embeds_key` is dropped when the embeddings arrive out of band (EPD:
-        published by the encoder instance through the EC connector), leaving
-        only the metadata the frontend needs to size the placeholder range.
-
-        Args:
-            embeds_key: The embedding field, e.g. `"image_embeds"`.
-            others: Fields that are always required, e.g. `"image_grid_thw"`.
-        """
-        fields = set(others)
-        if not self.allow_out_of_band_embeds:
-            fields.add(embeds_key)
-        return fields
 
     @classmethod
     def is_embeddings(

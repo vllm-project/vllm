@@ -1522,7 +1522,9 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields={"image_grid_thw"},
+                out_of_band_fields={"image_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_create_field_factory(self._spatial_merge_size),
             )
         return super()._parse_image_data(data)

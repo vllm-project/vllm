@@ -478,7 +478,9 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
         super().__init__(
             data,
             modality="image",
-            required_fields={"image_embeds", "image_sizes"},
+            required_fields={"image_sizes"},
+            out_of_band_fields={"image_embeds"},
+            allow_out_of_band=self.allow_out_of_band_embeds,
             fields_factory=fields_factory,
         )
 
@@ -499,7 +501,9 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
         super().__init__(
             data,
             modality="video",
-            required_fields={"video_embeds", "video_image_sizes"},
+            required_fields={"video_image_sizes"},
+            out_of_band_fields={"video_embeds"},
+            allow_out_of_band=self.allow_out_of_band_embeds,
             fields_factory=fields_factory,
         )
 

@@ -807,9 +807,9 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=self.embedding_required_fields(
-                    "image_embeds", "image_grid_thw"
-                ),
+                required_fields={"image_grid_thw"},
+                out_of_band_fields={"image_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -823,9 +823,9 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields=self.embedding_required_fields(
-                    "video_embeds", "video_grid_thw"
-                ),
+                required_fields={"video_grid_thw"},
+                out_of_band_fields={"video_embeds"},
+                allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
