@@ -408,20 +408,14 @@ class DFlashQwen3Model(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
-        # An all-sliding drafter makes the model's prefix-cache hash granularity
-        # unsatisfiable: it has to divide the target's block size and be a whole
-        # multiple of the drafter's at the same time, because
-        # SlidingWindowManager refuses partial hits. Booking the drafter's KV as
-        # full attention routes it to FullAttentionManager instead, which does
-        # support them. The window stays on the spec and is still applied by the
-        # kernel; only the block accounting changes.
+        # An all-sliding drafter makes the prefix-cache hash granularity
+        # unsatisfiable, since SlidingWindowManager refuses partial hits.
+        # FullAttentionManager serves them; the window stays on the spec and is
+        # still applied by the kernel, so only block accounting changes. The
+        # mixed case is already handled by `_dflash_needs_multi_kv_group`.
         #
-        # Derived rather than flagged, on two conditions. A drafter that *mixes*
-        # sliding and full attention is already handled by
-        # `_dflash_needs_multi_kv_group`; this is the case that gate excludes.
-        # And with prefix caching off there is nothing to gain, while the
-        # conversion still costs KV capacity -- a full-attention group is
-        # budgeted at max_model_len rather than at the window.
+        # Gated on prefix caching because the conversion costs KV capacity: a
+        # full-attention group is budgeted at max_model_len, not at the window.
         swa_layers = [
             layer.self_attn.attn
             for layer in self.layers

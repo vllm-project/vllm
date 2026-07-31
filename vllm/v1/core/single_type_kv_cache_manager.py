@@ -952,11 +952,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # group that only supports block-aligned lookup.
         # TODO: supporting them here would let a mamba-"align" + sliding-window
         # model keep its partial hits instead of falling back. It needs a
-        # block-size view for the contiguous-run scan alongside the raw hashes
-        # (as FullAttentionManager keeps), a partial-tail cache entry to match
-        # against, a `reachable_block_mask` that accepts a sub-block alignment,
-        # and a contiguous-block requirement computed from the partial tail
-        # length rather than once from the window.
+        # block-size view for the scan, a partial-tail cache entry, a
+        # sub-block-aligned `reachable_block_mask`, and a contiguous-block
+        # requirement derived from the tail length rather than the window.
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )

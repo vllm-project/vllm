@@ -317,12 +317,9 @@ class Scheduler(SchedulerInterface):
         # A finer prefix_match_unit is configured: a mamba partial tail entry
         # can only be registered by a step ending exactly at the prompt's last
         # hash boundary, so the split adds that stop.
-        # Ask the coordinator rather than recomputing: the sub-block stop this
-        # gates exists solely so a mamba partial-tail entry can be registered,
-        # and the coordinator may have disabled fine-grained hits for a reason
-        # this expression cannot see (a group that can only be looked up at
-        # block granularity). Computing it here as well is how the two came to
-        # disagree, leaving a stop that could no longer serve any purpose.
+        # Ask the coordinator rather than recomputing: it may have disabled
+        # fine-grained hits for a reason this expression cannot see, and a
+        # second copy of the rule is how the two came to disagree.
         self.mamba_partial_cache_hit = (
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size

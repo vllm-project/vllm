@@ -648,10 +648,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         # Every full-attention group, not just the first: a model can carry
         # more than one at different block sizes (see
-        # truncate_downward_closed_groups). A finer-grained group reports a
-        # legitimately deeper per-group hit whenever the reconciled hit is not
-        # a multiple of the coarser group's block size, and taking the first
-        # alone as the dense reference reads that as eviction.
+        # truncate_downward_closed_groups). Taking the first alone as the
+        # dense reference reads a granularity difference as eviction.
         self.full_attention_group_ids: list[int] = [
             group_id
             for group in self.attention_groups
@@ -812,27 +810,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 break
 
         if len(self.full_attention_group_ids) > 1:
-            # With more than one full-attention group -- a DFlash drafter
-            # booking its sliding-window layers as full attention keeps its
-            # own, smaller block size alongside the target's -- the loop
-            # above records each dense group's *own* hit as it is reached,
-            # and a finer group legitimately completes its next block sooner
-            # than a coarser one for identical underlying progress. That
-            # disagreement is block-size granularity, not a sparse-retention
-            # group falling behind, so the dense reference is where every
-            # dense group agrees (the min) rather than the deepest any one of
-            # them individually reached. Must run before the truncation below,
-            # which overwrites `hit_length_by_group` for these groups.
+            # Dense groups can disagree purely on block-size granularity: a
+            # finer group completes its next block sooner than a coarser one
+            # for identical progress. That is not a sparse group falling
+            # behind, so the reference is where every dense group agrees.
+            # Must precede the truncation below, which overwrites these.
             longest_hit_length = min(
                 hit_length_by_group[gid] for gid in self.full_attention_group_ids
             )
 
-        # Truncate every full attention group to the final hit_length. Each is
-        # looked up once (they are downward-closed) against a candidate length
-        # that later iterations may have reduced, so the trim is what makes the
-        # returned blocks agree with the reconciled hit. A group left untrimmed
-        # hands `add_local_computed_blocks` more blocks than the hit covers,
-        # which lands as a copy-on-write assertion on the first partial hit.
+        # Each group was looked up once against a candidate length that later
+        # iterations may have reduced. Leaving one untrimmed hands
+        # `add_local_computed_blocks` more blocks than the hit covers, which
+        # lands as a copy-on-write assertion on the first partial hit.
         truncate_downward_closed_groups(
             ((g.spec, g.group_ids) for g in self.attention_groups),
             hit_length,

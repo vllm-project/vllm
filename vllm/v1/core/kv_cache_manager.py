@@ -333,12 +333,8 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        # Two different questions, so two different reductions over the dense
-        # groups. There can be more than one (see
-        # truncate_downward_closed_groups), and the finer-grained one
-        # legitimately hits deeper whenever the reconciled hit is not a
-        # multiple of the coarser block size. Both reduce to the single-group
-        # behaviour when there is one.
+        # Two questions, so two reductions over the dense groups. Both
+        # reduce to the single-group behaviour when there is only one.
         dense_hits = [
             per_group_hits[group_id]
             for group_id in coordinator.full_attention_group_ids
