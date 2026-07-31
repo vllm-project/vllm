@@ -308,7 +308,6 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             executor_class=_DummyExecutor,
             log_stats=False,
             addresses=addresses,
-            num_api_servers=2,
         ) as (
             engine_manager,
             _coordinator,
