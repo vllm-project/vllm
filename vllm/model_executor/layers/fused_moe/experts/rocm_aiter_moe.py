@@ -479,11 +479,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
                 return False
         return True
 
+    def __init__(self, moe_config, quant_config, **kwargs):
+        super().__init__(moe_config, quant_config, **kwargs)
+        self.is_situ = moe_config.activation == MoEActivation.SITU
+
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
@@ -570,27 +575,3 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
-
-
-class AiterSituExperts(AiterExperts):
-    """AITER W4A16 expert variant for SiTU activation on gfx950.
-
-    Inherits all kernel dispatch from AiterExperts; only differs in the
-    activation it accepts and the quant-scheme gate (gfx950 only, same as
-    AiterExperts for kMxfp4Static).
-    """
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SITU
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        if (weight_key, activation_key) != (kMxfp4Static, None):
-            return False
-        from vllm.platforms.rocm import on_gfx950
-
-        return on_gfx950()
