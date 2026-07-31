@@ -1227,11 +1227,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
-        # if is_global_first_rank():
-        #     import json
-        #     with open("params_dict", "w") as file:
-        #         json.dump(list(params_dict.keys()), file)
-        #     print("wrote file")
 
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
