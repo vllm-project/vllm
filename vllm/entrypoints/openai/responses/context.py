@@ -74,10 +74,6 @@ def _map_tool_name_to_tool_type(tool_name: str) -> str:
     return _TOOL_NAME_TO_TYPE_MAP[tool_name]
 
 
-def _file_search_placeholder_payload() -> dict[str, list]:
-    return {"results": []}
-
-
 def _to_jsonable(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", by_alias=True)
@@ -106,11 +102,11 @@ def _file_search_args(
 
 
 async def _run_file_search_handler(args: dict[str, Any]) -> dict[str, Any]:
-    from vllm.plugins.file_search import get_file_search_handler
+    from vllm.plugins.file_search import FileSearchError, get_file_search_handler
 
     handler = get_file_search_handler()
     if handler is None:
-        return _file_search_placeholder_payload()
+        raise FileSearchError("No file_search plugin is configured")
     try:
         payload = await handler.search(
             query=args.get("query", ""),
@@ -119,22 +115,23 @@ async def _run_file_search_handler(args: dict[str, Any]) -> dict[str, Any]:
             max_num_results=args.get("max_num_results"),
             ranking_options=args.get("ranking_options"),
         )
-    except Exception:
-        logger.exception("file_search handler raised an exception")
-        return _file_search_placeholder_payload()
+    except FileSearchError:
+        raise
+    except Exception as exc:
+        raise FileSearchError("file_search handler failed") from exc
 
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list):
-        logger.error("file_search handler returned invalid results")
-        return _file_search_placeholder_payload()
+        raise FileSearchError("file_search handler returned an invalid results payload")
 
     normalized_results = []
     for result in results:
         try:
             validated = FileSearchResult.model_validate(result)
-        except Exception:
-            logger.exception("file_search handler returned an invalid result")
-            continue
+        except Exception as exc:
+            raise FileSearchError(
+                "file_search handler returned an invalid result"
+            ) from exc
         normalized_results.append(
             validated.model_dump(
                 mode="json",
@@ -859,7 +856,19 @@ class HarmonyContext(ConversationContext):
         if recipient.startswith("container."):
             return "container" in self.available_tools
         if recipient == "functions.file_search":
-            return any(tool.type == "file_search" for tool in self.tools)
+            if self.finish_reason in ("length", "abort", "error"):
+                return False
+            if not any(tool.type == "file_search" for tool in self.tools):
+                return False
+            try:
+                model_args = json.loads(last_msg.content[0].text)
+            except (IndexError, json.JSONDecodeError):
+                return False
+            return (
+                isinstance(model_args, dict)
+                and isinstance(model_args.get("query"), str)
+                and bool(model_args["query"])
+            )
         return False
 
     async def call_tool(self) -> list[Message]:

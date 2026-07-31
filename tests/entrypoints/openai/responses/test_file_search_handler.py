@@ -2,14 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from vllm.entrypoints.openai.responses.context import _run_file_search_handler
 from vllm.plugins.file_search import FileSearchHandler
+from vllm.plugins.file_search.ogx_handler import OGXFileSearchHandler
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.fixture(autouse=True)
+def reset_file_search_handler_cache():
+    from vllm.plugins import file_search
+
+    original_loaded = file_search._handler_loaded
+    original_handler = file_search._cached_handler
+    file_search._handler_loaded = False
+    file_search._cached_handler = None
+    yield
+    file_search._handler_loaded = original_loaded
+    file_search._cached_handler = original_handler
 
 
 class OkHandler(FileSearchHandler):
@@ -37,10 +52,12 @@ class RaisingHandler(FileSearchHandler):
 
 
 @pytest.mark.asyncio
-async def test_no_plugin_returns_empty():
-    with patch("vllm.plugins.file_search.get_file_search_handler", return_value=None):
-        payload = await _run_file_search_handler({"query": "test"})
-    assert payload == {"results": []}
+async def test_no_plugin_raises():
+    with (
+        patch("vllm.plugins.file_search.get_file_search_handler", return_value=None),
+        pytest.raises(RuntimeError, match="No file_search plugin"),
+    ):
+        await _run_file_search_handler({"query": "test"})
 
 
 @pytest.mark.asyncio
@@ -56,35 +73,54 @@ async def test_plugin_returns_results():
 
 
 @pytest.mark.asyncio
-async def test_plugin_non_dict_returns_empty():
-    with patch(
-        "vllm.plugins.file_search.get_file_search_handler",
-        return_value=BadHandler(),
+async def test_plugin_non_dict_raises():
+    with (
+        patch(
+            "vllm.plugins.file_search.get_file_search_handler",
+            return_value=BadHandler(),
+        ),
+        pytest.raises(RuntimeError, match="invalid results payload"),
     ):
-        payload = await _run_file_search_handler({"query": "test"})
-    assert payload == {"results": []}
+        await _run_file_search_handler({"query": "test"})
 
 
 @pytest.mark.asyncio
-async def test_plugin_exception_returns_empty():
-    with patch(
-        "vllm.plugins.file_search.get_file_search_handler",
-        return_value=RaisingHandler(),
+async def test_plugin_exception_raises():
+    with (
+        patch(
+            "vllm.plugins.file_search.get_file_search_handler",
+            return_value=RaisingHandler(),
+        ),
+        pytest.raises(RuntimeError, match="handler failed"),
     ):
-        payload = await _run_file_search_handler({"query": "test"})
-    assert payload == {"results": []}
+        await _run_file_search_handler({"query": "test"})
+
+
+@pytest.mark.asyncio
+async def test_ogx_http_failure_is_not_reported_as_empty_results():
+    request = httpx.Request("POST", "http://localhost/search")
+    response = httpx.Response(503, request=request)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: response),
+    )
+
+    with (
+        patch(
+            "vllm.plugins.file_search.ogx_handler.httpx.AsyncClient",
+            return_value=client,
+        ),
+        pytest.raises(RuntimeError, match="status 503"),
+    ):
+        await OGXFileSearchHandler().search(
+            query="test",
+            vector_store_ids=["vs_test"],
+        )
 
 
 @pytest.mark.asyncio
 async def test_plugin_discovery():
     """Test that get_file_search_handler discovers plugins via entry points."""
-    from unittest.mock import MagicMock
-
     from vllm.plugins import file_search
-
-    # Reset cached state
-    file_search._handler_loaded = False
-    file_search._cached_handler = None
 
     mock_handler = OkHandler()
     mock_factory = MagicMock(return_value=mock_handler)
@@ -98,19 +134,11 @@ async def test_plugin_discovery():
     assert handler is mock_handler
     mock_factory.assert_called_once()
 
-    # Reset state
-    file_search._handler_loaded = False
-    file_search._cached_handler = None
-
 
 @pytest.mark.asyncio
 async def test_no_plugins_installed():
     """Test graceful fallback when no plugins are installed."""
     from vllm.plugins import file_search
-
-    # Reset cached state
-    file_search._handler_loaded = False
-    file_search._cached_handler = None
 
     with patch(
         "vllm.plugins.file_search.load_plugins_by_group",
@@ -120,6 +148,20 @@ async def test_no_plugins_installed():
 
     assert handler is None
 
-    # Reset state
-    file_search._handler_loaded = False
-    file_search._cached_handler = None
+
+@pytest.mark.asyncio
+async def test_multiple_plugins_require_explicit_selection():
+    from vllm.plugins import file_search
+
+    first_factory = MagicMock(return_value=OkHandler())
+    second_factory = MagicMock(return_value=OkHandler())
+
+    with patch(
+        "vllm.plugins.file_search.load_plugins_by_group",
+        return_value={"first": first_factory, "second": second_factory},
+    ):
+        handler = file_search.get_file_search_handler()
+
+    assert handler is None
+    first_factory.assert_not_called()
+    second_factory.assert_not_called()

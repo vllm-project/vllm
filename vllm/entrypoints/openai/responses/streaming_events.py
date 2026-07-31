@@ -697,7 +697,9 @@ def emit_content_delta_events(
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
         fn_names = function_tool_names
-        if recipient == "functions.file_search":
+        if recipient == "functions.file_search" and (
+            fn_names is None or "file_search" not in fn_names
+        ):
             return emit_file_search_delta_events(state)
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
@@ -731,7 +733,9 @@ def emit_previous_item_done_events(
     text = previous_item.content[0].text
     if previous_item.recipient is not None:
         # Deal with tool call
-        if previous_item.recipient == "functions.file_search":
+        if previous_item.recipient == "functions.file_search" and (
+            function_tool_names is None or "file_search" not in function_tool_names
+        ):
             state.pending_file_search_item = previous_item
             return []
         if is_function_recipient(previous_item.recipient, function_tool_names):

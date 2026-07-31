@@ -18,7 +18,7 @@ from urllib.parse import quote
 import httpx
 
 from vllm.logger import init_logger
-from vllm.plugins.file_search import FileSearchHandler
+from vllm.plugins.file_search import FileSearchError, FileSearchHandler
 
 logger = init_logger(__name__)
 
@@ -62,11 +62,12 @@ def _content_text(content: Any) -> str | None:
         return content
     if not isinstance(content, list):
         return None
-    texts = [
-        part.get("text")
-        for part in content
-        if isinstance(part, dict) and isinstance(part.get("text"), str)
-    ]
+    texts: list[str] = []
+    for part in content:
+        if isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str):
+                texts.append(text)
     return "\n".join(texts) if texts else None
 
 
@@ -109,27 +110,17 @@ class OGXFileSearchHandler(FileSearchHandler):
                 data = response.json()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            logger.warning(
-                "[ogx_file_search] request failed; status=%s",
-                status,
-            )
-            return {"results": []}
+            raise FileSearchError(
+                f"OGX file_search request failed with status {status}"
+            ) from exc
         except Exception as exc:
-            logger.exception(
-                "[ogx_file_search] request failed; error=%s message=%s",
-                type(exc).__name__,
-                exc,
-            )
-            return {"results": []}
+            raise FileSearchError("OGX file_search request failed") from exc
 
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
-            logger.warning(
-                "[ogx_file_search] unexpected response shape; type=%s keys=%s",
-                type(data),
-                list(data) if isinstance(data, dict) else None,
+            raise FileSearchError(
+                "OGX file_search returned an invalid response payload"
             )
-            return {"results": []}
 
         logger.info("[ogx_file_search] data_len=%s", len(items))
         results = _to_results(items)

@@ -134,6 +134,14 @@ in your `pyproject.toml`:
 my_handler = "my_package.my_module:create_handler"
 ```
 
+Because vLLM includes the OGX handler, select a custom handler explicitly with
+`VLLM_PLUGINS`. Include any other vLLM plugins that should remain enabled in the
+same comma-separated allowlist:
+
+```bash
+VLLM_PLUGINS="my_handler" vllm serve <model>
+```
+
 ## Inference using Embedded vLLM
 
 An [inline provider](https://github.com/ogx-ai/ogx/tree/main/src/ogx/providers/inline/inference)

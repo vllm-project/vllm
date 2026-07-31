@@ -327,7 +327,9 @@ def _parse_function_call(
     return output_items
 
 
-def _parse_file_search_call(message: Message) -> list[ResponseOutputItem]:
+def _parse_file_search_call(
+    message: Message, incomplete: bool = False
+) -> list[ResponseOutputItem]:
     """Parse file_search function calls into file_search tool call items."""
     output_items: list[ResponseOutputItem] = []
     for content in message.content:
@@ -338,7 +340,7 @@ def _parse_file_search_call(message: Message) -> list[ResponseOutputItem]:
                 id=f"fs_{random_uuid()}",
                 queries=queries,
                 results=None,
-                status="completed",
+                status="incomplete" if incomplete else "completed",
             )
         )
     return output_items
@@ -492,8 +494,11 @@ def harmony_to_response_output(
                 output_items.append(_parse_browser_tool_call(message, recipient))
 
         # file_search tool calls (built-in, wrapped as a function tool)
-        elif recipient == "functions.file_search":
-            output_items.extend(_parse_file_search_call(message))
+        elif (
+            recipient == "functions.file_search"
+            and "file_search" not in function_tool_names
+        ):
+            output_items.extend(_parse_file_search_call(message, incomplete=incomplete))
 
         # Function calls (with or without "functions." prefix)
         elif is_function_recipient(recipient, function_tool_names):

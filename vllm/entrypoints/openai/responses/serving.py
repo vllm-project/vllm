@@ -151,6 +151,12 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
+def _get_harmony_tools(request: ResponsesRequest) -> list[Tool]:
+    if request.tool_choice == "none":
+        return []
+    return request.tools
+
+
 class OpenAIServingResponses(GenerateBaseServing):
     def __init__(
         self,
@@ -462,13 +468,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             context: ConversationContext
-            function_tool_names = extract_function_tool_names(request.tools)
+            harmony_tools = _get_harmony_tools(request)
+            function_tool_names = extract_function_tool_names(harmony_tools)
             if self.use_harmony:
                 context = HarmonyContext(
                     messages,
                     available_tools,
                     function_tool_names,
-                    tools=request.tools,
+                    tools=harmony_tools,
                     response_parser=response_parser,
                 )
             else:
@@ -1197,7 +1204,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         request_input = request.input
         if prev_response is None:
             # New conversation.
-            tool_types = extract_tool_types(request.tools)
+            harmony_tools = _get_harmony_tools(request)
+            tool_types = extract_tool_types(harmony_tools)
             with_custom_tools = has_custom_tools(tool_types)
             instructions = request.instructions
             if instructions is None and isinstance(request_input, list):
@@ -1207,7 +1215,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_descriptions = self._get_harmony_builtin_tool_descriptions(
                 request, tool_types
             )
-            tools = request.tools if with_custom_tools else None
+            tools = harmony_tools if with_custom_tools else None
             messages.extend(
                 build_harmony_preamble(
                     instructions=instructions,

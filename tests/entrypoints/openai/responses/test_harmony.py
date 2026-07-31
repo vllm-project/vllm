@@ -17,16 +17,27 @@ import pytest
 import pytest_asyncio
 import requests
 from openai import InternalServerError, NotFoundError, OpenAI
-from openai.types.responses import ResponseFileSearchToolCall
+from openai.types.responses import (
+    ResponseFileSearchToolCall,
+    ResponseFunctionToolCall,
+)
 from openai_harmony import Author, Message, Role, TextContent
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    render_for_completion,
+)
+from vllm.entrypoints.openai.responses.context import HarmonyContext
+from vllm.entrypoints.openai.responses.harmony import harmony_to_response_output
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+    emit_content_delta_events,
     emit_file_search_done_events,
 )
+from vllm.parser.harmony import HarmonyParser, Segment
 
 from .conftest import (
     BASE_TEST_ENV,
@@ -932,6 +943,95 @@ def _build_file_search_context(with_results: bool) -> tuple[Any, Message]:
     )
 
     return context, assistant_msg
+
+
+@pytest.mark.skip_global_cleanup
+def test_file_search_tool_choice_none_omits_tool_from_harmony_prompt():
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Do not search.",
+        tools=[FILE_SEARCH_TOOL],
+        tool_choice="none",
+    )
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.tool_server = None
+    serving.msg_store = {}
+
+    messages = serving._construct_input_messages_with_harmony(request, None)
+    prompt = get_encoding().decode(render_for_completion(messages))
+
+    assert "file_search" not in prompt
+
+
+@pytest.mark.skip_global_cleanup
+def test_custom_function_named_file_search_stays_function_call():
+    message = Message.from_role_and_content(
+        Role.ASSISTANT, '{"query":"custom"}'
+    ).with_channel("commentary")
+    message = message.with_recipient("functions.file_search")
+
+    output = harmony_to_response_output(message, frozenset({"file_search"}))
+
+    assert len(output) == 1
+    assert isinstance(output[0], ResponseFunctionToolCall)
+    assert output[0].name == "file_search"
+
+
+@pytest.mark.skip_global_cleanup
+def test_streaming_custom_function_named_file_search_stays_function_call():
+    segment = Segment(
+        channel="commentary",
+        recipient="functions.file_search",
+        delta='{"query":"custom"}',
+    )
+
+    events = emit_content_delta_events(
+        segment, StreamingState(), frozenset({"file_search"})
+    )
+
+    assert events[0].type == "response.output_item.added"
+    assert isinstance(events[0].item, ResponseFunctionToolCall)
+
+
+@pytest.mark.skip_global_cleanup
+def test_incomplete_file_search_call_preserves_status():
+    message = Message.from_role_and_content(
+        Role.ASSISTANT, '{"query":"truncated"'
+    ).with_channel("commentary")
+    message = message.with_recipient("functions.file_search")
+
+    output = harmony_to_response_output(
+        message,
+        frozenset(),
+        incomplete=True,
+    )
+
+    assert len(output) == 1
+    assert isinstance(output[0], ResponseFileSearchToolCall)
+    assert output[0].status == "incomplete"
+
+
+@pytest.mark.skip_global_cleanup
+def test_incomplete_file_search_call_is_not_executed():
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="search",
+        tools=[FILE_SEARCH_TOOL],
+    )
+    message = Message.from_role_and_content(
+        Role.ASSISTANT, '{"query":"truncated"'
+    ).with_channel("commentary")
+    message = message.with_recipient("functions.file_search")
+    context = HarmonyContext(
+        [message],
+        available_tools=[],
+        function_tool_names=frozenset(),
+        tools=request.tools,
+        response_parser=object.__new__(HarmonyParser),
+    )
+    context.finish_reason = "length"
+
+    assert not context.need_builtin_tool_call()
 
 
 @pytest.mark.skip_global_cleanup

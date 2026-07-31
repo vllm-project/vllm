@@ -28,6 +28,10 @@ _cached_handler: FileSearchHandler | None = None
 _handler_loaded: bool = False
 
 
+class FileSearchError(RuntimeError):
+    """Raised when a file search cannot be completed."""
+
+
 class FileSearchHandler(ABC):
     """Abstract base class for file search handlers.
 
@@ -77,10 +81,12 @@ def get_file_search_handler() -> FileSearchHandler | None:
         return None
 
     if len(plugins) > 1:
-        logger.warning(
-            "Multiple file_search plugins found: %s. Using the first one.",
+        logger.error(
+            "Multiple file_search plugins found: %s. Set VLLM_PLUGINS to "
+            "select exactly one file_search plugin.",
             list(plugins.keys()),
         )
+        return None
 
     name, factory = next(iter(plugins.items()))
     try:
