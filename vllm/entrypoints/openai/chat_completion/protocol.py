@@ -533,8 +533,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 msg["tool_calls"] = list(tool_calls)
         return self
 
-    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
-    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
     def build_chat_params(
         self,
@@ -565,6 +565,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
+            # No-tools requests default to tool_choice="none" at the API
+            # layer. Collapse that default before rendering, so K3 emits a
+            # model-visible tool-choice instruction only for requests with a
+            # tools block.
+            tool_choice=self.tool_choice if self.tools else None,
+            response_format=self.response_format,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

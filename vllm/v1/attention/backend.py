@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -631,11 +631,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    # Whether the builder constructor requires the block-table width.
+    requires_block_table_width: ClassVar[bool] = False
 
     @abstractmethod
     def __init__(
         self,
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
         layer_names: list[str],
         vllm_config: "VllmConfig",
         device: torch.device,
@@ -649,7 +651,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
@@ -802,6 +804,10 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
+
+    # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
+    # impls without one run the top-k MQA path for all requests.
+    supports_dense_mha_prefill: ClassVar[bool] = True
 
     # Required attributes that all impls should have
     num_heads: int

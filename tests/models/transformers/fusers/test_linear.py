@@ -11,7 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.models.transformers.fuser import get_fuser
-from vllm.model_executor.models.transformers.fusers import GLUFuser, QKVFuser
+from vllm.model_executor.models.transformers.fusers import (
+    GLUFuser,
+    PackedQKVFuser,
+    QKVFuser,
+)
 
 
 class SiluAndMulStub(nn.Module):
@@ -203,6 +207,103 @@ class PerHeadQKNormAttention(FakeAttention):
         return self.o_proj((q + k + v).flatten(-2)), None
 
 
+class ResidDropoutAttention(FakeAttention):
+    """GPT-style dropout after `o_proj` -> the output projection is still found."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.resid_dropout = nn.Dropout(0.0)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+        q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, _ = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.resid_dropout(self.o_proj(attn_output)), None
+
+
+class PackedQKVAttention(nn.Module):
+    """GPTBigCode-style: one packed projection split into q/k/v in the forward."""
+
+    is_causal = True
+
+    def __init__(
+        self,
+        hidden: int = 32,
+        head_dim: int = 8,
+        heads: int = 4,
+        kv_heads: int = 1,
+        bias: bool = False,
+        layer_idx: int = 0,
+    ):
+        super().__init__()
+        self.config = SimpleNamespace(_attn_implementation="vllm")
+        self.layer_idx = layer_idx
+        self.head_dim = head_dim
+        self.scaling = head_dim**-0.5
+        self.embed_dim = heads * head_dim
+        self.kv_dim = kv_heads * head_dim
+        self.c_attn = nn.Linear(hidden, self.embed_dim + 2 * self.kv_dim, bias=bias)
+        self.c_proj = nn.Linear(self.embed_dim, hidden, bias=bias)
+        self.resid_dropout = nn.Dropout(0.0)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        q, k, v = (
+            self.c_attn(hidden_states)
+            .unsqueeze(1)
+            .split((self.embed_dim, self.kv_dim, self.kv_dim), dim=3)
+        )
+        q = q.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        return self.resid_dropout(self.c_proj(attn_output)), attn_weights
+
+
+class PerHeadSplitAttention(nn.Module):
+    """A packed projection reshaped and split *per head* -> not a q/k/v split."""
+
+    def __init__(self, hidden: int = 32, head_dim: int = 8, heads: int = 4):
+        super().__init__()
+        self.head_dim = head_dim
+        self.heads = heads
+        self.c_attn = nn.Linear(hidden, 3 * heads * head_dim)
+        self.c_proj = nn.Linear(heads * head_dim, hidden)
+
+    def forward(self, hidden_states):
+        shape = (*hidden_states.shape[:2], self.heads, 3 * self.head_dim)
+        q, k, v = (
+            self.c_attn(hidden_states)
+            .view(shape)
+            .transpose(1, 2)
+            .split((self.head_dim, self.head_dim, self.head_dim), dim=3)
+        )
+        return self.c_proj((q + k + v).transpose(1, 2).flatten(-2))
+
+
 class FakeSelfAttn(nn.Module):
     """Stand-in for the vLLM `Attention` looked up in `attention_instances`."""
 
@@ -213,6 +314,14 @@ class FakeSelfAttn(nn.Module):
     def forward(self, q, k, v):
         # MHA-shaped stub: any deterministic combination of q/k/v will do
         return q + 2 * k + 3 * v
+
+
+class FakeMQASelfAttn(FakeSelfAttn):
+    """Stand-in for grouped/multi-query layouts, where `k`/`v` are narrower."""
+
+    def forward(self, q, k, v):
+        groups = q.shape[-1] // k.shape[-1]
+        return q + (2 * k + 3 * v).repeat(1, groups)
 
 
 @pytest.fixture(autouse=True)
@@ -263,6 +372,15 @@ def _apply_qkv_fuser_with_stubs(module: nn.Module, fuser: QKVFuser):
     setattr(module, fuser.merged_name, merged)
     for name in (fuser.q_name, fuser.k_name, fuser.v_name):
         delattr(module, name)
+    module.forward = MethodType(fuser.fused_forward, module)
+    return module
+
+
+def _apply_packed_qkv_fuser_with_stubs(module: nn.Module, fuser: PackedQKVFuser):
+    """Apply a fuser at `tp_size == 1`, where the rewritten split is unchanged."""
+    qkv = module.get_submodule(fuser.qkv_name)
+    qkv.output_sizes = [fuser.q_size, fuser.kv_size, fuser.kv_size]
+    qkv.tp_size = 1
     module.forward = MethodType(fuser.fused_forward, module)
     return module
 
@@ -366,6 +484,49 @@ def test_qkv_identifies_output_projection():
         # Norm children (q_norm/k_norm) must not disturb o_proj identification.
         assert get_fuser(QKNormAttention()).o_name == "o_proj"
         assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
+        # A module between o_proj and the return is transparent.
+        assert get_fuser(ResidDropoutAttention()).o_name == "o_proj"
+
+
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_detects_and_rewrites_packed_qkv(kv_heads):
+    """A single projection split into q/k/v must be re-sharded, not merged.
+
+    Only the split sizes change: `QKVParallelLinear` loads the packed
+    checkpoint weight as-is, and shards q by heads while replicating k/v."""
+    with torch.device("meta"):
+        meta = PackedQKVAttention(kv_heads=kv_heads)
+    fuser = get_fuser(meta)
+    assert isinstance(fuser, PackedQKVFuser)
+    assert (fuser.qkv_name, fuser.o_name) == ("c_attn", "c_proj")
+    assert (fuser.q_size, fuser.kv_size) == (32, 8 * kv_heads)
+
+    # The hard-coded widths become the per-rank widths of the sharded linear
+    names = fuser.fused_forward.__code__.co_names
+    assert "output_sizes" in names and "tp_size" in names
+    assert "kv_dim" not in names and "embed_dim" not in names
+
+    # Numerics: the rewritten forward must match the original on a real instance
+    real = PackedQKVAttention(kv_heads=kv_heads, layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    attention_instances = {3: FakeMQASelfAttn()}
+    expected, _ = real(x, attention_instances=attention_instances)
+    fused = _apply_packed_qkv_fuser_with_stubs(real, fuser)
+
+    # Fusion is in place: the module keeps its class and other attributes
+    assert fused is real and type(fused) is PackedQKVAttention
+    assert fused.layer_idx == 3 and fused.is_causal
+    out, _ = fused(x, attention_instances=attention_instances)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_per_head_split_is_not_packed_qkv():
+    """The split must consume the whole projection, else its sizes are head
+    widths and re-sharding by them would be wrong."""
+    with torch.device("meta"):
+        assert get_fuser(PerHeadSplitAttention()) is None
 
 
 def test_fuser_is_cached_per_class_and_structure():

@@ -269,6 +269,7 @@ def test_moe_align_block_size_with_expert_map(
                 if (experts[k] in local_experts) or not mask_inactive_experts
                 else -1
             )
+    topk_ids[0, 0] = -1
 
     actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
         topk_ids=topk_ids,
