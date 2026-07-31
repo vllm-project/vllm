@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -31,12 +32,13 @@ from vllm.v1.kv_offload.tiering.base import (
     TieringOffloadingMetrics,
 )
 from vllm.v1.kv_offload.tiering.manager import (
-    _BP_EMA_ALPHA,
-    _BP_HIGH_WATER_S,
-    _BP_LOW_WATER_S,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
+
+_BP_EMA_ALPHA = EMABackpressureDetector.DEFAULT_ALPHA
+_BP_HIGH_WATER_S = EMABackpressureDetector.DEFAULT_HIGH_WATER_S
+_BP_LOW_WATER_S = EMABackpressureDetector.DEFAULT_LOW_WATER_S
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -150,7 +152,7 @@ class TestBackpressure:
 
         # Jobs are held — no completion yet.
         self._simulate_on_schedule_end()
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
         assert bp.store_latency_ema == 0.0
 
         # Backdate and release: simulate a fast store.
@@ -166,7 +168,7 @@ class TestBackpressure:
     def test_pressure_activates_above_high_water(self, setup):
         keys = to_keys(range(2))
         self._store_blocks(keys)
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
 
         # Reset the per-step gate so the next on_schedule_end processes jobs.
         self._simulate_on_schedule_end()
@@ -177,12 +179,12 @@ class TestBackpressure:
         self._simulate_on_schedule_end()
 
         assert bp.store_latency_ema > _BP_HIGH_WATER_S
-        assert bp.is_under_pressure is True
+        assert bp.is_under_pressure() is True
 
     def test_pressure_clears_below_low_water(self, setup):
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
         bp.store_latency_ema = _BP_HIGH_WATER_S * 2
-        bp.is_under_pressure = True
+        bp._under_pressure = True
 
         # Drive several fast completions to bring EMA below low water.
         block_id = 100
@@ -198,26 +200,26 @@ class TestBackpressure:
             self.tier.release_jobs()
             self._simulate_on_schedule_end()
 
-        assert bp.is_under_pressure is False
+        assert bp.is_under_pressure() is False
 
     def test_hysteresis_prevents_oscillation(self, setup):
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
 
         # Set EMA between low and high water marks.
         mid = (_BP_LOW_WATER_S + _BP_HIGH_WATER_S) / 2
         bp.store_latency_ema = mid
 
         # When not under pressure, mid-range EMA should not activate.
-        bp.is_under_pressure = False
+        bp._under_pressure = False
         keys = to_keys(range(2))
         self._store_blocks(keys)
         self._backdate_held_jobs(mid)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
-        assert bp.is_under_pressure is False
+        assert bp.is_under_pressure() is False
 
         # When under pressure, mid-range EMA should not deactivate.
-        bp.is_under_pressure = True
+        bp._under_pressure = True
         keys2 = to_keys(range(10, 12))
         # Force-submit since pressure is on (cascade would skip).
         for k in keys2:
@@ -228,11 +230,11 @@ class TestBackpressure:
         self.tier.submit_store(job_meta)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
-        assert bp.is_under_pressure is True
+        assert bp.is_under_pressure() is True
 
     def test_stores_skipped_under_pressure(self, setup):
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = True
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = True
         initial_blocks = self.tier.get_num_blocks()
 
         keys = to_keys(range(50, 53))
@@ -244,35 +246,37 @@ class TestBackpressure:
         assert self.tier.get_num_blocks() == initial_blocks
 
     def test_stores_resume_after_pressure_clears(self, setup):
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
 
         # Start under pressure — stores skipped.
-        bp.is_under_pressure = True
+        bp._under_pressure = True
         keys1 = to_keys(range(60, 62))
         self._store_blocks(keys1)
         assert all(k not in self.tier.blocks for k in keys1)
 
         # Clear pressure — next store should cascade.
-        bp.is_under_pressure = False
+        bp._under_pressure = False
         keys2 = to_keys(range(70, 72))
         self._store_blocks(keys2)
         assert all(k in self.tier.blocks for k in keys2)
 
     def test_dropped_store_count_tracked(self, setup):
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = True
-        assert bp.stores_dropped == 0
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = True
+        policy = self.manager._bp_policy
+        assert policy.get_stores_dropped(self.tier) == 0
 
         self._store_blocks(to_keys([80]))
-        assert bp.stores_dropped == 1
+        assert policy._stores_dropped.get(self.tier, 0) == 1
 
         self._store_blocks(to_keys([81]))
-        assert bp.stores_dropped == 2
+        assert policy._stores_dropped.get(self.tier, 0) == 2
 
     def test_metrics_reported_via_get_stats(self, setup):
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = True
-        bp.stores_dropped = 5
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = True
+        policy = self.manager._bp_policy
+        policy._stores_dropped[self.tier] = 5
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -284,11 +288,11 @@ class TestBackpressure:
         assert reduced[f"{counter_key}:('delayed',)"] == 5
 
         # Dropped count resets after get_stats.
-        assert bp.stores_dropped == 0
+        assert policy._stores_dropped.get(self.tier, 0) == 0
 
     def test_metrics_gauge_zero_when_no_pressure(self, setup):
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = False
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = False
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -298,14 +302,14 @@ class TestBackpressure:
         assert reduced[f"{gauge_key}:('delayed',)"] == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
-        bp = self.manager._backpressure[self.tier]
+        bp = self.manager._bp_detectors[self.tier]
         bp.store_latency_ema = 5.0
-        bp.is_under_pressure = True
+        bp._under_pressure = True
 
         self.manager.reset_cache()
 
         assert bp.store_latency_ema == 0.0
-        assert bp.is_under_pressure is False
+        assert bp.is_under_pressure() is False
 
     def test_request_level_tier_respects_backpressure(self, setup):
         """Request-level cascade also skips pressured tiers."""
@@ -322,8 +326,8 @@ class TestBackpressure:
         self.manager.on_new_request(ctx)
 
         # Activate pressure.
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = True
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = True
         initial_blocks = self.tier.get_num_blocks()
 
         # prepare_store with existing + new blocks.
@@ -342,8 +346,8 @@ class TestBackpressure:
         for b in blocks:
             self.tier.blocks[b] = True
 
-        bp = self.manager._backpressure[self.tier]
-        bp.is_under_pressure = True
+        bp = self.manager._bp_detectors[self.tier]
+        bp._under_pressure = True
 
         # Lookups should still initiate promotion.
         for b in blocks:
