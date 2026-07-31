@@ -93,11 +93,13 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         num_blocks: int,
         mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
         enable_events: bool = False,
     ):
         super().__init__(
             num_blocks=num_blocks,
-            cache_policy=cache_policy,  # type: ignore[arg-type]
+            cache_policy=cache_policy,
+            cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
@@ -323,6 +325,8 @@ class TieringOffloadingManager(OffloadingManager):
         any_retry = False
         for tier in self.secondary_tiers:
             if tier is exclude_tier:
+                continue
+            if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
                 continue
             result = tier.lookup(key, req_context)
             if result is LookupResult.HIT:
