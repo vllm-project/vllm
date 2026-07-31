@@ -3491,6 +3491,7 @@ def chunk_gated_delta_rule_cpu(
     cu_seqlens: torch.Tensor,
     head_first: bool,
     use_qk_l2norm_in_kernel: bool,
+    initial_state_indices: torch.Tensor,
     eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.chunk_gated_delta_rule_cpu(
@@ -3504,6 +3505,7 @@ def chunk_gated_delta_rule_cpu(
         cu_seqlens,
         head_first,
         use_qk_l2norm_in_kernel,
+        initial_state_indices,
         eps,
     )
 

@@ -121,6 +121,13 @@ from ..common.mm_preprocess import (
 
 logger = init_logger(__name__)
 
+# Token-count cutoff for overlapping the MoE router gate with the routed-expert
+# down projection on a separate CUDA stream (latent MoE). At or below this many
+# tokens the launch-bound decode path benefits from multi-stream overlap; above
+# it the GEMMs saturate the device and the cross-stream sync is pure overhead,
+# so it falls back to sequential.
+_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
+
 
 class KimiMLP(nn.Module):
     def __init__(
@@ -513,7 +520,7 @@ class KimiMoE(nn.Module):
             )
             # Auxiliary CUDA stream to overlap the router gate with the routed
             # down projection on decode-sized batches (gated by
-            # VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
+            # _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
             self._down_proj_stream: torch.cuda.Stream | None = aux_stream()
             self._down_proj_events = (torch.cuda.Event(), torch.cuda.Event())
         else:
@@ -546,7 +553,13 @@ class KimiMoE(nn.Module):
                 activation_linear_beta=activation_situ_linear_beta,
             )
         else:
-            enable_tail_fusion = envs.VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
+            # The tail-fusion kernels are tcgen05-based, so they require an
+            # SM100 NVIDIA device; the runner falls back to the default latent
+            # MoE path everywhere else.
+            enable_tail_fusion = (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
+            )
             self.experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
@@ -645,7 +658,7 @@ class KimiMoE(nn.Module):
                 self._down_proj_events[0],
                 self._down_proj_events[1],
                 self._down_proj_stream
-                if num_tokens <= envs.VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
+                if num_tokens <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
                 else None,
             )
         )
