@@ -170,7 +170,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             request.request_id,
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
-        local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
+        local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -271,7 +271,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 time.perf_counter() + self._kv_lease_duration
             )
 
-            block_ids = self.get_sw_clipped_blocks(block_ids)
+            block_ids = self.get_exchange_clipped_blocks(block_ids)
             remote_num_tokens = request.num_computed_tokens
 
             # Store finished blocks for worker-level matching with D

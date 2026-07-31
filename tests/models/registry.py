@@ -503,6 +503,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
+    "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-35B-A3B-text-only"),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -1030,6 +1032,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
     ),
+    "KimiK3ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K3",
+        trust_remote_code=True,
+    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
@@ -1470,6 +1476,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
+    "K3DSparkModel": _HfExamplesInfo(
+        "moonshotai/Kimi-K3",
+        speculative_model="Inferact/Kimi-K3-DSpark",
+        use_original_num_layers=True,  # DSpark has >1 draft block
+        trust_remote_code=True,
+        # FIXME: Investigate the NVML failure in CI.
+        is_available_online=False,
+    ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
@@ -1667,6 +1681,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
+    ),
+    "KimiK3MTPModel": _HfExamplesInfo(
+        "moonshotai/Kimi-K3",
+        speculative_model="moonshotai/Kimi-K3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
