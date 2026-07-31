@@ -712,3 +712,69 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str):
     else:
         assert handoff.is_finished()
         assert handoff.num_output_tokens == 1
+
+
+def test_placeholder_underflow_graceful_stop():
+    """When num_output_placeholders would go negative (more tokens returned
+    than placeholders tracked), the scheduler should clamp to zero and stop
+    the request gracefully instead of crashing with AssertionError."""
+    scheduler = object.__new__(AsyncScheduler)
+    request = create_requests(num_requests=1, num_tokens=4, max_tokens=8)[0]
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+    request.num_output_placeholders = 1
+
+    scheduler.perf_metrics = None
+    scheduler.connector = None
+    scheduler.structured_output_manager = Mock()
+    scheduler.structured_output_manager.should_advance.return_value = False
+    scheduler.requests = {request.request_id: request}
+    scheduler.running = [request]
+    scheduler.waiting = Mock()
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
+    scheduler.kv_event_publisher = Mock()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.grammar_compile_error_reqs = set()
+    scheduler.vllm_config = Mock()
+    scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
+    scheduler.recompute_kv_load_failures = False
+    scheduler.defer_block_free = False
+    scheduler.make_stats = Mock(return_value=None)
+    scheduler.max_model_len = 128
+
+    def free_request(req, delay_free_blocks=False):
+        scheduler.finished_req_ids.add(req.request_id)
+        scheduler.requests.pop(req.request_id, None)
+        return None, None
+
+    scheduler._free_request = Mock(side_effect=free_request)
+
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    # Return 3 tokens when only 1 placeholder was tracked -- triggers underflow.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[100, 101, 102]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(output, model_runner_output)
+
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.num_output_placeholders == 0

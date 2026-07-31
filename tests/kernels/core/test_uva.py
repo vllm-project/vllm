@@ -53,3 +53,28 @@ def test_gpu_write(device):
     assert cpu_tensor[0, 0] == 2
     assert cpu_tensor[2, 3] == 4
     assert cpu_tensor[4, 5] == -2
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_write_after_map_coherence(device):
+    """The V2 model runner's UVA buffers depend on a live alias between the
+    CPU tensor and the device view: per-step writes to the CPU side must be
+    visible through the device view without any additional copy.
+
+    This test verifies that contract by writing a non-trivial pattern
+    *after* the device view is created and reading it back through the GPU.
+    A failure here (stale zeros) would indicate the view is a detached
+    snapshot — the exact defect that causes silent input corruption under
+    GPU Confidential Computing when is_pinned() is falsely negative."""
+    torch.set_default_device(device)
+    cpu_tensor = torch.zeros(8, dtype=torch.int32, device="cpu", pin_memory=True)
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+
+    pattern = torch.tensor([10, 20, 30, 40, 50, 60, 70, 80], dtype=torch.int32)
+    cpu_tensor[:] = pattern
+
+    readback = gpu_view.cpu()
+    assert torch.equal(readback, pattern), (
+        f"UVA coherence broken: expected {pattern.tolist()}, got {readback.tolist()}"
+    )
