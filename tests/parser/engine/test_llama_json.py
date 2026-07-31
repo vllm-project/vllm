@@ -1703,3 +1703,89 @@ class TestPhantomRetractionIsLinear:
 
         assert not result.tools_called
         assert (result.content or "").count('"id"') == count
+
+
+class TestNamedChoiceOnParameterlessTool:
+    """A tool declaring no ``parameters`` must still produce a call.
+
+    ``get_json_schema_from_tools`` returns the selected function's
+    ``parameters``, which is ``None`` for such a tool, so no guided-decoding
+    schema was applied.  With no llama structural tag either
+    (``VLLM_ENFORCE_STRICT_TOOL_CALLING=0``) nothing constrained the model
+    and nothing told the parser the output was bare parameters, so it
+    demanded a full envelope and returned no tool call at all -- for a
+    request that explicitly named the tool it wanted.
+    """
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        return cls
+
+    @staticmethod
+    def _request():
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "ping the server"}],
+            # No "parameters" key at all -- the shape that got no schema.
+            tools=[{"type": "function", "function": {"name": "ping"}}],
+            tool_choice={"type": "function", "function": {"name": "ping"}},
+        )
+
+    def test_a_schema_is_applied_so_the_output_shape_is_known(
+        self, parser_cls, mock_tokenizer
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request())
+
+        structured = getattr(request, "structured_outputs", None)
+        assert getattr(structured, "json", None) is not None
+
+    def test_bare_empty_object_is_a_call(self, parser_cls, mock_tokenizer):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request())
+
+        calls, content = parser._extract_tool_calls(
+            "{}", request, enable_auto_tools=True
+        )
+
+        assert [(c.name, json.loads(c.arguments)) for c in calls or []] == [
+            ("ping", {})
+        ]
+        assert not content
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 10_000])
+    def test_bare_empty_object_streams_a_call(
+        self, parser_cls, mock_tokenizer, chunk_size
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request())
+        body = "{}"
+
+        names: list[str] = []
+        args: dict[int, str] = {}
+        for start in range(0, len(body), chunk_size):
+            delta_text = body[start : start + chunk_size]
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(body),
+            )
+            for tool_call in (delta.tool_calls if delta else None) or []:
+                if tool_call.function and tool_call.function.name:
+                    names.append(tool_call.function.name)
+                if tool_call.function and tool_call.function.arguments:
+                    args[tool_call.index] = (
+                        args.get(tool_call.index, "") + tool_call.function.arguments
+                    )
+
+        assert names == ["ping"]
+        assert [json.loads(a) for a in args.values()] == [{}]
