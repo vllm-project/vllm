@@ -4,13 +4,13 @@
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
     KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
     KVConnectorSidecarTransferPlan,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
-    OffloadingConnectorMetadata,
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,

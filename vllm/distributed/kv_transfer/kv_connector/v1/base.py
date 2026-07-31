@@ -43,10 +43,8 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -147,31 +145,6 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     """
 
     pass
-
-
-@dataclass(frozen=True)
-class KVConnectorSidecarConfig:
-    """Connector storage layout exposed to block-aligned sidecars."""
-
-    num_connector_blocks: int
-    blocks_per_connector_block: int
-
-
-@dataclass(frozen=True)
-class KVConnectorSidecarBlockMap:
-    """One normalized block mapping for connector sidecar data."""
-
-    gpu_block_ids: np.ndarray
-    connector_block_ids: np.ndarray
-    connector_block_offsets: np.ndarray
-
-
-@dataclass(frozen=True)
-class KVConnectorSidecarTransferPlan:
-    """Normalized load/store mappings for one connector step."""
-
-    load: KVConnectorSidecarBlockMap | None = None
-    store: KVConnectorSidecarBlockMap | None = None
 
 
 class KVConnectorWorkerMetadata(ABC):
@@ -476,24 +449,6 @@ class KVConnectorBase_V1(ABC):
             gpu_block_pool: the GPU block pool.
         """
         return
-
-    def get_block_sidecar_config(self) -> KVConnectorSidecarConfig | None:
-        """Return the connector layout for block-aligned sidecar data.
-
-        Connectors that can move sidecar data with KV blocks should override
-        this method. A ``None`` result means that sidecars are unsupported.
-        """
-        return None
-
-    def get_block_sidecar_transfers(
-        self,
-        connector_metadata: KVConnectorMetadata,
-        kv_group_id: int,
-    ) -> KVConnectorSidecarTransferPlan:
-        """Normalize this step's internal KV jobs for sidecar consumers."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support KV block sidecars"
-        )
 
     @abstractmethod
     def get_num_new_matched_tokens(

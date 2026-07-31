@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
     KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
     KVConnectorSidecarTransferPlan,

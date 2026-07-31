@@ -10,7 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
     KVConnectorSidecarBlockMap,
     KVConnectorSidecarConfig,
     KVConnectorSidecarTransferPlan,
