@@ -103,17 +103,6 @@ def test_models(
     model_impl: str,
     num_fused: tuple[int, int],
 ) -> None:
-    import transformers
-    from packaging.version import Version
-
-    installed = Version(transformers.__version__)
-    required = Version("5.0.0")
-    if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
-        pytest.skip(
-            "MoE models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
-
     check_implementation(
         hf_runner,
         vllm_runner,
@@ -139,18 +128,21 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
-    """MLA models route through vLLM's MLA attention in the Transformers backend.
+    import transformers
+    from packaging.version import Version
 
-    Checks every attention layer owns an `MLAAttention`, and
-    that logprobs match vLLM's native DeepSeek implementation.
-    """
+    installed = Version(transformers.__version__)
+    required = Version("5.15.0.dev0")
+    if installed < required:
+        pytest.skip(
+            "MLA models with the Transformers modeling backend require "
+            f"transformers>={required}, but got {installed}"
+        )
+
     model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
-    # `trust_remote_code=False` so the built-in Transformers `deepseek_v2`
-    # modeling (which supports the "vllm" attention interface) is used instead
-    # of the checkpoint's remote code.
     with vllm_runner(
         model, model_impl="transformers", trust_remote_code=False, **kwargs
     ) as model_test:
