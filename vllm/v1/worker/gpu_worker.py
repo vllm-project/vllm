@@ -74,6 +74,7 @@ from vllm.utils.mem_utils import (
     format_gib,
     memory_profiling,
 )
+from vllm.utils.platform_utils import is_uva_available, verify_uva_coherence
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -431,6 +432,8 @@ class Worker(WorkerBase):
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
+                if is_uva_available():
+                    verify_uva_coherence()
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
