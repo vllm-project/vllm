@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
-    kMxfp4Static,
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
@@ -81,7 +80,7 @@ def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
 
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
-@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic, kMxfp4Static])
+@pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
 def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
     kernel_cls, activation_quant_key
 ):

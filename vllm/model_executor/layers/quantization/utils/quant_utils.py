@@ -107,6 +107,10 @@ class QuantKey:
     symmetric: symmetric if True, asymmetric if False
     """
 
+    # TODO: QuantKey.dtype is assumed to be `torch.dtype` in matcher_utils.py,
+    # but #37990 introduced e.g. `kInt4Static` that uses a `ScalarType` dtype,
+    # same for kMxfp6 that does not have a native torch representation.
+    # Logical dtype and storage (torch) dtype should be separated (see #48949).
     dtype: torch.dtype | ScalarType
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
