@@ -34,7 +34,7 @@ def _fused_q_cutedsl_impl(
     has_indexer: bool,
     index_rope_interleave: bool,
 ) -> None:
-    from .ops.fused_q_cutedsl import fused_q_cutedsl
+    from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import fused_q_cutedsl
 
     fused_q_cutedsl(
         positions,
@@ -873,7 +873,9 @@ def fused_q(
     index_q_head_dim = index_q.shape[2]
     use_cutedsl = False
     if _can_use_fused_q_cutedsl():
-        from .ops.fused_q_cutedsl import is_fused_q_cutedsl_supported
+        from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
+            is_fused_q_cutedsl_supported,
+        )
 
         use_cutedsl = is_fused_q_cutedsl_supported(
             q_pe,

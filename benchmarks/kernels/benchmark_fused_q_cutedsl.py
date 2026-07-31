@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import torch
 
-import vllm.models.deepseek_v32.nvidia.kernels as K
+import vllm.models.deepseek_v32.common.kernels as K
 from vllm.triton_utils import triton
 
 # GLM-5.2 / DeepSeek-V3.2 DSA dimensions.
