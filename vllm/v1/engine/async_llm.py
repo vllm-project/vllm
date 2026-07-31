@@ -654,10 +654,8 @@ class AsyncLLM(EngineClient):
         self._logger_ref = [self.logger_manager]
         logger_ref = self._logger_ref
         renderer = self.renderer
-        # P0 multi-modal sender ("shadow") cache, captured once; None for text-only.
-        mm_processor_cache = (
-            renderer.mm_processor_cache if renderer is not None else None
-        )
+        # P0 multi-modal sender ("shadow") cache; None for text-only models.
+        mm_processor_cache = renderer.mm_processor_cache
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
