@@ -56,7 +56,7 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 ## Requirements
 
 | Requirement | Reason |
-|---|---|
+| --- | --- |
 | `--enable-return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
 | `temperature > 0` | Greedy has no truncated distribution |
