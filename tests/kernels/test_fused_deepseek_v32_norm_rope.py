@@ -27,7 +27,7 @@ rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 import pytest
 import torch
 
-from vllm.models.deepseek_v32.nvidia import kernels as K
+from vllm.models.deepseek_v32.common import kernels as K
 from vllm.platforms import current_platform
 
 FP8 = torch.float8_e4m3fn

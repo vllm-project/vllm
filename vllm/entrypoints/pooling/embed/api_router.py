@@ -18,8 +18,11 @@ from .serving import ServingEmbedding
 router = APIRouter()
 
 
-def embedding(request: Request) -> ServingEmbedding | None:
-    return request.app.state.serving_embedding
+def embedding(request: Request) -> ServingEmbedding:
+    handler = getattr(request.app.state, "serving_embedding", None)
+    if handler is None:
+        raise NotImplementedError("The model does not support Embeddings API")
+    return handler
 
 
 @router.post(
@@ -37,9 +40,6 @@ async def create_embedding(
     raw_request: Request,
 ):
     handler = embedding(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Embeddings API")
-
     return await handler(request, raw_request)
 
 
@@ -58,7 +58,4 @@ async def create_cohere_embedding(
     raw_request: Request,
 ):
     handler = embedding(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Embeddings API")
-
     return await handler(request, raw_request)

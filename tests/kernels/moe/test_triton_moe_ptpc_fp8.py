@@ -102,9 +102,9 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
     ).sum(dim=1)
 
 
-@pytest.fixture(autouse=True, scope="module")
+@pytest.fixture(autouse=True)
 def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
+    """Sets the default CUDA device before each test in this module."""
     torch.set_default_device("cuda")
 
 

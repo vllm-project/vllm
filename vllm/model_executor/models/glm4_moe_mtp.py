@@ -51,9 +51,8 @@ from .glm4_moe import (
     Glm4MixtureOfExperts,
     Glm4MoE,
     Glm4MoeDecoderLayer,
-    get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 
 
 class SharedHead(nn.Module):

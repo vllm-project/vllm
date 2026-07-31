@@ -5,12 +5,14 @@ import ast
 import json
 import math
 import warnings
+from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
+    NamespaceTool,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -166,6 +168,91 @@ def consume_space(i: int, s: str) -> int:
     return i
 
 
+_NAMESPACE_TOOL_SEPARATOR = "__"
+
+
+@dataclass(frozen=True)
+class ResponsesToolCallName:
+    name: str
+    namespace: str | None = None
+
+
+def flat_namespace_tool_name(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
+
+
+def iter_response_function_tool_info(
+    tool: ResponsesTool,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    if isinstance(tool, FunctionTool):
+        return [(tool.name, tool.parameters)]
+    if not isinstance(tool, NamespaceTool):
+        return []
+
+    namespace = tool.name
+    return [
+        (
+            flat_namespace_tool_name(namespace, namespaced_tool.name),
+            namespaced_tool.parameters,
+        )
+        for namespaced_tool in tool.tools
+        if namespaced_tool.type == "function"
+    ]
+
+
+def iter_response_function_tool_dicts(
+    tools: list[ResponsesTool],
+) -> list[dict[str, Any]]:
+    function_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            namespace = tool.name
+            for namespaced_tool in tool.tools:
+                if namespaced_tool.type != "function":
+                    continue
+                tool_dict = namespaced_tool.model_dump()
+                tool_dict["name"] = flat_namespace_tool_name(
+                    namespace, namespaced_tool.name
+                )
+                function_tools.append(tool_dict)
+        else:
+            function_tools.append(tool.model_dump())
+    return function_tools
+
+
+def build_responses_tool_call_name_map(
+    tools: list[ResponsesTool] | None,
+) -> dict[str, ResponsesToolCallName]:
+    if not tools:
+        return {}
+
+    name_map: dict[str, ResponsesToolCallName] = {}
+    for tool in tools:
+        if not isinstance(tool, NamespaceTool):
+            continue
+        namespace = tool.name
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type != "function":
+                continue
+            flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
+            name_map[flat_name] = ResponsesToolCallName(
+                name=namespaced_tool.name,
+                namespace=namespace,
+            )
+    return name_map
+
+
+def resolve_responses_tool_call_name(
+    name: str,
+    tools: list[ResponsesTool] | None = None,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
+) -> ResponsesToolCallName:
+    name_map = tool_call_name_map
+    if name_map is None:
+        name_map = build_responses_tool_call_name_map(tools)
+    return name_map.get(name, ResponsesToolCallName(name=name))
+
+
 def _is_function_tool(tool: Tool) -> bool:
     return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
 
@@ -189,6 +276,11 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, params in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return (params or {}).get("properties", {})
+            continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
@@ -205,6 +297,11 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, _ in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return True
+            continue
         if not _is_function_tool(tool):
             continue
         name, _ = _extract_tool_info(tool)
@@ -213,8 +310,9 @@ def find_tool_name(
     return False
 
 
-def _get_tool_schema_from_tool(tool: Tool) -> dict:
-    name, params = _extract_tool_info(tool)
+def _get_tool_schema_from_name_and_params(
+    name: str, params: dict[str, Any] | None
+) -> dict:
     params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
@@ -223,6 +321,11 @@ def _get_tool_schema_from_tool(tool: Tool) -> dict:
         },
         "required": ["name", "parameters"],
     }
+
+
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
+    name, params = _extract_tool_info(tool)
+    return _get_tool_schema_from_name_and_params(name, params)
 
 
 def _get_tool_schema_defs(
@@ -247,13 +350,25 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
-    fn_tools = [t for t in tools if _is_function_tool(t)]
+    fn_tool_schemas: list[dict[str, Any]] = []
+    fn_tools: list[Tool] = []
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            fn_tool_schemas.extend(
+                _get_tool_schema_from_name_and_params(name, params)
+                for name, params in iter_response_function_tool_info(tool)
+            )
+            if isinstance(tool, FunctionTool):
+                fn_tools.append(tool)
+        elif _is_function_tool(tool):
+            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
+            fn_tools.append(tool)
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in fn_tools],
+            "anyOf": fn_tool_schemas,
         },
     }
     json_schema_defs = _get_tool_schema_defs(fn_tools)
@@ -274,23 +389,30 @@ def get_json_schema_from_tools(
         tool_choice, ToolChoiceFunction
     ):
         tool_name = tool_choice.name
-        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
-        if tool_name not in tool_map:
+        responses_tool_map: dict[str, dict[str, Any] | None] = {}
+        for tool in tools:
+            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+                continue
+            for name, params in iter_response_function_tool_info(tool):
+                responses_tool_map[name] = params
+                if "__" in name:
+                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
+        if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].parameters
+        return responses_tool_map[tool_name]
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
     ):
         tool_name = tool_choice.function.name
-        tool_map = {
+        chat_tool_map: dict[str, ChatCompletionToolsParam] = {
             tool.function.name: tool
             for tool in tools
             if isinstance(tool, ChatCompletionToolsParam)
         }
-        if tool_name not in tool_map:
+        if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].function.parameters
+        return chat_tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)

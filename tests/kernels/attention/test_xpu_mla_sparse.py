@@ -116,3 +116,55 @@ def test_bf16_triton_sparse_mla(device_str, dtype):
     assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)
     assert torch.allclose(max_logits, ref_max_logits, atol=1e-3, rtol=1e-3)
     assert torch.allclose(lse, ref_lse, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("device_str", ["xpu"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.skipif(
+    not torch.xpu.is_available(),
+    reason="XPU is required",
+)
+def test_bf16_triton_sparse_mla_masked_chunks(device_str, dtype):
+    """Rows whose leading BLOCK_N index entries are all masked must not NaN.
+
+    Regression test: with an -inf running max, a fully-masked leading chunk
+    produced re_scale = exp2(-inf - -inf) = NaN, permanently poisoning the
+    accumulator even though valid keys followed in later chunks.
+    """
+    device = torch.device(device_str)
+    s_q = 3
+    s_kv = 256
+    h_q = 64
+    h_kv = 1
+    d_qk = 576
+    d_v = 512
+    topk = 128  # 8 chunks of BLOCK_N=16
+
+    torch.random.manual_seed(1234)
+
+    q = torch.randn((s_q, h_q, d_qk), dtype=dtype, device=device)
+    kv = torch.randn((s_kv, h_kv, d_qk), dtype=dtype, device=device)
+    indices = torch.full((s_q, h_kv, topk), -1, dtype=torch.int32, device=device)
+    # row 0: valid keys only in chunks 1-2 -> leading AND trailing masked chunks
+    indices[0, 0, 16:48] = torch.arange(32, dtype=torch.int32, device=device)
+    # row 1: fully valid
+    indices[1, 0, :] = torch.arange(topk, dtype=torch.int32, device=device)
+    # row 2: no valid key at all
+
+    sm_scale = d_qk**-0.5
+
+    out, max_logits, lse = triton_bf16_mla_sparse_interface(
+        q, kv, indices, sm_scale, d_v
+    )
+    assert out.isfinite().all()
+
+    ref_out, _, ref_max_logits, ref_lse = reference_mla_sparse_prefill(
+        q, kv, indices, sm_scale, d_v
+    )
+    assert torch.allclose(out[:2], ref_out[:2], atol=1e-2, rtol=1e-2)
+    assert torch.allclose(max_logits[:2], ref_max_logits[:2], atol=1e-3, rtol=1e-3)
+    assert torch.allclose(lse[:2], ref_lse[:2], atol=1e-3, rtol=1e-3)
+    # A row with no valid key yields zeros (the reference's convention); its
+    # lse/max_logits are large-negative finite rather than the reference's
+    # +inf/-inf placeholders, so only the output is compared here.
+    assert torch.allclose(out[2], torch.zeros_like(out[2]))

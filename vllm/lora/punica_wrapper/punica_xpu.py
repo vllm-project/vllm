@@ -98,7 +98,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        bgmv_shrink(x, w_t_all, y, self._get_token_lora_indices(x), scale)
+        buf = torch.zeros(
+            x.size(0),
+            w_t_all.size(-2),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        bgmv_shrink(x, w_t_all, buf, self._get_token_lora_indices(x), scale)
+        y.copy_(buf)
 
     def _apply_expand(
         self,
@@ -448,11 +455,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             _,
             _,
             lora_ids,
-            _,
+            no_lora_flag,
             num_active_loras,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
+
+        assert no_lora_flag.numel() == 1
+        if no_lora_flag.item():
+            # None of the inputs require LoRA.
+            return
+
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(

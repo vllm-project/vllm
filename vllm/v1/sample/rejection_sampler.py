@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
@@ -67,8 +68,11 @@ class RejectionSampler(nn.Module):
         self.sampler = sampler
         self.use_fp64_gumbel = getattr(sampler, "use_fp64_gumbel", False)
         logprobs_mode = self.sampler.logprobs_mode
-        self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
-        self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
+        self.is_processed_logprobs_mode = logprobs_mode in PROCESSED_LOGPROBS_MODES
+        self.is_logits_logprobs_mode = logprobs_mode in (
+            "raw_logits",
+            "processed_logits",
+        )
 
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if (
@@ -292,11 +296,8 @@ class RejectionSampler(nn.Module):
         any_penalties_or_bad_words = (
             sampling_metadata.bad_words_token_ids or has_penalties
         )
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking = holder is not None and holder.has_tracked_requests()
-
         output_token_ids = sampling_metadata.output_token_ids
-        if any_penalties_or_bad_words or needs_thinking:
+        if any_penalties_or_bad_words:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
@@ -305,9 +306,7 @@ class RejectionSampler(nn.Module):
         # Calculate indices of target logits.
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
-            sampling_metadata.allowed_token_ids_mask is not None
-            or has_penalties
-            or needs_thinking
+            sampling_metadata.allowed_token_ids_mask is not None or has_penalties
         )
         if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
@@ -337,6 +336,7 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
+        holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,

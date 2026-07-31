@@ -13,6 +13,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
+    _select_flashinfer_allreduce_use_oneshot,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.fix_functionalization import (
@@ -30,6 +31,9 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+    AiterCustomAllreduce,
+)
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -43,6 +47,35 @@ from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("workspace_backend", "device_capability", "world_size", "tensor_size", "expected"),
+    [
+        ("mnnvl", 103, 8, 2 * 1024 * 1024, None),
+        ("trtllm", 103, 8, 2 * 1024 * 1024, True),
+        ("trtllm", 103, 8, 2 * 1024 * 1024 + 1, False),
+        ("trtllm", 100, 4, 4 * 1024 * 1024, True),
+        ("trtllm", 100, 4, 4 * 1024 * 1024 + 1, False),
+        ("trtllm", None, 8, 128 * 1024 * 1024, True),
+    ],
+)
+def test_select_flashinfer_allreduce_use_oneshot(
+    workspace_backend: str,
+    device_capability: int | None,
+    world_size: int,
+    tensor_size: int,
+    expected: bool | None,
+):
+    assert (
+        _select_flashinfer_allreduce_use_oneshot(
+            workspace_backend,
+            device_capability,
+            world_size,
+            tensor_size,
+        )
+        is expected
+    )
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
@@ -189,6 +222,25 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         ]
 
 
+class TestAllReduceGemmaRMSNormStaticQuantFP8Model(
+    TestAllReduceRMSNormStaticQuantFP8Model
+):
+    def __init__(
+        self,
+        hidden_size=16,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.float16,
+    ):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        for norm in self.norm:
+            norm.weight.requires_grad_(False)
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_reduce.default]
+
+
 class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     """Exercises the new ROCm AITER AR+RMS+per-group-FP8-quant patterns.
 
@@ -220,12 +272,10 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         token_num=16,
         eps=1e-6,
         dtype: torch.dtype = torch.bfloat16,
-        use_triton_quant: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.use_triton_quant = use_triton_quant
         assert hidden_size % self.quant_group_size == 0, (
             f"hidden_size ({hidden_size}) must be a multiple of "
             f"quant_group_size ({self.quant_group_size}) for per-group FP8 quant"
@@ -237,10 +287,6 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         ]
 
     def _group_quant(self, rms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.use_triton_quant:
-            return torch.ops.vllm.triton_per_token_group_quant_fp8(
-                rms, self.quant_group_size
-            )
         return torch.ops.vllm.rocm_aiter_group_fp8_quant.default(
             rms, self.quant_group_size
         )
@@ -287,11 +333,7 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            (
-                torch.ops.vllm.triton_per_token_group_quant_fp8.default
-                if self.use_triton_quant
-                else torch.ops.vllm.rocm_aiter_group_fp8_quant.default
-            ),
+            torch.ops.vllm.rocm_aiter_group_fp8_quant.default,
         ]
 
     def ops_in_model_after(self):
@@ -376,6 +418,15 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         ),
         pytest.param(
             TestAllReduceRMSNormStaticQuantFP8Model,
+            True,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
+        pytest.param(
+            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
             True,
             False,
             marks=pytest.mark.skipif(
@@ -504,8 +555,12 @@ def all_reduce_fusion_pass_on_test_model(
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
             "VLLM_FLASHINFER_ALLREDUCE_BACKEND": flashinfer_allreduce_backend,
+            "VLLM_ROCM_USE_AITER": str(int(use_aiter)),
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": str(int(use_aiter)),
         }
     )
+    if use_aiter:
+        rocm_aiter_ops.refresh_env_variables()
 
     init_distributed_environment()
 
@@ -569,7 +624,10 @@ def all_reduce_fusion_pass_on_test_model(
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
-        if test_model_cls is TestAllReduceGemmaRMSNormModel:
+        if test_model_cls in (
+            TestAllReduceGemmaRMSNormModel,
+            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+        ):
             fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
             fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
             assert fused_nodes
@@ -578,7 +636,6 @@ def all_reduce_fusion_pass_on_test_model(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("use_triton_quant", [True, False])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [128])
@@ -595,7 +652,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
-    use_triton_quant: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Sibling of ``test_all_reduce_fusion_pass_replace`` for the new
@@ -608,15 +664,15 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     * ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` (with-residual,
       single ``rms`` consumer)
     * ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`` (with-
-      residual, DSv3.2 indexer fan-out; parametrized over both
-      ``triton_per_token_group_quant_fp8`` and ``rocm_aiter_group_fp8_quant``
-      producers).
+      residual, DSv3.2 indexer fan-out; parametrized over
+      ``rocm_aiter_group_fp8_quant``
+      producer).
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-    if not rocm_aiter_ops.has_fused_allreduce_rmsnorm_quant_per_group():
+    if not AiterCustomAllreduce.build_supports_per_group_quant():
         pytest.skip(
             "aiter build is missing 'fused_ar_rms_per_group_quant' (needs "
             "ROCm/aiter PR #2823); the new patterns aren't registered."
@@ -635,7 +691,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
                 hidden_size,
                 dtype,
                 enable_rms_norm_custom_op,
-                use_triton_quant,
                 monkeypatch,
             ),
             nprocs=nprocs,
@@ -653,7 +708,6 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
-    use_triton_quant: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     set_random_seed(0)
@@ -671,6 +725,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
             "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
         }
     )
     rocm_aiter_ops.refresh_env_variables()
@@ -680,10 +735,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     custom_ops = []
     if enable_rms_norm_custom_op:
         custom_ops.append("+rms_norm")
-    # ``triton_per_token_group_quant_fp8`` is emitted by ``QuantFP8.forward_hip``
-    # only when QuantFP8 is enabled as a custom op (and ``use_triton=True`` at
-    # the call site). The patterns in this PR are robust to both Triton and
-    # rocm_aiter forms; we always enable +quant_fp8 so the matcher's example
+    # We always enable +quant_fp8 so the matcher's example
     # trace finds the same form the test model uses.
     custom_ops.append("+quant_fp8")
 
@@ -714,9 +766,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(
-            hidden_size, token_num, dtype=dtype, use_triton_quant=use_triton_quant
-        )
+        model = test_model_cls(hidden_size, token_num, dtype=dtype)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 

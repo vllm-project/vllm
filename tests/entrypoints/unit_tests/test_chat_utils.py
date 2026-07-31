@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import warnings
 from collections.abc import Mapping
 from typing import Literal
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -13,11 +15,14 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MEDIA_CONNECTOR_REGISTRY,
+    AsyncMultiModalItemTracker,
     ConversationMessage,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -703,6 +708,29 @@ def test_parse_chat_messages_empty_system(
         {"role": "system", "content": [{"type": "text", "text": ""}]},
         {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_only_chat_does_not_initialize_media_connector(
+    mistral_model_config,
+    monkeypatch,
+):
+    load_connector = MagicMock()
+    monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
+    messages = [{"role": "user", "content": "Who are you?"}]
+
+    parse_chat_messages(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+    await parse_chat_messages_async(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+
+    load_connector.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1501,7 +1529,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -1537,7 +1565,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited",
         )
-        with pytest.raises(ValueError, match="At most"):
+        with pytest.raises(VLLMValidationError, match="At most"):
             parse_chat_messages(
                 [
                     {
@@ -2742,3 +2770,39 @@ def test_postprocess_messages_null_arguments_string():
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
+    """Regression test: one failing media fetch must not abandon the other
+    still-in-flight fetches in the same modality batch.
+
+    Before the fix, `resolve_items` gathered per-modality fetches with plain
+    `asyncio.gather`, so the first exception propagated immediately while
+    sibling fetches (real network/thread-pool work in production) kept
+    running detached, with nothing left to await or cancel them.
+    """
+
+    async def _fetch(should_fail: bool, delay: float):
+        if should_fail:
+            await asyncio.sleep(0.01)
+            raise ValueError("simulated fetch failure")
+        await asyncio.sleep(delay)
+        return ("decoded", None)
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._items_by_modality["image"] = [
+        lambda: _fetch(True, 0),
+        lambda: _fetch(False, 0.2),
+        lambda: _fetch(False, 0.2),
+    ]
+
+    tasks_before = asyncio.all_tasks()
+    with pytest.raises(ValueError, match="simulated fetch failure"):
+        await tracker.resolve_items()
+
+    leaked_tasks = asyncio.all_tasks() - tasks_before
+    assert not leaked_tasks, (
+        f"resolve_items left {len(leaked_tasks)} task(s) running after "
+        f"raising: {leaked_tasks}"
+    )

@@ -56,7 +56,7 @@ class WriteTask:
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
     layer_name: str
-    event: torch.Event
+    event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)
@@ -422,6 +422,10 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # Prefill DP rank that owns this request's KV (forwarded by the proxy). The
+    # read must target this rank's memory registration; the default 0 preserves
+    # the symmetric single-DP behaviour.
+    remote_dp_rank: int = 0
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -473,8 +477,17 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            # Remote peer TP degree (used as remote_tp_size downstream). The
+            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
+            # which is absent on WRITE producer requests -> defaulted to 1 ->
+            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            tp_size=int(
+                kv_transfer_params.get("remote_tp_size")
+                or kv_transfer_params.get("tp_size")
+                or 0
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req

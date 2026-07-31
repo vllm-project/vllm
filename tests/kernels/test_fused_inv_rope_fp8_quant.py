@@ -726,13 +726,18 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     This catches stride/layout bugs that only manifest when the einsum
     kernel actually consumes the quantized activations.
     """
-    from deep_gemm.utils.math import ceil_div
-
     from vllm.utils.deep_gemm import (
         fp8_einsum,
+        is_deep_gemm_supported,
         per_block_cast_to_fp8,
         transform_sf_into_required_layout,
     )
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM not supported on this platform")
+
+    def ceil_div(a: int, b: int) -> int:
+        return (a + b - 1) // b
 
     heads_per_group = num_heads // n_groups
     d = heads_per_group * HEAD_DIM
@@ -809,8 +814,12 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     # -- Checks --
     # Einsum output: Triton and CUDA both rotate in fp32 now, so diffs
     # come from fp32 ordering and UE8M0 boundary shifts only.
-    # Use relative diff (same metric as test_fp8_einsum.py).
-    from deep_gemm.testing import calc_diff
+    # Use relative diff (same metric as deep_gemm.testing.calc_diff).
+    def calc_diff(x, y):
+        x, y = x.double(), y.double()
+        denominator = (x * x + y * y).sum()
+        sim = 2 * (x * y).sum() / denominator
+        return 1 - sim
 
     z_diff = calc_diff(z_fused, z_ref)
     assert z_diff < 0.01, (

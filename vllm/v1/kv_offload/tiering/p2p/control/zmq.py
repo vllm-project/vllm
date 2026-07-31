@@ -55,12 +55,16 @@ class ZmqConnection(ControlConnection):
     def __init__(self, peer_id: str, sockets: _Sockets) -> None:
         super().__init__(peer_id)
         self._sockets = sockets
+        # _dead: the peer is gone. _closed: the sockets have been released.
+        # Distinct, so mark_dead() cannot turn close() into a no-op and leak
+        # the DEALER and its monitor socket.
+        self._dead = False
         self._closed = False
         self._inbox: list[dict] = []
 
     def send(self, msg: dict) -> None:
         """Send a msgpack-encoded message to this peer."""
-        if self._closed:
+        if not self.alive:
             raise RuntimeError(
                 f"ZmqConnection: send on closed connection to {self.peer_id}"
             )
@@ -77,12 +81,13 @@ class ZmqConnection(ControlConnection):
 
     @property
     def alive(self) -> bool:
-        return not self._closed
+        return not (self._dead or self._closed)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self._dead = True
         logger.info("ZmqConnection: closing connection to %s", self.peer_id)
         self._sockets.monitor.close()
         self._sockets.dealer.close()
@@ -92,8 +97,12 @@ class ZmqConnection(ControlConnection):
         self._inbox.append(msg)
 
     def mark_dead(self) -> None:
-        """Mark connection as disconnected."""
-        self._closed = True
+        """Mark connection as disconnected.
+
+        Only flips liveness: the sockets stay open until close() releases
+        them, so the owner can still drain recv() before tearing down.
+        """
+        self._dead = True
 
     @property
     def monitor_socket(self) -> zmq.Socket:
@@ -114,6 +123,9 @@ class ZmqTransport(ControlTransport):
 
         self._connections: dict[str, ZmqConnection] = {}
         self._pending_inbound: list[tuple[str, dict]] = []
+        # Monotonic suffix for inproc monitor endpoints — see
+        # _open_connection() for why peer_id alone is not enough.
+        self._monitor_seq = 0
 
         self._zmq_ctx = zmq.Context()
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
@@ -127,10 +139,23 @@ class ZmqTransport(ControlTransport):
     # ------------------------------------------------------------------
 
     def connect(self, peer_id: str) -> ZmqConnection:
-        """Open an outbound connection to a remote peer."""
-        assert peer_id not in self._connections, (
-            f"ZmqConnection to {peer_id} already exists"
-        )
+        """Open an outbound connection to a remote peer.
+
+        A dead connection can still be registered: its owning session may mark
+        it dead after this tick's sweep already ran, and poll() only
+        unregisters it on the next pass. Retire such an entry instead of
+        asserting, so a reconnect landing in that window succeeds. A live
+        entry is still a genuine duplicate.
+        """
+        existing = self._connections.get(peer_id)
+        if existing is not None:
+            assert not existing.alive, f"ZmqConnection to {peer_id} already exists"
+            logger.info(
+                "ZmqTransport %s: retiring dead connection to %s before reconnect",
+                self._local_id,
+                peer_id,
+            )
+            self._connections.pop(peer_id).close()
         logger.info(
             "ZmqTransport %s: opening OUTBOUND connection to %s",
             self._local_id,
@@ -146,8 +171,18 @@ class ZmqTransport(ControlTransport):
         - Checks monitors for disconnections
         - Removes and closes dead connections
         """
+        # Retire connections a session killed since the last poll() before
+        # routing traffic: otherwise a reconnecting peer's first message is
+        # enqueued into the dead connection and discarded along with it.
+        # This closes only that between-polls window. A peer that dies while
+        # poll() is running is not seen until the next _check_monitors(), and
+        # one that dies silently not until the ZMQ heartbeat expires; both
+        # still take a message into a doomed connection and are out of scope.
+        self._sweep_dead_connections()
+
         self._recv_router()
         self._check_monitors()
+        self._sweep_dead_connections()
 
         # Create connections for new inbound peers
         new_connections: list[ControlConnection] | None = None
@@ -165,10 +200,6 @@ class ZmqTransport(ControlTransport):
                 new_connections.append(conn)
             conn.enqueue(msg)
         self._pending_inbound.clear()
-
-        # Remove dead connections
-        for pid in [p for p, c in self._connections.items() if not c.alive]:
-            self._connections.pop(pid).close()
 
         return (
             new_connections if new_connections is not None else _EMPTY_NEW_CONNECTIONS
@@ -210,8 +241,13 @@ class ZmqTransport(ControlTransport):
         _apply_heartbeat(dealer)
         dealer.identity = self._local_id.encode()
 
+        # Unique per connection, not per peer: libzmq releases an inproc
+        # endpoint on its reaper thread after the DEALER's close() has already
+        # returned, so reusing the peer-derived address on a reconnect races
+        # that teardown and fails with EADDRINUSE.
         safe_id = peer_id.replace(":", "-").replace("/", "-")
-        monitor_addr = f"inproc://p2p-monitor-{safe_id}"
+        monitor_addr = f"inproc://p2p-monitor-{safe_id}-{self._monitor_seq}"
+        self._monitor_seq += 1
         dealer.monitor(monitor_addr, zmq.EVENT_DISCONNECTED)
 
         monitor_sock = self._zmq_ctx.socket(zmq.PAIR)
@@ -230,6 +266,11 @@ class ZmqTransport(ControlTransport):
             len(self._connections),
         )
         return conn
+
+    def _sweep_dead_connections(self) -> None:
+        """Unregister and release every connection that is no longer alive."""
+        for pid in [p for p, c in self._connections.items() if not c.alive]:
+            self._connections.pop(pid).close()
 
     def _recv_router(self) -> None:
         """Non-blocking: receive all pending messages from ROUTER."""

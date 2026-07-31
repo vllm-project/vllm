@@ -136,6 +136,19 @@ class TestRmsNormPerBlockQuantConfigPicker:
             {"hidden_size": 4096, "group_size": 128, "num_tokens": 32}
         )
 
+    def test_b200_configs_disable_reduction_warp_specialization(self):
+        config_set = ConfigManager.get_instance().load_config_set(
+            "rms_norm_per_block_quant"
+        )
+        configs = config_set.to_dict()["nvidia_b200"].values()
+
+        # TODO: Remove once the Triton pin includes
+        # https://github.com/triton-lang/triton/pull/9716. Tracked by
+        # https://github.com/triton-lang/triton/issues/10901.
+        assert all(
+            config["range_warp_specializes"][1] is not True for config in configs
+        )
+
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, FP8_DTYPE]

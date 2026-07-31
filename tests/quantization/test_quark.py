@@ -17,22 +17,31 @@ import pytest
 import torch
 from packaging import version
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    quant_dequant_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 else:
+
+    def on_gfx942() -> bool:
+        return False
 
     def on_gfx950() -> bool:
         return False
@@ -41,11 +50,13 @@ else:
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
-QUARK_MXFP4_MIN_VERSION = "0.8.99"
+QUARK_MXFP4_MIN_VERSION = "0.12"
 
 QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
+
+AITER_AVAILABLE = is_aiter_found_and_supported()
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -55,7 +66,7 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
 try:
-    huggingface_hub.list_repo_refs(
+    hf_api().list_repo_refs(
         "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
     )
     HF_HUB_AMD_ORG_ACCESS = True
@@ -145,7 +156,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "nameistoken/tiny-qwen3-moe-w8a8-int8-quark"
+    model_path = "amd/tiny-qwen3-moe-w8a8-int8"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -163,6 +174,38 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not (on_gfx950() or on_gfx942()),
+    reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
+)
+@pytest.mark.parametrize("tp", [1])
+def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
+    """Test W4A8 (INT4 weight + FP8 activation) MoE with a tiny Qwen3 MoE model.
+
+    W4A8 dispatches through the AITER fused MoE kernel, so AITER must be on.
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    model_path = "amd/tiny-qwen3-moe-w4a8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            moe = model.model.layers[0].mlp.experts
+            assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
+                f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
+            )
 
         llm.apply_model(check_model)
 
@@ -242,7 +285,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
         excepted_value=10.6,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
+        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.45
     ),
 ]
 
@@ -448,6 +491,42 @@ def test_mxfp4_dequant_kernel_match_quark(
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
     assert torch.equal(out_hip, out_torch)
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.skipif(
+    not AITER_AVAILABLE,
+    reason="AITER is not found or not supported on the current platform",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dynamic_quant_match_quark(
+    float_dtype: torch.dtype, scalings: list[float]
+):
+    """`AiterMxfp4LinearKernel` quantizes weights dynamically through AITER's
+    `dynamic_mxfp4_quant`, while the emulation path quantizes/dequantizes
+    through Quark's `qdq_mxfp4`. Check that both agree on the same input.
+    """
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    torch.manual_seed(0)
+
+    hidden_size = 32 * 64
+    inp = (torch.rand(48, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
+    for i in range(hidden_size // 32):
+        inp[:, i * 32 : (i + 1) * 32] = (
+            inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
+        )
+
+    x_q, x_s = dynamic_mxfp4_quant(inp)
+    out_dynamic_quant = dq_mxfp4_torch(x_q, x_s, float_dtype)
+
+    out_quark_qdq = quant_dequant_mxfp4(inp)
+
+    assert torch.equal(out_dynamic_quant, out_quark_qdq)
 
 
 # Unit tests for ``is_layer_skipped`` fused-name handling.

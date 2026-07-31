@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! DeepSeek V3.2 prompt renderer.
 
 use std::collections::{HashMap, HashSet};

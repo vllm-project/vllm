@@ -557,7 +557,7 @@ def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -772,7 +772,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -2036,7 +2036,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.self_timed = False
 
     # Load the dataset.
-    assert tokenizer is not None, "Tokenizer must be initialized before loading dataset"
     input_requests = get_samples(args, tokenizer)
 
     if args.dataset_name in ("random", "prefix_repetition"):

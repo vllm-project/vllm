@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm.models.deepseek_v4.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(

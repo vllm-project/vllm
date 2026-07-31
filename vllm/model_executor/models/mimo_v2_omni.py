@@ -715,7 +715,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
             effective_frames = num_frames * tokens_per_second
         else:
             effective_frames = num_frames
-        padded_num_frames = effective_frames + effective_frames % temporal_patch_size
+        padded_num_frames = effective_frames + (-effective_frames % temporal_patch_size)
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size

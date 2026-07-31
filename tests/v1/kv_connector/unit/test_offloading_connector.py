@@ -45,7 +45,7 @@ if current_platform.is_cuda():
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
-        # (block_size_factor stays 1).
+        # (blocks_per_chunk stays 1).
         ("tiiuae/Falcon-H1-0.5B-Instruct", None, None, True),
     ]
 
@@ -251,23 +251,19 @@ def test_cpu_offloading(
         kv_connector_extra_config=extra_config,
     )
 
-    # KV events are incompatible with HMA (setting kv_events_config
-    # would force HMA off), so only enable them for non-HMA models.
     subscriber: MockSubscriber | None = None
-    kv_events_config: KVEventsConfig | None = None
-    if not uses_hma:
-        port: int
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", 0))
-            port = s.getsockname()[1]
+    port: int
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
 
-        events_endpoint = f"tcp://*:{port}"
-        kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=events_endpoint,
-            topic="test",
-        )
+    events_endpoint = f"tcp://*:{port}"
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=events_endpoint,
+        topic="test",
+    )
 
     # Attention-free / hybrid models disable prefix caching by default
     # (ModelConfig.is_prefix_caching_supported returns False).  Without it,
@@ -289,9 +285,8 @@ def test_cpu_offloading(
         **({"max_num_seqs": 1} if current_platform.is_rocm() else {}),
     )
 
-    if kv_events_config is not None:
-        events_endpoint = events_endpoint.replace("*", "127.0.0.1")
-        subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
+    events_endpoint = events_endpoint.replace("*", "127.0.0.1")
+    subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
         _latency_test(llm, subscriber)

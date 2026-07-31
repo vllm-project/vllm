@@ -256,6 +256,13 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        # Stable per-token causal page-count buffer for decode cudagraph replays
+        # (consumed by the MSA top-k path's sparse_topk_select num_valid_pages).
+        self.num_valid_pages_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -417,6 +424,9 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         # (decode at [:, :nd], prefill at [:, nd:]) and return views into it; the
         # kernels' out= writes out[:, :total_q]. None -> allocate fresh.
         buf = self.topk_indices_buffer
+        buf_htk = (
+            buf if buf is None or current_platform.is_rocm() else buf.transpose(0, 1)
+        )
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
         if index_md.num_decodes > 0:
@@ -434,7 +444,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.num_kv_heads,
                 d.decode_query_len,
                 d.max_decode_query_len,
-                out=buf,
+                out=buf_htk,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -458,7 +468,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.topk_blocks,
                 self.init_blocks,
                 self.local_blocks,
-                out=buf[:, nd:, :] if buf is not None else None,
+                out=buf_htk[:, nd:, :] if buf_htk is not None else None,
             )
         return decode_topk, prefill_topk
 

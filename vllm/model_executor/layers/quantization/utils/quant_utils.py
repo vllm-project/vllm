@@ -190,6 +190,8 @@ kInt4Static32Asym = QuantKey(
 
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
+kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
 
 # INT4 W4A8 quantization keys
 
@@ -214,6 +216,12 @@ kInt4W4A8StaticGroup32Sym = QuantKey(
 kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
 kInt4W4A8StaticGroupSym = QuantKey(
     torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
+
+kInt4W4A8StaticChannelSym = QuantKey(
+    torch.int8,
+    ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL),
+    symmetric=True,
 )
 
 

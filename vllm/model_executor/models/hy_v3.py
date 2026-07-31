@@ -73,6 +73,7 @@ from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -177,7 +178,9 @@ class HYV3MoEFused(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.expert_bias = nn.Parameter(torch.empty(config.num_experts))
+        self.expert_bias = nn.Parameter(
+            torch.empty(config.num_experts, dtype=torch.float32)
+        )
         scoring_func = "sigmoid"
         e_score_correction_bias = self.expert_bias
 
@@ -268,7 +271,7 @@ class HYV3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             quant_config=quant_config,
-            bias=None,
+            bias=False,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -646,21 +649,6 @@ class HYV3Model(nn.Module, MixtureOfExperts):
             loaded_params.add(name)
 
         return loaded_params
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
-) -> int | None:
-    # HYV3MTP is enabled only when num_nextn_predict_layers is greater than 1
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None
 
 
 class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):

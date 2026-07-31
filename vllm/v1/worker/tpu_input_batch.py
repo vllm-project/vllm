@@ -29,6 +29,7 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
+        max_num_blocks_per_req: list[int],
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -64,12 +65,12 @@ class InputBatch:
         # Block table.
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
+            max_num_blocks=max_num_blocks_per_req,
         )
 
         # Sampling-related.
@@ -493,22 +494,6 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs :]
         del self.req_output_token_ids[self.num_reqs :]
-
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
-        max_prompt_len = self.num_prompt_tokens[: self.num_reqs].max()
-        prompt_token_ids_cpu_tensor = torch.empty(
-            (self.num_reqs, max_prompt_len),
-            device="cpu",
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
-        prompt_token_ids = prompt_token_ids_cpu_tensor.numpy()
-        prompt_token_ids[:] = self.token_ids_cpu[: self.num_reqs, :max_prompt_len]
-        # Use the value of vocab_size as a pad since we don't have a
-        # token_id of this value.
-        for i in range(self.num_reqs):
-            prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray

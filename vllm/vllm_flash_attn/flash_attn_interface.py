@@ -388,7 +388,7 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
-        out, softmax_lse = _flash_attn_fwd(
+        out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,

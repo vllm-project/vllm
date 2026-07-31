@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -157,7 +158,9 @@ class EncoderDecoderModelState(ModelState):
         for_capture: bool,
         num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        encoder_seq_lens = torch.zeros(num_reqs, dtype=torch.int32, pin_memory=True)
+        encoder_seq_lens = torch.zeros(
+            num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
         encoder_seq_lens_np = encoder_seq_lens.numpy()
         if not for_capture:
             # During normal execution, use actual encoder lengths.

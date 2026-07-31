@@ -5,6 +5,7 @@ import copy
 from collections.abc import Iterable
 from functools import partial
 
+import regex
 import torch
 import torch.nn as nn
 
@@ -22,7 +23,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
 from .interfaces import SupportsMultiModal
-from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
+from .utils import WeightsMapper, make_empty_intermediate_tensors_factory, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -107,11 +108,13 @@ class EagleMistralLarge3Model(DeepseekV2Model):
 
 
 class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
-    remapping = MistralLarge3ForCausalLM.remapping | {
-        r"eagle_linear\.weight": r"model.fc.weight",
-        r"eagle_linear\.qscale_act": r"model.fc.input_scale",
-        r"eagle_linear\.qscale_weight": r"model.fc.weight_scale",
-    }
+    hf_to_vllm_mapper = MistralLarge3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_regex={
+            regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",
+            regex.compile(r"\Aeagle_linear\.qscale_act\Z"): r"model.fc.input_scale",
+            regex.compile(r"\Aeagle_linear\.qscale_weight\Z"): r"model.fc.weight_scale",
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         target_layer_num = vllm_config.model_config.get_num_layers(

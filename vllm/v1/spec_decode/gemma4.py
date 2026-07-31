@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -164,6 +165,29 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 ),
             )
         return base
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        """Gemma4 MTP requires dim-mismatched embedding sharing.
+
+        The draft checkpoint's embed_tokens is a draft-dim placeholder
+        (tied to lm_head so load_weights populates both); the model
+        expects it to be replaced by the target's backbone-dim embedding,
+        so the base class's embedding-dim equality guard must not apply.
+        """
+        if get_pp_group().world_size != 1:
+            return
+        inner_model = getattr(target_language_model, "model", None)
+        target_embed_tokens = getattr(inner_model, "embed_tokens", None)
+        if target_embed_tokens is None:
+            raise AttributeError(
+                "Target model does not have an 'embed_tokens' attribute"
+            )
+        del self.model.model.embed_tokens
+        self.model.model.embed_tokens = target_embed_tokens
+        logger.info(
+            "Gemma4 MTP: sharing target model's backbone-dim embed_tokens "
+            "with the draft model."
+        )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         """Gemma4 MTP always keeps its own draft-dim lm_head.

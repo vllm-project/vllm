@@ -546,8 +546,11 @@ def test_flash_attn_accepts_handled_fp8_variants(
 ):
     """FlashAttentionBackend must accept the two fp8 dtypes it can actually
     handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
-    import vllm.v1.attention.backends.flash_attn as fa_mod
+    import vllm.v1.attention.backends.fa_utils as fa_utils_mod
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
-    monkeypatch.setattr(fa_mod.current_platform, "is_xpu", lambda: True)
+    # The fp8 decision is made in fa_utils, using its own current_platform
+    # binding, so patch is_xpu there (not on flash_attn's) to stay robust to
+    # import order across earlier tests that patch vllm.platforms.current_platform.
+    monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: True)
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)

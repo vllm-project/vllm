@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from vllm.entrypoints.speech_to_text.base.serving import OpenAISpeechToText
+from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
 
@@ -43,7 +43,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
         is_tracing_enabled=AsyncMock(return_value=False),
     )
 
-    server = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
     server.task_type = "transcribe"
     server.models = SimpleNamespace(model_name=lambda: "audio")
@@ -53,7 +53,13 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 40.0))
+    server._preprocess_speech_to_text = AsyncMock(
+        return_value=(
+            engine_inputs,
+            40.0,
+            [30.0 * i for i in range(len(engine_inputs))],
+        )
+    )
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
@@ -112,7 +118,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
         {"prompt": "chunk-1"},
         {"prompt": "chunk-2"},
     ]
-    server = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
     server.task_type = "transcribe"
     server.models = SimpleNamespace(model_name=lambda: "audio")
@@ -122,7 +128,9 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 90.0))
+    server._preprocess_speech_to_text = AsyncMock(
+        return_value=(engine_inputs, 90.0, [0.0, 29.5, 29.5 + 29.7])
+    )
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
@@ -170,7 +178,7 @@ async def test_language_detection_cancel_aborts_engine_request():
         abort=AsyncMock(),
     )
 
-    server = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
     server.engine_client = engine_client
     server.asr_config = SimpleNamespace()
     server.tokenizer = Mock()

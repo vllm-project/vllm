@@ -7,7 +7,7 @@ from typing import Any, ParamSpec, TypeVar
 from torch import fx as fx
 
 from vllm import envs
-from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
@@ -30,18 +30,23 @@ if rocm_aiter_ops.is_enabled():
     )
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    from .fusion.add_rms_fusion import (
+        AddRMSNormFusionPass,
+        RMSNormReshapeFusionPass,
+    )
+    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.sequence_parallelism import SequenceParallelismPass
+    from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
-    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
-    from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
@@ -137,6 +142,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
+        model_config = config.model_config
+        enable_transformers_norm_canonicalization = (
+            (
+                self.pass_config.fuse_act_padding
+                or self.pass_config.fuse_allreduce_rms
+                or self.pass_config.fuse_norm_quant
+            )
+            and model_config is not None
+            and model_config.using_transformers_backend()
+        )
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -148,6 +163,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if enable_transformers_norm_canonicalization:
+                self.passes += [AddRMSNormFusionPass(config)]
+
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 # Run the more specific RMSNorm+router-pad fusion before
                 # AR+RMS, since both consume fused_add_rms_norm.
@@ -158,6 +176,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:
                     self.passes += [AllReduceFusionPass(config)]
+
+            if enable_transformers_norm_canonicalization:
+                # Let AR+RMS match before moving output reshapes ahead of the
+                # remaining RMSNorms, exposing them to RMS+Quant fusion.
+                self.passes += [RMSNormReshapeFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
                 if rocm_aiter_ops.is_enabled():
@@ -171,11 +194,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if (
-                self.pass_config.fuse_mla_dual_rms_norm
-                and rocm_aiter_ops.is_enabled()
-                and check_aiter_fused_qk_rmsnorm()
-            ):
+            if self.pass_config.fuse_qk_norm_rope_kvcache:
+                self.passes += [SplitCoalescingPass(config)]
+                self.passes += [ScatterSplitReplacementPass(config)]
+                self.passes += [QkNormRopeKvCacheFusionPass(config)]
+
+            if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:

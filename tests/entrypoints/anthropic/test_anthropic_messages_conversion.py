@@ -23,7 +23,6 @@ from vllm.entrypoints.anthropic.protocol import (
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
-    _get_cached_tokens,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
@@ -668,42 +667,6 @@ class TestThinkingBlockConversion:
 # ======================================================================
 
 
-class TestGetCachedTokens:
-    """Tests for _get_cached_tokens helper."""
-
-    def test_none_usage(self):
-        assert _get_cached_tokens(None) is None
-
-    def test_no_prompt_tokens_details(self):
-        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
-        assert _get_cached_tokens(usage) is None
-
-    def test_cached_tokens_present(self):
-        usage = UsageInfo(
-            prompt_tokens=100,
-            completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
-        )
-        assert _get_cached_tokens(usage) == 80
-
-    def test_cached_tokens_zero(self):
-        """Zero cached tokens should return 0, not None."""
-        usage = UsageInfo(
-            prompt_tokens=100,
-            completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
-        )
-        assert _get_cached_tokens(usage) == 0
-
-    def test_cached_tokens_none_in_details(self):
-        usage = UsageInfo(
-            prompt_tokens=100,
-            completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=None),
-        )
-        assert _get_cached_tokens(usage) is None
-
-
 class TestBuildAnthropicUsage:
     """Tests for _build_anthropic_usage helper.
 
@@ -711,36 +674,32 @@ class TestBuildAnthropicUsage:
     vLLM's prompt_tokens is the total.
     """
 
-    def test_no_cache_info(self):
-        """When cache info is unavailable, return raw prompt_tokens."""
-        result = _build_anthropic_usage(100, 10, None)
-        assert result.input_tokens == 100
-        assert result.output_tokens == 10
-        assert result.cache_read_input_tokens is None
-        assert result.cache_creation_input_tokens is None
-
     def test_cache_hit(self):
         """When cache is hit, input_tokens excludes cached tokens."""
         usage = UsageInfo(
             prompt_tokens=100,
             completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=80, created_cache_tokens=10
+            ),
         )
-        result = _build_anthropic_usage(100, 10, usage)
-        assert result.input_tokens == 20  # 100 - 80
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 10  # 100 - 80 - 10
         assert result.output_tokens == 10
         assert result.cache_read_input_tokens == 80
-        assert result.cache_creation_input_tokens == 0
+        assert result.cache_creation_input_tokens == 10
 
     def test_zero_cached_tokens(self):
         """Zero cached tokens should still set cache_creation to 0."""
         usage = UsageInfo(
             prompt_tokens=100,
             completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=0, created_cache_tokens=0
+            ),
         )
-        result = _build_anthropic_usage(100, 10, usage)
-        assert result.input_tokens == 100  # 100 - 0
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 100  # 100 - 0 - 0
         assert result.cache_read_input_tokens == 0
         assert result.cache_creation_input_tokens == 0
 
@@ -749,9 +708,11 @@ class TestBuildAnthropicUsage:
         usage = UsageInfo(
             prompt_tokens=100,
             completion_tokens=10,
-            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=100),
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=100, created_cache_tokens=0
+            ),
         )
-        result = _build_anthropic_usage(100, 10, usage)
+        result = _build_anthropic_usage(usage)
         assert result.input_tokens == 0
         assert result.cache_read_input_tokens == 100
         assert result.cache_creation_input_tokens == 0
@@ -759,7 +720,7 @@ class TestBuildAnthropicUsage:
     def test_no_prompt_tokens_details(self):
         """UsageInfo without prompt_tokens_details returns no cache info."""
         usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
-        result = _build_anthropic_usage(100, 10, usage)
+        result = _build_anthropic_usage(usage)
         assert result.input_tokens == 100
         assert result.cache_read_input_tokens is None
         assert result.cache_creation_input_tokens is None
@@ -1241,7 +1202,9 @@ class TestStreamingCacheUsageSemantics:
                     prompt_tokens=100,
                     completion_tokens=5,
                     total_tokens=105,
-                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=80, created_cache_tokens=10
+                    ),
                 ),
             )
             yield "data: [DONE]"
@@ -1263,9 +1226,9 @@ class TestStreamingCacheUsageSemantics:
         delta_usage = next(
             data["usage"] for ev, data in events if ev == "message_delta"
         )
-        assert delta_usage["input_tokens"] == 20  # 100 - 80
+        assert delta_usage["input_tokens"] == 10  # 100 - 80 - 10
         assert delta_usage["cache_read_input_tokens"] == 80
-        assert delta_usage["cache_creation_input_tokens"] == 0
+        assert delta_usage["cache_creation_input_tokens"] == 10
 
     @pytest.mark.asyncio
     async def test_streaming_no_cache_hit(self):
@@ -1284,7 +1247,9 @@ class TestStreamingCacheUsageSemantics:
                     prompt_tokens=50,
                     completion_tokens=5,
                     total_tokens=55,
-                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=0, created_cache_tokens=0
+                    ),
                 ),
             )
             yield "data: [DONE]"
@@ -1302,7 +1267,7 @@ class TestStreamingCacheUsageSemantics:
         assert start_usage["input_tokens"] == 50
         assert "cache_read_input_tokens" not in start_usage
         assert "cache_creation_input_tokens" not in start_usage
-        assert delta_usage["input_tokens"] == 50  # 50 - 0
+        assert delta_usage["input_tokens"] == 50  # 50 - 0 - 0
         assert delta_usage["cache_read_input_tokens"] == 0
         assert delta_usage["cache_creation_input_tokens"] == 0
 

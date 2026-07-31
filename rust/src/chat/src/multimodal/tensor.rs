@@ -1,49 +1,88 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
+use std::mem::size_of;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
+use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
-use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
+use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireArrayData, WireTensor};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
+/// Element type retained alongside an encoded tensor during multimodal lowering.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TensorKind {
+    /// 32-bit floating point.
+    F32,
+    /// IEEE 16-bit floating point.
+    F16,
+    /// Brain floating point.
+    Bf16,
+    /// Signed 64-bit integer.
+    I64,
+    /// Unsigned 32-bit integer.
+    U32,
+}
+
+impl TensorKind {
+    const fn element_size(self) -> usize {
+        match self {
+            Self::F32 => size_of::<f32>(),
+            Self::F16 => size_of::<f16>(),
+            Self::Bf16 => size_of::<bf16>(),
+            Self::I64 => size_of::<i64>(),
+            Self::U32 => size_of::<u32>(),
+        }
+    }
+
+    const fn wire_dtype(self) -> &'static str {
+        match self {
+            Self::F32 => "float32",
+            Self::F16 => "float16",
+            Self::Bf16 => "bfloat16",
+            Self::I64 => "int64",
+            Self::U32 => "uint32",
+        }
+    }
+}
+
 /// Representation for multimodal kwarg values for transformation.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum KwargValue {
-    /// Float tensor with row-major flat data and shape.
-    F32Tensor { data: Vec<f32>, shape: Vec<usize> },
-    /// Float16 tensor with row-major flat data and shape.
-    F16Tensor { data: Vec<f16>, shape: Vec<usize> },
-    /// BFloat16 tensor with row-major flat data and shape.
-    Bf16Tensor { data: Vec<bf16>, shape: Vec<usize> },
-    /// Signed integer tensor with row-major flat data and shape.
-    I64Tensor { data: Vec<i64>, shape: Vec<usize> },
-    /// Unsigned integer tensor with row-major flat data and shape.
-    U32Tensor { data: Vec<u32>, shape: Vec<usize> },
+    /// Tensor with row-major flat data and shape.
+    Tensor { kind: TensorKind, wire: WireTensor },
     /// Non-tensor kwarg value that is shared or copied as-is.
     Passthrough(ProtocolKwargValue),
 }
 
-/// Collect `pixel_values` and model-specific outputs into one tensor map.
+/// Collect the primary encoder input and model-specific outputs into one
+/// tensor map.
+///
+/// `primary_key` names the encoder-input tensor as the model's forward kwargs
+/// expect it (e.g. `pixel_values` for images, `pixel_values_videos` for
+/// videos).
 pub(super) fn collect_tensors(
-    preprocessed: PreprocessedImages,
+    preprocessed: PreprocessedEncoderInputs,
+    primary_key: &str,
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
-    let PreprocessedImages {
-        pixel_values,
+    let PreprocessedEncoderInputs {
+        encoder_input,
         model_specific,
         ..
     } = preprocessed;
 
-    let pixel_values = {
-        let shape = pixel_values.shape().to_vec();
-        let data = pixel_values.into_iter().collect();
+    let primary_value = {
+        let shape = encoder_input.shape().to_vec();
+        let data = encoder_input.into_iter().collect();
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 
     let mut tensors = HashMap::new();
-    tensors.insert("pixel_values".to_string(), pixel_values);
+    tensors.insert(primary_key.to_string(), primary_value);
     for (key, value) in model_specific {
         tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
     }
@@ -58,8 +97,14 @@ impl KwargValue {
             ModelSpecificValue::Tensor { data, shape } => {
                 Self::from_f32_tensor(data, shape, float_dtype)?
             }
-            ModelSpecificValue::IntTensor { data, shape } => Self::I64Tensor { data, shape },
-            ModelSpecificValue::UintTensor { data, shape } => Self::U32Tensor { data, shape },
+            ModelSpecificValue::IntTensor { data, shape } => {
+                let wire = WireTensor::from_i64(shape, data).map_err(Error::Multimodal)?;
+                Self::tensor(TensorKind::I64, wire)
+            }
+            ModelSpecificValue::UintTensor { data, shape } => {
+                let wire = WireTensor::from_u32(shape, data).map_err(Error::Multimodal)?;
+                Self::tensor(TensorKind::U32, wire)
+            }
             ModelSpecificValue::Int(value) => Self::Passthrough(Int(value)),
             ModelSpecificValue::Float(value) => Self::Passthrough(Float(value)),
             ModelSpecificValue::IntVec(values) => {
@@ -84,110 +129,86 @@ impl KwargValue {
     /// Convert a float tensor to the target float dtype if needed, keeping the
     /// same shape.
     fn from_f32_tensor(data: Vec<f32>, shape: Vec<usize>, float_dtype: ModelDtype) -> Result<Self> {
-        match float_dtype {
-            ModelDtype::Float16 => Ok(Self::F16Tensor {
-                data: data.into_iter().map(f16::from_f32).collect(),
-                shape,
-            }),
-            ModelDtype::BFloat16 => Ok(Self::Bf16Tensor {
-                data: data.into_iter().map(bf16::from_f32).collect(),
-                shape,
-            }),
-            ModelDtype::Float32 => Ok(Self::F32Tensor { data, shape }),
-        }
+        let (kind, wire) = match float_dtype {
+            ModelDtype::Float16 => (
+                TensorKind::F16,
+                WireTensor::from_f16(shape, data.into_iter().map(f16::from_f32).collect()),
+            ),
+            ModelDtype::BFloat16 => (
+                TensorKind::Bf16,
+                WireTensor::from_bf16(shape, data.into_iter().map(bf16::from_f32).collect()),
+            ),
+            ModelDtype::Float32 => (TensorKind::F32, WireTensor::from_f32(shape, data)),
+        };
+        wire.map(|wire| Self::tensor(kind, wire)).map_err(Error::Multimodal)
+    }
+
+    fn tensor(kind: TensorKind, wire: WireTensor) -> Self {
+        debug_assert_eq!(wire.dtype, kind.wire_dtype());
+        Self::Tensor { kind, wire }
     }
 }
 
-impl TryFrom<KwargValue> for ProtocolKwargValue {
+impl TryFrom<&KwargValue> for ProtocolKwargValue {
     type Error = Error;
 
-    fn try_from(value: KwargValue) -> Result<Self> {
-        match value {
-            KwargValue::F32Tensor { data, shape } => Ok(Self::Tensor(
-                WireTensor::from_f32(shape, data).map_err(Error::Multimodal)?,
-            )),
-            KwargValue::F16Tensor { data, shape } => Ok(Self::Tensor(
-                WireTensor::from_f16(shape, data).map_err(Error::Multimodal)?,
-            )),
-            KwargValue::Bf16Tensor { data, shape } => Ok(Self::Tensor(
-                WireTensor::from_bf16(shape, data).map_err(Error::Multimodal)?,
-            )),
-            KwargValue::I64Tensor { data, shape } => Ok(Self::Tensor(
-                WireTensor::from_i64(shape, data).map_err(Error::Multimodal)?,
-            )),
-            KwargValue::U32Tensor { data, shape } => Ok(Self::Tensor(
-                WireTensor::from_u32(shape, data).map_err(Error::Multimodal)?,
-            )),
-            KwargValue::Passthrough(value) => Ok(value),
-        }
+    fn try_from(value: &KwargValue) -> Result<Self> {
+        let wire = match value {
+            KwargValue::Tensor { wire, .. } => wire.clone(),
+            KwargValue::Passthrough(value) => return Ok(value.clone()),
+        };
+        Ok(ProtocolKwargValue::Tensor(wire))
     }
 }
 
 impl KwargValue {
-    /// Extract one image from a batched tensor field.
-    ///
-    /// Batched fields use their first axis as image index and drop that axis in
-    /// the per-feature value, matching vLLM's batched-field semantics.
-    pub(super) fn batched_value_at(&self, index: usize) -> Result<Self> {
+    /// First-axis length for tensor values; `None` for passthrough kwargs.
+    pub(super) fn first_dim(&self) -> Option<usize> {
         match self {
-            Self::F32Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
-                Ok(Self::F32Tensor { data, shape })
-            }
-            Self::F16Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
-                Ok(Self::F16Tensor { data, shape })
-            }
-            Self::Bf16Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
-                Ok(Self::Bf16Tensor { data, shape })
-            }
-            Self::I64Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
-                Ok(Self::I64Tensor { data, shape })
-            }
-            Self::U32Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, index, index + 1, true)?;
-                Ok(Self::U32Tensor { data, shape })
-            }
-            Self::Passthrough(value) => Ok(Self::Passthrough(value.clone())),
+            Self::Tensor { wire, .. } => wire.shape.first().copied(),
+            Self::Passthrough(_) => None,
         }
     }
 
-    /// Extract one image's variable-length range from a flat tensor field.
+    /// Convert one media item from a batched tensor field to wire bytes.
     ///
-    /// Flat fields keep the first axis as the sliced length for this image.
-    pub(super) fn flat_value_range(&self, start: usize, end: usize) -> Result<Self> {
-        match self {
-            Self::F32Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
-                Ok(Self::F32Tensor { data, shape })
+    /// Batched fields use their first axis as media-item index and drop that
+    /// axis in the per-feature value, matching vLLM's batched-field semantics.
+    pub(super) fn batched_wire_value_at(&self, index: usize) -> Result<ProtocolKwargValue> {
+        self.wire_value_range(index, index + 1, true)
+    }
+
+    /// Convert one media item's flat tensor range directly to wire bytes.
+    ///
+    /// Flat fields keep the first axis as the sliced length for this item.
+    pub(super) fn flat_wire_value_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<ProtocolKwargValue> {
+        self.wire_value_range(start, end, false)
+    }
+
+    fn wire_value_range(
+        &self,
+        start: usize,
+        end: usize,
+        drop_axis: bool,
+    ) -> Result<ProtocolKwargValue> {
+        let wire = match self {
+            Self::Tensor { kind, wire } => {
+                slice_first_axis_range(wire, kind.element_size(), start, end, drop_axis)
             }
-            Self::F16Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
-                Ok(Self::F16Tensor { data, shape })
-            }
-            Self::Bf16Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
-                Ok(Self::Bf16Tensor { data, shape })
-            }
-            Self::I64Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
-                Ok(Self::I64Tensor { data, shape })
-            }
-            Self::U32Tensor { data, shape } => {
-                let (shape, data) = slice_first_axis_range(shape, data, start, end, false)?;
-                Ok(Self::U32Tensor { data, shape })
-            }
-            Self::Passthrough(value) => Ok(Self::Passthrough(value.clone())),
-        }
+            Self::Passthrough(value) => return Ok(value.clone()),
+        };
+        wire.map(ProtocolKwargValue::Tensor)
     }
 }
 
-/// Compute the first-axis range for one image in a flat tensor.
+/// Compute the first-axis range for one media item in a flat tensor.
 ///
 /// `sizes_key` names a companion tensor whose entries are cumulative slice
-/// sizes per image.
+/// sizes per media item.
 pub(super) fn flat_range_for_index(
     sizes: &KwargValue,
     sizes_key: &str,
@@ -195,7 +216,7 @@ pub(super) fn flat_range_for_index(
 ) -> Result<(usize, usize)> {
     let sizes = tensor_as_usize_vec(sizes)?;
     let size = *sizes.get(index).ok_or_else(|| {
-        multimodal!("flat tensor sizes key `{sizes_key}` has no entry for image {index}")
+        multimodal!("flat tensor sizes key `{sizes_key}` has no entry for media item {index}")
     })?;
     let start = sizes[..index].iter().sum::<usize>();
     Ok((start, start + size))
@@ -204,44 +225,53 @@ pub(super) fn flat_range_for_index(
 /// Read a tensor value as per-image sizes for flat slicing.
 fn tensor_as_usize_vec(tensor: &KwargValue) -> Result<Vec<usize>> {
     match tensor {
-        KwargValue::I64Tensor { data, .. } => data
-            .iter()
+        KwargValue::Tensor {
+            kind: TensorKind::I64,
+            wire,
+        } => raw_tensor_bytes(wire, size_of::<i64>())?
+            .chunks_exact(size_of::<i64>())
+            .map(|bytes| i64::from_ne_bytes(bytes.try_into().expect("exact int64 chunk")))
             .map(|value| {
-                usize::try_from(*value)
+                usize::try_from(value)
                     .map_err(|_| multimodal!("negative flat tensor size `{value}`"))
             })
             .collect(),
-        KwargValue::U32Tensor { data, .. } => {
-            Ok(data.iter().map(|value| *value as usize).collect())
-        }
+        KwargValue::Tensor {
+            kind: TensorKind::U32,
+            wire,
+        } => Ok(raw_tensor_bytes(wire, size_of::<u32>())?
+            .chunks_exact(size_of::<u32>())
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().expect("exact uint32 chunk")) as usize)
+            .collect()),
         _ => Err(multimodal!("flat tensor sizes must be int64 or uint32")),
     }
 }
 
 /// Slice a flat row-major tensor along its first axis.
-fn slice_first_axis_range<T: Clone>(
-    shape: &[usize],
-    data: &[T],
+fn slice_first_axis_range(
+    tensor: &WireTensor,
+    element_size: usize,
     start: usize,
     end: usize,
     drop_axis: bool,
-) -> Result<(Vec<usize>, Vec<T>)> {
+) -> Result<WireTensor> {
+    let shape = tensor.shape.as_slice();
+    raw_tensor_bytes(tensor, element_size)?;
     let first_dim = *shape.first().ok_or_else(|| multimodal!("tensor has no first dimension"))?;
     if start > end || end > first_dim {
         bail_multimodal!("invalid tensor slice {start}..{end} for first dimension {first_dim}");
     }
-    let expected_len = shape
-        .checked_numel()
-        .ok_or_else(|| multimodal!("tensor shape {shape:?} has too many elements"))?;
-    if expected_len != data.len() {
-        bail_multimodal!(
-            "tensor shape {shape:?} expects {expected_len} elements, got {}",
-            data.len()
-        );
-    }
-    let stride = shape[1..].iter().product::<usize>();
-    let data_start = start * stride;
-    let data_end = end * stride;
+    let stride = shape[1..]
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
+        .and_then(|stride| stride.checked_mul(element_size))
+        .ok_or_else(|| multimodal!("tensor shape {shape:?} byte stride overflowed usize"))?;
+    let data_start = start
+        .checked_mul(stride)
+        .ok_or_else(|| multimodal!("tensor slice start byte offset overflowed usize"))?;
+    let data_end = end
+        .checked_mul(stride)
+        .ok_or_else(|| multimodal!("tensor slice end byte offset overflowed usize"))?;
     let out_shape = if drop_axis {
         shape[1..].to_vec()
     } else {
@@ -249,7 +279,38 @@ fn slice_first_axis_range<T: Clone>(
         shape[0] = end - start;
         shape
     };
-    Ok((out_shape, data[data_start..data_end].to_vec()))
+    let WireArrayData::RawView(data) = &tensor.data else {
+        return Err(multimodal!("cannot slice an aux tensor buffer"));
+    };
+    Ok(WireTensor::from_raw_bytes(
+        tensor.dtype.clone(),
+        out_shape,
+        data.slice(data_start..data_end),
+    ))
+}
+
+fn raw_tensor_bytes(tensor: &WireTensor, element_size: usize) -> Result<&[u8]> {
+    let WireArrayData::RawView(data) = &tensor.data else {
+        return Err(multimodal!("expected an inline tensor buffer"));
+    };
+    let expected_bytes = tensor
+        .shape
+        .checked_numel()
+        .and_then(|numel| numel.checked_mul(element_size))
+        .ok_or_else(|| {
+            multimodal!(
+                "tensor shape {:?} byte length overflowed usize",
+                tensor.shape
+            )
+        })?;
+    if expected_bytes != data.len() {
+        bail_multimodal!(
+            "tensor shape {:?} expects {expected_bytes} bytes, got {}",
+            tensor.shape,
+            data.len()
+        );
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -257,43 +318,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batched_value_at_drops_first_axis() {
-        let value = KwargValue::F32Tensor {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![2, 2],
+    fn batched_wire_value_at_drops_first_axis() {
+        let data = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let expected_ptr = data.as_ptr().cast::<u8>().wrapping_add(2 * size_of::<f32>());
+        let value = KwargValue::tensor(
+            TensorKind::F32,
+            WireTensor::from_f32(vec![2, 2], data).unwrap(),
+        );
+
+        let ProtocolKwargValue::Tensor(tensor) = value.batched_wire_value_at(1).unwrap() else {
+            panic!("expected tensor");
         };
 
-        let value = value.batched_value_at(1).unwrap();
-
-        assert!(matches!(
-            value,
-            KwargValue::F32Tensor { data, shape }
-                if shape == vec![2] && data == vec![3.0, 4.0]
-        ));
+        assert_eq!(tensor.shape, vec![2]);
+        let raw_view = tensor.data.into_raw_view().unwrap();
+        assert_eq!(raw_view.as_ptr(), expected_ptr);
+        assert_eq!(
+            raw_view,
+            [3.0_f32, 4.0].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn flat_value_range_keeps_first_axis() {
-        let value = KwargValue::U32Tensor {
-            data: (0..10).collect(),
-            shape: vec![5, 2],
+    fn flat_wire_value_range_keeps_first_axis() {
+        let value = KwargValue::tensor(
+            TensorKind::U32,
+            WireTensor::from_u32(vec![5, 2], (0..10_u32).collect()).unwrap(),
+        );
+
+        let ProtocolKwargValue::Tensor(tensor) = value.flat_wire_value_range(1, 3).unwrap() else {
+            panic!("expected tensor");
         };
 
-        let value = value.flat_value_range(1, 3).unwrap();
-
-        assert!(matches!(
-            value,
-            KwargValue::U32Tensor { data, shape }
-                if shape == vec![2, 2] && data == vec![2, 3, 4, 5]
-        ));
+        assert_eq!(tensor.shape, vec![2, 2]);
+        assert_eq!(
+            tensor.data.into_raw_view().unwrap(),
+            [2_u32, 3, 4, 5].into_iter().flat_map(u32::to_ne_bytes).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn flat_range_for_index_uses_size_tensor() {
-        let sizes = KwargValue::I64Tensor {
-            data: vec![2, 3, 4],
-            shape: vec![3],
-        };
+        let sizes = KwargValue::tensor(
+            TensorKind::I64,
+            WireTensor::from_i64(vec![3], vec![2_i64, 3, 4]).unwrap(),
+        );
 
         assert_eq!(
             flat_range_for_index(&sizes, "image_grid_thw", 1).unwrap(),
@@ -303,10 +372,11 @@ mod tests {
 
     #[test]
     fn slice_first_axis_range_errors_on_shape_data_mismatch() {
-        let error = slice_first_axis_range(&[2, 2], &[1.0_f32, 2.0, 3.0], 0, 1, true).unwrap_err();
+        let tensor = WireTensor::from_raw("float32", vec![2, 2], vec![0; 3 * size_of::<f32>()]);
+        let error = slice_first_axis_range(&tensor, size_of::<f32>(), 0, 1, true).unwrap_err();
 
         assert!(
-            matches!(error, Error::Multimodal(message) if message.contains("expects 4 elements"))
+            matches!(error, Error::Multimodal(message) if message.contains("expects 16 bytes"))
         );
     }
 
@@ -315,7 +385,7 @@ mod tests {
         let value =
             KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::BFloat16).unwrap();
 
-        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(value).unwrap()
+        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(&value).unwrap()
         else {
             panic!("expected tensor");
         };
@@ -330,7 +400,7 @@ mod tests {
         let value =
             KwargValue::from_f32_tensor(vec![1.0, -1.0], vec![2], ModelDtype::Float16).unwrap();
 
-        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(value).unwrap()
+        let ProtocolKwargValue::Tensor(tensor) = ProtocolKwargValue::try_from(&value).unwrap()
         else {
             panic!("expected tensor");
         };

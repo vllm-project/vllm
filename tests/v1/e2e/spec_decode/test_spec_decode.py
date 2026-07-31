@@ -17,12 +17,13 @@ from tests.utils import (
     multi_gpu_marks,
     multi_gpu_only,
     single_gpu_only,
+    wait_for_rocm_memory_to_settle,
 )
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.benchmarks.datasets import InstructCoderDataset
-from vllm.config import VllmConfig, replace
+from vllm.config import CompilationConfig, VllmConfig, replace
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -159,6 +160,12 @@ def reset_torch_dynamo():
     torch._dynamo.reset()
 
 
+@pytest.fixture
+def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
+    if current_platform.is_rocm():
+        request.getfixturevalue("disable_vllm_compile_cache")
+
+
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -174,21 +181,26 @@ def reset_torch_dynamo():
         },
     ],
 )
+@pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     model_name: str,
+    vllm_runner,
 ):
-    spec_llm = LLM(
-        model=model_name,
+    with vllm_runner(
+        model_name,
+        # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
         speculative_config=speculative_config,
         max_model_len=4096,
-    )
-    evaluate_llm_for_gsm8k(spec_llm)
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        # Preserve LLM's default compilation/cudagraph configuration. Without
+        # this, VllmRunner injects its reduced test-only capture sizes.
+        compilation_config=CompilationConfig(),
+    ) as runner:
+        evaluate_llm_for_gsm8k(runner.llm)
 
 
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
@@ -285,6 +297,73 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.slow_test
+@large_gpu_mark(min_gb=80)
+def test_gemma4_dspark_correctness_and_acceptance_rate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to exercise
+    the probabilistic draft-sampling/rejection-sampling path (not just greedy).
+
+    Uses google/gemma-4-12B-it as target with the dspark_gemma4_12b_block7 draft
+    model. Exercises the full Gemma4 DSpark path (draft build over the reused
+    base classes DFlashQwen3Model / Qwen3DSparkForCausalLM / Gemma4MTP* /
+    DSparkMarkovHead, the fused context-KV precompute, the Markov head, and
+    rejection sampling), so it fails if any base class drifts out of sync.
+
+    gemma-4-12B is instruct-tuned, so GSM8K is run through the chat template
+    (use_chat_completions=True; raw few-shot completion collapses to a few
+    percent). Reference: measured over 5 runs of 200 GSM8K questions at
+    temperature=1.0 (prefix caching disabled):
+      accuracy:        min=0.900 max=0.955 mean=0.937
+      acceptance_rate: min=0.578 max=0.595 mean=0.588
+      acceptance_len:  min=5.044 max=5.167 mean=5.116
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    spec_llm = LLM(
+        model="google/gemma-4-12B-it",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_gemma4_12b_block7",
+            "num_speculative_tokens": 7,
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=8192,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+    )
+    try:
+        results = evaluate_gsm8k_offline(
+            spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
+        )
+        gsm8k_accuracy = results["accuracy"]
+
+        metrics = spec_llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
+        print(
+            f"Gemma4 DSpark acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+
+        assert acceptance_rate >= 0.588 * 0.9
+        assert acceptance_len >= 5.116 * 0.9
+        assert gsm8k_accuracy >= 0.937 * 0.9
+    finally:
+        del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
     ["model_path", "expected_accuracy_threshold"],
     [
@@ -300,6 +379,7 @@ def test_speculators_model_integration(
     sampling_config: SamplingParams,
     model_path: str,
     expected_accuracy_threshold: float,
+    vllm_runner,
 ):
     """
     Test that speculators models work with the simplified integration.
@@ -322,41 +402,48 @@ def test_speculators_model_integration(
     test_prompts = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
-    spec_llm = LLM(model=model_path, max_model_len=4096, gpu_memory_utilization=0.92)
-    evaluate_llm_for_gsm8k(
-        spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
-    )
-    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    with vllm_runner(
+        model_path,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        max_model_len=4096,
+        gpu_memory_utilization=0.92,
+    ) as spec_runner:
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm, expected_accuracy_threshold=expected_accuracy_threshold
+        )
+        spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
-    # Verify speculative config was auto-detected
-    assert spec_llm.llm_engine.vllm_config.speculative_config is not None, (
-        f"Speculative config should be auto-detected for {model_path}"
-    )
+        # Verify speculative config was auto-detected
+        assert spec_runner.llm.llm_engine.vllm_config.speculative_config is not None, (
+            f"Speculative config should be auto-detected for {model_path}"
+        )
 
-    spec_config = spec_llm.llm_engine.vllm_config.speculative_config
-    assert spec_config.num_speculative_tokens > 0, (
-        f"Expected positive speculative tokens, "
-        f"got {spec_config.num_speculative_tokens}"
-    )
+        spec_config = spec_runner.llm.llm_engine.vllm_config.speculative_config
+        assert spec_config.num_speculative_tokens > 0, (
+            f"Expected positive speculative tokens, "
+            f"got {spec_config.num_speculative_tokens}"
+        )
 
-    # Verify draft model is set to the speculator model
-    assert spec_config.model == model_path, (
-        f"Draft model should be {model_path}, got {spec_config.model}"
-    )
+        # Verify draft model is set to the speculator model
+        assert spec_config.model == model_path, (
+            f"Draft model should be {model_path}, got {spec_config.model}"
+        )
 
-    # Extract verifier model for reference run
-    verifier_model = spec_llm.llm_engine.vllm_config.model_config.model
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        # Extract verifier model for reference run
+        verifier_model = spec_runner.llm.llm_engine.vllm_config.model_config.model
 
     # Second run: Reference without speculative decoding
-    ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.92)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+    with vllm_runner(
+        verifier_model,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        max_model_len=4096,
+        gpu_memory_utilization=0.92,
+    ) as ref_runner:
+        ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
     # Compare outputs
     matches = sum(
@@ -448,6 +535,9 @@ def _run_eagle_correctness(
         del ref_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the spec engine started right after
+        # does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
         spec_llm = LLM(
             model=model_name,
@@ -485,6 +575,9 @@ def _run_eagle_correctness(
         del spec_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
+        # not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
 
 @single_gpu_only
@@ -1319,50 +1412,80 @@ def load_and_process_dataset(data_name: str):
     return dataset
 
 
-@pytest.fixture
-def dflash_config():
-    target_model = "Qwen/Qwen3-8B"
-    draft_model = "z-lab/Qwen3-8B-DFlash-b16"
-
-    return dict(
-        model=target_model,
-        trust_remote_code=True,
-        speculative_config={
-            "method": "dflash",
-            "model": draft_model,
-            "num_speculative_tokens": 16,
-            "max_model_len": 32768,
-        },
-        max_model_len=32768,
-        max_num_seqs=128,
-        gpu_memory_utilization=0.85,
-        enforce_eager=False,
-        disable_log_stats=False,
-    )
-
-
+@pytest.mark.parametrize(
+    ["spec_config", "expected_acceptance_lengths", "chat_template_kwargs"],
+    [
+        pytest.param(
+            dict(
+                model="Qwen/Qwen3-8B",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "dflash",
+                    "model": "z-lab/Qwen3-8B-DFlash-b16",
+                    "num_speculative_tokens": 16,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                max_num_seqs=128,
+                gpu_memory_utilization=0.85,
+                enforce_eager=False,
+                disable_log_stats=False,
+            ),
+            # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
+            {
+                "mt-bench": 4.24,
+                "humaneval": 6.50,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 6.54 * 0.975,
+            },
+            {"enable_thinking": False},
+            id="dflash",
+        ),
+        pytest.param(
+            dict(
+                model="google/gemma-4-E4B-it",
+                trust_remote_code=True,
+                speculative_config={
+                    "method": "mtp",
+                    "model": "google/gemma-4-E4B-it-assistant",
+                    "num_speculative_tokens": 2,
+                    "max_model_len": 32768,
+                },
+                max_model_len=32768,
+                # Skip multimodal profiling; this is a text-only eval.
+                limit_mm_per_prompt={"image": 0, "audio": 0},
+                disable_log_stats=False,
+            ),
+            {
+                "mt-bench": 2.28,
+                "humaneval": 2.68,
+                # runs with a subset of prompts so extra wide tol here
+                "gsm8k": 2.67 * 0.975,
+            },
+            {},
+            id="gemma4",
+        ),
+    ],
+)
 @pytest.mark.parametrize("use_mrv2", [False, True])
-def test_dflash_acceptance_rates(
-    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+def test_acceptance_rates(
+    monkeypatch: pytest.MonkeyPatch,
+    spec_config: dict[str, Any],
+    expected_acceptance_lengths: dict[str, float],
+    chat_template_kwargs: dict[str, Any],
+    use_mrv2: bool,
 ):
     """
-    E2E test for DFlash (block diffusion) speculative decoding.
-    Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval
-    comparing against baseline results from the paper (Table 1).
-    See https://github.com/z-lab/dflash/blob/main/benchmark_sglang.py for methodology.
+    E2E acceptance-rate validation for speculative decoding.
+
+    Drives one or more datasets (keyed in ``expected_acceptance_lengths``)
+    through the spec decode engine and asserts the mean acceptance length
+    stays within tolerance of the reference figure for each dataset.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
-
-    spec_llm = LLM(**dflash_config)
+    spec_llm = LLM(**spec_config)
 
     max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
-
-    # All scores from Table 1 in https://arxiv.org/pdf/2602.06036
-    expected_acceptance_lengths = {
-        "mt-bench": 4.24,
-        "humaneval": 6.50,
-        "gsm8k": 6.54 * 0.975,  # runs with a subset of prompts so extra wide tol here
-    }
 
     tokenizer = spec_llm.get_tokenizer()
     for dataset_name, expected_len in expected_acceptance_lengths.items():
@@ -1378,10 +1501,11 @@ def test_dflash_acceptance_rates(
                 [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                **chat_template_kwargs,
             )
 
-            # Temp=0, MaxTokens=2048 from the paper
+            # Greedy (temp=0) so acceptance length is deterministic and comparable
+            # across runs.
             spec_llm.generate(
                 [prompt_text],
                 SamplingParams(temperature=0, max_tokens=2048),
@@ -1393,17 +1517,17 @@ def test_dflash_acceptance_rates(
             acceptance_lengths.append(acceptance_len)
 
         mean_acceptance_length = sum(acceptance_lengths) / len(acceptance_lengths)
-        # Fairly tight tolerance of 95% against the paper's figures,
+        # Fairly tight tolerance of 95% against the reference figures,
         # watching for regressions. Can be relaxed if test is flaky but be sure to
         # check for genuine issues such as #40727.
         expected_len = expected_len * 0.95
         print(
-            f"DFlash acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
+            f"acceptance_len for {dataset_name}: {mean_acceptance_length:.2f}"
             f" (expected at least {expected_len:.2f})"
         )
 
         assert mean_acceptance_length >= expected_len, (
-            f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
+            f"acceptance_len for {dataset_name} is below expected threshold: "
             f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
         )
 

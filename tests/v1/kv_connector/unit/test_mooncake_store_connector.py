@@ -410,7 +410,7 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", token_len=128, block_hashes=[]) == 5
+    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -439,11 +439,11 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     assert client.reset() is False
 
 
-def _poll_lookup(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
+def _poll_lookup(client, req_id, num_tokens=128, block_hashes=(), timeout=5.0):
     """Drive non-blocking lookup until the executor completes it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = client.lookup(req_id, token_len, list(block_hashes), non_block=True)
+        result = client.lookup(req_id, num_tokens, list(block_hashes), non_block=True)
         if result is not None:
             return result
         time.sleep(0.005)

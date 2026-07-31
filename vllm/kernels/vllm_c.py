@@ -32,7 +32,9 @@ def rms_norm(
     if IS_ROCM and (x.dim() > 2 or not x.is_contiguous()):
         original_shape = x.shape
         x = x.reshape(-1, original_shape[-1])
-        output = torch.empty_like(x)
+        # empty_like preserves the strides of transposed inputs, but the
+        # libtorch-stable kernel requires a contiguous output tensor.
+        output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
         torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.reshape(original_shape)
 

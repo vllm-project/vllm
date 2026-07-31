@@ -888,6 +888,10 @@ def rejection_sample(
     use_fp64: bool = False,
     use_block_verification: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    assert draft_logits is None or (
+        draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
+    )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     draft_logits_stride_0 = 0

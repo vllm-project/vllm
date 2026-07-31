@@ -57,6 +57,9 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device
+    # INC WNA16 (AutoRound)
+    elif hasattr(base_layer, "ark_linear"):
+        return base_layer.ark_linear.qweight.device
     # MoE layer
     elif hasattr(base_layer, "w2_weight"):
         return base_layer.w2_weight.device

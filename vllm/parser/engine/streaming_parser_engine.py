@@ -22,13 +22,12 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
+    DROP_TERMINAL,
     LexerInput,
     PreLexedTerminal,
     TextChunk,
     TokenIDScanner,
 )
-
-DROP_TERMINAL = "__DROP__"
 
 
 @dataclass(slots=True)
@@ -186,6 +185,7 @@ class StreamingParserEngine:
         # implicit-reasoning-end (content returns None).
         self._scanner.reset()
         self._lexer.reset()
+        self._message_header_buffer = ""
         self._reset_args_state()
 
     def feed(
@@ -270,6 +270,17 @@ class StreamingParserEngine:
                 SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
             )
             self.state = ParserState.CONTENT
+        elif self.state == ParserState.MESSAGE_HEADER:
+            if self._message_header_buffer:
+                events.append(
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=self._message_header_buffer,
+                        tool_index=self.tool_index,
+                    )
+                )
+                self._message_header_buffer = ""
+            self.state = ParserState.CONTENT
 
         return events
 
@@ -303,18 +314,21 @@ class StreamingParserEngine:
         transition = self.config.transitions.get(key)
 
         if transition is None:
-            if (
-                self._has_drops
-                and terminal == DROP_TERMINAL
-                # Preserve drop tokens when skip_tool_parsing is active so
-                # the reasoning pass doesn't silently remove tokens that a
-                # later tool-call pass might need to see.
-                and not self.skip_tool_parsing
-            ):
+            if self._has_drops and terminal == DROP_TERMINAL:
                 return []
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
+            if self.state == ParserState.MESSAGE_HEADER:
+                self.state = ParserState.CONTENT
+                self._message_header_buffer = ""
+                return [
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=value,
+                        tool_index=self.tool_index,
+                    )
+                ]
             if EventType.REASONING_END in transition.events:
                 self.state = ParserState.CONTENT
                 return [
@@ -342,6 +356,9 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value)
 
     def _emit_for_state(self, text: str) -> list[SemanticEvent]:
+        if self.state == ParserState.MESSAGE_HEADER:
+            self._message_header_buffer += text
+            return []
         if self.state == ParserState.TOOL_ARGS:
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
@@ -368,6 +385,8 @@ class StreamingParserEngine:
         value: str,
     ) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
+        previous_state = self.state
+        message_header = ""
 
         if (
             self.state == ParserState.TOOL_ARGS
@@ -383,15 +402,27 @@ class StreamingParserEngine:
             )
             self._args_buffer = ""
 
+        if previous_state == ParserState.MESSAGE_HEADER:
+            message_header = self._message_header_buffer
+            self._message_header_buffer = ""
+
         self.state = transition.next_state
 
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
                 self.tool_index += 1
+            event_value = (
+                message_header
+                if previous_state == ParserState.MESSAGE_HEADER
+                and event_type == EventType.TEXT_CHUNK
+                else value
+            )
+            if event_type == EventType.TEXT_CHUNK and not event_value:
+                continue
             events.append(
                 SemanticEvent(
                     event_type,
-                    value=value,
+                    value=event_value,
                     tool_index=self.tool_index,
                 )
             )

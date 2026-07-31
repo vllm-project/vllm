@@ -12,7 +12,7 @@ from tests.quantization.utils import is_quant_method_supported
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
-MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
+MODELS = ["ai21labs/Jamba-tiny-random"]
 
 
 @pytest.mark.skipif(

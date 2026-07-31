@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,9 @@ import torch
 from PIL import Image, ImageDraw
 
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.media.base import MediaWithBytes
+from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
 
@@ -82,6 +86,29 @@ def test_hash_collision_array_shape():
     assert hasher.hash_kwargs(data=arr1) != hasher.hash_kwargs(data=arr2)
 
 
+def test_hash_collision_video_num_frames():
+    source = b"x" * 100
+
+    def item_for_hash(num_frames: int):
+        frames: np.ndarray = np.zeros((num_frames, 8, 8, 3), dtype=np.uint8)
+        metadata = {
+            "total_num_frames": 16,
+            "fps": 2.0,
+            "duration": 8.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": False,
+        }
+        video = MediaWithBytes((frames, metadata), source)
+        items = MultiModalDataParser()._parse_video_data([video])
+        return items.get_all_items_for_hash()[0]
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(video=item_for_hash(2)) != hasher.hash_kwargs(
+        video=item_for_hash(4)
+    )
+
+
 def test_hash_non_contiguous_array():
     arr = np.arange(24).reshape(4, 6).T
     assert not arr.flags.c_contiguous
@@ -109,3 +136,37 @@ def test_hash_image_exif_id():
     assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
     # second image has non-UUID in ImageID, so it should hash to the image data
     assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)
+
+
+def _rgba_png_bytes() -> bytes:
+    image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_hash_collision_media_io_config():
+    data = _rgba_png_bytes()
+    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
+    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes(data)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=black)
+    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=keep)
+    assert hasher.hash_kwargs(image=white) == hasher.hash_kwargs(image=white2)
+
+
+def test_hash_media_io_noop_config_preserves_hash():
+    image = Image.new("RGB", (8, 8), (0, 128, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    loaded = ImageMediaIO().load_bytes(data)
+    assert loaded.io_config is None
+
+    plain = MediaWithBytes(loaded.media, data)
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(image=loaded) == hasher.hash_kwargs(image=plain)

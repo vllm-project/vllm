@@ -21,8 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -44,10 +43,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -64,10 +60,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -76,8 +68,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -1056,153 +1048,48 @@ class OpenPanguModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_attn_mlp_weight(
-        self,
-        attn_mlp_replace_mapping: list[tuple[str, str, int]],
-        params_dict: dict[str, Any],
-        weight_name: str,
-        loaded_weight: torch.Tensor,
-        loaded_params: set[str],
-    ) -> bool:
-        for param_name, origin_name, shard_id in attn_mlp_replace_mapping:
-            if origin_name not in weight_name or (
-                ("mlp.experts." in weight_name) and weight_name not in params_dict
-            ):
-                continue
-            weight_name_mapped = weight_name.replace(origin_name, param_name)
-            if (
-                param_name == "fused_qkv_a_proj"
-                and weight_name_mapped not in params_dict
-            ):
-                continue
-            else:
-                weight_name = weight_name_mapped
-            if weight_name.endswith(".bias") and weight_name not in params_dict:
-                continue
-            if is_pp_missing_parameter(weight_name, self):
-                continue
-
-            param = params_dict[weight_name]
-            weight_loader = param.weight_loader
-            weight_loader(param, loaded_weight, shard_id)
-            loaded_params.add(weight_name)
-            return True
-        return False
-
-    def load_expert_weight(
-        self,
-        expert_merge_mapping: list[tuple[str, str, int, str]],
-        params_dict: dict[str, Any],
-        weight_name: str,
-        loaded_weight: torch.Tensor,
-        loaded_params: set[str],
-        flag_dict: dict[str, bool],
-    ) -> bool:
-        for mapping in expert_merge_mapping:
-            param_name, origin_name, expert_id, shard_id = mapping
-            if origin_name not in weight_name:
-                continue
-            flag_dict["is_expert_weight"] = True
-            weight_name_mapped = weight_name.replace(origin_name, param_name)
-            if is_pp_missing_parameter(weight_name_mapped, self):
-                continue
-            param = params_dict[weight_name_mapped]
-            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-            success = weight_loader(
-                param,
-                loaded_weight,
-                weight_name_mapped,
-                shard_id=shard_id,
-                expert_id=expert_id,
-                return_success=True,
-            )
-            if success:
-                weight_name = weight_name_mapped
-                loaded_params.add(weight_name_mapped)
-                return True
-        return False
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        attn_mlp_replace_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".fused_qkv_a_proj", ".q_a_proj", 0),
-            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        has_experts = hasattr(self.config, "n_routed_experts")
-        if has_experts:
-            expert_merge_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
-                num_redundant_experts=self.num_redundant_experts,
-            )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+    def _filter_spec_layers(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        # Skip the MTP (spec-decode) layers that follow the main model's layers.
+        num_mtp = getattr(self.config, "num_nextn_predict_layers", 0)
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-
-            if (
-                "layers" in name
-                and hasattr(self.config, "num_nextn_predict_layers")
-                and (self.config.num_nextn_predict_layers > 0)
-            ):
+            if "layers" in name and num_mtp > 0:
                 layer_idx = int(name.split("layers.")[-1].split(".")[0])
                 mtp_idx = layer_idx - self.config.num_hidden_layers
-                if mtp_idx >= 0 and mtp_idx < self.config.num_nextn_predict_layers:
-                    continue  # skip spec decode layers for main model
+                if 0 <= mtp_idx < num_mtp:
+                    continue
+            yield name, loaded_weight
 
-            flag_dict = {"is_expert_weight": False}
-            if (
-                self.load_attn_mlp_weight(
-                    attn_mlp_replace_mapping,
-                    params_dict,
-                    name,
-                    loaded_weight,
-                    loaded_params,
-                )
-                or has_experts
-                and self.load_expert_weight(
-                    expert_merge_mapping,
-                    params_dict,
-                    name,
-                    loaded_weight,
-                    loaded_params,
-                    flag_dict,
-                )
-            ):
-                continue
-            else:
-                if flag_dict["is_expert_weight"]:
-                    continue
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name.endswith("e_score_correction_bias"):
-                    name = name.replace(
-                        "e_score_correction_bias", "gate.e_score_correction_bias"
-                    )
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+        stacked: dict[str, tuple[str, int | str]] = {
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        }
+        # The attention layout is config-dependent: MLA with a fused low-rank
+        # projection, MLA without it, or standard qkv. Only add the stacked
+        # entries whose fused target actually exists as a parameter.
+        param_names = list(dict(self.named_parameters()))
+        if any(".fused_qkv_a_proj." in n for n in param_names):
+            stacked[".q_a_proj"] = (".fused_qkv_a_proj", 0)
+            stacked[".kv_a_proj_with_mqa"] = (".fused_qkv_a_proj", 1)
+        if any(".qkv_proj." in n for n in param_names):
+            stacked[".q_proj"] = (".qkv_proj", "q")
+            stacked[".k_proj"] = (".qkv_proj", "k")
+            stacked[".v_proj"] = (".qkv_proj", "v")
+        mapper = WeightsMapper(
+            orig_to_new_substr={
+                "e_score_correction_bias": "gate.e_score_correction_bias",
+            },
+            orig_to_new_stacked=stacked,
+        )
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(self._filter_spec_layers(weights), mapper=mapper)
         self.post_weight_load()
-        return loaded_params
+        return loaded
 
     def post_weight_load(self) -> None:
         for name, module in self.named_modules():

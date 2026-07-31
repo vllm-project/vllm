@@ -81,6 +81,7 @@ _transformers_v4_compatibility_import()
 _transformers_v4_compatibility_init()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
@@ -440,12 +441,14 @@ def get_image_processor(
     *args: Any,
     revision: str | None = None,
     trust_remote_code: bool = False,
+    processor_cls_overrides: type[_I] | None = None,
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        processor = AutoImageProcessor.from_pretrained(
+        processor_cls = processor_cls_overrides or AutoImageProcessor
+        processor = processor_cls.from_pretrained(
             processor_name,
             *args,
             revision=revision,

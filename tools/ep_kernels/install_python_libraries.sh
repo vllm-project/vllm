@@ -170,6 +170,48 @@ do_build() {
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
+    # DeepEPv2 requires Linux 5.6+ at runtime for pidfd_getfd (pidfd_open was
+    # added in Linux 5.3), but manylinux headers predate both definitions.
+    # DeepEP is built as a separate wheel for the vLLM container image and is
+    # not included in the vLLM wheel, so this does not change its manylinux ABI.
+    if [[ "$name" == "DeepEP" ]] && \
+        ! grep -q "vLLM manylinux syscall compatibility" \
+            csrc/kernels/backend/symmetric.hpp; then
+        sed -i '1i\
+// vLLM manylinux syscall compatibility\
+#if defined(__x86_64__) || defined(__aarch64__)\
+#ifndef SYS_pidfd_open\
+#ifdef __NR_pidfd_open\
+#define SYS_pidfd_open __NR_pidfd_open\
+#else\
+#define SYS_pidfd_open 434\
+#endif\
+#endif\
+#ifndef SYS_pidfd_getfd\
+#ifdef __NR_pidfd_getfd\
+#define SYS_pidfd_getfd __NR_pidfd_getfd\
+#else\
+#define SYS_pidfd_getfd 438\
+#endif\
+#endif\
+#endif' csrc/kernels/backend/symmetric.hpp
+    fi
+
+    if [[ "$name" == "DeepEP" ]]; then
+        # DeepEP links against the CUDA driver API in driverless build images.
+        local cuda_driver_stub
+        local cuda_driver_stub_dir
+        cuda_driver_stub=$(
+            find -H "$CUDA_HOME" -path "*/stubs/libcuda.so" -print -quit
+        )
+        if [[ -z "$cuda_driver_stub" ]]; then
+            echo "CUDA driver stub not found under $CUDA_HOME" >&2
+            exit 1
+        fi
+        cuda_driver_stub_dir=$(dirname "$cuda_driver_stub")
+        export LIBRARY_PATH="${cuda_driver_stub_dir}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    fi
+
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
         eval "$extra_env" uv pip install --no-build-isolation -vvv .

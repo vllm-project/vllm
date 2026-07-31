@@ -134,8 +134,8 @@ def benchmark_config(
     torch.accelerator.synchronize()
 
     # Benchmark
-    start = torch.Event(enable_timing=True)
-    end = torch.Event(enable_timing=True)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(num_iters):
         with override_config(config):

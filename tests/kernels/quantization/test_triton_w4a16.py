@@ -302,3 +302,160 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
     torch.testing.assert_close(layer.weight_packed, expected_w_kn8)
     torch.testing.assert_close(layer.weight_scale, expected_scales_gn)
     torch.testing.assert_close(layer.weight_zero_point, expected_zeros_gn8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.distributed import (
+        ensure_model_parallel_initialized,
+        init_distributed_environment,
+    )
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.model_executor.parameter import (
+        GroupQuantScaleParameter,
+        PackedvLLMParameter,
+    )
+    from vllm.scalar_type import scalar_types
+
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method="tcp://127.0.0.1:0",
+            local_rank=0,
+        )
+        ensure_model_parallel_initialized(1, 1)
+
+    set_random_seed(0)
+
+    K, N = 256, 256
+    G = 32
+
+    w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    w_gptq_k8n = _pack_int4_along_k_to_ckpt(w_int4_kn).t().contiguous()
+    scales_gptq_gn = 0.05 * torch.rand((K // G, N), device=device, dtype=torch.float16)
+    zeros_int4_gn = torch.randint(0, 16, (K // G, N), device=device, dtype=torch.int32)
+    zeros_gptq_gn8 = _pack_int4_along_n(zeros_int4_gn)
+
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=True,
+        has_g_idx=False,
+    )
+    kernel = TritonW4A16LinearKernel(
+        config,
+        w_q_param_name="qweight",
+        w_s_param_name="scales",
+        w_zp_param_name="qzeros",
+        w_gidx_param_name=None,
+    )
+
+    weight_loader = lambda *args, **kwargs: None
+
+    class DummyLayer(torch.nn.Module):
+        pass
+
+    layer = DummyLayer()
+    layer.register_parameter(
+        "qweight",
+        PackedvLLMParameter(
+            data=w_gptq_k8n,
+            weight_loader=weight_loader,
+            input_dim=0,
+            output_dim=1,
+            packed_factor=8,
+            packed_dim=0,
+        ),
+    )
+    layer.register_parameter(
+        "scales",
+        GroupQuantScaleParameter(
+            data=scales_gptq_gn,
+            weight_loader=weight_loader,
+            input_dim=0,
+            output_dim=1,
+        ),
+    )
+    layer.register_parameter(
+        "qzeros",
+        PackedvLLMParameter(
+            data=zeros_gptq_gn8,
+            weight_loader=weight_loader,
+            input_dim=0,
+            output_dim=1,
+            packed_factor=8,
+            packed_dim=1,
+        ),
+    )
+
+    kernel.process_weights_after_loading(layer)
+
+    expected_w_kn8 = _pack_int4_along_n(w_int4_kn)
+
+    assert tuple(layer.qweight.shape) == (K, N // 8)
+    assert tuple(layer.scales.shape) == (K // G, N)
+    assert tuple(layer.qzeros.shape) == (K // G, N // 8)
+
+    torch.testing.assert_close(layer.qweight, expected_w_kn8)
+    torch.testing.assert_close(layer.scales, scales_gptq_gn)
+    torch.testing.assert_close(layer.qzeros, zeros_gptq_gn8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    K, N, G = 256, 256, 32
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    kernel = TritonW4A16LinearKernel(
+        config,
+        w_q_param_name="qweight",
+        w_s_param_name="scales",
+        w_zp_param_name="qzeros",
+        w_gidx_param_name=None,
+    )
+
+    class DummyLayer(torch.nn.Module):
+        pass
+
+    layer = DummyLayer()
+    layer.qweight = torch.empty((K, N // 8), device=device, dtype=torch.int32)
+    layer.scales = torch.empty((K // G, N), device=device, dtype=torch.float16)
+    layer.qzeros = torch.empty((1, 1), device=device, dtype=torch.int32)
+
+    captured = {}
+
+    def fake_gemm(*, a, b_q, scales, qzeros, group_size, zp_bias):
+        captured["qzeros"] = qzeros
+        captured["zp_bias"] = zp_bias
+        return torch.empty((a.shape[0], N), device=a.device, dtype=a.dtype)
+
+    monkeypatch.setattr(triton_w4a16_module, "triton_w4a16_gemm", fake_gemm)
+
+    x = torch.empty((2, K), device=device, dtype=torch.float16)
+    output = kernel.apply_weights(layer, x)
+
+    assert output.shape == (2, N)
+    assert captured["qzeros"] is None
+    assert captured["zp_bias"] == scalar_types.uint4b8.bias

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Laguna model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -20,10 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -38,10 +34,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     SupportsEagle3,
@@ -51,8 +43,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -575,6 +567,14 @@ class LagunaDecoderLayer(nn.Module):
 
 @support_torch_compile
 class LagunaModel(nn.Module, EagleModelMixin):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -675,167 +675,41 @@ class LagunaModel(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        """Get expert parameter mapping for weight loading.
-
-        Returns mapping tuples of (param_name, weight_name, expert_id, shard_id)
-        that handle both weights and quantization scales.
-        """
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            # gate_proj and up_proj are loaded as separate Linears (see
-            # LagunaMLP) so no merge entry is needed here.
-        ]
-
-        # Suffixes to skip for GPTQ/modelopt models if param doesn't exist
-        ignore_suffixes = (
-            ".bias",
-            "_bias",
-            ".k_scale",
-            "_k_scale",
-            ".v_scale",
-            "_v_scale",
-            ".weight_scale",
-            "_weight_scale",
-            ".input_scale",
-            "_input_scale",
-        )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-
+    def _slice_sink(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-
         for name, loaded_weight in weights:
             # Handle attention sinks (distributed across ranks). Derive the
             # per-rank slice from the parameter's own shape so per-layer
             # variations in head count are handled correctly.
             if "sink" in name:
-                param = params_dict.get(name)
-                if param is not None:
-                    layer_heads_per_rank = param.shape[0]
-                    layer_head_start = tp_rank * layer_heads_per_rank
-                    narrow_weight = loaded_weight.narrow(
-                        0, layer_head_start, layer_heads_per_rank
-                    )
-                    param.data.copy_(narrow_weight)
-                    loaded_params.add(name)
-                continue
+                heads_per_rank = loaded_weight.shape[0] // tp_size
+                loaded_weight = loaded_weight.narrow(
+                    0, tp_rank * heads_per_rank, heads_per_rank
+                )
+            yield name, loaded_weight
 
-            # Handle stacked params (QKV, gate_up for
-            # non-expert layers and shared_expert)
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                # Skip expert weights - handled below via expert_params_mapping
-                if "mlp.experts" in name and "shared_expert" not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                if name.endswith(ignore_suffixes) and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                # Remap FP8 kv_scale names for backwards compatibility
-                if name.endswith("scale"):
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if weight_loader == default_weight_loader:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-                break
-            else:
-                # Try expert params mapping (handles weights + quantization scales)
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    # Mark as expert weight so we skip regular loading below
-                    is_expert_weight = True
-
-                    # Create mapped name without modifying original
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    if (
-                        name_mapped.endswith(ignore_suffixes)
-                        and name_mapped not in params_dict
-                    ):
-                        continue
-                    if name_mapped not in params_dict:
-                        continue
-
-                    param = params_dict[name_mapped]
-                    # Use return_success to handle expert parallelism correctly
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        loaded_params.add(name_mapped)
-                        break
-                else:
-                    # Expert weight not mapped to this rank - skip
-                    if is_expert_weight:
-                        continue
-
-                    # Remap kv_scale names before the ignore_suffixes filter:
-                    # the suffix list includes .k_scale/.v_scale, so filtering
-                    # first drops the checkpoint key before remap can rewrite
-                    # it to the .attn.* name that exists in params_dict.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    if name not in params_dict:
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
-
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            ignore_unexpected_suffixes=[
+                ".bias",
+                "_bias",
+                ".k_scale",
+                "_k_scale",
+                ".v_scale",
+                "_v_scale",
+                ".weight_scale",
+                "_weight_scale",
+                ".input_scale",
+                "_input_scale",
+            ],
+        )
+        return loader.load_weights(
+            self._slice_sink(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
@@ -891,9 +765,6 @@ class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(

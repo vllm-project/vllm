@@ -35,6 +35,8 @@ from vllm.multimodal.parse import ImageProcessorItems, ImageSize, VideoProcessor
 from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
+    ResolvedPromptUpdate,
+    _seq2text,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -408,6 +410,35 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             for modality, pattern in placeholders
         ]
 
+    def _recompute_cached_prompt_update(
+        self, cached_update: ResolvedPromptUpdate, new_item_idx: int
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update, new_item_idx
+        )
+        # MiniCPM-V 4.6 prefixes video placeholders with `<image_id>{idx}</image_id>`
+        # (the base class only rewrites the image modality).
+        if cached_update.modality == "video":
+            tokenizer = self.info.get_tokenizer()
+            id_start = getattr(tokenizer, "image_id_start_token", "<image_id>")
+            id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
+            video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
+
+            text = _seq2text(tokenizer, cached_update.content.full)
+            prev_item_idx = cached_update.item_idx
+
+            new_update = new_update.with_content(
+                PromptUpdateDetails.select_text(
+                    text.replace(
+                        f"{id_start}{prev_item_idx}{id_end}",
+                        f"{id_start}{new_item_idx}{id_end}",
+                        1,
+                    ),
+                    video_token,
+                )
+            )
+        return new_update
+
     def _get_mm_fields_config(
         self,
         hf_inputs,
@@ -620,9 +651,9 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            "q_proj": ("qkv_proj", "q"),
-            "k_proj": ("qkv_proj", "k"),
-            "v_proj": ("qkv_proj", "v"),
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
         }
     )
 

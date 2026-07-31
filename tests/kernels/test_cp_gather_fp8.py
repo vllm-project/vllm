@@ -27,8 +27,8 @@ def _build_test_case(seq_lens, block_size, seed=42):
         seed: Random seed for reproducibility.
 
     Returns:
-        Tuple of (cache, block_table, seq_lens_t, workspace_starts_t,
-                  num_reqs, total_tokens, expected_output).
+        Tuple of (cache, block_table, workspace_starts_t, num_reqs,
+                  total_tokens, expected_output).
     """
     torch.manual_seed(seed)
 
@@ -112,7 +112,6 @@ def _build_test_case(seq_lens, block_size, seed=42):
             # Expected output: exact copy
             expected[out_idx, NOPE_DIM:] = rope
 
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
     workspace_starts_t = torch.tensor(
         workspace_starts, dtype=torch.int32, device="cuda"
     )
@@ -120,7 +119,6 @@ def _build_test_case(seq_lens, block_size, seed=42):
     return (
         cache,
         block_table,
-        seq_lens_t,
         workspace_starts_t,
         num_reqs,
         total_tokens,
@@ -197,7 +195,6 @@ def _build_test_case_fast(seq_lens, block_size, seed=42):
         flat_cache[:sl] = token_data[ws : ws + sl]
         block_start += nb
 
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
     workspace_starts_t = torch.tensor(
         workspace_starts, dtype=torch.int32, device="cuda"
     )
@@ -205,7 +202,6 @@ def _build_test_case_fast(seq_lens, block_size, seed=42):
     return (
         cache,
         block_table,
-        seq_lens_t,
         workspace_starts_t,
         num_reqs,
         total_tokens,
@@ -232,7 +228,6 @@ def test_cp_gather_and_upconvert_fp8_kv_cache(seq_lens, block_size):
     (
         cache,
         block_table,
-        seq_lens_t,
         workspace_starts_t,
         num_reqs,
         total_tokens,
@@ -244,7 +239,7 @@ def test_cp_gather_and_upconvert_fp8_kv_cache(seq_lens, block_size):
     )
 
     ops.cp_gather_and_upconvert_fp8_kv_cache(
-        cache, dst, block_table, seq_lens_t, workspace_starts_t, num_reqs
+        cache, dst, block_table, workspace_starts_t, num_reqs
     )
 
     # NoPE: fp8 dequant has rounding error, so we allow small tolerance.
@@ -277,8 +272,6 @@ def test_cp_gather_fp8_shuffled_blocks():
     )
     block_table = torch.tensor([[3, 1]], dtype=torch.int32, device="cuda")
     workspace_starts = torch.tensor([0], dtype=torch.int32, device="cuda")
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
-
     expected = torch.zeros(
         total_tokens, NOPE_DIM + ROPE_DIM, dtype=torch.bfloat16, device="cuda"
     )
@@ -314,9 +307,67 @@ def test_cp_gather_fp8_shuffled_blocks():
     )
 
     ops.cp_gather_and_upconvert_fp8_kv_cache(
-        cache, dst, block_table, seq_lens_t, workspace_starts, len(seq_lens)
+        cache, dst, block_table, workspace_starts, len(seq_lens)
     )
 
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
+@pytest.mark.parametrize(
+    "gather_seq_lens,seq_starts",
+    [
+        ([6, 5, 3], [3, 4, 5]),
+        ([0, 5, 3], [12, 4, 5]),
+    ],
+)
+def test_cp_gather_fp8_with_sequence_starts(gather_seq_lens, seq_starts):
+    """Gather request slices beginning at arbitrary cache positions."""
+    full_seq_lens = [12, 11, 9]
+    (
+        cache,
+        block_table,
+        _workspace_starts_t,
+        num_reqs,
+        _total_tokens,
+        full_expected,
+    ) = _build_test_case(full_seq_lens, block_size=4)
+
+    workspace_starts = torch.tensor(
+        [0, gather_seq_lens[0], sum(gather_seq_lens[:2])],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    seq_starts_t = torch.tensor(seq_starts, dtype=torch.int32, device="cuda")
+    dst = torch.empty(
+        sum(gather_seq_lens),
+        NOPE_DIM + ROPE_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        cache,
+        dst,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        seq_starts_t,
+    )
+
+    full_workspace_starts = [0, full_seq_lens[0], sum(full_seq_lens[:2])]
+    expected = torch.cat(
+        [
+            full_expected[
+                full_workspace_starts[i] + seq_starts[i] : full_workspace_starts[i]
+                + seq_starts[i]
+                + gather_seq_lens[i]
+            ]
+            for i in range(num_reqs)
+        ]
+    )
     torch.testing.assert_close(
         dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
     )
@@ -342,7 +393,6 @@ def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
     (
         cache,
         block_table,
-        seq_lens_t,
         workspace_starts_t,
         num_reqs,
         total_tokens,
@@ -354,7 +404,7 @@ def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
     )
 
     ops.cp_gather_and_upconvert_fp8_kv_cache(
-        cache, dst, block_table, seq_lens_t, workspace_starts_t, num_reqs
+        cache, dst, block_table, workspace_starts_t, num_reqs
     )
 
     torch.testing.assert_close(

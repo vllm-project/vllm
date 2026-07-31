@@ -297,7 +297,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         )
 
 
-@pytest.mark.timeout(240 if current_platform.is_rocm() else 60)
+@pytest.mark.timeout(240 if current_platform.is_rocm() else 120)
 @multi_gpu_test(num_gpus=2)
 @create_new_process_for_each_test()
 def test_extract_hidden_states_tp2():

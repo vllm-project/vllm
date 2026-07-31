@@ -5,6 +5,7 @@
 import pytest
 
 from vllm.config import StructuredOutputsConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 pytestmark = pytest.mark.cpu_test
@@ -32,7 +33,7 @@ def test_structured_outputs_rejected_for_diffusion_models():
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
     )
-    with pytest.raises(ValueError, match="not yet supported for diffusion"):
+    with pytest.raises(VLLMValidationError, match="not yet supported for diffusion"):
         params._validate_structured_outputs(
             _StubModelConfig(is_diffusion=True),
             StructuredOutputsConfig(),
@@ -63,7 +64,7 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
     rejected at request validation (-> 400) instead of reaching and crashing
     the engine."""
     params = SamplingParams(structured_outputs=structured_outputs)
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(VLLMValidationError, match=match):
         params._validate_structured_outputs(
             _StubModelConfig(is_diffusion=False),
             StructuredOutputsConfig(),

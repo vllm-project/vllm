@@ -378,15 +378,14 @@ _PRE_INIT_THOUGHT_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 class TestGemma4PreInitReasoningRobustness:
     """Tests for the ``(REASONING, THINK_START)`` no-op transition and
-    cooperating ``thought\\n`` prefix stripping when the engine has been
-    pre-initialised to ``REASONING`` from the prompt.
+    cooperating ``thought\\n`` prefix stripping.
 
-    These cover the case the reviewer raised: prompt ends with
-    ``<|turn>model\\n`` (``is_reasoning_end`` returns ``False`` because
-    thinking is enabled, so the engine is pre-initialised), but the model
-    still emits its own ``<|channel>thought\\n…<channel|>content``. The
-    ``thought\\n`` prefix must be stripped, the ``<|channel>`` must not
-    leak as text, and the post-``<channel|>`` text must appear as content.
+    Covers both engine start states: a new-turn prompt (engine starts in
+    ``CONTENT`` and the model emits its own ``<|channel>`` opener) and a
+    prompt ending inside an open ``<|channel>`` block (engine
+    pre-initialised to ``REASONING``). In both cases the ``thought\\n``
+    prefix must be stripped, the ``<|channel>`` must not leak as text,
+    and the post-``<channel|>`` text must appear as content.
     """
 
     @pytest.fixture
@@ -397,13 +396,12 @@ class TestGemma4PreInitReasoningRobustness:
     def pre_init_parser(self, pre_init_tokenizer):
         return Gemma4Parser(pre_init_tokenizer)
 
-    def test_redundant_channel_open_swallowed_after_new_turn(
+    def test_model_emitted_channel_open_after_new_turn(
         self, pre_init_parser, pre_init_tokenizer, request_obj
     ):
-        # Prompt ends with ``<|turn>model\n``-style sentinel. With
-        # ``enable_thinking=True`` (the default), ``is_reasoning_end``
-        # returns ``False`` for a ``<|turn>`` tail, so the engine is
-        # pre-initialised to ``REASONING``.
+        # Prompt ends with a ``<|turn>model\n``-style sentinel, i.e. not
+        # inside an open ``<|channel>`` block, so the engine starts in
+        # ``CONTENT`` and the model's own opener drives the transition.
         results = _stream_tokens_batched(
             pre_init_parser,
             pre_init_tokenizer,
@@ -414,8 +412,7 @@ class TestGemma4PreInitReasoningRobustness:
 
         reasoning, content, _ = _collect_fields(results)
 
-        # ``thought\n`` prefix must be stripped from reasoning even though
-        # the engine was pre-initialised to REASONING.
+        # ``thought\n`` prefix must be stripped from reasoning.
         assert reasoning.startswith("Reason"), (
             f"thought\\n prefix leaked into reasoning: {reasoning!r}"
         )
@@ -462,6 +459,80 @@ class TestGemma4PreInitReasoningRobustness:
         )
         assert "Reasoning body" in reasoning
         assert "Final content" in content
+
+
+# ── Channel-less direct answer (no reasoning markers at all) ──────────
+
+_PLAIN_ANSWER_TEXT = "This is a direct final answer without channel markers."
+_PLAIN_ANSWER_TOKENS: list[tuple[int, str]] = []
+for _i, _word in enumerate(_PLAIN_ANSWER_TEXT.split(" ")):
+    _prefix = " " if _i > 0 else ""
+    _PLAIN_ANSWER_TOKENS.append((7000 + _i, _prefix + _word))
+
+
+class TestGemma4ChannelLessOutputConsistency:
+    """Streaming and non-streaming must classify channel-less output
+    identically.
+
+    With ``enable_thinking=True``, a prompt that merely starts a new model
+    turn (ends with ``<|turn>model\\n``) used to pre-initialise the
+    streaming engine to ``REASONING``, so a direct answer containing no
+    channel markers was streamed entirely as ``reasoning`` while the
+    non-streaming path returned the same text as ``content``.
+
+    Regression test for vllm-project/vllm#48217.
+    """
+
+    @pytest.fixture
+    def plain_tokenizer(self):
+        return _make_tokenizer(_PLAIN_ANSWER_TOKENS)
+
+    @pytest.fixture
+    def plain_parser(self, plain_tokenizer):
+        return Gemma4Parser(plain_tokenizer)
+
+    def test_streaming_channel_less_output_is_content(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        results = _stream_tokens_batched(
+            plain_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            # New-turn tail: ``<|turn>model\n``.
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+
+        reasoning, content, _ = _collect_fields(results)
+
+        assert content == _PLAIN_ANSWER_TEXT, (
+            f"Channel-less output missing from content: {content!r}"
+        )
+        assert not reasoning, (
+            f"Channel-less output misclassified as reasoning: {reasoning!r}"
+        )
+
+    def test_streaming_matches_non_streaming(
+        self, plain_parser, plain_tokenizer, request_obj
+    ):
+        reasoning, content = plain_parser.extract_reasoning(
+            _PLAIN_ANSWER_TEXT, request_obj
+        )
+        assert reasoning is None
+        assert content == _PLAIN_ANSWER_TEXT
+
+        stream_parser = Gemma4Parser(plain_tokenizer)
+        results = _stream_tokens_batched(
+            stream_parser,
+            plain_tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[NEW_TURN_ID, 9100, 9101],
+        )
+        stream_reasoning, stream_content, _ = _collect_fields(results)
+
+        assert (stream_reasoning or None) == reasoning
+        assert (stream_content or None) == content
 
 
 # ── Second model output: two tool calls with holdback ────────────────

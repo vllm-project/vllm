@@ -127,6 +127,28 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_device_comms(
+    action: Callable[[DeviceCommunicatorBase], None],
+) -> None:
+    """Apply ``action`` to every group's device communicator.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``).
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+
+    for dc in comms:
+        action(dc)
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
@@ -269,11 +291,17 @@ def _create_subgroups_split_group(
     must enter with the same ``split_ranks`` definition. Each rank receives
     the subgroup it belongs to.
     """
+    from vllm.distributed.utils import (
+        get_cpu_distributed_timeout_or_none,
+        get_distributed_timeout_or_none,
+    )
+
     device_backend_str = _device_backend_str(torch_distributed_backend)
     self_device_group = torch.distributed.split_group(
         split_ranks=group_ranks,
         group_desc=f"{group_name}:device",
         backend=device_backend_str,
+        timeout=get_distributed_timeout_or_none(),
     )
     # CPU subgroup: split_group requires the requested backend filter to
     # include the parent's default device type (= the device the parent PG
@@ -284,6 +312,7 @@ def _create_subgroups_split_group(
         split_ranks=group_ranks,
         group_desc=f"{group_name}:cpu",
         backend=f"cpu:gloo,{device_backend_str}",
+        timeout=get_cpu_distributed_timeout_or_none(),
     )
     return self_device_group, self_cpu_group
 
@@ -385,6 +414,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -393,13 +423,10 @@ class GroupCoordinator:
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.device_index: int
-        if _WORLD is not None:
-            self.device_index = _WORLD.device_index
-        else:
-            assert local_rank >= 0, (
-                "local_rank must be provided when creating the world group"
-            )
-            self.device_index = local_rank
+        assert local_rank >= 0, (
+            "local_rank must be provided when creating the world group"
+        )
+        self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
@@ -417,13 +444,19 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+            from vllm.distributed.utils import (
+                get_cpu_distributed_timeout_or_none,
+                get_distributed_timeout_or_none,
+            )
 
             timeout = get_cpu_distributed_timeout_or_none()
+            device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
                 device_group = torch.distributed.new_group(
-                    ranks, backend=torch_distributed_backend
+                    ranks,
+                    backend=torch_distributed_backend,
+                    timeout=device_timeout,
                 )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
@@ -476,6 +509,7 @@ class GroupCoordinator:
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+                use_all2all=use_all2all,
             )
 
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -504,10 +538,16 @@ class GroupCoordinator:
         This is a collective call: every world rank must invoke it. Used where we
         want to issue ops that can run concurrently with ops on `device_group`.
         """
+        from vllm.distributed.utils import get_distributed_timeout_or_none
+
+        device_timeout = get_distributed_timeout_or_none()
         sibling: ProcessGroup | None = None
         for ranks in self.group_ranks:
             pg = torch.distributed.new_group(
-                ranks, backend=self.torch_distributed_backend, group_desc=group_desc
+                ranks,
+                backend=self.torch_distributed_backend,
+                group_desc=group_desc,
+                timeout=device_timeout,
             )
             if self.rank in ranks:
                 sibling = pg
@@ -1283,6 +1323,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1291,6 +1332,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        use_all2all=use_all2all,
     )
 
 
@@ -1301,6 +1343,7 @@ def _init_stateless_group(
     backend: str,
     coord_store: Store,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1316,6 +1359,7 @@ def _init_stateless_group(
         coord_store=coord_store,
         global_rank=world.rank,
         global_world_size=world.world_size,
+        use_all2all=use_all2all,
     )
 
 
@@ -1408,7 +1452,10 @@ def get_pcp_group() -> GroupCoordinator:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(
+    device: torch.device,
+    graph_capture_context: GraphCaptureContext | None = None,
+):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
@@ -1421,8 +1468,13 @@ def graph_capture(device: torch.device):
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
+
+    A caller may pass an explicit ``graph_capture_context`` to control the
+    stream used (e.g. to capture on the default stream).
     """
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    context = graph_capture_context or GraphCaptureContext(
+        torch.cuda.Stream(device=device)
+    )
     with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
         yield context
 
@@ -1757,7 +1809,7 @@ def initialize_model_parallel(
             get_world_group().device_group
         )
 
-    # the layout order is: ExternalDP x DP x PP x TP
+    # the layout order is: ExternalDP x DP x PP x PCP x TP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     # DP is the data parallel group that is part of the model,
@@ -1794,17 +1846,13 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
+    dcp_size = decode_context_model_parallel_size or 1
+    dcp_ranks = local_all_ranks if enable_elastic_ep else all_ranks
+    if dcp_size > 1:
+        # DCP spans PCP first, then TP for full TP x PCP groups.
+        dcp_ranks = dcp_ranks.transpose(-1, -2)
+    group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    if enable_elastic_ep:
-        group_ranks = local_all_ranks.reshape(
-            -1, decode_context_model_parallel_size
-        ).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -1882,6 +1930,7 @@ def initialize_model_parallel(
             .unbind(0)
         )
         group_ranks = [x.tolist() for x in group_ranks]
+        use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
             _EP = _init_stateless_group(
                 group_ranks,
@@ -1889,10 +1938,15 @@ def initialize_model_parallel(
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
+                use_all2all=use_all2all,
             )
         else:
             _EP = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="ep"
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name="ep",
+                use_all2all=use_all2all,
             )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -1978,6 +2032,13 @@ def ensure_model_parallel_initialized(
         f"{pcp_world_size=} vs. "
         f"{prefill_context_model_parallel_size=}"
     )
+    dcp_world_size = get_dcp_group().world_size
+    dcp_model_parallel_size = decode_context_model_parallel_size or 1
+    assert dcp_world_size == dcp_model_parallel_size, (
+        "decode context parallel group already initialized, but of unexpected size: "
+        f"{dcp_world_size=} vs. "
+        f"{dcp_model_parallel_size=}"
+    )
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
@@ -1999,6 +2060,20 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
     if _EPLB is not None:
         _EPLB.prepare_communication_buffer_for_model(model)
+
+
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare every device communicator for a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_prepare())
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore every device communicator after a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_restore())
+    torch.accelerator.synchronize()
 
 
 def model_parallel_is_initialized():

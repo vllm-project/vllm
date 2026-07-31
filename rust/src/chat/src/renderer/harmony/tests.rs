@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::path::PathBuf;
 
 use expect_test::{ExpectFile, expect, expect_file};
@@ -19,7 +22,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
     fixture_chat_request(
         &fixture_path(input_name),
         FixtureRequestOptions {
-            enable_thinking: false,
+            enable_thinking: Some(false),
             no_generation_prompt_when_last_assistant: false,
         },
     )

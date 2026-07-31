@@ -14,6 +14,10 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
 
+// skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
+// (gfx9/gfx11 ISA, unsupported there); skip these registrations to avoid
+// undefined symbols. vLLM uses default/Triton GEMM for these ops on gfx1250.
+#ifndef VLLM_SKIP_SKINNY_GEMMS
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(
       "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
@@ -25,6 +29,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
+
+  // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
+  // optional zero points for asymmetric quantization
+  rocm_ops.def(
+      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
+      "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
+      "int group_size) -> Tensor");
+  rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
@@ -38,6 +50,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+#endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1100
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).

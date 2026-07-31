@@ -79,6 +79,7 @@ from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -1143,16 +1144,3 @@ class AXK1ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: AXK1Config, weight_name: str
-) -> int | None:
-    if config.num_nextn_predict_layers and config.num_nextn_predict_layers > 0:
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(
-                f"model.layers.{layer_idx + i}."
-            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None

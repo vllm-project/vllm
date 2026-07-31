@@ -65,7 +65,7 @@ class ProcessorInputs:
                         **{modality: item},
                         **hf_processor_mm_kwargs,
                     )
-                    for item in data_items
+                    for item in data_items.get_all_items_for_hash()
                 ]
 
         return mm_hashes

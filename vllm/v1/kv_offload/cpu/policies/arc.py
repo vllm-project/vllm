@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from typing_extensions import override
 
-from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
@@ -48,7 +48,7 @@ class ARCCachePolicy(CachePolicy):
     """
 
     def __init__(self, cache_capacity: int):
-        self.cache_capacity: int = cache_capacity
+        super().__init__(cache_capacity)
         self.target_t1_size: float = 0.0
         self.t1: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
         self.t2: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
@@ -72,7 +72,7 @@ class ARCCachePolicy(CachePolicy):
             self.t2.pop(key, None)
 
     @override
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.t1:
                 block = self.t1.pop(key)

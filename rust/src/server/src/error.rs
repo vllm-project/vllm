@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -136,6 +139,22 @@ mod tests {
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("min_tokens=5"));
         assert!(response.error.message.contains("max_tokens=4"));
+    }
+
+    #[test]
+    fn sampling_params_validation_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::SamplingParams(vllm_text::SamplingParamsError::OutOfRange {
+                parameter: "top_p",
+                value: 0.0,
+                expected: "(0, 1]",
+            }),
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("top_p"));
     }
 
     #[test]

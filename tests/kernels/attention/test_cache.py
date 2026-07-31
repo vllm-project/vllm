@@ -10,7 +10,7 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_kv_cache_split_views, set_random_seed
+from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -255,10 +255,8 @@ def test_reshape_and_cache_flash(
     nvfp4_key_data = None
     nvfp4_value_data = None
     if kv_cache_dtype == "nvfp4":
-        (nvfp4_key_data,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
-        (nvfp4_value_data,), (value_scale_cache,) = nvfp4_kv_cache_split_views(
-            value_cache
-        )
+        nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
+        nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
     if kv_cache_dtype == "nvfp4":
         # Global scale = amax / 448 (per-tensor)

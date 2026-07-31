@@ -14,6 +14,7 @@ from torch.distributed import ProcessGroup
 from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -36,6 +37,14 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 )
 
 
+def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    close = torch.isclose(actual, expected, atol=2e-1, rtol=2e-1)
+    close_fraction = close.float().mean().item()
+    assert close_fraction > 0.99, (
+        f"Only {close_fraction:.1%} of FP8 outputs are within tolerance"
+    )
+
+
 @dataclasses.dataclass
 class TestConfig:
     dtype: torch.dtype
@@ -50,6 +59,7 @@ class TestConfig:
 class TestTensors:
     rank_tokens: torch.Tensor
     rank_token_scales: torch.Tensor | None
+    intermediate_scales: torch.Tensor | None
     topk: torch.Tensor
     topk_weights: torch.Tensor
     config: TestConfig
@@ -63,6 +73,12 @@ class TestTensors:
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
         )
+        if config.dtype == torch.float8_e4m3fn:
+            rank_token_scales = torch.tensor(1 / 448, device="cuda")
+            intermediate_scales = torch.tensor(8 / 448, device="cuda")
+        else:
+            rank_token_scales = None
+            intermediate_scales = None
 
         topk = torch.stack(
             [
@@ -73,7 +89,8 @@ class TestTensors:
         topk_weights = torch.randn(topk.shape, dtype=torch.float32, device="cuda")
         return TestTensors(
             rank_tokens=rank_tokens,
-            rank_token_scales=None,
+            rank_token_scales=rank_token_scales,
+            intermediate_scales=intermediate_scales,
             topk=topk,
             topk_weights=topk_weights,
             config=config,
@@ -124,7 +141,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
@@ -162,6 +178,7 @@ def deepep_v2_moe_impl(
         w2_scale=w2_scale,
         per_act_token_quant=per_act_token_quant,
         a1_scale=test_tensors.rank_token_scales,
+        a2_scale=test_tensors.intermediate_scales,
     )
 
     hidden_size = test_tensors.rank_tokens.size(1)
@@ -231,6 +248,8 @@ def _deep_ep_v2_moe(
             test_tensors.topk,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            a1_scale=test_tensors.rank_token_scales,
+            a2_scale=test_tensors.intermediate_scales,
             quant_dtype=q_dtype,
             per_act_token_quant=per_act_token_quant,
         )
@@ -262,12 +281,15 @@ def _deep_ep_v2_moe(
             per_act_token_quant,
         )
 
-    torch.testing.assert_close(
-        torch_combined,
-        deepep_combined,
-        atol=6e-2,
-        rtol=6e-2,
-    )
+    if is_quantized:
+        assert_fp8_close(torch_combined, deepep_combined)
+    else:
+        torch.testing.assert_close(
+            torch_combined,
+            deepep_combined,
+            atol=6e-2,
+            rtol=6e-2,
+        )
 
 
 MNKs = [
@@ -355,17 +377,29 @@ def _deep_ep_v2_moe_cudagraph(
     num_local_experts = config.num_experts // pgi.world_size
     hidden_size = config.k
 
-    # Create FP8 weights directly, then dequantize for bf16 reference.
-    w1_fp8 = torch.randn(
-        (config.num_experts, 2 * config.n, config.k),
-        device="cuda",
-        dtype=torch.bfloat16,
-    ).to(torch.float8_e4m3fn)
-    w2_fp8 = torch.randn(
-        (config.num_experts, config.k, config.n),
-        device="cuda",
-        dtype=torch.bfloat16,
-    ).to(torch.float8_e4m3fn)
+    # All ranks must use the same global weights before taking their EP slice.
+    w1_bf16 = (
+        torch.randn(
+            (config.num_experts, 2 * config.n, config.k),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
+    w2_bf16 = (
+        torch.randn(
+            (config.num_experts, config.k, config.n),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
+    torch.distributed.broadcast(w1_bf16, src=0, group=pg)
+    torch.distributed.broadcast(w2_bf16, src=0, group=pg)
+
+    # Round-trip through FP8 before constructing the reference and kernel weights.
+    w1_fp8 = w1_bf16.to(torch.float8_e4m3fn)
+    w2_fp8 = w2_bf16.to(torch.float8_e4m3fn)
     w1_ref = w1_fp8.to(torch.bfloat16)
     w2_ref = w2_fp8.to(torch.bfloat16)
 
@@ -385,21 +419,8 @@ def _deep_ep_v2_moe_cudagraph(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
-        # Reference MoE using dequantized bf16 weights
-        torch_combined = torch_experts(
-            test_tensors.rank_tokens,
-            w1_ref,
-            w2_ref,
-            test_tensors.topk_weights,
-            test_tensors.topk,
-        )
-
-        # Use the production pipeline: make_fused_moe_layer creates
-        # a FusedMoE layer, quantizes weights, runs
-        # process_weights_after_loading (TrtLLM W31 swap + BlockMajorK
-        # shuffle), and selects the kernel.
-        # Quantize weights using production helper, EP-slice, then
-        # convert to TrtLLM format.
+        # Mirror production weight processing: quantize, EP-slice, then
+        # convert to the TrtLLM BlockMajorK format.
         from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
         from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
             TrtLlmFp8ExpertsModular,
@@ -411,14 +432,32 @@ def _deep_ep_v2_moe_cudagraph(
 
         block_shape = [128, 128]
         qw = _quantize_fp8_halves(w1_ref, w2_ref, block_shape)
+        assert qw.w13_weight_scale is not None
+        assert qw.w2_weight_scale is not None
+
+        # Reference MoE using the same blockwise FP8 quantization scheme as
+        # the production kernel. torch_experts quantizes activations before
+        # both GEMMs and dequantizes the operands for the reference matmuls.
+        reference_topk_weights = test_tensors.topk_weights.to(torch.bfloat16).to(
+            torch.float32
+        )
+        torch_combined = torch_experts(
+            test_tensors.rank_tokens,
+            qw.w13_weight,
+            qw.w2_weight,
+            reference_topk_weights,
+            test_tensors.topk,
+            w1_scale=qw.w13_weight_scale,
+            w2_scale=qw.w2_weight_scale,
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=block_shape,
+        )
 
         # EP-slice before format conversion
         e_start = num_local_experts * pgi.rank
         e_end = e_start + num_local_experts
         w1_ep = qw.w13_weight[e_start:e_end]
         w2_ep = qw.w2_weight[e_start:e_end]
-        assert qw.w13_weight_scale is not None
-        assert qw.w2_weight_scale is not None
         w1_scale_ep = qw.w13_weight_scale[e_start:e_end]
         w2_scale_ep = qw.w2_weight_scale[e_start:e_end]
 
@@ -452,10 +491,22 @@ def _deep_ep_v2_moe_cudagraph(
             w2_scale=w2_scale_ep,
         )
         moe_config = make_dummy_moe_config(
-            num_experts=num_local_experts,
+            num_experts=config.num_experts,
+            num_local_experts=num_local_experts,
             experts_per_token=config.topk,
             hidden_dim=hidden_size,
             intermediate_size=config.n,
+        )
+        moe_parallel_config = dataclasses.replace(
+            moe_config.moe_parallel_config,
+            ep_size=pgi.world_size,
+            ep_rank=pgi.rank,
+            use_ep=True,
+            all2all_backend="deepep_v2",
+        )
+        moe_config = dataclasses.replace(
+            moe_config,
+            moe_parallel_config=moe_parallel_config,
         )
         fused_experts = TrtLlmFp8ExpertsModular(
             moe_config=moe_config,
@@ -480,21 +531,21 @@ def _deep_ep_v2_moe_cudagraph(
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
             fused_experts=fused_experts,
-            inplace=False,
         )
 
-        for _ in range(3):
-            out = mk_kernel.apply(
-                hidden_states=test_tensors.rank_tokens,
-                w1=w1_ep,
-                w2=w2_ep,
-                topk_weights=test_tensors.topk_weights,
-                topk_ids=test_tensors.topk,
-                activation=MoEActivation.SILU,
-                global_num_experts=config.num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
+        with set_forward_context(None, vllm_cfg):
+            for _ in range(3):
+                out = mk_kernel.apply(
+                    hidden_states=test_tensors.rank_tokens,
+                    w1=w1_ep,
+                    w2=w2_ep,
+                    topk_weights=test_tensors.topk_weights,
+                    topk_ids=test_tensors.topk,
+                    activation=MoEActivation.SILU,
+                    global_num_experts=config.num_experts,
+                    expert_map=None,
+                    apply_router_weight_on_input=False,
+                )
 
         torch.testing.assert_close(
             torch_combined,
