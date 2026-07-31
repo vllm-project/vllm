@@ -76,7 +76,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
-    SUPPORTS_REPLICATED_LAYOUT = True
 
     @classmethod
     @override
@@ -233,6 +232,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
 
         return self._manager
+
+    @override
+    def _uses_shared_region(self) -> bool:
+        # Tiering always allocates on the shared region (every platform), so the
+        # replicated-layout gate must not be narrowed by the CPU spec's
+        # CUDA-alike check.
+        return True
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
