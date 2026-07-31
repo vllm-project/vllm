@@ -35,7 +35,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, Qwen2VLImageProcessor
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
@@ -82,6 +82,7 @@ from vllm.multimodal.video_prune.evs import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import make_input_norm, maybe_do_input_norm
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1375,6 +1376,11 @@ class Qwen2_5_VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        if multimodal_config.mm_device_do_normalize:
+            self.input_norm = make_input_norm(Qwen2VLImageProcessor)
+        else:
+            self.input_norm = None
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Qwen2_5_VLImageInputs | None:
@@ -1437,6 +1443,8 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+            pixel_values = maybe_do_input_norm(pixel_values, self.input_norm)
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
@@ -1493,6 +1501,10 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = maybe_do_input_norm(
+                pixel_values_videos, self.input_norm
+            )
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,

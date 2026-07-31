@@ -133,7 +133,9 @@ def test_get_image_size_with_most_features(
         assert tokens < max_tokens
 
 
-@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+@pytest.mark.parametrize(
+    "model_id", ["Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct"]
+)
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_make_input_norm(
     image_assets: ImageTestAssets,
