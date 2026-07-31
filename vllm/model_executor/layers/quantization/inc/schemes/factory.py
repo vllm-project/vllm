@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
     from .inc_fp8_scheme import INCFp8Scheme
+    from .inc_mxfp4_scheme import INCMxfp4Scheme
     from .inc_mxfp8_scheme import INCMxfp8Scheme
     from .inc_wna16_scheme import INCWna16Scheme
 
@@ -17,6 +18,7 @@ def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
         INCFp8Scheme,
         INCMxfp8Scheme,
         INCWna16Scheme,
+        INCMxfp4Scheme,
     ]
 
     for scheme_cls in scheme_list:

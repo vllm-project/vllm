@@ -6,6 +6,7 @@ import pytest
 from tests.entrypoints.multimodal.conftest import managed_llm
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.exceptions import VLLMValidationError
 
 MODEL = "llava-hf/llava-1.5-7b-hf"
 PROMPT = "USER: <image>\nDescribe this image briefly.\nASSISTANT:"
@@ -42,7 +43,7 @@ def test_generate_with_embedding(llm: LLM):
 def test_raw_image_rejected(llm: LLM):
     """Raw image input is still rejected when limit=0."""
     raw_image = ImageAsset("stop_sign").pil_image
-    with pytest.raises(ValueError, match=r"At most 0 image\(s\)"):
+    with pytest.raises(VLLMValidationError, match=r"At most 0 image\(s\)"):
         llm.generate(
             {"prompt": PROMPT, "multi_modal_data": {"image": raw_image}},
             sampling_params=SamplingParams(max_tokens=16),

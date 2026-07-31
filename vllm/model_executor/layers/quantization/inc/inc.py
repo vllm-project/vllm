@@ -91,7 +91,10 @@ class INCConfig(QuantizationConfig):
                 f"Unsupported weight_bits: {weight_bits}, "
                 f"currently only support {self.SUPPORTED_BITS}."
             )
-        if data_type not in self.SUPPORTED_DTYPES:
+        # auto-round mxfp data_type is e.g. "mx_fp4" / "mx_fp4e2m1"; match the
+        # "mx_fp" family by substring like auto_round.compressors.is_mx_fp.
+        is_mxfp = "mx_fp" in data_type
+        if data_type not in self.SUPPORTED_DTYPES and not is_mxfp:
             raise ValueError(
                 f"Unsupported data_type: {data_type}, "
                 f"currently only support {self.SUPPORTED_DTYPES}."
@@ -130,6 +133,17 @@ class INCConfig(QuantizationConfig):
             f"group_size={self.group_size}, sym={self.sym})"
         )
 
+    @property
+    def is_mxfp(self) -> bool:
+        # auto-round mxfp data_type is the "mx_fp" family (e.g. "mx_fp",
+        # "mx_fp4e2m1"); match by substring like auto_round.compressors.is_mx_fp.
+        return "mx_fp" in self.data_type
+
+    @property
+    def is_mxfp8(self) -> bool:
+        # MXFP4 and MXFP8 share data_type "mx_fp" and differ only by bit width.
+        return self.is_mxfp and self.weight_bits == self.MXFP8_BITS
+
     def _validate_supported_quantization(self) -> None:
         if self.data_type == "int":
             assert isinstance(self.group_size, int), (
@@ -165,6 +179,7 @@ class INCConfig(QuantizationConfig):
             assert self.weight_bits == self.MXFP8_BITS, (
                 f"INC MXFP8 only supports bits=8, but found bits={self.weight_bits}."
             )
+        if self.is_mxfp8:
             assert self.group_size == self.MXFP8_GROUP_SIZE, (
                 "INC MXFP8 only supports group_size=32, "
                 f"but found group_size={self.group_size}."
@@ -179,16 +194,15 @@ class INCConfig(QuantizationConfig):
                 "INC MXFP8 only supports backend='auto', "
                 f"but found backend={self.backend!r}."
             )
-
         if self.packing_format == self.FP8_BLOCK_PACKING_FORMAT:
             assert self.data_type == self.FP8_BLOCK_DATA_TYPE, (
                 f"packing_format={self.FP8_BLOCK_PACKING_FORMAT!r} requires "
                 f"data_type={self.FP8_BLOCK_DATA_TYPE!r}."
             )
-        elif self.packing_format == self.MXFP8_PACKING_FORMAT:
-            assert self.data_type == self.MXFP8_DATA_TYPE, (
+        elif self.packing_format == self.MXFP8_PACKING_FORMAT and not self.is_mxfp:
+            raise ValueError(
                 f"packing_format={self.MXFP8_PACKING_FORMAT!r} requires "
-                f"data_type={self.MXFP8_DATA_TYPE!r}."
+                f"an {self.MXFP8_DATA_TYPE!r} data_type."
             )
 
     def _validate_raw_config(self, config: dict[str, Any]) -> None:
