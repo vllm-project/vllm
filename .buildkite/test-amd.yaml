@@ -166,7 +166,7 @@ steps:
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==1.1.0
+  - pip install helion==1.4.0
   - pytest -v -s kernels/helion/
 
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
