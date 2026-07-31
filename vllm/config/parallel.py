@@ -1024,9 +1024,12 @@ class ParallelConfig:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
 
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
-            self.disable_custom_all_reduce = True
+        # Batch-invariant mode keeps custom all-reduce ENABLED. Its 1-stage
+        # kernel accumulates over absolute rank indices, so its reduction
+        # order is identical on every rank and independent of batch
+        # composition, and CustomAllreduce sizes its buffers at init under
+        # VLLM_BATCH_INVARIANT so the custom-vs-NCCL choice cannot change
+        # mid-run. See #50136.
 
         if (
             self.distributed_executor_backend is not None
