@@ -31,6 +31,20 @@ pub(super) struct DecodedArray2<T> {
     pub data: Vec<T>,
 }
 
+pub(super) enum ResolvedArrayBytes<'a> {
+    Owned(Bytes),
+    Borrowed(&'a [u8]),
+}
+
+impl AsRef<[u8]> for ResolvedArrayBytes<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes.as_ref(),
+            Self::Borrowed(bytes) => bytes,
+        }
+    }
+}
+
 pub(super) fn decode_array2_u32<Frame>(
     value: WireNdArray,
     field: &str,
@@ -49,11 +63,11 @@ where
     }
 
     let data = match scalar {
-        ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
+        ScalarType::I32 => decode_i32_vec(bytes.as_ref(), endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+        ScalarType::I64 => decode_i64_vec(bytes.as_ref(), endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
@@ -84,11 +98,11 @@ where
     }
 
     let data = match scalar {
-        ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
+        ScalarType::I32 => decode_i32_vec(bytes.as_ref(), endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+        ScalarType::I64 => decode_i64_vec(bytes.as_ref(), endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
             .try_collect()?,
@@ -114,7 +128,7 @@ where
         ));
     }
 
-    let data = decode_f32_vec(&bytes, endianness, field)?;
+    let data = decode_f32_vec(bytes.as_ref(), endianness, field)?;
     Ok(DecodedArray2 {
         rows: shape[0],
         cols: shape[1],
@@ -122,12 +136,12 @@ where
     })
 }
 
-pub(super) fn decode_array_metadata<Frame>(
+pub(super) fn decode_array_metadata<'a, Frame>(
     value: WireNdArray,
     field: &str,
-    frames: &[Frame],
+    frames: &'a [Frame],
     expected_scalars: &[ScalarType],
-) -> Result<(Vec<usize>, Bytes, ScalarType, Endianness)>
+) -> Result<(Vec<usize>, ResolvedArrayBytes<'a>, ScalarType, Endianness)>
 where
     Frame: AsRef<[u8]>,
 {
@@ -141,7 +155,7 @@ where
     }
 
     let bytes = resolve_array_bytes(data, field, frames)?;
-    validate_byte_length(shape.as_slice(), bytes.len(), field, scalar)?;
+    validate_byte_length(shape.as_slice(), bytes.as_ref().len(), field, scalar)?;
     Ok((shape, bytes, scalar, endianness))
 }
 
@@ -168,16 +182,16 @@ pub(super) fn parse_dtype(dtype: &str, field: &str) -> Result<(ScalarType, Endia
     Ok((scalar, endianness))
 }
 
-pub(super) fn resolve_array_bytes<Frame>(
+pub(super) fn resolve_array_bytes<'a, Frame>(
     value: WireArrayData,
     field: &str,
-    frames: &[Frame],
-) -> Result<Bytes>
+    frames: &'a [Frame],
+) -> Result<ResolvedArrayBytes<'a>>
 where
     Frame: AsRef<[u8]>,
 {
     match value {
-        WireArrayData::RawView(bytes) => Ok(bytes),
+        WireArrayData::RawView(bytes) => Ok(ResolvedArrayBytes::Owned(bytes)),
         WireArrayData::AuxIndex(index) => {
             let frame = frames.get(index).ok_or_else(|| {
                 decode_error(
@@ -188,7 +202,7 @@ where
                     ),
                 )
             })?;
-            Ok(Bytes::copy_from_slice(frame.as_ref()))
+            Ok(ResolvedArrayBytes::Borrowed(frame.as_ref()))
         }
     }
 }
