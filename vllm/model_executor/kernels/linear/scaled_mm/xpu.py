@@ -211,13 +211,38 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         #   - apply_block_scaled_mm recovers the contiguous buffer via .t()
         scale_kn = scale.data.t().contiguous()  # [k_blocks, n_blocks]
         replace_parameter(layer, scale_attr, scale_kn.t())  # view: [n_blocks, k_blocks]
-        # Mark the repacked layout so weight-dequant helpers
-        # (get_and_maybe_dequant_weights) can undo it: the block scale is now
-        # [K/block_k, N/block_n] instead of the checkpoint [N/block_n, K/block_k].
-        layer.weight_scale_transposed = True
+
+        # oneDNN indexes the weight in block_n-sized tiles, one per scale block
+        # along N, so the weight must span exactly n_blocks * block_n rows.
+        # The scale is the source of truth for the required N -- no ceil needed.
+        block_n = self.weight_group_shape.row
+        n_blocks = scale_kn.shape[1]
+        n = layer.weight.shape[0]
+        # Unpadded N. Recorded unconditionally so apply_block_scaled_mm can slice
+        # back to it regardless of which branch below runs.
+        self._output_size = n
 
         if getattr(layer, "is_bmm", False):
+            # Grouped fp8_bmm slices both weight and scale per group, so every
+            # group must start on a block boundary. Padding a group tail would
+            # need interleaved (not trailing) padding, which is not implemented,
+            # so fail loudly rather than silently misaligning scales to weights.
+            batch = layer.bmm_batch_size
+            if n_blocks % batch or (n_blocks // batch) * block_n != n // batch:
+                raise ValueError(
+                    f"fp8_bmm requires N per group to be a multiple of block_n "
+                    f"({block_n}); got N={n}, n_blocks={n_blocks}, batch={batch}"
+                )
             self._prepare_bmm_params(layer, scale_kn)
+        elif n_blocks * block_n != n:
+            # Pad the N boundary so oneDNN's trailing block is fully backed.
+            replace_parameter(
+                layer,
+                "weight",
+                torch.nn.functional.pad(
+                    layer.weight.data, (0, 0, 0, n_blocks * block_n - n)
+                ).contiguous(),
+            )
 
     def _prepare_bmm_params(
         self, layer: torch.nn.Module, scale_kn: torch.Tensor
@@ -239,18 +264,6 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         layer.bmm_weight = w.reshape(batch, N_total // batch, K).permute(
             0, 2, 1
         )  # [G, K, N_per_group]
-
-        # oneDNN block matmul requires N to be a multiple of block_n
-        # We pad the weight boundary here
-        if not getattr(layer, "is_bmm", False):
-            weight = layer.weight.data
-            n = weight.shape[0]
-            self._output_size = n
-            block_n = self.weight_group_shape.row
-            n_pad = (n + block_n - 1) // block_n * block_n
-            if n_pad != n:
-                padded = torch.nn.functional.pad(weight, (0, 0, 0, n_pad - n))
-                replace_parameter(layer, "weight", padded.contiguous())
 
     def apply_block_scaled_mm(
         self,
