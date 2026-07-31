@@ -20,7 +20,7 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import (
@@ -560,7 +560,7 @@ class KimiMoE(nn.Module):
                 current_platform.is_cuda()
                 and current_platform.is_device_capability_family(100)
             )
-            self.experts = FusedMoE(
+            self.experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
                 top_k=num_experts_per_token,
@@ -578,7 +578,7 @@ class KimiMoE(nn.Module):
                 scoring_func=config.moe_router_activation_func,
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 routed_scaling_factor=self.routed_scaling_factor,
-                # Down projection runs outside FusedMoE so it can overlap the
+                # Down projection runs outside MoERunner so it can overlap the
                 # router gate on the aux stream (see forward()); the original
                 # hidden states are passed to forward() as shared_experts_input
                 # so shared experts still see the untransformed input.
@@ -689,7 +689,7 @@ class KimiMoE(nn.Module):
                 )
         else:
             # Routed experts consume the down-projected latent; shared experts
-            # (inside FusedMoE) get the original hidden states via
+            # (inside MoERunner) get the original hidden states via
             # shared_experts_input.
             final_hidden_states = self.experts(
                 hidden_states=routed_hidden_states,
