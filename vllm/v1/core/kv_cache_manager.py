@@ -768,6 +768,11 @@ class KVCacheManager:
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
+    def finalize_response_checkpoint(self, request: Request, keep: bool) -> None:
+        """Keep or discard the request's rolling recurrent response state."""
+        if self.enable_caching:
+            self.coordinator.finalize_response_checkpoint(request, keep)
+
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]
     ) -> KVCacheBlocks:

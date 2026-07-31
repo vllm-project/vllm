@@ -287,6 +287,11 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
             )
 
+    def finalize_response_checkpoint(self, request: Request, keep: bool) -> None:
+        """Keep a stopped response checkpoint or discard an unusable one."""
+        for manager in self.single_type_managers:
+            manager.finalize_response_checkpoint(request, keep)
+
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.

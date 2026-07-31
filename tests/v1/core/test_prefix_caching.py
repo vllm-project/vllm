@@ -4074,6 +4074,130 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     assert retained(0) == {14}
 
 
+@pytest.mark.parametrize(
+    ("assistant_tokens", "expected_checkpoint"),
+    [
+        pytest.param(
+            # Kimi K3 chat:
+            # <think>reasoning</think><response>answer</response>
+            [1000, *range(1001, 1008), 1008, 1010, *range(1011, 1018), 1018],
+            48,
+            id="chat",
+        ),
+        pytest.param(
+            # Kimi K3 tool call:
+            # <think>reasoning</think><tool_calls><tool_call>...</tool_call>
+            [2000, *range(2001, 2010), 2010, 2020, *range(2021, 2034), 2034],
+            56,
+            id="tool_call",
+        ),
+    ],
+)
+def test_mamba_latest_only_retains_preserved_response(
+    monkeypatch, assistant_tokens, expected_checkpoint
+):
+    """A preserved K3 assistant turn reuses its latest aligned response state.
+
+    Main's latest-only policy retains the prompt replay boundary. The rolling
+    response checkpoint adds exactly one Mamba state and lets the next request
+    reuse the preserved reasoning/response or reasoning/tool-call history.
+    """
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 8
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    prompt_tokens = [i for i in range(4) for _ in range(block_size)]
+    request = make_request("first", prompt_tokens, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert num_computed == 0
+
+    # Materialize the prompt's normal replay boundary, then finish the prompt.
+    for chunk in (3 * block_size, block_size):
+        blocks = manager.allocate_slots(request, chunk, 0, computed_blocks)
+        assert blocks is not None
+        request.num_computed_tokens += chunk
+        computed_blocks = None
+
+    request.append_output_token_ids(assistant_tokens)
+    while request.num_computed_tokens < request.num_tokens:
+        chunk = min(
+            block_size,
+            request.num_tokens - request.num_computed_tokens,
+        )
+        blocks = manager.allocate_slots(request, chunk, 0, None)
+        assert blocks is not None
+        request.num_computed_tokens += chunk
+
+    # Only the most recent response boundary is retained for Mamba; earlier
+    # rolling response states have already been evicted.
+    response_hash_indices = {
+        i
+        for i in range(len(request.block_hashes))
+        if i >= len(prompt_tokens) // block_size
+        and manager.block_pool.get_cached_block(
+            request.block_hashes[i], kv_cache_group_ids=[1]
+        )
+        is not None
+    }
+    assert response_hash_indices == {expected_checkpoint // block_size - 1}
+
+    manager.finalize_response_checkpoint(request, keep=True)
+    manager.free(request)
+
+    end_of_msg = [3000]
+    next_user = [3001] * block_size
+    replay = make_request(
+        "replay",
+        prompt_tokens + assistant_tokens + end_of_msg + next_user,
+        block_size,
+        sha256,
+    )
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == expected_checkpoint
+
+    # If the client drops preserved thinking, the response hash chain diverges
+    # and the new checkpoint cannot produce a false hit.
+    without_thinking = make_request(
+        "without-thinking",
+        prompt_tokens + assistant_tokens[len(assistant_tokens) // 2 :] + end_of_msg,
+        block_size,
+        sha256,
+    )
+    _, num_computed_without_thinking, _ = manager.get_computed_blocks(without_thinking)
+    assert num_computed_without_thinking < expected_checkpoint
+
+
+def test_mamba_discards_rolling_response_for_non_stop_finish(monkeypatch):
+    """Length caps/errors/aborts do not retain the rolling response state."""
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 8
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt_tokens = [1] * (4 * block_size)
+    request = make_request("first", prompt_tokens, block_size, sha256)
+    request.append_output_token_ids([2] * block_size)
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    blocks = manager.allocate_slots(
+        request, request.num_tokens, num_computed, computed_blocks
+    )
+    assert blocks is not None
+    checkpoint_hash = request.block_hashes[-1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is not None
+
+    manager.finalize_response_checkpoint(request, keep=False)
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
 def test_mamba_reachable_block_mask_pins_shared_prefix():
     """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
     ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must

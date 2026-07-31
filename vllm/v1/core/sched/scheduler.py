@@ -2302,6 +2302,12 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        # A normal stop can be replayed by a subsequent preserved-thinking
+        # turn. Abort, error, repetition, and length-cap endings cannot.
+        self.kv_cache_manager.finalize_response_checkpoint(
+            request, keep=request.status == RequestStatus.FINISHED_STOPPED
+        )
+
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 

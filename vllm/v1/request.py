@@ -173,6 +173,12 @@ class Request:
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
+        # Latest rolling response checkpoint for each recurrent KV-cache group.
+        # Values are (block_id, block_hash_with_group_id). The manager replaces
+        # these as generation crosses cacheable boundaries so sparse retention
+        # needs only one additional recurrent state per request.
+        self.recurrent_response_checkpoints: dict[int, tuple[int, bytes]] = {}
+
         # Multi-modal related
         self.mm_features = mm_features or []
 

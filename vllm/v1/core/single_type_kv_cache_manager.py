@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -475,6 +476,10 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+    def finalize_response_checkpoint(self, request: Request, keep: bool) -> None:
+        """Finalize any rolling response checkpoint owned by this group."""
+        return
 
     @classmethod
     def reachable_block_mask(
@@ -1681,6 +1686,11 @@ class MambaManager(SingleTypeKVCacheManager):
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
+        response_hash = self._cache_rolling_response_checkpoint(
+            request, num_tokens, retention_interval
+        )
+        if response_hash is not None:
+            self.cached_blocks_this_step.add(response_hash)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
             if partial_hash is not None:
@@ -1699,6 +1709,89 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def _cache_rolling_response_checkpoint(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None,
+    ) -> BlockHashWithGroupId | None:
+        """Keep the latest cacheable recurrent state reached during decode.
+
+        With latest-only retention, the normal reachable boundary is tied to
+        the prompt. A preserved-thinking chat template can replay much more:
+        the prior assistant response. Register each newly crossed response
+        boundary and evict the preceding rolling entry, keeping the additional
+        recurrent-state cost constant.
+
+        The entry is registered before the forward that materializes the state,
+        just like normal full-block caching. ``cached_blocks_this_step`` keeps
+        another request from consuming it before that forward completes.
+        """
+        if (
+            retention_interval != 0
+            or num_tokens <= request.num_prompt_tokens
+            or num_tokens % self.block_size != 0
+        ):
+            return None
+
+        block_idx = num_tokens // self.block_size - 1
+        blocks = self.req_to_blocks[request.request_id]
+        if block_idx >= len(blocks):
+            return None
+        block = blocks[block_idx]
+        if block.is_null:
+            return None
+
+        block_hashes = resolve_block_hashes(
+            request.block_hashes, self.block_pool.hash_block_size, self.block_size
+        )
+        if block_idx >= len(block_hashes):
+            return None
+        checkpoint_hash = make_block_hash_with_group_id(
+            block_hashes[block_idx], self.kv_cache_group_id
+        )
+
+        old_checkpoint = request.recurrent_response_checkpoints.get(
+            self.kv_cache_group_id
+        )
+        if old_checkpoint == (block.block_id, checkpoint_hash):
+            return checkpoint_hash
+        if old_checkpoint is not None:
+            old_block_id, old_hash = old_checkpoint
+            if self.block_pool.cached_block_hash_to_block.contain(
+                BlockHashWithGroupId(old_hash), old_block_id
+            ):
+                self.block_pool.evict_blocks({old_block_id})
+
+        if not self.block_pool.cached_block_hash_to_block.contain(
+            checkpoint_hash, block.block_id
+        ):
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=blocks,
+                num_cached_blocks=block_idx,
+                num_full_blocks=block_idx + 1,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+            )
+        request.recurrent_response_checkpoints[self.kv_cache_group_id] = (
+            block.block_id,
+            checkpoint_hash,
+        )
+        return checkpoint_hash
+
+    def finalize_response_checkpoint(self, request: Request, keep: bool) -> None:
+        checkpoint = request.recurrent_response_checkpoints.pop(
+            self.kv_cache_group_id, None
+        )
+        if keep or checkpoint is None:
+            return
+        block_id, checkpoint_hash = checkpoint
+        if self.block_pool.cached_block_hash_to_block.contain(
+            BlockHashWithGroupId(checkpoint_hash), block_id
+        ):
+            self.block_pool.evict_blocks({block_id})
 
     def _cache_partial_tail_block(
         self,
