@@ -524,9 +524,6 @@ class Base(
         """
         text_config = self.text_config
 
-        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
-        head_size = self.model_config.get_head_size()
-        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
 
         # In encoder models, the attention layers will have `is_causal=False`
@@ -555,14 +552,18 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
-            if getattr(text_config, "is_heterogeneous", False):
-                layer_head_size = self.model_config.get_head_size(layer_idx=i)
-                layer_num_kv_heads = self.model_config.get_num_kv_heads(
-                    self.parallel_config, layer_idx=i
-                )
-            else:
-                layer_head_size = head_size
-                layer_num_kv_heads = num_kv_heads
+            # `[i]` is the whole-model config unless the checkpoint is
+            # heterogeneous, in which case it is this layer's own geometry.
+            arch_config = self.model_config.model_arch_config[i]
+            num_heads = self.model_config.get_num_attention_heads(
+                self.parallel_config, arch_config
+            )
+            head_size = arch_config.head_size
+            # Default to Llama scale, maybe updated in vllm_attention_forward
+            scale = head_size**-0.5
+            num_kv_heads = self.model_config.get_num_kv_heads(
+                self.parallel_config, arch_config
+            )
 
             attn_cls = (
                 EncoderOnlyAttention
@@ -571,11 +572,9 @@ class Base(
             )
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
-                head_size=layer_head_size,
-                # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_attention_forward
-                scale=layer_head_size**-0.5,
-                num_kv_heads=layer_num_kv_heads,
+                head_size=head_size,
+                scale=scale,
+                num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,

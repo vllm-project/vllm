@@ -208,24 +208,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
         and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
         to Triton.
         """
-        hf_text_config = vllm_config.model_config.hf_text_config
-        if hasattr(hf_text_config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            head_dims = {
-                layer_type: hf_text_config.per_layer_config[layer_type].head_dim
-                for layer_type in hf_text_config.layer_types
-            }
-        else:
-            # Transformers < 5.15.0
-            head_dims = {
-                "sliding_attention": getattr(hf_text_config, "head_dim", None),
-                "full_attention": getattr(hf_text_config, "global_head_dim", None),
-            }
+        model_config = vllm_config.model_config
+        arch_config = model_config.model_arch_config
+        layer_types = getattr(model_config.hf_text_config, "layer_types", None) or []
+        head_dims = {
+            layer_types[i]: arch_config[i].head_size
+            for i in range(min(arch_config.total_num_hidden_layers, len(layer_types)))
+        }
 
-        if (
-            any(dim is None for dim in head_dims.values())
-            or len(set(head_dims.values())) == 1
-        ):
+        if len(set(head_dims.values())) <= 1:
             return
 
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported

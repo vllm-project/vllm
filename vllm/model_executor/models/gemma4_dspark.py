@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model
@@ -43,21 +44,9 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
             config, "attention_k_eq_v", False
         )
 
-        if hasattr(config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            layer_config = config.per_layer_config[layer_idx]
-            head_dim = layer_config.head_dim
-            num_kv_heads = layer_config.num_key_value_heads
-        else:
-            # Transformers < 5.15.0
-            head_dim = config.head_dim
-            num_kv_heads = config.num_key_value_heads
-            if layer_type == "full_attention":
-                head_dim = getattr(config, "global_head_dim", head_dim)
-                if self.use_k_eq_v:
-                    num_kv_heads = getattr(
-                        config, "num_global_key_value_heads", num_kv_heads
-                    )
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
         super().__init__(
             config=config,
             hidden_size=config.hidden_size,

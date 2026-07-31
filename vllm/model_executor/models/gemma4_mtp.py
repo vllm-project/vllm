@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -271,25 +272,9 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_type = config.layer_types[layer_idx]
-
-        if hasattr(config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            layer_config = config.per_layer_config[layer_idx]
-            head_dim = layer_config.head_dim
-            num_kv_heads = layer_config.num_key_value_heads
-        else:
-            # Transformers < 5.15.0
-            # Determine if this full-attention layer uses k_eq_v
-            # (laptop variant: no v_proj, K reused as V on full attention layers)
-            head_dim = config.head_dim
-            num_kv_heads = config.num_key_value_heads
-            if layer_type == "full_attention":
-                head_dim = getattr(config, "global_head_dim", head_dim)
-                if getattr(config, "attention_k_eq_v", False):
-                    num_kv_heads = getattr(
-                        config, "num_global_key_value_heads", num_kv_heads
-                    )
+        layer_config = gemma4_layer_config(config, layer_idx)
+        head_dim = layer_config.head_dim
+        num_kv_heads = layer_config.num_key_value_heads
 
         self.self_attn = Gemma4MTPAttention(
             config=config,
