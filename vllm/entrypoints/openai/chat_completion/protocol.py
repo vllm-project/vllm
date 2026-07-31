@@ -188,20 +188,32 @@ class ChatCompletionNamedFunction(OpenAIBaseModel):
     name: str
 
 
+def _message_level_tool_declarations(messages: Any) -> list[dict]:
+    """All message-level tool declarations (on system/developer messages).
+
+    Mirrors the roles that `parse_chat_messages` passes through to the chat
+    template. Only non-empty dict entries count -- malformed declarations
+    such as ``[{}]`` are not a tool source.
+    """
+    if not isinstance(messages, list):
+        return []
+    declarations = []
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") not in ("system", "developer"):
+            continue
+        tools = msg.get("tools")
+        if isinstance(tools, list):
+            declarations.extend(t for t in tools if isinstance(t, dict) and t)
+    return declarations
+
+
 def _has_message_level_tools(messages: Any) -> bool:
     """Whether any message carries a message-level tool declaration.
 
     Mirrors the roles that `parse_chat_messages` passes through to the chat
     template ("system", "developer").
     """
-    if not isinstance(messages, list):
-        return False
-    return any(
-        isinstance(msg, dict)
-        and msg.get("role") in ("system", "developer")
-        and bool(msg.get("tools"))
-        for msg in messages
-    )
+    return bool(_message_level_tool_declarations(messages))
 
 
 class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
@@ -944,7 +956,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 ' "function": {"name": "my_function"}}`'
             )
             if isinstance(data["tool_choice"], dict):
-                valid_tool = False
                 function = data["tool_choice"].get("function")
                 if not isinstance(function, dict):
                     raise VLLMValidationError(
@@ -965,17 +976,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         f" in `tool_choice`! {correct_usage_message}",
                         parameter="tool_choice.function.name",
                     )
-                # Only cross-check the name against request-level `tools`
-                # when they are present; the named tool may be declared at
-                # the message level, which is not visible here.
-                for tool in data.get("tools") or []:
-                    if tool["function"]["name"] == function_name:
-                        valid_tool = True
-                        break
-                if data.get("tools") and not valid_tool:
+                # Cross-check the name against declarations at either level:
+                # request-level `tools` or message-level declarations (the
+                # named tool may be declared on a system/developer message).
+                eligible_names = [
+                    tool["function"]["name"] for tool in data.get("tools") or []
+                ]
+                eligible_names += [
+                    fn_name
+                    for tool in _message_level_tool_declarations(data.get("messages"))
+                    if isinstance(tool.get("function"), dict)
+                    and (fn_name := tool["function"].get("name"))
+                ]
+                if function_name not in eligible_names:
                     raise VLLMValidationError(
                         "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`",
+                        " of the declared `tools`",
                         parameter="tool_choice",
                     )
         return data

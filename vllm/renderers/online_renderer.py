@@ -14,6 +14,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    _has_message_level_tools,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
@@ -140,10 +141,20 @@ class OnlineRenderer:
             and not self.use_harmony
         )
 
-        # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
+        # Validate tool_choice when tool parsing is required but unavailable.
+        # "auto" with no tools anywhere is a harmless no-op and does not
+        # require a parser; required/named without any tool source is
+        # already rejected at request validation.
+        has_any_tools = bool(request.tools) or _has_message_level_tools(
+            request.messages
+        )
+        if (
+            tool_parsing_unavailable
+            and request.tool_choice not in (
+                None,
+                "none",
+            )
+            and has_any_tools
         ):
             if request.tool_choice == "auto" and not self.enable_auto_tools:
                 # for hf tokenizers, "auto" tools requires
