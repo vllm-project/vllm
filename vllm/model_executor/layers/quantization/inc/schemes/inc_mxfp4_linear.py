@@ -28,7 +28,12 @@ class INCMxfp4LinearMethod(INCLinearScheme):
     """
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
-        self.group_size = layer_config.group_size or 32
+        if not isinstance(layer_config.group_size, int):
+            raise ValueError(
+                "INC MXFP4 requires scalar group_size, "
+                f"but found group_size={layer_config.group_size!r}."
+            )
+        self.group_size = layer_config.group_size
         self.kernel = init_mxfp4_linear_kernel()
 
     @classmethod

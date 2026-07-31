@@ -130,6 +130,7 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INC4AI/Llama-3.1-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "enforce_eager": True,
+        "max_model_len": 512,
     },
 }
 
