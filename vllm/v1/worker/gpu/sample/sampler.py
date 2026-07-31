@@ -102,6 +102,7 @@ class Sampler:
             expanded_local_pos,
             return_logprobs=return_logprobs,
         )
+
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
