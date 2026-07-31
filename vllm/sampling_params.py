@@ -850,7 +850,7 @@ class SamplingParams(
         if self.trace_decode_token_ids is None:
             return
 
-        if not self.trace_decode_token_ids:
+        if len(self.trace_decode_token_ids) == 0:
             raise ValueError("trace_decode_token_ids must be a non-empty list.")
         if self.n != 1:
             raise ValueError("trace_decode_token_ids requires n=1.")
