@@ -60,7 +60,6 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers import ChatParams
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -177,15 +176,6 @@ class OpenAIServingChat(GenerateBaseServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
-
-    def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
-            )
-        )
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest

@@ -36,7 +36,7 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
@@ -104,6 +104,15 @@ class OnlineRenderer:
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
         self.supports_code_interpreter = False
+
+    def warmup(self) -> None:
+        self.renderer.warmup(
+            ChatParams(
+                chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                chat_template_kwargs=self.default_chat_template_kwargs,
+            )
+        )
 
     async def render_chat(
         self,
