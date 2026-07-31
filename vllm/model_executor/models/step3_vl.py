@@ -894,7 +894,7 @@ class Step3VLForConditionalGeneration(
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``output`` contains global-image features and ``local_output``
+        ``outputs['global']`` contains global-image features and ``outputs['local']``
         contains local-patch features (or ``None`` when there are no patches).
         """
         output = outputs["global"]
@@ -910,8 +910,7 @@ class Step3VLForConditionalGeneration(
         patch_tokens = total_patches * self.patch_output_tokens
 
         global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
-        if total_patches > 0:
-            assert local_output is not None
+        if total_patches > 0 and local_output is not None:
             patch_part = local_output[:patch_tokens].reshape(
                 -1, self.patch_output_tokens, hidden
             )

@@ -936,17 +936,17 @@ class DeepseekOCRForCausalLM(
         """
         Assemble per-image embeddings from global and local encoder outputs.
 
-        ``output`` contains global-image features with newlines already
+        ``output['global']`` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):
         ``[B * 272, n_embed]``.
 
-        ``local_output`` contains local-patch features without
+        ``output['local']`` contains local-patch features without
         newlines (from CUDA graph replay or eager fallback):
         ``[P * 100, n_embed]``. May be ``None`` if no patches in batch.
 
         This method:
-        1. Splits ``output`` into per-image global portions.
-        2. Splits ``local_output`` into per-image patch groups.
+        1. Splits ``output['global']`` into per-image global portions.
+        2. Splits ``output['local']`` into per-image patch groups.
         3. For each image: assembles patch grid with newlines via
            ``_assemble_patch_grid``, then concatenates
            ``[local_tiled, global, view_seperator]``.
@@ -970,8 +970,7 @@ class DeepseekOCRForCausalLM(
 
         # Split local output into per-patch groups.
         local_flat = None
-        if total_patches > 0:
-            assert local_output is not None
+        if total_patches > 0 and local_output is not None:
             local_flat = local_output[: total_patches * self.single_patch_output_token]
             local_flat = local_flat.reshape(
                 total_patches, self.single_patch_output_token, n_embed
