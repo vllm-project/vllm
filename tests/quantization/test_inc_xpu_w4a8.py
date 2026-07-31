@@ -412,14 +412,12 @@ def test_falls_back_to_w4a16_for_small_batches(monkeypatch, w4a8_layer) -> None:
     method.process_weights_after_loading(layer)
 
     calls = []
-    monkeypatch.setattr(
-        INCXPULinearMethod,
-        "apply_weights",
-        lambda self, layer, x, bias=None: (
-            calls.append(tuple(x.shape))
-            or torch.zeros(x.shape[:-1] + (OUT_FEATURES,), dtype=x.dtype)
-        ),
-    )
+
+    def record_fallback(self, layer, x, bias=None):
+        calls.append(tuple(x.shape))
+        return torch.zeros(x.shape[:-1] + (OUT_FEATURES,), dtype=x.dtype)
+
+    monkeypatch.setattr(INCXPULinearMethod, "apply_weights", record_fallback)
     monkeypatch.setattr(
         torch.ops._xpu_C,
         "int4_gemm_w4a8",
@@ -447,7 +445,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
             "large batches must not take the w4a16 fallback"
         ),
     )
-    captured = {}
+    captured: dict[str, tuple] = {}
     _stub_quant(monkeypatch, captured)
     _stub_gemm(monkeypatch, captured)
 
@@ -495,7 +493,7 @@ def test_scales_are_fp16_for_any_activation_dtype(
     layer.scales.data = layer.scales.data.to(act_dtype)
     method.process_weights_after_loading(layer)
 
-    captured = {}
+    captured: dict[str, tuple] = {}
     _stub_quant(monkeypatch, captured)
     _stub_gemm(monkeypatch, captured)
 
@@ -512,7 +510,7 @@ def test_forwards_bias_to_kernel(monkeypatch, w4a8_layer) -> None:
     method, layer = w4a8_layer
     method.process_weights_after_loading(layer)
 
-    captured = {}
+    captured: dict[str, tuple] = {}
     _stub_quant(monkeypatch)
     _stub_gemm(monkeypatch, captured)
 
@@ -574,8 +572,8 @@ def test_e2e_generates_with_real_weights(vllm_runner, monkeypatch, model) -> Non
 
     The stubbed tests above cannot catch a wrong-but-plausible calling
     convention, because the fake kernel accepts anything. Greedy decoding of a
-    factual prompt does: mis-set scales or a bad weight layout turn the answer
-    into noise rather than raising.
+    factual prompt does: wrongly set scales or a bad weight layout turn the
+    answer into noise rather than raising.
     """
     monkeypatch.setenv(_BACKEND_ENV, "w4a8")
 
