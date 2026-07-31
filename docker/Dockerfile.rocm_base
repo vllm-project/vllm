@@ -1,10 +1,15 @@
 ARG BASE_IMAGE=ubuntu:22.04
-ARG TRITON_BRANCH="release/3.6.x"
-ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.16.post5"
+ARG AITER_BRANCH="v0.1.16.post6"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+
+# TheRock configuration
+ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ARG ROCM_SDK_VERSION=7.14.0
+ARG TORCH_VERSION=2.11.0+rocm7.14.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -20,8 +25,6 @@ ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1
 ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
 ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
-# Prebuild AITER kernels at wheel-build time (CDNA only). 1=on, 0=off.
-ARG AITER_PREBUILD_AITER_KERNELS=0
 ARG MAX_JOBS=128
 ENV MAX_JOBS=${MAX_JOBS}
 
@@ -54,94 +57,23 @@ RUN apt-get update -y \
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
-# Install sccache if USE_SCCACHE is enabled (for release builds)
-ARG USE_SCCACHE
-ARG SCCACHE_DOWNLOAD_URL
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME
-ARG SCCACHE_REGION_NAME
-ARG SCCACHE_S3_NO_CREDENTIALS
-RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && SCCACHE_ARCH="x86_64" \
-        && SCCACHE_VERSION="v0.8.1" \
-        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && chmod +x /usr/bin/sccache \
-        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-        && sccache --version; \
-    fi
-
-
-###
-### TheROCK install
-###
-ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+# Install ROCm SDK via TheRock
+ARG PIP_EXTRA_INDEX_URL
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-ARG ROCM_SDK_VERSION=7.14.0
-ARG TORCH_VERSION=2.11.0+rocm7.14.0
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
-ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0
-# DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
-# "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
-ARG DEVICE_EXTRAS
-# Source build fallback repos (used when wheels are not available).
-ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
-ARG PYTORCH_BRANCH="release/2.11"
-ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG PYTORCH_VISION_BRANCH="v0.24.1"
-ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
-ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
-
-# Install ROCm SDK
+ARG ROCM_SDK_VERSION
 RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch: try wheels first, build from source if not available.
-RUN set -e; \
-    TORCH_INSTALLED=0; \
-    if [ -n "${ROCM_SDK_VERSION}" ]; then \
-        echo "Trying PyTorch wheels from TheRock index..." \
-        && if pip install --index-url ${PIP_EXTRA_INDEX_URL} \
-                "torch==${TORCH_VERSION}" \
-                "torchaudio==${TORCHAUDIO_VERSION}" \
-                "torchvision==${TORCHVISION_VERSION}"; then \
-            echo "PyTorch wheels installed successfully"; \
-            python3 -c "import torch; print(f'  torch={torch.__version__}, hip={torch.version.hip}')"; \
-            TORCH_INSTALLED=1; \
-        else \
-            echo "PyTorch wheels not found, will build from source"; \
-        fi; \
-    fi; \
-    if [ "${TORCH_INSTALLED}" = "0" ]; then \
-        echo "Building PyTorch from source (${PYTORCH_REPO} @ ${PYTORCH_BRANCH})" \
-        && apt-get update && apt-get install -y pkg-config liblzma-dev \
-        && git clone ${PYTORCH_REPO} /tmp/pytorch \
-        && cd /tmp/pytorch && git checkout ${PYTORCH_BRANCH} \
-        && pip install -r requirements.txt && git submodule update --init --recursive \
-        && python3 tools/amd_build/build_amd.py \
-        && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') \
-           python3 setup.py bdist_wheel --dist-dir=dist \
-        && pip install dist/*.whl \
-        && rm -rf /tmp/pytorch \
-        && echo "Building torchvision from source (${PYTORCH_VISION_REPO} @ ${PYTORCH_VISION_BRANCH})" \
-        && git clone ${PYTORCH_VISION_REPO} /tmp/vision \
-        && cd /tmp/vision && git checkout ${PYTORCH_VISION_BRANCH} \
-        && python3 setup.py bdist_wheel --dist-dir=dist \
-        && pip install dist/*.whl \
-        && rm -rf /tmp/vision \
-        && echo "Building torchaudio from source (${PYTORCH_AUDIO_REPO} @ ${PYTORCH_AUDIO_BRANCH})" \
-        && git clone ${PYTORCH_AUDIO_REPO} /tmp/audio \
-        && cd /tmp/audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
-        && git submodule update --init --recursive \
-        && pip install -r requirements.txt \
-        && python3 setup.py bdist_wheel --dist-dir=dist \
-        && pip install dist/*.whl \
-        && rm -rf /tmp/audio; \
-    fi
+# Install PyTorch wheels
+ARG TORCH_VERSION
+ARG TORCHAUDIO_VERSION
+ARG TORCHVISION_VERSION
+RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+    "torch==${TORCH_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}"
+RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.version.hip}')"
 
 # Install device-specific packages for each arch in PYTORCH_ROCM_ARCH
 SHELL ["/bin/bash", "-c"]
@@ -169,43 +101,39 @@ ENV PATH="$SITE_PACKAGES/_rocm_sdk_devel/bin:$SITE_PACKAGES/_rocm_sdk_devel/lib/
 RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
-# Setup sccache for HIP compilation via HIP_CLANG_PATH
-# This creates wrapper scripts in a separate directory and points HIP to use them
-# This avoids modifying the original ROCm binaries which can break detection
-# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
-# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
+# Install sccache if USE_SCCACHE is enabled (for release builds)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_REGION_NAME
+ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Setting up sccache wrappers for HIP compilation..." \
-        && mkdir -p /opt/sccache-wrappers \
+        echo "Installing sccache..." \
+        && SCCACHE_ARCH="x86_64" \
+        && SCCACHE_VERSION="v0.8.1" \
+        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && chmod +x /usr/bin/sccache \
+        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+        && sccache --version; \
+    fi
+
+# Setup sccache wrappers for HIP compilation
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        mkdir -p /opt/sccache-wrappers \
         && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang++ "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang++ \
         && chmod +x /opt/sccache-wrappers/clang++ \
         && printf '#!/bin/bash\nexec sccache %s/lib/llvm/bin/clang "$@"\n' "${ROCM_PATH}" > /opt/sccache-wrappers/clang \
-        && chmod +x /opt/sccache-wrappers/clang \
-        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
+        && chmod +x /opt/sccache-wrappers/clang; \
     fi
 
-# NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
-# because clang++ path depends on rocm-sdk init
-
-# Set sccache environment variables only when USE_SCCACHE=1
-# This prevents S3 config from leaking into images when sccache is not used
-ARG USE_SCCACHE
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
-
-
-###
-### Triton Build
-###
-FROM base AS build_triton
-ARG TRITON_BRANCH
-ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-RUN cd triton && git checkout ${TRITON_BRANCH} && mkdir -p /app/install
-RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
-    && python3 -m build --wheel && cp dist/*.whl /app/install; fi
 
 
 ###
@@ -235,7 +163,6 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
-ARG PREBUILD_KERNELS
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
     && git submodule update --init --recursive \
@@ -245,7 +172,7 @@ RUN pip install pyyaml && cd aiter \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
-    && PREBUILD_KERNELS=${AITER_PREBUILD_AITER_KERNELS} AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
@@ -255,41 +182,32 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 ### Final Build
 ###
 
-# Wheel release stage - 
+# Wheel release stage -
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs 2>/dev/null || echo "No aiter wheels (RDNA build)"
+    cp /install/*.whl /app/debs
 
 FROM base AS debs
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs 2>/dev/null || echo "No aiter wheels (RDNA build)"
+    cp /install/*.whl /app/debs
 
 FROM base AS final
-# --no-deps: torch/triton already in base from TheRock; don't re-resolve from PyPI
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install --no-deps /install/*.whl
+    pip install /install/*.whl
 
 ARG BASE_IMAGE
-ARG TRITON_BRANCH
-ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
-    && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
-    && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
