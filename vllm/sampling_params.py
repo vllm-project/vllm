@@ -884,6 +884,16 @@ class SamplingParams(
             raise ValueError(
                 "trace_decode_token_ids is not supported with structured outputs."
             )
+        if self.repetition_detection is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with repetition_detection."
+            )
+        if self.thinking_token_budget is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with thinking_token_budget."
+            )
+        if self.bad_words:
+            raise ValueError("trace_decode_token_ids is not supported with bad_words.")
 
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
