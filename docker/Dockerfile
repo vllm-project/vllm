@@ -1044,7 +1044,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # floor must be <= the FINAL_BASE_IMAGE's glibc.
 ARG MOONCAKE_WHEEL_AARCH64
 ARG MOONCAKE_WHEEL_X86_64
-RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
             WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
         else \
