@@ -176,3 +176,44 @@ def test_update_block_size_for_backend_warns_only_through_phase_one():
             Platform.update_block_size_for_backend(same_as_preferred_config)
         assert same_as_preferred_config.cache_config.block_size == 64
         assert mock_logger.warning_once.called
+
+
+@pytest.mark.parametrize(
+    "block_size,should_warn",
+    [
+        # A platform that resolves 128 with the flag absent. Passing 16 lands
+        # at 16, so the flag does change the outcome and must not warn -- the
+        # backend's own preference of 16 is not what an omitted flag gives on
+        # such a platform. This is the CPU case from the review.
+        (16, False),
+        (64, False),
+        # Exactly what the platform resolves anyway: identical outcome.
+        (128, True),
+        (256, False),
+    ],
+)
+def test_block_size_warning_uses_the_platform_no_flag_value(block_size, should_warn):
+    class PlatformWithOwnDefault(Platform):
+        @classmethod
+        def block_size_without_user_flag(cls, backend_cls) -> int:
+            return 128
+
+    vllm_config = _make_vllm_config(block_size, use_mla=False)
+    backend_cls = _make_backend_cls([MultipleOf(16)])
+    with (
+        _resolve_fake_hybrid_model_cls(),
+        patch("vllm.platforms.interface.logger") as mock_logger,
+    ):
+        PlatformWithOwnDefault._align_hybrid_block_size(vllm_config, backend_cls)
+
+    assert mock_logger.warning_once.called == should_warn
+
+
+def test_cpu_platform_no_flag_block_size_matches_what_it_configures():
+    """CpuPlatform skips Phase 1, so its no-flag value has to come from
+    `check_and_update_config`, which sets an unspecified block size to 128."""
+    from vllm.platforms.cpu import CpuPlatform
+
+    backend_cls = _make_backend_cls([MultipleOf(16)], preferred_block_size=16)
+
+    assert CpuPlatform.block_size_without_user_flag(backend_cls) == 128

@@ -762,6 +762,25 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
+    def block_size_without_user_flag(cls, backend_cls: type["AttentionBackend"]) -> int:
+        """Block size this platform resolves when `--block-size` is not passed.
+
+        Only used to decide whether an explicit `--block-size` changed
+        anything. Platforms that do not take `update_block_size_for_backend`'s
+        phase 1 must override this, or the comparison is against a value they
+        would never have produced.
+
+        Args:
+            backend_cls: The resolved non-SSM attention backend.
+
+        Returns:
+            The block size that would be resolved with no user flag.
+        """
+        from vllm.config.cache import CacheConfig
+
+        return backend_cls.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE)
+
+    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -773,7 +792,6 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.cache import CacheConfig
         from vllm.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
@@ -890,12 +908,12 @@ class Platform:
                 kernel_block_alignment_floor,
                 cache_config.block_size,
             )
-            # What the backend would have picked with no --block-size at all.
-            # Comparing against the floor alone would warn on a flag that does
-            # change the result, when the preferred size sits above the floor.
+            # What this platform would have resolved with no --block-size at
+            # all. Comparing against the floor alone would warn on a flag that
+            # does change the result, when the no-flag size sits above it.
             no_flag_alignment_size = max(
                 kernel_block_alignment_floor,
-                backend_cls.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE),
+                cls.block_size_without_user_flag(backend_cls),
             )
 
         if (
