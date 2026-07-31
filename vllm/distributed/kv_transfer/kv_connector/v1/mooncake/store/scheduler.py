@@ -114,14 +114,6 @@ class MooncakeStoreScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.debug(
-            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
-            request.request_id,
-            request.num_tokens,
-            num_external_hit_tokens,
-            need_to_allocate,
-        )
-
         if need_to_allocate <= 0:
             return 0, False
 

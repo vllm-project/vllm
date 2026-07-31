@@ -1702,12 +1702,16 @@ class MooncakeConnectorWorker:
                 if isinstance(layer_spec, KpoolTailSpec):
                     # The tail co-owns the indexer tensor: its bound view is a
                     # strided bf16 [num_blocks, 2, kpool, head_dim] slice whose
-                    # stride(0) is the padded idx_page. Only the logical 2048 B
-                    # (K half | score half) carry data, so transfer the logical
-                    # page, not the padded stride, and split K (1024 B) / score
-                    # (1024 B) halves.
-                    block_len = layer_spec.unpadded_page_size_bytes
-                    kv_block_len = block_len // 2
+                    # stride(0) is the padded idx_page. block_len MUST stay the
+                    # physical padded stride (cache.stride(0)*elsize = idx_page)
+                    # because it is the per-slot address stride used to locate
+                    # tail block b at base + b*idx_page. Overriding it to the
+                    # logical unpadded page mis-addresses every tail block b!=0
+                    # (base + b*unpadded lands inside a neighbouring indexer
+                    # slot of the shared tensor) and clobbers the compressed
+                    # indexer cache. Only the K/score half length uses the
+                    # logical unpadded page.
+                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
                 elif isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                     kv_block_len = layer_spec.page_size_bytes
                 elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(

@@ -758,6 +758,25 @@ class Scheduler(SchedulerInterface):
                         ) = self.kv_cache_manager.get_computed_blocks_for_connector(
                             request
                         )
+                        if hit_diverged:
+                            # Per-group prefix hits diverged (a lagging
+                            # mamba/indexer group's blocks were evicted below
+                            # the full-attention hit). Reconcile to the common
+                            # block-aligned boundary every group agrees on so
+                            # the local blocks and num_new_local_computed_tokens
+                            # stay consistent; the connector transfers the
+                            # suffix beyond this boundary for all groups.
+                            # Keeping the deeper full-attention hit would let
+                            # the partial-tail truncate / slot allocation
+                            # reference blocks a lagging group doesn't have
+                            # (assertion failure, or silent under-allocation
+                            # corrupting the lagging group's state).
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            hit_diverged = False
                     else:
                         (
                             new_computed_blocks,
