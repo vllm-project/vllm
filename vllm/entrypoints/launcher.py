@@ -92,6 +92,18 @@ async def serve_http(
         )
     )
 
+    # make sure uvicorn server signal handler has been registered.
+    # Otherwise the app signal handler below will be overwritten in server.serve.
+    # server.started is set to True after server complete server.startup.
+    # We need to constraint the time sequence.
+    logger.info("API server: waiting for HTTP server to start")
+    while not server.started and not server_task.done():
+        await asyncio.sleep(0.1)
+    if server_task.done():
+        # Propagate startup failure (e.g. port bind error) instead of hanging.
+        await server_task
+    logger.info("API server: HTTP server started")
+
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:
