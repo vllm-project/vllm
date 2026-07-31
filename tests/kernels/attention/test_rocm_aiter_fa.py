@@ -306,11 +306,10 @@ def test_aiter_mha_backend_validates_kv_cache_block_size():
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
 
     assert AiterFlashAttentionBackend.get_kv_cache_shape(8, 16, 8, 128) == (
-        2,
+        8,
         8,
         16,
-        8,
-        128,
+        256,
     )
     with pytest.raises(ValueError, match="Block size must be a multiple of 16"):
         AiterFlashAttentionBackend.get_kv_cache_shape(8, 15, 8, 128)
