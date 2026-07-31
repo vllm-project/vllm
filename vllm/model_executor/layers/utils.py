@@ -278,10 +278,13 @@ def rocm_unquantized_gemm_impl(
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
-    # Deterministic reduction stores one float workspace value per K shard.
-    fits_wvsplitkrc = (
-        N_p2 * m * ((k + 512 - 1) // 512)
-    ) <= 128 * 1024 * 12  # deterministic
+    # The kernel halves the K-shard to 256 when the CUs allow, doubling the
+    # shard count. N_p2 == 16 never shrinks.
+    chunkk = 1 if (N_p2 == 16 or CuNeeded * 2 > cu_count) else 2
+    k_rnd = (k + 512 // chunkk - 1) // (512 // chunkk)
+    # Deterministic reduction stores one fp32 partial per (M, N, k-shard); all
+    # of them must fit the split-K workspace.
+    fits_wvsplitkrc = (N_p2 * m * k_rnd) <= 128 * 1024 * 12  # deterministic
     fits_wvsplitkrc &= CuNeeded <= cu_count
 
     skinny_operands_compatible = weight.is_contiguous() and (

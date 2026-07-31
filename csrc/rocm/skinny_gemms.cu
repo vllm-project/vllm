@@ -1364,9 +1364,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   };
   using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
 
-  __shared__ scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+  // The main-loop staging areas are separated from the split-K readback by a
+  // __syncthreads(), so the readback may reuse all of LDS.
+  __shared__ union {
+    struct {
+      scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+      scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
+    } mainloop;
+    scalar_t all[max_lds_len];
+  } lds;
+  auto& stg = lds.mainloop.stg;
+  auto& s = lds.mainloop.s;
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
-  __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
   #ifndef WVSPLITKRC_1KPASS
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
@@ -1682,33 +1691,69 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
       if constexpr (DTRMNSTC) {
+        constexpr uint32_t NT = N / NTILE / GrpsShrB;
+        // The readback stages k-shard partials through LDS, which bounds how
+        // many shards may be in flight at once.
+        constexpr uint32_t LDS_F4 =
+            max_lds_len * sizeof(scalar_t) / sizeof(float4);
+        constexpr uint32_t KSBMAX = LDS_F4 / (THRDS * 4 * NT);
+        static_assert(KSBMAX >= 1, "LDS cannot stage even one k-shard");
+        const uint32_t KSB = (k_rnd < KSBMAX) ? k_rnd : KSBMAX;
+
+        // First batch is peeled; it is the only batch for most shapes.
   #pragma unroll
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
             int g_nindx =
                 (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
             int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
             __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                               nt * THRDS * 4 * k_rnd]),
+                (float4*)(&glbl[g_adr + M * N * kb]),
+                &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                     nt * THRDS * 4 * KSB]),
                 16, 0, 0);
           }
         }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        if (BIAS)  // overlaps the DMAs above
+          for (uint32_t nt = 0; nt < NT; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                           (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
               biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
             }
           }
-        asm volatile("s_waitcnt 0");
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
-                                       ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
-            vals[nt].f4 += eval;
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+        for (uint32_t kb = 0; kb < KSB; kb++) {
+          for (uint32_t nt = 0; nt < NT; nt++) {
+            vals[nt].f4 +=
+                ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                   kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+          }
+        }
+
+        for (uint32_t ks0 = KSB; ks0 < k_rnd; ks0 += KSB) {
+          const uint32_t ksn = (k_rnd - ks0 < KSB) ? (k_rnd - ks0) : KSB;
+          // prior reads must retire before the staging is overwritten
+          asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              int g_nindx =
+                  (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+              int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+              __builtin_amdgcn_global_load_lds(
+                  (float4*)(&glbl[g_adr + M * N * (ks0 + kb)]),
+                  &(((float4*)lds.all)[(threadIdx.y * THRDS) + kb * THRDS * 4 +
+                                       nt * THRDS * 4 * KSB]),
+                  16, 0, 0);
+            }
+          }
+          asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+          for (uint32_t kb = 0; kb < ksn; kb++) {
+            for (uint32_t nt = 0; nt < NT; nt++) {
+              vals[nt].f4 +=
+                  ((float4*)lds.all)[(threadIdx.x + threadIdx.y * THRDS) +
+                                     kb * THRDS * 4 + nt * THRDS * 4 * KSB];
+            }
           }
         }
       } else {
@@ -1821,6 +1866,18 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   // Can we increase SplitK by shrinking the K-shared to 256?
   int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+  // N_p2 == 16 always dispatches with CHUNKK=1 below.
+  if (N_p2 == 16) chunkk = 1;
+
+  // One fp32 partial per (M, N, k-shard) must fit the split-K workspace.
+  const int64_t k_rnd = (K_in + 512 / chunkk - 1) / (512 / chunkk);
+  const int64_t glbl_cap = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
+  const int64_t glbl_needed =
+      _DTRMNSTC ? (int64_t)N_p2 * M_in * k_rnd : (int64_t)N_p2 * M_in;
+  TORCH_CHECK(glbl_needed <= glbl_cap,
+              "wvSplitKrc: split-K workspace too small", " (need ", glbl_needed,
+              " > ", glbl_cap, " floats) for N=", N_in, " K=", K_in,
+              " M=", M_in);
 
   static torch::Tensor axl_glbl =
       torch::zeros(

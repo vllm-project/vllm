@@ -116,6 +116,15 @@ K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
 # M tiles are 64 rows, +16 for a partial tile
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
 
+# (N, K, M) with more K-shards than the readback can stage in one LDS pass.
+# Spans both CHUNKK values and both N-tile counts.
+NKM_FACTORS_WVSPLITKRC_LARGE_K = [
+    (128, 6144, 128),
+    (96, 8192, 128),
+    (128, 12288, 128),
+    (32, 12288, 128),
+]
+
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
     (1, 16, 16),
@@ -220,6 +229,25 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed
         torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-8)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC_LARGE_K)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
+    """K large enough that the split-K readback must stage LDS in batches."""
+    torch.manual_seed(seed)
+
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    ref_out = torch.nn.functional.linear(A, B, None)
+    out = ops.wvSplitKrc(A, B, num_compute_units(), None)
+
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
