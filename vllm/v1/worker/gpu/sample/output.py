@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 from typing import NamedTuple
 
+import numpy as np
 import torch
 
-from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
 
 class SamplingMaskTensors(NamedTuple):
@@ -22,6 +23,20 @@ class SamplingMaskTensors(NamedTuple):
         return SamplingMaskTensors(
             self.token_ids.to("cpu", non_blocking=True),
             self.counts.to("cpu", non_blocking=True),
+        )
+
+    def tolists(self, num_sampled_tokens: np.ndarray) -> SamplingMaskLists:
+        """Convert compact mask tensors to the scheduler's CSR representation."""
+        counts = self.counts.cpu().numpy()
+        offsets = np.empty(len(counts) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        return SamplingMaskLists(
+            token_ids=self.token_ids.cpu().numpy(),
+            offsets=offsets,
+            cu_num_generated_tokens=np.cumsum(
+                np.concatenate(([0], num_sampled_tokens))
+            ).tolist(),
         )
 
 

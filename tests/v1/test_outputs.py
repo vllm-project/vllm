@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest import TestCase
 
+import numpy as np
 import torch
 
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 
 def test_logprobs_tensors_cat():
@@ -28,6 +30,19 @@ def test_logprobs_tensors_cat():
     assert result.selected_token_ranks.tolist() == [1, 2]
     assert result.cu_num_generated_tokens == [0, 1, 2]
     assert LogprobsTensors.cat([first]) is first
+
+
+def test_sampling_mask_tensors_tolist():
+    tensors = SamplingMaskTensors(
+        token_ids=torch.tensor([3, 5, 7]),
+        counts=torch.tensor([2, 1]),
+    )
+
+    result = tensors.tolists(np.array([1, 0, 1]))
+
+    assert result.token_ids.tolist() == [3, 5, 7]
+    assert result.offsets.tolist() == [0, 2, 3]
+    assert result.cu_num_generated_tokens == [0, 1, 1]
 
 
 class TestLogprobsLists(TestCase):

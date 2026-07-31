@@ -11,7 +11,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    SamplingMaskLists,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 
@@ -77,10 +76,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.sampling_mask_tensors is not None:
-            self.model_runner_output.sampling_masks = _build_sampling_mask_lists(
-                self.sampling_mask_tensors.token_ids.numpy(),
-                self.sampling_mask_tensors.counts.numpy(),
-                self.num_sampled_tokens_np,
+            self.model_runner_output.sampling_masks = (
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -149,24 +146,6 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True).numpy()
-
-
-def _build_sampling_mask_lists(
-    token_ids: np.ndarray,
-    counts: np.ndarray,
-    num_sampled_tokens: np.ndarray,
-) -> SamplingMaskLists:
-    counts = counts[num_sampled_tokens.astype(bool)]
-    offsets = np.empty(len(counts) + 1, dtype=np.int64)
-    offsets[0] = 0
-    np.cumsum(counts, dtype=np.int64, out=offsets[1:])
-    return SamplingMaskLists(
-        token_ids=token_ids,
-        offsets=offsets,
-        cu_num_generated_tokens=np.cumsum(
-            np.concatenate(([0], num_sampled_tokens))
-        ).tolist(),
-    )
 
 
 @contextlib.contextmanager
