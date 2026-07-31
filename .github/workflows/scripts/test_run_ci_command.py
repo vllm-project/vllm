@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 import unittest
+import urllib.error
 from typing import Any
+from unittest.mock import patch
 
 from run_ci_command import (
     CI_AUTHORIZED_COMMENT_MARKER,
@@ -11,6 +14,7 @@ from run_ci_command import (
     COMMAND_RUN_CI,
     RETRY_STATES,
     BuildkiteClient,
+    HttpTransport,
     authorize,
     create_build_payload,
     has_trusted_approval,
@@ -160,7 +164,109 @@ class FakeTransport:
         return self.response
 
 
+class FakeHttpResponse:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.response).encode()
+
+
 class RunCiCommandTest(unittest.TestCase):
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_retries_buildkite_rate_limit(self, urlopen: Any) -> None:
+        body = {
+            "message": "Please wait 9 seconds before making more requests.",
+            "reset": 9,
+            "scope": "rest",
+        }
+        rate_limit_error = urllib.error.HTTPError(
+            "https://api.buildkite.com/v2/builds",
+            429,
+            "Too Many Requests",
+            {
+                "RateLimit-Limit": "400",
+                "RateLimit-Remaining": "0",
+                "RateLimit-Reset": "9",
+            },
+            io.BytesIO(json.dumps(body).encode()),
+        )
+        urlopen.side_effect = [rate_limit_error, FakeHttpResponse({"ok": True})]
+        delays: list[float] = []
+
+        response = HttpTransport(
+            jitter=lambda: 2.5,
+            sleep=delays.append,
+        ).request("https://api.buildkite.com/v2/builds")
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(delays, [11.5])
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_retries_rate_limit_three_times(self, urlopen: Any) -> None:
+        def rate_limit_error() -> urllib.error.HTTPError:
+            body = {
+                "message": "Please wait 9 seconds before making more requests.",
+                "reset": 9,
+                "scope": "rest",
+            }
+            return urllib.error.HTTPError(
+                "https://api.buildkite.com/v2/builds",
+                429,
+                "Too Many Requests",
+                {
+                    "RateLimit-Limit": "400",
+                    "RateLimit-Remaining": "0",
+                    "RateLimit-Reset": "9",
+                },
+                io.BytesIO(json.dumps(body).encode()),
+            )
+
+        urlopen.side_effect = [rate_limit_error() for _ in range(4)]
+        delays: list[float] = []
+
+        with self.assertRaisesRegex(RuntimeError, "API returned 429"):
+            HttpTransport(
+                jitter=lambda: 2,
+                sleep=delays.append,
+            ).request("https://api.buildkite.com/v2/builds")
+
+        self.assertEqual(delays, [11, 11, 11])
+        self.assertEqual(urlopen.call_count, 4)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_does_not_retry_permission_error(self, urlopen: Any) -> None:
+        permission_error = urllib.error.HTTPError(
+            "https://api.github.com/repos/vllm-project/vllm/issues/1/comments",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"message":"Resource not accessible by integration"}'),
+        )
+        urlopen.side_effect = permission_error
+        delays: list[float] = []
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Resource not accessible by integration",
+        ):
+            HttpTransport(
+                jitter=lambda: 2,
+                sleep=delays.append,
+            ).request(
+                "https://api.github.com/repos/vllm-project/vllm/issues/1/comments"
+            )
+
+        self.assertEqual(delays, [])
+        self.assertEqual(urlopen.call_count, 1)
+
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         self.assertEqual(parse_command(COMMAND_RUN_CI), COMMAND_RUN_CI)
         self.assertEqual(
