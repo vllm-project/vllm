@@ -143,6 +143,24 @@ steps:
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
+- label: Kernels FlashMLA Test (H100)
+  key: kernels-flashmla-test-h100
+  timeout_in_minutes: 25
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - cmake/external_projects/flashmla.cmake
+  - vllm/v1/attention/ops/flashmla.py
+  - vllm/v1/attention/backends/mla/flashmla.py
+  - vllm/v1/attention/backends/mla/flashmla_sparse.py
+  - tests/kernels/attention/test_flashmla.py
+  - tests/kernels/attention/test_flashmla_sparse.py
+  - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+  commands:
+    - pytest -v -s kernels/attention/test_flashmla.py
+    - pytest -v -s kernels/attention/test_flashmla_sparse.py
+    - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+
 - label: Kernels Quantization Test %N
   key: kernels-quantization-test
   timeout_in_minutes: 60
