@@ -556,10 +556,52 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
+
+                # A mixed non-spec batch is decode-first: the decodes are
+                # length-1 sequences, and the chunk kernel returns NaN for those.
+                # Send them to the recurrent kernel and give the chunk kernel the
+                # prefill tail only. GDNAttentionMetadata already rebases
+                # cu_seqlens, state indices and the initial-state mask for this
+                # split, matching how qwen_gdn_linear_attn splits its batch.
+                core_attn_out_decode = None
+                split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
+                if split_non_spec:
+                    nd_tok = m.num_decode_tokens
+                    core_attn_out_decode, _ = fused_recurrent_kda(
+                        q=q_ns[:, :nd_tok],
+                        k=k_ns[:, :nd_tok],
+                        v=v_ns[:, :nd_tok],
+                        raw_g=g1_ns[:, :nd_tok],
+                        raw_beta=beta_ns[:, :nd_tok],
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
+                        ssm_state_indices=non_spec_state_indices_tensor[
+                            : m.num_decodes
+                        ],
+                    )
+                    q_ns = q_ns[:, nd_tok:]
+                    k_ns = k_ns[:, nd_tok:]
+                    v_ns = v_ns[:, nd_tok:]
+                    g1_ns = g1_ns[:, nd_tok:]
+                    beta_ns = beta_ns[:, nd_tok:]
+                    prefill_query_start_loc = m.prefill_query_start_loc
+                    prefill_state_indices = m.prefill_state_indices
+                    prefill_has_initial_state = m.prefill_has_initial_state
+                    assert prefill_query_start_loc is not None
+                    assert prefill_state_indices is not None
+                    assert prefill_has_initial_state is not None
+                else:
+                    prefill_query_start_loc = non_spec_query_start_loc
+                    prefill_state_indices = non_spec_state_indices_tensor
+                    prefill_has_initial_state = has_initial_state
+
                 initial_state = gather_initial_states(
                     recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
+                    prefill_state_indices,
+                    prefill_has_initial_state,
                 )
                 (
                     core_attn_out_non_spec,
@@ -576,10 +618,16 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
+                    cu_seqlens=prefill_query_start_loc,
                 )
                 # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                recurrent_state[prefill_state_indices] = last_recurrent_state
+
+                if split_non_spec:
+                    # Restore decode-first token order for the merge below.
+                    core_attn_out_non_spec = torch.cat(
+                        [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                    )
 
             else:
                 # pure-decode non-spec batch
