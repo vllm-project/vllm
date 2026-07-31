@@ -323,3 +323,77 @@ def test_fp8_paged_mqa_logits_triton_matches_torch(
             atol=_ATOL,
             rtol=_RTOL,
         )
+
+
+def test_fp8_paged_mqa_logits_triton_strided_pool_no_int32_overflow():
+    """Unified-KV-pool layer views have a large block stride; with enough
+    blocks, int32 `block_idx * stride` exceeds 2**31 and wraps to a negative
+    offset (IMA, or silent corruption when the wrapped address is mapped).
+    Uses a padded pool whose stride puts the referenced blocks past the
+    overflow threshold and checks parity against the torch reference."""
+    torch.manual_seed(0)
+    head_dim = 128
+    block_size = 64
+    batch_size, next_n, num_heads = 2, 1, 16
+    context_len = 256
+    device = "cuda"
+
+    # Row payload is block_size * (head_dim + 4) = 8448 B; pad the pool block
+    # stride to 2 MiB so int32 wraps at block_idx >= 2**31 / 2**21 = 1024.
+    pool_stride = 2**21
+    total_blocks = 1040
+
+    row_elems = block_size * (head_dim + 4)
+    kv_bf16 = torch.randn(
+        total_blocks, block_size, head_dim, dtype=torch.bfloat16, device=device
+    )
+    kv_contig = _pack_paged_kv(kv_bf16)
+
+    backing = torch.zeros(total_blocks * pool_stride, dtype=torch.uint8, device=device)
+    kv_strided = backing.as_strided(
+        (total_blocks, block_size, 1, head_dim + 4),
+        (pool_stride, head_dim + 4, head_dim + 4, 1),
+    )
+    kv_strided.copy_(kv_contig.view(total_blocks, block_size, 1, head_dim + 4))
+    assert kv_strided.view(total_blocks, -1).stride(0) == pool_stride
+    assert kv_strided.view(total_blocks, -1).shape[1] == row_elems
+
+    q_fp8 = torch.randn(
+        batch_size, next_n, num_heads, head_dim, dtype=torch.bfloat16, device=device
+    ).to(torch.float8_e4m3fn)
+    weights = torch.randn(
+        batch_size * next_n, num_heads, dtype=torch.float32, device=device
+    )
+    context_lens = torch.full(
+        (batch_size,), context_len, dtype=torch.int32, device=device
+    )
+    # Every referenced block sits past the int32 overflow threshold.
+    max_blocks = (context_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        1024,
+        total_blocks,
+        (batch_size, max_blocks),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    out_torch = _fp8_paged_mqa_logits_ref(
+        q_fp8, kv_strided, weights, context_lens, block_tables, context_len
+    )
+    out_triton = fp8_paged_mqa_logits_triton(
+        q_fp8,
+        kv_strided,
+        weights,
+        context_lens,
+        block_tables,
+        context_len,
+        clean_logits=True,
+    )
+
+    inf_torch = torch.isinf(out_torch) & (out_torch < 0)
+    inf_triton = torch.isinf(out_triton) & (out_triton < 0)
+    assert torch.equal(inf_torch, inf_triton)
+    finite = ~inf_torch
+    torch.testing.assert_close(
+        out_triton[finite], out_torch[finite], atol=_ATOL, rtol=_RTOL
+    )
