@@ -61,7 +61,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         self.has_distinct_decode_attn_backend = any(
-            len(group.backend.get_backend_variants()) > 1
+            group.backend.has_distinct_decode_backend()
             for groups in self.target_attn_groups
             for group in groups
         )
@@ -210,8 +210,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
-        if self.has_distinct_decode_attn_backend and input_batch.is_prefilling_np.any():
-            uniform_token_count = None
+        has_prefill = bool(
+            self.has_distinct_decode_attn_backend and input_batch.is_prefilling_np.any()
+        )
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -220,6 +221,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            has_prefill=has_prefill,
         )
 
         self._prepare_eplb_forward(input_batch.num_tokens)

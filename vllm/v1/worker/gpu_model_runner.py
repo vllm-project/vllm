@@ -134,6 +134,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
+    AttentionImplBase,
     AttentionMetadata,
     AttentionMetadataBuilder,
     AttentionType,
@@ -6584,12 +6585,9 @@ class GPUModelRunner(
                 )
             # Clean up quantized KV cache scale views
             # (int8_per_token_head, fp8_per_token_head)
-            if hasattr(layer, "impl"):
-                for impl in layer.impl.get_impl_variants():
-                    if hasattr(impl, "_k_scale_cache"):
-                        impl._k_scale_cache = None
-                    if hasattr(impl, "_v_scale_cache"):
-                        impl._v_scale_cache = None
+            impl = getattr(layer, "impl", None)
+            if isinstance(impl, AttentionImplBase):
+                impl.reset_kv_cache_views()
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -7112,7 +7110,7 @@ class GPUModelRunner(
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
         self.has_distinct_decode_attn_backend = any(
-            len(group.backend.get_backend_variants()) > 1
+            group.backend.has_distinct_decode_backend()
             for group in self._attn_group_iterator()
         )
 

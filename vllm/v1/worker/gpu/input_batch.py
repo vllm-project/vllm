@@ -105,6 +105,7 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        is_prefilling: bool = False,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -174,7 +175,7 @@ class InputBatch:
             num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
-            is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            is_prefilling_np=np.full(num_reqs, is_prefilling, dtype=np.bool_),
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,

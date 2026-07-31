@@ -152,8 +152,21 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
-    def get_backend_variants(cls) -> tuple[type["AttentionBackend"], ...]:
-        return (cls,)
+    def has_distinct_decode_backend(cls) -> bool:
+        """Whether pure-decode batches are routed to a different backend."""
+        return False
+
+    @classmethod
+    def supports_decode_backend_routing(cls) -> bool:
+        """Whether this backend may be paired with a distinct decode backend."""
+        return True
+
+    @classmethod
+    def get_cudagraph_support_backend_name(
+        cls, vllm_config: "VllmConfig", kv_cache_spec: "AttentionSpec"
+    ) -> str:
+        """Name of the backend that determines this backend's cudagraph support."""
+        return cls.__name__
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -649,9 +662,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
-    def get_builder_variants(self) -> tuple["AttentionMetadataBuilder", ...]:
-        return (self,)
-
     @classmethod
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
@@ -904,6 +914,9 @@ class AttentionImplBase(ABC, Generic[T]):
     def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
         return (self,)
 
+    def reset_kv_cache_views(self) -> None:
+        """Drop tensors that alias the KV cache so it can be freed."""
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
@@ -1122,7 +1135,12 @@ def subclass_attention_backend(
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
 
     return type(
-        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+        name,
+        (attention_backend_cls,),
+        {
+            "get_builder_cls": lambda: builder_cls,
+            "supports_decode_backend_routing": classmethod(lambda cls: False),
+        },
     )
 
 

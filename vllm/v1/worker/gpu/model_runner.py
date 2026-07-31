@@ -461,7 +461,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config, self.vllm_config, self.device
         )
         self.has_distinct_decode_attn_backend = any(
-            len(group.backend.get_backend_variants()) > 1
+            group.backend.has_distinct_decode_backend()
             for groups in self.attn_groups
             for group in groups
         )
@@ -1213,23 +1213,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
-        if has_prefill is None and self.has_distinct_decode_attn_backend:
-            req_indices = np.fromiter(
-                map(
-                    self.req_states.req_id_to_index.get,
-                    scheduler_output.num_scheduled_tokens,
-                ),
-                dtype=np.int32,
-                count=num_reqs,
-            )
-            has_prefill = bool(
-                np.any(
-                    self.req_states.num_computed_prefill_tokens[req_indices]
-                    < self.req_states.prefill_len.np[req_indices]
+        if has_prefill is None:
+            has_prefill = self.has_distinct_decode_attn_backend and (
+                self.req_states.any_prefilling(
+                    scheduler_output.num_scheduled_tokens, num_reqs
                 )
             )
-        if has_prefill:
-            uniform_tok_count = None
         num_active_loras = 0
         if self.lora_config:
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
@@ -1253,6 +1242,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            has_prefill=has_prefill,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1290,9 +1280,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_reqs or num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
+                is_prefilling=has_prefill,
             )
-            if has_prefill:
-                input_batch.is_prefilling_np.fill(True)
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:

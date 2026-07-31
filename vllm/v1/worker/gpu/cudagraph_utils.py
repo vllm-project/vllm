@@ -55,6 +55,7 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    decode_only: bool = False
 
 
 class CreateForwardFn(Protocol):
@@ -75,7 +76,10 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    has_prefill: bool = False,
 ) -> bool:
+    if has_prefill and desc.decode_only:
+        return False
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
     return (
@@ -243,6 +247,7 @@ class CudaGraphManager:
                         num_reqs=rounded_num_reqs,
                         uniform_token_count=decode_query_len,
                         num_active_loras=num_active_loras,
+                        decode_only=True,
                     )
 
                     # avoid duplicate graphs
@@ -368,6 +373,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        has_prefill: bool = False,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -381,6 +387,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    has_prefill,
                 ):
                     return desc
         return BatchExecutionDescriptor(

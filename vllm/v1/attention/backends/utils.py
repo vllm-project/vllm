@@ -184,6 +184,10 @@ def create_composite_attention_backend(
             for impl in self.get_impl_variants():
                 impl.process_weights_after_loading(act_dtype)
 
+        def reset_kv_cache_views(self):
+            for impl in self.get_impl_variants():
+                impl.reset_kv_cache_views()
+
         def fused_output_quant_supported(self, quant_key):
             return all(
                 impl.fused_output_quant_supported(quant_key)
@@ -291,15 +295,37 @@ def create_composite_attention_backend(
         def use_cascade_attention(self, *args, **kwargs):
             return all(
                 builder.use_cascade_attention(*args, **kwargs)
-                for builder in self.get_builder_variants()
+                for builder in self._builders
             )
 
-        def get_builder_variants(self):
+        @property
+        def _builders(self):
             return self.general_builder, self.decode_builder
+
+        # Forward the optional workspace protocol so that a wrapped builder
+        # which allocates one (FlashInfer) still joins the runner's cross-group
+        # sharing instead of allocating a second buffer behind the composite.
+        def _get_workspace_buffer(self):
+            for builder in self._builders:
+                if hasattr(builder, "_get_workspace_buffer"):
+                    workspace = builder._get_workspace_buffer()
+                    # The runner only calls the getter for the group that
+                    # provides the buffer, so hand it to the sibling here.
+                    self.set_workspace_buffer(workspace)
+                    return workspace
+            return None
+
+        def set_workspace_buffer(self, workspace_buffer):
+            for builder in self._builders:
+                if hasattr(builder, "set_workspace_buffer"):
+                    builder.set_workspace_buffer(workspace_buffer)
 
     class CompositeAttentionBackend(
         general_backend  # type: ignore[misc, valid-type]
     ):
+        general_backend_cls = general_backend
+        decode_backend_cls = decode_backend
+
         @staticmethod
         def get_impl_cls():
             return CompositeAttentionImpl
@@ -322,8 +348,29 @@ def create_composite_attention_backend(
             )
 
         @classmethod
-        def get_backend_variants(cls):
-            return general_backend, decode_backend
+        def has_distinct_decode_backend(cls):
+            return True
+
+        @classmethod
+        def get_required_kv_cache_layout(cls):
+            return (
+                general_backend.get_required_kv_cache_layout()
+                or decode_backend.get_required_kv_cache_layout()
+            )
+
+        @classmethod
+        def get_cudagraph_support_backend_name(cls, vllm_config, kv_cache_spec):
+            support = CompositeAttentionMetadataBuilder.get_cudagraph_support(
+                vllm_config, kv_cache_spec
+            )
+            for backend in (general_backend, decode_backend):
+                variant_support = backend.get_builder_cls().get_cudagraph_support(
+                    vllm_config, kv_cache_spec
+                )
+                if variant_support == support:
+                    return backend.__name__
+            # Neither variant is the limit; composition itself is.
+            return cls.__name__
 
     CompositeAttentionBackend.__name__ = (
         f"Composite[{general_backend.__name__},{decode_backend.__name__}]"

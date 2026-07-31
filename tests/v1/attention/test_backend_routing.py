@@ -3,12 +3,20 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    DeviceConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -17,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionImpl,
     MultipleOf,
+    subclass_attention_backend,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
@@ -33,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, init_attn_backend
 from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
@@ -258,13 +268,37 @@ def test_flexible_general_backend_adopts_decode_required_layout():
                 attn_backend=_FlexibleGeneralBackend,
             )
 
-        assert layer.get_attn_backend().get_backend_variants() == (
-            _FlexibleGeneralBackend,
-            _HNDDecodeBackend,
-        )
+        backend = layer.get_attn_backend()
+        assert backend.general_backend_cls is _FlexibleGeneralBackend
+        assert backend.decode_backend_cls is _HNDDecodeBackend
         assert get_kv_cache_layout() == "HND"
     finally:
         set_kv_cache_layout(None)
+
+
+def test_builder_wrapping_backends_are_not_routed():
+    """Wrappers like chunked local attention and static sink inject their
+    semantics into the builder. A separately selected decode backend uses its
+    own builder, so routing such a layer would silently drop local attention
+    (or the sink blocks) on pure-decode batches."""
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    wrapped = subclass_attention_backend(
+        name_prefix="ChunkedLocalAttention_",
+        attention_backend_cls=_FlexibleGeneralBackend,
+        builder_cls=_GeneralBuilder,
+    )
+    assert not wrapped.supports_decode_backend_routing()
+
+    with (
+        set_current_vllm_config(config),
+        patch(
+            "vllm.model_executor.layers.attention.attention.get_attn_backend",
+            return_value=_HNDDecodeBackend,
+        ),
+    ):
+        layer = Attention(num_heads=8, head_size=128, scale=0.1, attn_backend=wrapped)
+
+    assert layer.get_attn_backend() is wrapped
 
 
 def test_layers_cannot_require_different_kv_layouts():
@@ -557,6 +591,59 @@ def test_routing_limits_cudagraph_support_to_uniform_batches():
     assert cg_support.min_cg_attn_backend.startswith("Composite[")
 
 
+def _make_cudagraph_manager(monkeypatch, max_num_seqs=8):
+    monkeypatch.setattr(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    compilation_config = CompilationConfig(
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=list(range(1, max_num_seqs + 1)),
+    )
+    compilation_config.max_cudagraph_capture_size = max_num_seqs
+    compilation_config.post_init_cudagraph_sizes()
+
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.compilation_config = compilation_config
+    vllm_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs
+    )
+    vllm_config.parallel_config = ParallelConfig()
+    vllm_config.speculative_config = None
+
+    manager = cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=1,
+    )
+    # dispatch() only consults the candidate table once graphs are captured.
+    manager._graphs_captured = True
+    return manager
+
+
+def test_prefill_batch_never_dispatches_a_uniform_decode_graph(monkeypatch):
+    """A token-uniform batch can still contain prefills (e.g. a one-token final
+    prefill chunk). Those must not replay a uniform-decode graph, which was
+    captured with the decode-only backend."""
+    manager = _make_cudagraph_manager(monkeypatch)
+    dispatch_args = dict(num_reqs=4, num_tokens=4, uniform_token_count=1)
+
+    decode_desc = manager.dispatch(**dispatch_args, num_active_loras=0)
+    prefill_desc = manager.dispatch(
+        **dispatch_args, num_active_loras=0, has_prefill=True
+    )
+
+    assert decode_desc.cg_mode == CUDAGraphMode.FULL
+    assert decode_desc.decode_only
+    assert prefill_desc.cg_mode == CUDAGraphMode.PIECEWISE
+    assert not prefill_desc.decode_only
+
+
 class _SingleTokenDecodeBuilder(_DecodeBuilder):
     @classmethod
     def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
@@ -585,12 +672,13 @@ def test_composite_builder_caps_cudagraph_support(decode_backend, expected_suppo
     assert support == expected_support
 
 
-def test_workspace_provider_is_not_reset_with_its_own_buffer():
-    """Only sibling builders receive a newly provided workspace buffer."""
+def test_routed_variants_share_one_workspace_buffer():
+    """Composition must not hide the workspace protocol: the runner shares one
+    buffer across attention groups, and a variant it cannot see would allocate
+    a second (hundreds of MiB for FlashInfer)."""
     attn_groups, _, _ = _init_uniform_decode_backend()
     builder = attn_groups[0][0].get_metadata_builder()
 
-    assert builder.general_builder.workspace_buffer is None
     assert (
         builder.decode_builder.workspace_buffer
         is builder.general_builder.provided_workspace
