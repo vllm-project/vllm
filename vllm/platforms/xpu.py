@@ -117,6 +117,7 @@ class XPUPlatform(Platform):
         "auto_gptq",
         "inc",
         "fp8",
+        "deepseek_v4_fp8",
         "mxfp4",
         "mxfp8",
         "fp8_per_tensor",
