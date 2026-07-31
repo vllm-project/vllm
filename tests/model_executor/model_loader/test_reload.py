@@ -167,6 +167,72 @@ def test_materialize_layer_preserves_non_meta_tensors():
     assert torch.equal(layer.bias.data, bias_values)
 
 
+def _poison_allocator(shape, dtype=torch.float32, count=8):
+    """Allocate and free garbage-filled blocks so a subsequent same-size
+    allocation is likely to reuse one. Makes uninitialized-memory bugs
+    deterministic enough to catch instead of relying on fresh zero pages."""
+    poison = [torch.full(shape, float("nan"), dtype=dtype) for _ in range(count)]
+    del poison
+
+
+def test_materialize_meta_tensor_zero_fills():
+    """Regions a weight loader never writes (kernel alignment padding) must
+    rematerialize as zeros: create_weights() zero-initializes padded weights,
+    and post-load processing packs whatever the pad region holds into the
+    kernel weights."""
+    meta = to_meta_tensor(torch.empty(64, 64))
+    _poison_allocator((64, 64))
+    tensor = materialize_meta_tensor(meta)
+    assert torch.equal(tensor, torch.zeros(64, 64))
+
+
+class _PaddedWeightLayer(torch.nn.Module):
+    """Mimics a quant method whose created weight is padded for kernel
+    alignment (e.g. mxfp4 rounding 2880 up to 2944): the checkpoint backs
+    only the leading columns and the pad region is zero-initialized."""
+
+    REAL_COLS = 48
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(64, 64), requires_grad=False)
+        self.weight.weight_loader = self._load_padded
+
+    @staticmethod
+    def _load_padded(param, loaded_weight):
+        param.data[:, : _PaddedWeightLayer.REAL_COLS].copy_(loaded_weight)
+
+
+def test_layerwise_reload_preserves_padded_weight_zeros():
+    """A padded layer under-loads (load_numel < load_numel_total), so it takes
+    the delayed-processing path at finalization. The pad region must come back
+    as zeros, matching first-load create_weights() state, not as reused
+    allocator memory."""
+    layer = _PaddedWeightLayer()
+    model = torch.nn.Sequential(layer)
+    checkpoint = torch.arange(
+        64 * _PaddedWeightLayer.REAL_COLS, dtype=torch.float32
+    ).reshape(64, _PaddedWeightLayer.REAL_COLS)
+
+    record_metadata_for_reloading(model)
+    layer.weight.weight_loader(layer.weight, checkpoint)
+    kernel_ptr = layer.weight.data_ptr()
+
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, checkpoint + 1)
+    _poison_allocator((64, 64))
+    finalize_layerwise_reload(model, model_config=None)
+
+    # storage preserved for captured graphs, loaded slice refreshed
+    assert layer.weight.data_ptr() == kernel_ptr
+    assert torch.equal(
+        layer.weight.data[:, : _PaddedWeightLayer.REAL_COLS], checkpoint + 1
+    )
+    # the never-loaded pad region must match its create_weights() zero state
+    pad = layer.weight.data[:, _PaddedWeightLayer.REAL_COLS :]
+    assert torch.equal(pad, torch.zeros_like(pad))
+
+
 _MARLIN_SIZE_K, _MARLIN_SIZE_N, _MARLIN_GROUP_SIZE = 128, 64, 64
 
 
