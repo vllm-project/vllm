@@ -8,8 +8,8 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -693,20 +693,27 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
-    def populate_forward_context(self) -> None:
-        """Stash the PCP metadata the attention forward / kv-cache update need.
+    def populate_attn_metadata(self, attn_metadata: dict | None) -> None:
+        """Stamp the PCP per-step state onto each GQA attention metadata object.
 
-        Centralized here so the model runner stays a single call. Populates:
+        Centralized here so the model runner stays a single call. Sets, on every
+        FlashAttentionMetadata in ``attn_metadata``:
           - ``pcp_has_prefill``: rank-invariant bool gating the cache-write
             all-gather (when the global batch has any prefill, every rank
             gathers the whole batch; otherwise writes stay local).
           - ``pcp_row_plan``: per-step :class:`PCPRowPlan` for the sharded
             PCP+DCP prefill path (None for warmup or pure-decode steps, which
             is also how forward() tells the two paths apart).
+        MLA uses its own metadata class and has no row plan, so non-GQA objects
+        are skipped.
         """
-        kwargs = get_forward_context().additional_kwargs
-        kwargs["pcp_has_prefill"] = self._global_has_prefill
-        kwargs["pcp_row_plan"] = self.build_cp_row_plan()
+        if not attn_metadata:
+            return
+        plan = self.build_cp_row_plan()
+        for meta in attn_metadata.values():
+            if isinstance(meta, FlashAttentionMetadata):
+                meta.pcp_row_plan = plan
+                meta.pcp_has_prefill = self._global_has_prefill
 
     def build_cp_row_plan(self) -> "PCPRowPlan | None":
         """Build the per-step row plan for the sharded PCP+DCP attention path.

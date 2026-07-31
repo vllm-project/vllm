@@ -279,6 +279,12 @@ class FlashAttentionMetadata:
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
 
+    # PCP per-step state, stamped by PCPManager.populate_attn_metadata (not via
+    # forward_context). pcp_row_plan selects _forward_pcp_dcp vs _forward_with_dcp;
+    # pcp_has_prefill gates the rank-invariant cache-write all-gather.
+    pcp_has_prefill: bool = False
+    pcp_row_plan: "PCPRowPlan | None" = None
+
     # Per-segment is_prefilling flag (rank-local view). Used by the builder to
     # detect prefill vs decode batches under DualChunkSwap (a prefill chunk can
     # be a single token, so max_query_len is unreliable).
@@ -901,6 +907,10 @@ class FlashAttentionImpl(AttentionImpl):
         # self.pcp_world_size / self.pcp_rank are auto-populated by
         # AttentionImplBase.__new__ from get_pcp_group().
         self.use_pcp = self.pcp_world_size > 1
+        # Per-layer write-gathered K/V from do_kv_cache_update, reused by the
+        # suffix attention in _forward_pcp_dcp. Keyed by layer_name because this
+        # impl is shared across the layers of an attention group.
+        self._pcp_gathered_kv: dict[str, tuple[torch.Tensor, torch.Tensor] | None] = {}
         # How Q and the partials move across the DCP group is decided by the
         # PCP/DCP topology alone; both backends share the rule (see pcp.py).
         self.dcp_combine = resolve_dcp_combine_fn(vllm_config)
@@ -1035,11 +1045,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # all-reduce); only a PCP+DCP prefill/mixed step -- where
                 # DualChunkSwap partitions the queries and the manager builds
                 # a row plan -- goes to _forward_pcp_dcp.
-                plan = (
-                    get_forward_context().additional_kwargs.get("pcp_row_plan")
-                    if self.use_pcp
-                    else None
-                )
+                plan = attn_metadata.pcp_row_plan if self.use_pcp else None
                 if plan is not None:
                     # MRv2 PCP+DCP prefill (dcp == pcp): every row is a
                     # (cached prefix, new-token span) pair -- the suffix
@@ -1254,7 +1260,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Rank-invariant gather decision: per-rank num_decode_tokens can differ
             # under DualChunkSwap and desync the all-gather, so if the global batch
             # has any prefill every rank gathers the whole batch.
-            if get_forward_context().additional_kwargs.get("pcp_has_prefill"):
+            if attn_metadata is not None and attn_metadata.pcp_has_prefill:
                 num_decode_tokens = 0
             key_cache, value_cache = kv_cache.transpose(1, 2).split(
                 self.head_size, dim=-1
@@ -1267,12 +1273,12 @@ class FlashAttentionImpl(AttentionImpl):
             )
             # Stash the write-gathered K/V for the suffix attention of the
             # sharded PCP+DCP path (a gather only happens on prefill steps).
-            # Keyed by layer and scoped to this step's forward context, so a
+            # Keyed by layer on the impl (shared across an attention group), so a
             # layer whose cache update is skipped (kv sharing) cannot pick up
             # stale tensors.
-            get_forward_context().additional_kwargs[
-                f"pcp_gathered_kv:{layer.layer_name}"
-            ] = (cache_key, cache_value) if num_decode_tokens == 0 else None
+            self._pcp_gathered_kv[layer.layer_name] = (
+                (cache_key, cache_value) if num_decode_tokens == 0 else None
+            )
             reshape_and_cache_flash(
                 cache_key,
                 cache_value,
@@ -1361,7 +1367,6 @@ class FlashAttentionImpl(AttentionImpl):
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
-        fc = get_forward_context()
         query = query.contiguous()
         fa_kw = self._fa_common_kwargs(q_descale, k_descale, v_descale)
 
@@ -1370,9 +1375,7 @@ class FlashAttentionImpl(AttentionImpl):
         if n > 0:
             # Suffix: local rows vs the write-gathered new K/V. The gather is
             # the one do_kv_cache_update already did for the cache write.
-            gathered_kv = fc.additional_kwargs.get(
-                f"pcp_gathered_kv:{layer.layer_name}"
-            )
+            gathered_kv = self._pcp_gathered_kv.get(layer.layer_name)
             assert gathered_kv is not None, (
                 "PCP+DCP prefill step without write-gathered K/V: "
                 "do_kv_cache_update did not run for this layer (kv sharing?)."
