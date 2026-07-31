@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #ifndef CPU_ARCH_MACROS_H
 #define CPU_ARCH_MACROS_H
 
@@ -61,100 +64,172 @@
 #endif
 
 #ifdef __aarch64__
-  // Implementation of neon_expf copied from Arm Optimized Routines (expf
-  // AdvSIMD)
-  // https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/expf.c
-  //
-  // Additional fast exponential intended for cases where outputs will be
-  // downcasted to FP16 / BF16 (e.g. attention softmax). Accurate within 1 ULP
-  // for FP16 Accurate within 1 ULP for BF16 for inputs in [-87.683, 88.376] &
-  // clamps inputs outside this range to 0 / inf. Implementation is similar to
-  // exp_u20, but:
-  // - uses a third degree polynomial approximation for exp(r) instead of a
-  // fifth degree one, with coefficients re-tuned.
-  // - does not split natural log (ln) into high / low parts
-  // - clamps exp(x) to 0 for x < -87.683113f and inf for x > 88.3762589f
-  // exp(x) = 2^n (exp(r))
-  // r = x - n*ln2, with n = round(x/ln2)
-  // exp(r) ~ poly(r) = 1 + r + r^2 * (c3 + c2 * r)
-  // n = round(x / ln2), r = x - n*ln2
-  #include <limits>
-  #define DEFINE_FAST_EXP                                                      \
-    const float32x4_t inv_ln2 = vdupq_n_f32(0x1.715476p+0f);                   \
-    const float ln2_hi = 0x1.62e4p-1f;                                         \
-    const float ln2_lo = 0x1.7f7d1cp-20f;                                      \
-    const float c0 = 0x1.0e4020p-7f;                                           \
-    const float c2 = 0x1.555e66p-3f;                                           \
-    const float32x4_t ln2_c02 = {ln2_hi, ln2_lo, c0, c2};                      \
-    const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);                  \
-    const float32x4_t c1 = vdupq_n_f32(0x1.573e2ep-5f);                        \
-    const float32x4_t c3 = vdupq_n_f32(0x1.fffdb6p-2f);                        \
-    const float32x4_t c4 = vdupq_n_f32(0x1.ffffecp-1f);                        \
-    const float32x4_t pos_special_bound = vdupq_n_f32(0x1.5d5e2ap+6f);         \
-    const float32x4_t neg_special_bound = vnegq_f32(pos_special_bound);        \
-    const float32x4_t inf =                                                    \
-        vdupq_n_f32(std::numeric_limits<float>::infinity());                   \
-    const float32x4_t zero = vdupq_n_f32(0.0f);                                \
-    auto neon_expf = [&](float32x4_t values) __attribute__((always_inline)) {  \
-      float32x4_t n = vrndaq_f32(vmulq_f32(values, inv_ln2));                  \
-      float32x4_t r = vfmsq_laneq_f32(values, n, ln2_c02, 0);                  \
-      r = vfmsq_laneq_f32(r, n, ln2_c02, 1);                                   \
-      uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(vcvtq_s32_f32(n)), 23); \
-      float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));  \
-      float32x4_t r2 = vmulq_f32(r, r);                                        \
-      float32x4_t p = vfmaq_laneq_f32(c1, r, ln2_c02, 2);                      \
-      float32x4_t q = vfmaq_laneq_f32(c3, r, ln2_c02, 3);                      \
-      q = vfmaq_f32(q, p, r2);                                                 \
-      p = vmulq_f32(c4, r);                                                    \
-      float32x4_t poly = vfmaq_f32(p, q, r2);                                  \
-      poly = vfmaq_f32(scale, poly, scale);                                    \
-      const uint32x4_t hi_mask = vcgeq_f32(values, pos_special_bound);         \
-      const uint32x4_t lo_mask = vcleq_f32(values, neg_special_bound);         \
-      poly = vbslq_f32(hi_mask, inf, poly);                                    \
-      return vbslq_f32(lo_mask, zero, poly);                                   \
-    };                                                                         \
-    auto fast_exp = [&](const vec_op::FP32Vec16& vec)                          \
-                        __attribute__((always_inline)) {                       \
-                          float32x4x4_t result;                                \
-                          result.val[0] = neon_expf(vec.reg.val[0]);           \
-                          result.val[1] = neon_expf(vec.reg.val[1]);           \
-                          result.val[2] = neon_expf(vec.reg.val[2]);           \
-                          result.val[3] = neon_expf(vec.reg.val[3]);           \
-                          return vec_op::FP32Vec16(result);                    \
-                        };                                                     \
-    const float32x4_t lower_bound = vdupq_n_f32(-0x1.5ebb82p+6f);              \
-    const float32x4_t upper_bound = vdupq_n_f32(0x1.61814ap+6f);               \
-    constexpr float ln2 = 0x1.62e43p-1f;                                       \
-    constexpr float f_c2 = 0x1.5592ecp-3f;                                     \
-    const float32x4_t f_c3 = vdupq_n_f32(0x1.017d34p-1f);                      \
-    auto neon_expf_f16 = [&](float32x4_t values) __attribute__((               \
-                             always_inline)) {                                 \
-      const uint32x4_t lt_lower = vcltq_f32(values, lower_bound);              \
-      const uint32x4_t gt_upper = vcgtq_f32(values, upper_bound);              \
-      float32x4_t n = vrndaq_f32(vmulq_f32(values, inv_ln2));                  \
-      float32x4_t r = vfmsq_n_f32(values, n, ln2);                             \
-      uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(vcvtq_s32_f32(n)), 23); \
-      float32x4_t r2 = vmulq_f32(r, r);                                        \
-      float32x4_t q = vfmaq_n_f32(f_c3, r, f_c2);                              \
-      float32x4_t s = vaddq_f32(vdupq_n_f32(1.0f), r);                         \
-      float32x4_t p = vfmaq_f32(s, q, r2);                                     \
-      float32x4_t y =                                                          \
-          vreinterpretq_f32_u32(vaddq_u32(vreinterpretq_u32_f32(p), e));       \
-      y = vbslq_f32(lt_lower, vdupq_n_f32(0.0f), y);                           \
-      y = vbslq_f32(gt_upper, vdupq_n_f32(INFINITY), y);                       \
-      return y;                                                                \
-    };                                                                         \
-    auto fast_exp_f16 = [&](const vec_op::FP32Vec16& vec)                      \
-                            __attribute__((always_inline)) {                   \
-                              float32x4x4_t result;                            \
-                              result.val[0] = neon_expf_f16(vec.reg.val[0]);   \
-                              result.val[1] = neon_expf_f16(vec.reg.val[1]);   \
-                              result.val[2] = neon_expf_f16(vec.reg.val[2]);   \
-                              result.val[3] = neon_expf_f16(vec.reg.val[3]);   \
-                              return vec_op::FP32Vec16(result);                \
-                            };
-
-#endif  // __aarch64__
+  #if defined CPU_CAPABILITY_SVE256 || defined CPU_CAPABILITY_SVE128
+    // Implementation adapted from Arm Optimized Routines (SVE expf):
+    // https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/sve/expf.c
+    #define DEFINE_FAST_EXP                                                    \
+      alignas(16) static constexpr float sve_exp_lane_constants[4] = {         \
+          0x1.62e4p-1f, 0x1.7f7d1cp-20f, 0.5f, 0x1.803f8p17f};                 \
+      constexpr float sve_exp_shift = 0x1.803f8p17f;                           \
+      constexpr float sve_exp_inv_ln2 = 0x1.715476p+0f;                        \
+      constexpr float sve_exp_special_bound = 0x1.5d5e2ap+6f;                  \
+      constexpr float sve_exp_inf_bound = 0x1.62e42fp6f;                       \
+      constexpr float sve_exp_zero_bound = -0x1.9fe368p6f;                     \
+      auto sve_expf_inline =                                                   \
+          [&](svfloat32_t x, const svbool_t pg)                                \
+              __attribute__((always_inline)) {                                 \
+                const svfloat32_t lane_constants =                             \
+                    svld1rq(svptrue_b32(), sve_exp_lane_constants);            \
+                const svfloat32_t z = svmad_x(                                 \
+                    pg, svdup_n_f32(sve_exp_inv_ln2), x, sve_exp_shift);       \
+                const svfloat32_t n = svsub_x(pg, z, sve_exp_shift);           \
+                svfloat32_t r = svmls_lane(x, n, lane_constants, 0);           \
+                r = svmls_lane(r, n, lane_constants, 1);                       \
+                const svfloat32_t scale = svexpa(svreinterpret_u32(z));        \
+                const svfloat32_t r2 = svmul_x(svptrue_b32(), r, r);           \
+                const svfloat32_t poly = svmla_lane(r, r2, lane_constants, 2); \
+                return svmla_x(pg, scale, scale, poly);                        \
+              };                                                               \
+      auto sve_expf_special_case =                                             \
+          [&](svfloat32_t x, const svbool_t pg) __attribute__((noinline)) {    \
+            const svbool_t is_negative = svcmplt(pg, x, 0.0f);                 \
+            const svfloat32_t offset =                                         \
+                svneg_m(svdup_n_f32(23.0f), is_negative, svdup_n_f32(23.0f));  \
+            const svint32_t scale_adjust =                                     \
+                svneg_m(svdup_n_s32(23), is_negative, svdup_n_s32(23));        \
+            x = svmin_x(pg, svmax_x(pg, x, sve_exp_zero_bound),                \
+                        sve_exp_inf_bound);                                    \
+            const svfloat32_t lane_constants =                                 \
+                svld1rq(svptrue_b32(), sve_exp_lane_constants);                \
+            svfloat32_t z =                                                    \
+                svmad_x(pg, svdup_n_f32(sve_exp_inv_ln2), x, sve_exp_shift);   \
+            const svfloat32_t n = svsub_x(pg, z, sve_exp_shift);               \
+            svfloat32_t r = svmls_lane(x, n, lane_constants, 0);               \
+            r = svmls_lane(r, n, lane_constants, 1);                           \
+            z = svsub_x(pg, z, offset);                                        \
+            const svfloat32_t scale = svexpa(svreinterpret_u32(z));            \
+            const svfloat32_t r2 = svmul_x(svptrue_b32(), r, r);               \
+            const svfloat32_t poly = svmla_lane(r, r2, lane_constants, 2);     \
+            const svfloat32_t y = svmla_x(pg, scale, scale, poly);             \
+            return svscale_x(pg, y, scale_adjust);                             \
+          };                                                                   \
+      auto sve_expf = [&](svfloat32_t x) __attribute__((always_inline)) {      \
+        const svbool_t pg = svptrue_b32();                                     \
+        const svbool_t special = svacgt(pg, x, sve_exp_special_bound);         \
+        if (svptest_any(special, special)) {                                   \
+          return sve_expf_special_case(x, pg);                                 \
+        }                                                                      \
+        return sve_expf_inline(x, pg);                                         \
+      };                                                                       \
+      auto fast_exp = [&](const vec_op::FP32Vec16& vec) __attribute__((        \
+                          always_inline)) {                                    \
+        vec_op::FP32Vec16 result(vec_op::uninit);                              \
+        vec_op::unroll_loop<int, vec_op::FP32Vec16::VEC_REG_NUM>([&](int i) {  \
+          result.reg.val[i] = vec_op::FP32Vec16::VectorizedT(                  \
+              sve_expf(static_cast<svfloat32_t>(vec.reg.val[i])));             \
+        });                                                                    \
+        return result;                                                         \
+      };                                                                       \
+      auto fast_exp_f16 = fast_exp;
+  #else
+    // Implementation of neon_expf copied from Arm Optimized Routines (expf
+    // AdvSIMD)
+    // https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/expf.c
+    //
+    // Additional fast exponential intended for cases where outputs will be
+    // downcasted to FP16 / BF16 (e.g. attention softmax). Accurate within 1 ULP
+    // for FP16 Accurate within 1 ULP for BF16 for inputs in [-87.683, 88.376] &
+    // clamps inputs outside this range to 0 / inf. Implementation is similar to
+    // exp_u20, but:
+    // - uses a third degree polynomial approximation for exp(r) instead of a
+    // fifth degree one, with coefficients re-tuned.
+    // - does not split natural log (ln) into high / low parts
+    // - clamps exp(x) to 0 for x < -87.683113f and inf for x > 88.3762589f
+    // exp(x) = 2^n (exp(r))
+    // r = x - n*ln2, with n = round(x/ln2)
+    // exp(r) ~ poly(r) = 1 + r + r^2 * (c3 + c2 * r)
+    // n = round(x / ln2), r = x - n*ln2
+    #include <limits>
+    #define DEFINE_FAST_EXP                                                    \
+      const float32x4_t inv_ln2 = vdupq_n_f32(0x1.715476p+0f);                 \
+      const float ln2_hi = 0x1.62e4p-1f;                                       \
+      const float ln2_lo = 0x1.7f7d1cp-20f;                                    \
+      const float c0 = 0x1.0e4020p-7f;                                         \
+      const float c2 = 0x1.555e66p-3f;                                         \
+      const float32x4_t ln2_c02 = {ln2_hi, ln2_lo, c0, c2};                    \
+      const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);                \
+      const float32x4_t c1 = vdupq_n_f32(0x1.573e2ep-5f);                      \
+      const float32x4_t c3 = vdupq_n_f32(0x1.fffdb6p-2f);                      \
+      const float32x4_t c4 = vdupq_n_f32(0x1.ffffecp-1f);                      \
+      const float32x4_t pos_special_bound = vdupq_n_f32(0x1.5d5e2ap+6f);       \
+      const float32x4_t neg_special_bound = vnegq_f32(pos_special_bound);      \
+      const float32x4_t inf =                                                  \
+          vdupq_n_f32(std::numeric_limits<float>::infinity());                 \
+      const float32x4_t zero = vdupq_n_f32(0.0f);                              \
+      auto neon_expf =                                                         \
+          [&](float32x4_t values) __attribute__((always_inline)) {             \
+            float32x4_t n = vrndaq_f32(vmulq_f32(values, inv_ln2));            \
+            float32x4_t r = vfmsq_laneq_f32(values, n, ln2_c02, 0);            \
+            r = vfmsq_laneq_f32(r, n, ln2_c02, 1);                             \
+            uint32x4_t e =                                                     \
+                vshlq_n_u32(vreinterpretq_u32_s32(vcvtq_s32_f32(n)), 23);      \
+            float32x4_t scale =                                                \
+                vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));            \
+            float32x4_t r2 = vmulq_f32(r, r);                                  \
+            float32x4_t p = vfmaq_laneq_f32(c1, r, ln2_c02, 2);                \
+            float32x4_t q = vfmaq_laneq_f32(c3, r, ln2_c02, 3);                \
+            q = vfmaq_f32(q, p, r2);                                           \
+            p = vmulq_f32(c4, r);                                              \
+            float32x4_t poly = vfmaq_f32(p, q, r2);                            \
+            poly = vfmaq_f32(scale, poly, scale);                              \
+            const uint32x4_t hi_mask = vcgeq_f32(values, pos_special_bound);   \
+            const uint32x4_t lo_mask = vcleq_f32(values, neg_special_bound);   \
+            poly = vbslq_f32(hi_mask, inf, poly);                              \
+            return vbslq_f32(lo_mask, zero, poly);                             \
+          };                                                                   \
+      auto fast_exp = [&](const vec_op::FP32Vec16& vec)                        \
+                          __attribute__((always_inline)) {                     \
+                            float32x4x4_t result;                              \
+                            result.val[0] = neon_expf(vec.reg.val[0]);         \
+                            result.val[1] = neon_expf(vec.reg.val[1]);         \
+                            result.val[2] = neon_expf(vec.reg.val[2]);         \
+                            result.val[3] = neon_expf(vec.reg.val[3]);         \
+                            return vec_op::FP32Vec16(result);                  \
+                          };                                                   \
+      const float32x4_t lower_bound = vdupq_n_f32(-0x1.5ebb82p+6f);            \
+      const float32x4_t upper_bound = vdupq_n_f32(0x1.61814ap+6f);             \
+      constexpr float ln2 = 0x1.62e43p-1f;                                     \
+      constexpr float f_c2 = 0x1.5592ecp-3f;                                   \
+      const float32x4_t f_c3 = vdupq_n_f32(0x1.017d34p-1f);                    \
+      auto neon_expf_f16 =                                                     \
+          [&](float32x4_t values) __attribute__((always_inline)) {             \
+            const uint32x4_t lt_lower = vcltq_f32(values, lower_bound);        \
+            const uint32x4_t gt_upper = vcgtq_f32(values, upper_bound);        \
+            float32x4_t n = vrndaq_f32(vmulq_f32(values, inv_ln2));            \
+            float32x4_t r = vfmsq_n_f32(values, n, ln2);                       \
+            uint32x4_t e =                                                     \
+                vshlq_n_u32(vreinterpretq_u32_s32(vcvtq_s32_f32(n)), 23);      \
+            float32x4_t r2 = vmulq_f32(r, r);                                  \
+            float32x4_t q = vfmaq_n_f32(f_c3, r, f_c2);                        \
+            float32x4_t s = vaddq_f32(vdupq_n_f32(1.0f), r);                   \
+            float32x4_t p = vfmaq_f32(s, q, r2);                               \
+            float32x4_t y =                                                    \
+                vreinterpretq_f32_u32(vaddq_u32(vreinterpretq_u32_f32(p), e)); \
+            y = vbslq_f32(lt_lower, vdupq_n_f32(0.0f), y);                     \
+            y = vbslq_f32(gt_upper, vdupq_n_f32(INFINITY), y);                 \
+            return y;                                                          \
+          };                                                                   \
+      auto fast_exp_f16 = [&](const vec_op::FP32Vec16& vec)                    \
+                              __attribute__((always_inline)) {                 \
+                                float32x4x4_t result;                          \
+                                result.val[0] = neon_expf_f16(vec.reg.val[0]); \
+                                result.val[1] = neon_expf_f16(vec.reg.val[1]); \
+                                result.val[2] = neon_expf_f16(vec.reg.val[2]); \
+                                result.val[3] = neon_expf_f16(vec.reg.val[3]); \
+                                return vec_op::FP32Vec16(result);              \
+                              };
+  #endif  // CPU_CAPABILITY_SVE
+#endif    // __aarch64__
 
 // RISC-V RVV
 #ifdef __riscv_v

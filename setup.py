@@ -1177,6 +1177,14 @@ if _is_cpu():
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
+    if (
+        platform.machine() in ("aarch64",)
+        and torch.cpu.get_capabilities().get("sve", False)
+        and torch.cpu.get_capabilities().get("bf16", False)
+    ):
+        ext_modules.append(CMakeExtension(name="vllm._C_SVE256"))
+        ext_modules.append(CMakeExtension(name="vllm._C_SVE128"))
+
 if _build_custom_ops():
     if _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C"))
