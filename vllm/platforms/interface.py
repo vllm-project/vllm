@@ -878,9 +878,7 @@ class Platform:
                 s.base if isinstance(s, MultipleOf) else s
                 for s in backend_cls.get_supported_kernel_block_sizes()
             )
-            # The floor forced by the backend and (for MLA) the kernel's
-            # 128-alignment requirement, independent of any user-supplied
-            # `--block-size`.
+            # Independent of any user-supplied --block-size.
             kernel_block_alignment_floor = backend_min_block_size
             if model_config.use_mla:
                 # TRTLLM/FlashInfer MLA decode kernels require the physical
@@ -892,17 +890,14 @@ class Platform:
                 kernel_block_alignment_floor,
                 cache_config.block_size,
             )
-            # What Phase 1 of `update_block_size_for_backend` would have
-            # chosen had `--block-size` not been set explicitly, so a value
-            # below the floor isn't assumed to be discarded when the backend
-            # would otherwise have preferred something above it.
+            # What the backend would have picked with no --block-size at all.
+            # Comparing against the floor alone would warn on a flag that does
+            # change the result, when the preferred size sits above the floor.
             no_flag_alignment_size = max(
                 kernel_block_alignment_floor,
                 backend_cls.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE),
             )
 
-        # An explicit --block-size that resolves to the same kernel block
-        # alignment as omitting it entirely has no effect; say so once.
         if (
             cache_config.user_specified_block_size
             and kernel_block_alignment_size == no_flag_alignment_size
