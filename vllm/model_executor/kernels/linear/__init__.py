@@ -978,6 +978,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
+    a16_kernels = (MarlinNvFp4LinearKernel, HummingNvFp4LinearKernel)
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
     # batch-invariant CUTLASS implementation when available, otherwise fall
@@ -1018,6 +1019,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
+        if use_a16 and force_kernel not in a16_kernels:
+            raise ValueError(f"{force_kernel.__name__} does not support W4A16")
         is_supported, reason = force_kernel.is_supported()
         if not is_supported:
             raise ValueError(
@@ -1030,6 +1033,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # Auto-select from registry (or --linear-backend filtered).
     platform = current_platform._enum
     possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
+    if use_a16:
+        possible = [kernel for kernel in possible if kernel in a16_kernels]
 
     # Apply --linear-backend filtering when set.
     if linear_backend != "auto":

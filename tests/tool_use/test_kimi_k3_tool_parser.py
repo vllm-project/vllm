@@ -141,7 +141,6 @@ def test_extract_tool_calls_with_response_and_typed_arguments():
     assert extracted.content == "answer"
     assert len(extracted.tool_calls) == 1
     tool_call = extracted.tool_calls[0]
-    assert tool_call.id == "calc:0"
     assert tool_call.function.name == "calc"
     assert json.loads(tool_call.function.arguments) == {
         "x": 1,
@@ -168,7 +167,6 @@ def test_delegating_parser_preserves_tool_calls_after_reasoning():
     assert content == "answer"
     assert tool_calls is not None
     assert len(tool_calls) == 1
-    assert tool_calls[0].id == "calc:0"
     assert tool_calls[0].name == "calc"
     assert json.loads(tool_calls[0].arguments) == {"x": 1}
 
@@ -364,9 +362,17 @@ def test_streaming_split_markers_do_not_leak():
     assert OPEN not in content
     assert SEP not in content
     assert len(tool_deltas) == 1
-    assert tool_deltas[0].id == "calc:0"
     assert tool_deltas[0].function.name == "calc"
     assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
+
+
+def test_tool_call_ids_are_unique_across_messages():
+    output = _tools(_call("calc", 1))
+
+    first = KimiK3ToolParser(DummyTokenizer()).extract_tool_calls(output, _request())
+    second = KimiK3ToolParser(DummyTokenizer()).extract_tool_calls(output, _request())
+
+    assert first.tool_calls[0].id != second.tool_calls[0].id
 
 
 def test_streaming_consumed_response_prefix_no_call_keeps_content():
