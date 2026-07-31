@@ -12,6 +12,7 @@ import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
 )
@@ -284,9 +285,10 @@ class FlashAttentionMetadata:
 
     sliding_window: tuple[int, int] | None = None
 
-    # PrefixLM bidirectional range id for multimodal tokens.
-    # Shape: (num_seqs, max_seq_len) int32, -1 outside multimodal ranges.
-    mm_prefix_range_id_tensor: torch.Tensor | None = None
+    # PrefixLM bidirectional range containing each scheduled query token.
+    # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
+    # (-1, -1) for query tokens outside every multimodal range.
+    mm_prefix_query_range_tensor: torch.Tensor | None = None
 
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
@@ -453,6 +455,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             self.persistent_rswa_window_tensor = torch.tensor(
                 [self.rswa_window], dtype=torch.int32, device=self.device
+            )
+
+        # mm_prefix: persistent staging + device buffers owned by this builder,
+        # sized by scheduled query tokens so build() never allocates.
+        self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
+        self.mm_prefix_query_ranges_np: np.ndarray | None = None
+        self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
+        if self.model_config.is_mm_prefix_lm:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self.mm_prefix_query_ranges_cpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
+            )
+            self.mm_prefix_query_ranges_np = self.mm_prefix_query_ranges_cpu.numpy()
+            self.mm_prefix_query_ranges_gpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, device=self.device
             )
 
     def build(
@@ -698,14 +715,32 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
-        if mm_ranges is not None:
-            from vllm.v1.attention.backends.utils import (
-                compute_mm_prefix_range_id_tensor,
-            )
+        if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
+            from vllm.v1.attention.backends.utils import fill_mm_prefix_query_ranges
 
-            attn_metadata.mm_prefix_range_id_tensor = compute_mm_prefix_range_id_tensor(
-                mm_ranges, num_reqs, max_seq_len, seq_lens.device
+            # The upper bound is exact for prefill rows, which is where
+            # mm_prefix ranges live; decode rows only ever get an optimistic
+            # (larger) context, moving them further past every range.
+            mm_seq_lens_cpu = (
+                common_attn_metadata.seq_lens_cpu_upper_bound
+                if common_attn_metadata.seq_lens_cpu_upper_bound is not None
+                else common_attn_metadata.seq_lens_cpu
             )
+            num_mm_tokens = fill_mm_prefix_query_ranges(
+                self.mm_prefix_query_ranges_np,
+                mm_ranges,
+                common_attn_metadata.query_start_loc_cpu,
+                mm_seq_lens_cpu,
+            )
+            if num_mm_tokens > 0:
+                assert self.mm_prefix_query_ranges_cpu is not None
+                assert self.mm_prefix_query_ranges_gpu is not None
+                mm_query_ranges = self.mm_prefix_query_ranges_gpu[:num_mm_tokens]
+                mm_query_ranges.copy_(
+                    self.mm_prefix_query_ranges_cpu[:num_mm_tokens],
+                    non_blocking=True,
+                )
+                attn_metadata.mm_prefix_query_range_tensor = mm_query_ranges
 
         # R-SWA: copy prefix lengths into persistent buffers (outside the
         # compiled region) so forward() never allocates during CUDA graph
@@ -971,11 +1006,11 @@ class FlashAttentionImpl(AttentionImpl):
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
 
-                mm_prefix_range_ids = attn_metadata.mm_prefix_range_id_tensor
+                mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
                 mm_mask_mod = None
                 mm_aux = None
                 if (
-                    mm_prefix_range_ids is not None
+                    mm_prefix_query_ranges is not None
                     and not is_dynamic_causal
                     and causal is True
                     and self.vllm_flash_attn_version == 4
@@ -1002,7 +1037,7 @@ class FlashAttentionImpl(AttentionImpl):
                         sliding_window=mm_clamp_sw,
                         sliding_window_left=sw_val,
                     )
-                    mm_aux = [mm_prefix_range_ids]
+                    mm_aux = [mm_prefix_query_ranges, attn_metadata.query_start_loc]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
                 # mask without block-size approximation.  The mask_mod encodes
@@ -1391,8 +1426,16 @@ def _make_mm_prefix_mask_mod(
     use consistent absolute positions.  This matches the Triton
     reference path (``compute_kv_seq_mask``).
 
-    ``aux_tensors[0]`` stores per-token range ids with -1 outside multimodal
-    ranges.  ``sliding_window_left`` enforces the sliding window on the causal
+    ``aux_tensors[0]`` holds the absolute ``[start, end]`` bounds of the
+    mm_prefix range containing each scheduled query token (``(-1, -1)`` when
+    none), and ``aux_tensors[1]`` is ``cu_seqlens_q``, used to turn the local
+    ``q_idx`` into a packed row index.  Because mm_prefix ranges never overlap,
+    ``r_start <= kv_idx <= r_end`` is exactly "query and key share a range", so
+    no key-side lookup is needed and ``kv_idx`` is never used as an index.
+    The ``(-1, -1)`` sentinel falls out for free: ``kv_idx <= -1`` is false for
+    every valid key.
+
+    ``sliding_window_left`` enforces the sliding window on the causal
     term (None = full causal, no window).  ``sliding_window`` clamps the
     bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
     layers via ``mm_prefix_clamp_sliding_window``).
@@ -1405,6 +1448,26 @@ def _make_mm_prefix_mask_mod(
         scalar_to_ssa,
         ssa_to_scalar,
     )
+
+    @cute.jit
+    def _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx):
+        """Load the mm_prefix range bounds for this query row.
+
+        Both loads depend only on the query index, so they hoist out of the
+        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, which
+        is correct only while this mask_mod runs unvectorized (no
+        ``__vec_size__`` attribute → FA4 uses ``vec_size=1``).
+        """
+        q_ranges = aux_tensors[0]
+        cu_seqlens_q = aux_tensors[1]
+        b = batch_idx[0]
+        last_q_idx = cutlass.max(seqlen_info.seqlen_q - Int32(1), Int32(0))
+        q_local = cutlass.min(ssa_to_scalar(q_idx), last_q_idx)
+        token_idx = cu_seqlens_q[b] + q_local
+        return (
+            scalar_to_ssa(q_ranges[token_idx, 0], Int32),
+            scalar_to_ssa(q_ranges[token_idx, 1], Int32),
+        )
 
     if sliding_window_left is not None:
 
@@ -1421,18 +1484,8 @@ def _make_mm_prefix_mask_mod(
             q_abs = q_idx + ctx_off
             sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
             keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
-            range_ids = aux_tensors[0]
-            b = batch_idx[0]
-            last_kv_idx = cutlass.max(seqlen_info.seqlen_k - Int32(1), Int32(0))
-            q_lookup_idx = scalar_to_ssa(
-                cutlass.min(ssa_to_scalar(q_abs), last_kv_idx), Int32
-            )
-            kv_lookup_idx = scalar_to_ssa(
-                cutlass.min(ssa_to_scalar(kv_idx), last_kv_idx), Int32
-            )
-            q_range_id = scalar_to_ssa(range_ids[b, q_lookup_idx], Int32)
-            k_range_id = scalar_to_ssa(range_ids[b, kv_lookup_idx], Int32)
-            mm = (q_range_id >= 0) & (q_range_id == k_range_id)
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            mm = (kv_idx >= r_start) & (kv_idx <= r_end)
             if sliding_window > 0:
                 mm = mm & ((q_abs - kv_idx) < sw)
             keep = keep | mm
@@ -1452,18 +1505,8 @@ def _make_mm_prefix_mask_mod(
             ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
             q_abs = q_idx + ctx_off
             keep = kv_idx <= q_abs
-            range_ids = aux_tensors[0]
-            b = batch_idx[0]
-            last_kv_idx = cutlass.max(seqlen_info.seqlen_k - Int32(1), Int32(0))
-            q_lookup_idx = scalar_to_ssa(
-                cutlass.min(ssa_to_scalar(q_abs), last_kv_idx), Int32
-            )
-            kv_lookup_idx = scalar_to_ssa(
-                cutlass.min(ssa_to_scalar(kv_idx), last_kv_idx), Int32
-            )
-            q_range_id = scalar_to_ssa(range_ids[b, q_lookup_idx], Int32)
-            k_range_id = scalar_to_ssa(range_ids[b, kv_lookup_idx], Int32)
-            keep = keep | ((q_range_id >= 0) & (q_range_id == k_range_id))
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            keep = keep | ((kv_idx >= r_start) & (kv_idx <= r_end))
             return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True

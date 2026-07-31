@@ -75,61 +75,75 @@ def compute_mm_prefix_range_tensor(
     return padded.view(num_seqs, max_ranges, 2)
 
 
-def compute_mm_prefix_range_id_tensor(
+def fill_mm_prefix_query_ranges(
+    out: np.ndarray,
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
-    num_seqs: int,
-    max_seq_len: int,
-    device: torch.device,
-) -> torch.Tensor | None:
-    """Convert mm_prefix ranges to per-token range ids for FA4 mask_mod.
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+) -> int:
+    """Map each scheduled query token to the mm_prefix range containing it.
 
-    Returns shape: (num_seqs, max_seq_len), filled with -1 outside multimodal
-    ranges. Range ids only need to be unique within each request.
+    Writes into ``out``, a caller-owned ``(max_num_batched_tokens, 2)`` int32
+    staging buffer, and returns the number of rows written (0 if no range
+    covers any scheduled query token, in which case ``out`` is untouched and
+    the caller should skip the mask_mod entirely). Row ``i`` holds the absolute
+    ``[start, end]`` bounds of the bidirectional range that query token ``i``
+    belongs to, or ``(-1, -1)`` when it is outside every range.
 
-    Empty / degenerate ranges (``start >= end``) are skipped to match the
-    Triton and legacy FA4 ``start < end`` validity check. Overlapping ranges
-    cannot be represented by per-token ids and raise ``ValueError``.
+    mm_prefix ranges never overlap, so "query and key share a range" is
+    equivalent to "the key lies inside the query's own range". The kernel
+    therefore needs no key-side lookup, and this metadata is sized by scheduled
+    query tokens rather than by context length -- bounded by
+    ``max_num_batched_tokens`` instead of ``num_seqs * max_seq_len``.
+
+    Ranges are absolute prompt positions and may extend past the tokens
+    scheduled so far under chunked prefill; the portion outside the current
+    chunk is simply not recorded. Degenerate ranges (``start >= end``) are
+    skipped to match the Triton path's ``start < end`` validity check.
+
+    ``seq_lens_cpu`` only needs to be exact for prefill rows, since mm_prefix
+    ranges cover prompt tokens: an over-estimate on a decode row shifts that
+    row's query position further past every range, which still matches nothing.
     """
-    if mm_prefix_range is None or max_seq_len <= 0:
-        return None
+    if mm_prefix_range is None:
+        return 0
 
-    target_device = torch.device(device)
-    range_ids = torch.full(
-        (num_seqs, max_seq_len),
-        -1,
-        dtype=torch.int32,
-        device="cpu",
-        pin_memory=PIN_MEMORY and target_device.type != "cpu",
+    query_start_loc = query_start_loc_cpu.numpy()
+    num_actual_tokens = int(query_start_loc[-1])
+    if num_actual_tokens <= 0:
+        return 0
+    assert num_actual_tokens <= out.shape[0], (
+        f"mm_prefix staging buffer holds {out.shape[0]} tokens, got {num_actual_tokens}"
     )
-    has_valid_range = False
 
-    for seq_idx in range(num_seqs):
-        ranges = sorted(mm_prefix_range.get(seq_idx, ()))
-        previous_end = -1
-        range_id = 0
-        for start, end in ranges:
-            # Match Triton / legacy FA4: start >= end is not a valid range.
+    # Resolve every span before touching `out`, so batches whose ranges all
+    # fall outside the scheduled tokens skip the fill entirely.
+    spans: list[tuple[int, int, int, int]] = []
+    for req_idx, req_ranges in mm_prefix_range.items():
+        if not req_ranges:
+            continue
+        token_start = int(query_start_loc[req_idx])
+        query_len = int(query_start_loc[req_idx + 1]) - token_start
+        if query_len <= 0:
+            continue
+        # Absolute position of this request's first scheduled query token.
+        context_len = int(seq_lens_cpu[req_idx]) - query_len
+        for start, end in req_ranges:
             if start >= end:
                 continue
-            if start < 0 or end >= max_seq_len:
-                raise ValueError(
-                    "Invalid mm_prefix range "
-                    f"({start}, {end}) for max_seq_len={max_seq_len}"
-                )
-            if start <= previous_end:
-                raise ValueError(
-                    "Overlapping mm_prefix ranges cannot be represented by "
-                    f"range IDs: previous_end={previous_end}, start={start}"
-                )
-            range_ids[seq_idx, start : end + 1] = range_id
-            previous_end = end
-            range_id += 1
-            has_valid_range = True
+            first = max(start - context_len, 0)
+            last = min(end - context_len, query_len - 1)
+            if first > last:
+                continue
+            spans.append((token_start + first, token_start + last + 1, start, end))
 
-    if not has_valid_range:
-        return None
+    if not spans:
+        return 0
 
-    return range_ids.to(device=target_device, non_blocking=True)
+    out[:num_actual_tokens] = -1
+    for row_start, row_end, start, end in spans:
+        out[row_start:row_end] = (start, end)
+    return num_actual_tokens
 
 
 def is_valid_kv_cache_layout(value: str) -> bool:
