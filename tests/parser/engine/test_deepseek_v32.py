@@ -305,6 +305,30 @@ class TestOrphanInvokeNameValidation:
         assert args == {"city": "SF"}
         assert DSML_INVOKE_PREFIX in result.content
 
+    def test_quoted_marker_directly_before_wrapped_call(
+        self, mock_tokenizer, mock_request, weather_tool
+    ):
+        """A quoted marker followed immediately by the real wrapper must
+        release the hold and parse the wrapped call."""
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[weather_tool])
+        mock_request.tools = [weather_tool]
+        text = (
+            "See "
+            + DSML_INVOKE_PREFIX
+            + _func_calls(_invoke("get_weather", _param("city", "true", "SF")))
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"city": "SF"}
+        assert DSML_INVOKE_PREFIX in result.content
+        # The wrapper token opens the real tool call, so it must be
+        # consumed by the parser rather than left in the content.
+        assert DSML_FUNC_START not in result.content
+
     def test_streaming_quoted_marker_then_wrapped_call(
         self, mock_tokenizer, mock_request, weather_tool
     ):

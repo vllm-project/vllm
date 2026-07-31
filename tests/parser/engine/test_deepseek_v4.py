@@ -679,6 +679,9 @@ class TestOrphanInvokeNameValidation:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"location": "NYC"}
         assert DSML_INVOKE_PREFIX in result.content
+        # The wrapper token opens the real tool call, so it must be
+        # consumed by the parser rather than left in the content.
+        assert DSML_TOOL_START not in result.content
 
     def test_streaming_quoted_marker_then_wrapped_call(
         self, mock_tokenizer, mock_request, weather_tool
