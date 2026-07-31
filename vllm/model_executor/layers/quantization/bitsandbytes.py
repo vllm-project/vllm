@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cached_property
 from typing import Any, Union
 
 import torch
 from packaging import version
 
-from vllm.model_executor.layers.fused_moe.config import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -164,9 +164,15 @@ class BitsAndBytesConfig(QuantizationConfig):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
+
+
+class BitsAndBytesWeightParameter(torch.nn.Parameter):
+    @cached_property
+    def dtype(self) -> torch.dtype:
+        return torch.get_default_dtype()
 
 
 def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
@@ -247,7 +253,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                     "The input size is not aligned with the quantized weight shape."
                 )
 
-            qweight = torch.nn.Parameter(
+            qweight = BitsAndBytesWeightParameter(
                 torch.empty(total_size // quant_ratio, 1, dtype=torch.uint8),
                 requires_grad=False,
             )
@@ -451,7 +457,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -472,16 +478,17 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -497,7 +504,6 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,

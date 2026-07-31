@@ -31,6 +31,23 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 logger = init_logger(__name__)
 
 
+def _cat_ubatch_outputs(
+    sorted_results: list,
+) -> "torch.Tensor | tuple[torch.Tensor, ...]":
+    """Concatenate per-ubatch model outputs along the batch dim.
+
+    Most models return a single hidden-states tensor per ubatch. Target
+    models running with auxiliary output (e.g. EAGLE3 speculative decoding,
+    which collects aux hidden states for the drafter) return a tuple of
+    tensors instead. Fan out over tuple components so `torch.cat` sees
+    matching shapes and the caller receives the same structure the model
+    produced for a single ubatch (#40769).
+    """
+    if sorted_results and isinstance(sorted_results[0], tuple):
+        return tuple(torch.cat(parts, dim=0) for parts in zip(*sorted_results))
+    return torch.cat(sorted_results, dim=0)
+
+
 @dataclass
 class UbatchMetadata:
     context: UBatchContext
@@ -71,8 +88,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for computation.
         """
 
-        assert current_platform.is_cuda(), (
-            "SM control is currently only supported on CUDA"
+        assert current_platform.is_cuda() or current_platform.is_rocm(), (
+            "SM/CU control is supported on CUDA and ROCm platforms"
         )
         device = torch.accelerator.current_device_index()
         total_sms = num_compute_units(device)
@@ -137,6 +154,16 @@ class UBatchWrapper:
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
         comm_sms: int = envs.VLLM_DBO_COMM_SMS
+        rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and vllm_config.parallel_config.enable_dbo
+            and vllm_config.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
+        if rocm_deepep_ht_dbo:
+            # On ROCm, reserving CUs for DeepEP HT communication under DBO
+            # corrupts DP+EP generation accuracy. Keep the backend active, but
+            # leave all CUs visible to the compute and communication kernels.
+            comm_sms = 0
 
         set_comm_sms = lambda sms: None
         if vllm_config.parallel_config.enable_expert_parallel:
@@ -225,7 +252,7 @@ class UBatchWrapper:
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
-        num_tokens = ubatch_metadata[0].num_tokens + ubatch_metadata[1].num_tokens
+        num_tokens = sum(m.num_tokens for m in ubatch_metadata)
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
@@ -241,7 +268,7 @@ class UBatchWrapper:
                 )
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all ubatch threads to be ready
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
@@ -266,7 +293,7 @@ class UBatchWrapper:
                 for thread in ubatch_threads:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
-                result = torch.cat(sorted_results, dim=0)
+                result = _cat_ubatch_outputs(sorted_results)
                 cudagraph_metadata.outputs = result
                 # Join offloader's copy stream after forward to avoid unjoined
                 # stream error. The last layer's start_prefetch forks copy_stream,
@@ -305,12 +332,12 @@ class UBatchWrapper:
                 )
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait()  # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for all ubatch threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
         sorted_results = [value for position, value in sorted(results)]
-        result = torch.cat(sorted_results, dim=0)
+        result = _cat_ubatch_outputs(sorted_results)
         return result
 
     def _make_ubatch_metadata(

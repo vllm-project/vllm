@@ -9,21 +9,14 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
-PYTHON="${PYTHON_PROG:-python3}" # try to read from env var, otherwise use python3
+DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
-# detect if python3.12+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
-if [[ "$has_new_python" -eq 0 ]]; then
-    # use new python from docker
-    docker pull python:3-slim
-    PYTHON="docker run --rm -u $(id -u):$(id -g) -v $(pwd):/app -w /app python:3-slim python3"
-fi
-
-echo "Using python interpreter: $PYTHON"
-echo "Python version: $($PYTHON --version)"
+# Select python3 (>= 3.12) -- local if available, else a docker fallback.
+# shellcheck source=lib/select-python.sh
+source .buildkite/scripts/lib/select-python.sh
+select_python
 
 # ======== generate and upload indices ========
 
@@ -52,8 +45,10 @@ $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --curr
 echo "Uploading indices to $S3_COMMIT_PREFIX"
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 
-# copy to /nightly/ only if it is on the main branch and not a PR
-if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+# copy to /nightly/ only when enabled for a main branch build that is not a PR
+if [[ "${UPDATE_NIGHTLY_INDEX:-1}" == "1" && \
+      "$BUILDKITE_BRANCH" == "main" && \
+      "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
     echo "Uploading indices to overwrite /nightly/"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 fi
@@ -74,7 +69,7 @@ pure_version="${version%%+*}"
 echo "Pure version (without variant): $pure_version"
 
 # re-generate and copy to /<pure_version>/ only if it does not have "dev" in the version
-if [[ "$version" != *"dev"* ]]; then
+if [[ "${UPDATE_VERSION_INDEX:-1}" == "1" && "$version" != *"dev"* ]]; then
     echo "Re-generating indices for /$pure_version/"
     rm -rf "${INDICES_OUTPUT_DIR:?}"
     mkdir -p "$INDICES_OUTPUT_DIR"

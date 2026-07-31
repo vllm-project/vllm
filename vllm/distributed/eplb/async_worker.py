@@ -4,12 +4,10 @@
 The async worker that transfers experts in the background.
 """
 
-import asyncio
 import threading
 from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import ProcessGroup
 
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
@@ -27,8 +25,7 @@ def start_async_worker(
     state: "EplbState",
     is_profile: bool = False,
 ) -> threading.Thread:
-    eplb_group = get_eplb_group().device_group
-    rank = eplb_group.rank()
+    rank = get_eplb_group().device_group.rank()
     device_index = state.cuda_device_index
     assert state.is_async
 
@@ -36,21 +33,14 @@ def start_async_worker(
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(
-                transfer_run_periodically(
-                    state=state,
-                    eplb_group=eplb_group,
-                    cuda_stream=cuda_stream,
-                    is_profile=is_profile,
-                )
+            transfer_run_periodically(
+                state=state,
+                cuda_stream=cuda_stream,
+                is_profile=is_profile,
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
-        finally:
-            loop.close()
 
     thread = threading.Thread(target=thread_target, daemon=True)
     thread.start()
@@ -83,15 +73,17 @@ def run_rebalance_experts(
     return new_physical_to_logical_map
 
 
-async def transfer_run_periodically(
+def transfer_run_periodically(
     state: "EplbState",
-    eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
-        logger.info("async worker woke up for EPLB transfer")
+
+        eplb_group = get_eplb_group().device_group
+        eplb_cpu_group = get_eplb_group().cpu_group
+        ep_rank = eplb_group.rank()
 
         assert state.is_async
         for model_state in state.model_states.values():
@@ -108,17 +100,33 @@ async def transfer_run_periodically(
             new_physical_to_logical_map = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
-            logger.info(
-                "Async worker computed new indices for model %s",
-                model_state.model_name,
-            )
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration
             # of this loop will copy the new set of expert weights into
             # model_state.expert_buffer, which will be consumed by the main thread in
-            # move_to_workspace
-            while model_state.rebalanced and layer_idx < num_layers:
-                transfer_metadata = await transfer_layer(
+            # move_to_workspace.
+            # We sync the rebalanced flag across ranks before each iteration so
+            # all ranks make a coordinated decision to continue or stop.
+            while layer_idx < num_layers:
+                flag = torch.tensor(
+                    [int(model_state.rebalanced)],
+                    dtype=torch.int32,
+                    device="cpu",
+                )
+                torch.distributed.all_reduce(flag, group=eplb_cpu_group)
+                if int(flag.item()) != eplb_cpu_group.size():
+                    logger.warning(
+                        "async worker (rank=%d): layer %d coordinated stop "
+                        "(flag_sum=%d, group_size=%d)",
+                        ep_rank,
+                        layer_idx,
+                        int(flag.item()),
+                        eplb_cpu_group.size(),
+                    )
+                    model_state.rebalanced = False
+                    break
+
+                transfer_metadata = transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],
@@ -127,6 +135,7 @@ async def transfer_run_periodically(
                     ep_group=eplb_group,
                     is_profile=is_profile,
                     cuda_stream=cuda_stream,
+                    layer_idx=layer_idx,
                 )
 
                 # Wait until all writes to expert_buffer have finished before making the
@@ -149,6 +158,5 @@ async def transfer_run_periodically(
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=cuda_stream)
-                logger.debug("Layer %d transfer complete", layer_idx)
                 assert model_state.pending_result is None
                 layer_idx += 1

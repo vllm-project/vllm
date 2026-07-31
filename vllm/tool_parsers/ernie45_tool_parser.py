@@ -34,7 +34,6 @@ class Ernie45ToolParser(ToolParser):
         abc\n</think>\n\n\n<tool_call>\ndef\n</tool_call>\n
         """
         super().__init__(tokenizer, tools)
-        self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id = -1
         self.streamed_args_for_tool: list[str] = []

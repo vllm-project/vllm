@@ -11,6 +11,7 @@ from safetensors.torch import load_file, save_file
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
 
@@ -110,6 +111,9 @@ def generate_and_test(
         )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 def test_olmoe_lora(olmoe_lora_files, maybe_enable_lora_dual_stream):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
@@ -178,6 +182,9 @@ def test_olmoe_lora_mixed_random(
     assert outputs[0].outputs[0].text.strip().startswith(EXPECTED_LORA_OUTPUT[0])
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
 def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):

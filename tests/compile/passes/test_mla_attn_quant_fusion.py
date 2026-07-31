@@ -83,10 +83,6 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
 
-        # Create kv_b_proj (ColumnParallelLinear) on device.
-        # Reuse weights from prior model instance when available, because
-        # ColumnParallelLinear may get NaN from recycled CUDA memory after
-        # torch.compile runs in the same process.
         kv_b_proj = ColumnParallelLinear(
             input_size=kv_lora_rank,
             output_size=num_heads * (qk_nope_head_dim + v_head_dim),
@@ -96,8 +92,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         kv_b_proj_weight = kwargs.get("kv_b_proj_weight")
         if kv_b_proj_weight is not None:
             kv_b_proj.weight.data.copy_(kv_b_proj_weight)
-        elif kv_b_proj.weight.data.isnan().any():
-            # Sanitize NaN from recycled CUDA memory
+        else:
             kv_b_proj.weight.data.normal_()
 
         # Create MLAAttention
@@ -424,8 +419,7 @@ def test_mla_attention_quant_pattern(
     model_class: type[MLAAttentionQuantPatternModel],
     backend: AttentionBackendEnum,
     dist_init,
-    monkeypatch,
-    use_fresh_inductor_cache,
+    disable_vllm_compile_cache,
 ):
     """Test MLA AttentionQuantPattern fusion pass"""
     if (
@@ -433,8 +427,6 @@ def test_mla_attention_quant_pattern(
         and not is_nvfp4_supported()
     ):
         pytest.skip("NVFP4 is not supported on this GPU (requires SM 100+).")
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 

@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -150,6 +150,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0
@@ -159,10 +160,15 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
+    # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
+    # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
+    # partial last tile). Some whitelisted shapes have K=2880 (e.g. gpt-oss-120b
+    # hidden), so skip aiter there and fall back to the torch GEMM path below.
+    if use_aiter_triton_gemm(n, m, k, x.dtype) and not (on_gfx1250() and k % 256 != 0):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -170,21 +176,27 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
+        # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
+        # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )
 
-    if not use_skinny:
-        return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 5:
+            cu_count = num_compute_units()
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -228,6 +240,29 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    # Skip CPU GEMM dispatch for non-2D weights (e.g. MoE 3D expert weights).
+    # These layers are handled by their own specialized methods.
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op or MoE 3D expert weights
+        if torch.cpu._is_amx_tile_supported() and hasattr(
+            ops, "causal_conv1d_weight_pack"
+        ):
+            # prepack conv weight
+            unpacked = (
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+                .contiguous()
+                .clone()
+            )
+            # Stash the un-packed (dim, width) weight so the speculative-decode
+            # GDN path (which uses torch conv, not the AMX kernel) can use it.
+            layer._cpu_unpacked_conv_weight = unpacked
+            layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
 
@@ -253,6 +288,10 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
+            is_prepacked,
+        )
         return
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
@@ -266,6 +305,9 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
+        )
         return
     elif (
         ops._supports_onednn
@@ -277,6 +319,7 @@ def dispatch_cpu_unquantized_gemm(
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
                 layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            logger.debug_once("CPU unquantized GEMM dispatch: using oneDNN onednn_mm")
             return
         except RuntimeError as e:
             logger.warning_once(
@@ -287,6 +330,9 @@ def dispatch_cpu_unquantized_gemm(
     # fallback case
     layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
         x, weight, bias
+    )
+    logger.debug_once(
+        "CPU unquantized GEMM dispatch: using torch.nn.functional.linear (fallback)"
     )
 
 

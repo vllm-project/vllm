@@ -133,6 +133,7 @@ class VLMTestInfo(NamedTuple):
 
     # Exposed options for HF runner
     hf_model_kwargs: dict[str, Any] | None = None
+    hf_processor: Callable[[str], Any] | None = None
     # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
     auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM
@@ -196,6 +197,7 @@ class VLMTestInfo(NamedTuple):
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
             "hf_model_kwargs": self.hf_model_kwargs,
+            "hf_processor": self.hf_processor,
             "stop_str": self.stop_str,
             "patch_hf_runner": self.patch_hf_runner,
         }

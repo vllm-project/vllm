@@ -96,7 +96,7 @@ class VisualTokenizer(torch.nn.Module):
         self.backbone = self._init_backbone(
             config=config,
             quant_config=quant_config,
-            prefix=f"{prefix}.backbone",
+            prefix=maybe_prefix(prefix, "backbone"),
         )
         # reserved tokens for IMAGE_INDICATORS
         head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)
@@ -442,7 +442,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
             self.visual_tokenizer = VisualTokenizer(
                 config=config.visual_tokenizer_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.visual_tokenizer",
+                prefix=maybe_prefix(prefix, "visual_tokenizer"),
             )
             self.vte = VisualEmbedding(
                 self.config.visual_tokenizer_config.vocab_size, self.config.hidden_size

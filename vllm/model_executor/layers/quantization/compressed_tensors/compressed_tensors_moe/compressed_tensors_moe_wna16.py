@@ -10,7 +10,8 @@ from compressed_tensors.quantization import (
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -47,7 +48,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # grouped actorder isn't supported by this kernel
         assert weight_quant.actorder != "group"
         assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
+            "Only symmetric quantization is supported for MoE. "
+            "Try --moe-backend emulation."
         )
 
     def create_weights(
@@ -96,6 +98,21 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
+            if hidden_size % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 MoE requires hidden_size "
+                    f"({hidden_size}) to be divisible by group_size "
+                    f"({self.group_size})."
+                )
+            if intermediate_size_per_partition % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 MoE with static group scales "
+                    "requires the MoE intermediate size per tensor-parallel "
+                    f"partition ({intermediate_size_per_partition}) to be "
+                    f"divisible by group_size ({self.group_size}). Scale "
+                    "groups would otherwise cross TP shard boundaries; use a "
+                    "compatible TP size or enable expert parallelism."
+                )
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
@@ -240,10 +257,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
@@ -254,7 +272,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
