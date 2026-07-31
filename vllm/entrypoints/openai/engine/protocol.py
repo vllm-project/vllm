@@ -139,11 +139,8 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     # schema is the field in openai but that causes conflicts with pydantic so
     # instead use json_schema with an alias
     json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
-    # strict defaults to true: guided decoding constrains the output to the
-    # schema. strict=false applies no grammar constraint, but the schema may
-    # still be rendered into the prompt by chat templates that consume
-    # response_format. StrictBool rejects non-boolean values (e.g. "yes")
-    # with a 400 instead of coercing them.
+    # StrictBool rejects non-boolean values (e.g. "yes") with a 400 instead
+    # of coercing them.
     strict: StrictBool | None = None
 
 

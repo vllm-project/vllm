@@ -39,17 +39,35 @@ def _convert_developer_to_system(
     """Map ``developer`` messages to ``system`` for K3's chat encoding.
 
     K3's ``encoding_k3`` only recognizes ``system`` and silently drops other
-    roles. Unlike the HF renderer's variant, ``tools`` is kept: K3 renders a
-    tools-carrying system message as a dynamic tool declare.
+    roles. A system message carrying ``tools`` is rendered as a dynamic tool
+    declare with its content ignored, so a developer message with BOTH
+    content and tools is split in two (declare first, content second),
+    matching the Rust frontend.
     """
-    return [
-        (
-            {**msg, "role": "system"}  # type: ignore[misc]
-            if msg["role"] == "developer"
-            else msg
+    converted: list[ConversationMessage] = []
+    for msg in conversation:
+        if msg["role"] != "developer":
+            converted.append(msg)
+            continue
+        content = msg.get("content")
+        has_content = bool(
+            content
+            if isinstance(content, str)
+            else (content is not None and content != [])
         )
-        for msg in conversation
-    ]
+        if has_content and msg.get("tools"):
+            converted.append(
+                {"role": "system", "tools": msg["tools"]}  # type: ignore[misc]
+            )
+            converted.append(
+                {
+                    **{k: v for k, v in msg.items() if k != "tools"},
+                    "role": "system",
+                }  # type: ignore[misc]
+            )
+        else:
+            converted.append({**msg, "role": "system"})  # type: ignore[misc]
+    return converted
 
 
 def _drop_null_tool_fields(tools: Any) -> Any:
@@ -97,17 +115,26 @@ def _preserve_malformed_tool_arguments(
                 function = tool_call.get("function")
                 if isinstance(function, dict):
                     arguments = function.get("arguments")
-                    if isinstance(arguments, str) and arguments.strip():
-                        try:
-                            json.loads(arguments)
-                        except json.JSONDecodeError:
+                    if isinstance(arguments, str):
+                        if not arguments.strip():
+                            # Whitespace-only arguments read as a non-empty
+                            # string downstream and fail json.loads; K3 treats
+                            # them as empty arguments.
                             tool_call = {
                                 **tool_call,
-                                "function": {
-                                    **function,
-                                    "arguments": json.dumps(arguments),
-                                },
+                                "function": {**function, "arguments": "{}"},
                             }
+                        else:
+                            try:
+                                json.loads(arguments)
+                            except json.JSONDecodeError:
+                                tool_call = {
+                                    **tool_call,
+                                    "function": {
+                                        **function,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
             new_calls.append(tool_call)
         preserved.append({**message, "tool_calls": new_calls})  # type: ignore[typeddict-item]
     return preserved

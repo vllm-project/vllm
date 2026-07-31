@@ -448,6 +448,27 @@ def test_preserve_malformed_tool_arguments_helper():
     assert calls[2]["function"]["arguments"] == {"x": 1}
 
 
+def test_preserve_malformed_tool_arguments_whitespace_only():
+    # Whitespace-only arguments are normalized to empty arguments instead of
+    # failing json.loads downstream (K3 treats them as empty).
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "a",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "  \n "},
+                },
+            ],
+        },
+    ]
+
+    (out,) = _preserve_malformed_tool_arguments(messages)
+    assert out["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
 def test_render_messages_preserves_malformed_tool_arguments():
     """Malformed tool-call arguments round-trip to K3's encoding byte-exact.
 
@@ -533,9 +554,42 @@ def test_render_messages_converts_developer_to_system():
 
     assert prompt == {"prompt_token_ids": [1, 2]}
     sent = tokenizer.conversations[-1]
-    assert sent[0]["role"] == "system"
-    assert sent[0]["content"] == "be terse"
-    assert sent[0]["tools"] == tools
+    # A developer message with BOTH content and tools is split in two
+    # (declare first, content second): the encoding renders a system
+    # message with tools as a tool-declare and would drop the content.
+    assert sent[0] == {"role": "system", "tools": tools}
+    assert sent[1] == {"role": "system", "content": "be terse"}
+
+
+def test_render_messages_converts_developer_without_tools_to_single_system():
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, prompt = renderer.render_messages(
+        [{"role": "developer", "content": "be terse"}],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    assert sent[0] == {"role": "system", "content": "be terse", "tools": None}
+    assert len(sent) == 1
+
+
+def test_render_messages_converts_developer_tools_without_content_to_single():
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+    tools = [{"type": "function", "function": {"name": "search"}}]
+
+    conversation, prompt = renderer.render_messages(
+        [{"role": "developer", "tools": tools}],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    assert sent[0] == {"role": "system", "content": "", "tools": tools}
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio

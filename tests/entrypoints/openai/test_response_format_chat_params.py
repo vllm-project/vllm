@@ -171,3 +171,13 @@ class TestResponsesResponseFormatForwarding:
         request = self._build_responses_request()
         params = request.build_chat_params(None, "auto")
         assert params.response_format is None
+
+    def test_explicit_text_format_forwarded(self):
+        # Explicit type=text stays a real value so it overrides a conflicting
+        # chat_template_kwargs response_format instead of vanishing into None.
+        request = self._build_responses_request(
+            text={"format": {"type": "text"}},
+            chat_template_kwargs={"response_format": {"type": "json_object"}},
+        )
+        params = request.build_chat_params(None, "auto")
+        assert params.response_format == {"type": "text", "json_schema": None}

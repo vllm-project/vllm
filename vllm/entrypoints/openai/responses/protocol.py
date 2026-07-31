@@ -140,6 +140,11 @@ def _text_format_to_chat_response_format(
         }
     if fmt.type == "json_object":
         return {"type": "json_object", "json_schema": None}
+    if fmt.type == "text":
+        # Keep the explicit field instead of returning None: otherwise a
+        # conflicting chat_template_kwargs entry would survive and still
+        # inject formatting for renderers that consume response_format.
+        return {"type": "text", "json_schema": None}
     return None
 
 
