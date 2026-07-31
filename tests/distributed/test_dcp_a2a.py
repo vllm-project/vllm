@@ -110,15 +110,13 @@ class TestDCPCommBackendConfig:
         config.set_dcp_defaults()
         assert config.dcp_comm_backend == "ag_rs"
 
-    def test_a2a_requires_dcp_greater_than_1(self):
-        """A2A backend requires decode_context_parallel_size > 1."""
-        with pytest.raises(
-            ValueError, match="requires decode_context_parallel_size > 1"
-        ):
-            ParallelConfig(
-                dcp_comm_backend="a2a",
-                decode_context_parallel_size=1,
-            )
+    def test_a2a_with_dcp_1_is_inert(self):
+        """A2A with DCP disabled is accepted; the DCP paths stay off."""
+        config = ParallelConfig(
+            dcp_comm_backend="a2a",
+            decode_context_parallel_size=1,
+        )
+        assert config.dcp_comm_backend == "a2a"
 
     def test_a2a_with_dcp_valid(self):
         """A2A backend is valid when DCP > 1."""

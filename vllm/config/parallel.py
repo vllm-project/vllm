@@ -557,11 +557,6 @@ class ParallelConfig:
                 f"{sorted({1, pcp, tp * pcp})}."
             )
 
-        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
-            raise ValueError(
-                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
-            )
-
         return self
 
     def set_dcp_defaults(
