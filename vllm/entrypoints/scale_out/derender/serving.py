@@ -148,6 +148,13 @@ class ServingDerender(BaseServing):
         if bounds_error is not None:
             return bounds_error
 
+        if self.online_derenderer.parser is not None and request.chat_request is None:
+            return self.create_error_response(
+                "chat_request is required when a tool or reasoning parser is "
+                "configured because plain detokenization would leak raw parser "
+                "markup into content."
+            )
+
         try:
             choices = await self.online_derenderer.derender_chat(
                 request.generate_response, request.chat_request
@@ -256,13 +263,57 @@ class ServingDerender(BaseServing):
 
         Processes one ``GenerateStreamResponse`` chunk and returns the
         derendered chunk together with the updated client carried state.
-
-        ``parser is None`` or no ``chat_request`` until reasoning/tool call
-        functionality added in future PR.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if self.online_derenderer.parser is not None and request.chat_request is None:
+            return self.create_error_response(
+                "chat_request is required when a tool or reasoning parser is "
+                "configured because plain detokenization would leak raw parser "
+                "markup into content."
+            )
+
+        if (
+            self.online_derenderer.parser is not None
+            and request.prompt_token_ids is None
+        ):
+            return self.create_error_response(
+                "prompt_token_ids is required when a tool or reasoning "
+                "parser is configured. Without it parse_delta cannot tell "
+                "whether the prompt left reasoning open (e.g. a chat "
+                "template that pre-opens <think>) and would misclassify "
+                "reasoning content as plain content."
+            )
+
+        # Each streamed chunk contains at most one choice per SSE event.
+        # A single DerenderStreamState is threaded
+        # through every choice in the chunk, so >1 would corrupt detok/parser
+        # state across choices. See the matching check in
+        # OnlineDerenderer.derender_chat_stream which this fails ahead of to
+        # avoid touching the tokenizer at all on a malformed chunk.
+        num_choices = len(request.generate_chunk.choices)
+        if num_choices > 1:
+            return self.create_error_response(
+                f"derender_chat_stream expects at most one choice per chunk "
+                f"(got {num_choices})."
+            )
+
+        prior_len = (
+            len(request.stream_state.output_token_ids)
+            if request.stream_state is not None
+            else 0
+        )
+        delta_len = sum(
+            len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+        )
+        max_model_len = self.model_config.max_model_len
+        if prior_len + delta_len > max_model_len:
+            return self.create_error_response(
+                f"output_token_ids length ({prior_len}) plus delta "
+                f"({delta_len}) exceeds max_model_len ({max_model_len})."
+            )
 
         try:
             chunk, updated_state = await self.online_derenderer.derender_chat_stream(
@@ -271,14 +322,19 @@ class ServingDerender(BaseServing):
                 state=request.stream_state,
                 chat_request=request.chat_request,
                 prompt_tokens=request.prompt_tokens,
+                prompt_token_ids=request.prompt_token_ids,
             )
-        except NotImplementedError as exc:
-            return self.create_error_response(exc)
         except ValueError as exc:
             return self.create_error_response(str(exc))
-        except (KeyError, IndexError) as exc:
+        except Exception as exc:
+            # stream_state and on the parser path, the parser state
+            # is rebuilt by replaying it is entirely client controlled.
+            # Hermes swallows its own streaming exceptions but
+            # finalize_generation and engine-based parsers don't, so an
+            # unexpected parser failure on malformed (but well typed) state
+            # must surface as a 400 here rather than an unhandled 500.
             return self.create_error_response(
-                f"invalid stream_state: detokenization failed ({exc!r})"
+                f"invalid stream_state: derender failed ({exc!r})"
             )
 
         logger.debug(

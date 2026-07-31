@@ -957,8 +957,10 @@ async def test_e2e_parsed_reasoning_and_tool_call(parser_client, parser_tokenize
 
 
 @pytest.mark.asyncio
-async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
-    """Without chat_request, derender falls back to plain detokenization."""
+async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
+    """Without chat_request a parser configured model rejects with 400
+    rather than silently falling back to plain detokenization. This is to
+    prevent the leak of raw reasoning/tool markup into content."""
     messages = [{"role": "user", "content": "Hello"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -973,9 +975,8 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
             "prompt_tokens": len(gen_req["token_ids"]),
         },
     )
-    assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "Hi" in content
+    assert resp.status_code == 400
+    assert "chat_request" in resp.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
