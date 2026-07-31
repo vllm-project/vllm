@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
@@ -59,30 +60,49 @@ def _make_model_config(vocab_size: int):
     return model_config
 
 
-def test_validate_trace_decode_token_ids_accepts_in_vocab():
+def test_validate_trace_replay_accepts_in_vocab():
     params = SamplingParams(trace_decode_token_ids=[0, 50, 99])
     # Should not raise.
-    params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+    params._validate_trace_replay(
+        _make_model_config(vocab_size=100), speculative_config=None
+    )
 
 
-def test_validate_trace_decode_token_ids_rejects_out_of_vocab():
+def test_validate_trace_replay_rejects_out_of_vocab():
     # The non-negative check passes at construction, but the token id exceeds
     # the vocabulary; verify() must reject it before it reaches the sampler.
     params = SamplingParams(trace_decode_token_ids=[0, 100])
     with pytest.raises(ValueError, match="out-of-vocab"):
-        params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
 
 
-def test_validate_trace_decode_token_ids_noop_when_unset():
+def test_validate_trace_replay_noop_when_unset():
     params = SamplingParams(max_tokens=4)
     # Should not raise when the field is unset.
-    params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+    params._validate_trace_replay(
+        _make_model_config(vocab_size=100), speculative_config=None
+    )
 
 
 def test_trace_decode_token_ids_rejects_speculative_decoding():
     params = SamplingParams(trace_decode_token_ids=[1])
     with pytest.raises(ValueError, match="not supported with speculative decoding"):
-        params._validate_spec_decode(object())
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=object()
+        )
+
+
+def test_trace_decode_token_ids_rejects_structured_outputs():
+    params = SamplingParams(
+        trace_decode_token_ids=[1],
+        structured_outputs=StructuredOutputsParams(json_object=True),
+    )
+    with pytest.raises(ValueError, match="not supported with structured outputs"):
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
 
 
 # ---------------------------------------------------------------------------

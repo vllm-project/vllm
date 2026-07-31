@@ -761,7 +761,7 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
-        self._validate_trace_decode_token_ids(model_config)
+        self._validate_trace_replay(model_config, speculative_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
@@ -852,10 +852,23 @@ class SamplingParams(
                 value=invalid_token_ids,
             )
 
-    def _validate_trace_decode_token_ids(self, model_config: ModelConfig) -> None:
-        """Validate trace_decode_token_ids are within vocabulary range."""
+    def _validate_trace_replay(
+        self,
+        model_config: ModelConfig,
+        speculative_config: SpeculativeConfig | None,
+    ) -> None:
+        """Validate trace replay request compatibility."""
         if self.trace_decode_token_ids is None:
             return
+
+        if speculative_config is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with speculative decoding."
+            )
+        if self.structured_outputs is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with structured outputs."
+            )
 
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
@@ -910,11 +923,6 @@ class SamplingParams(
     ) -> None:
         if speculative_config is None:
             return
-
-        if self.trace_decode_token_ids is not None:
-            raise ValueError(
-                "trace_decode_token_ids is not supported with speculative decoding."
-            )
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
