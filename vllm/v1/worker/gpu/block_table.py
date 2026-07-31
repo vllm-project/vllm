@@ -179,13 +179,9 @@ class BlockTables:
     def set_dummy_context(
         self, num_reqs: int, query_len: int, context_len: int, num_kv_blocks: int
     ) -> int:
-        """Give each dummy request a disjoint span of KV blocks.
-
-        Used when profiling step cost, so the profiled step reads a realistic
-        amount of cache instead of attending over nothing.
-
-        Returns:
-            The context length actually used, clamped to what the cache holds.
+        """
+        Give each dummy request a disjoint span of KV blocks.
+        Used when profiling step cost.
         """
         for bpk, block_size in zip(self.blocks_per_kv_block, self.kernel_block_sizes):
             capacity = (num_kv_blocks * bpk // num_reqs) * block_size
