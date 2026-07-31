@@ -732,7 +732,7 @@ RUN curl -k -O https://raw.githubusercontent.com/ROCm/vllm/refs/heads/gfx1250_be
 RUN pip3 uninstall -y triton && \
     git clone https://github.com/triton-lang/triton.git && \
     cd triton && \
-    git checkout c517f38c && \
+    git checkout 78420176f2d90c3270a48c9218e27e9b5d923c8d && \
     TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
 
 CMD ["/bin/bash"]
