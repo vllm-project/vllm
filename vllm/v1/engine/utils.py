@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+STARTUP_PROGRESS_LOG_PERIOD_S = 30
 
 
 class CoreEngineState(Enum):
@@ -1203,6 +1205,37 @@ def launch_core_engines(
         )
 
 
+def describe_failed_procs(
+    proc_manager: CoreEngineProcManager | None,
+    coord_process: Process | None,
+) -> str:
+    """Describe which local proc(s) exited, for engine startup failure errors.
+
+    A process's sentinel can become ready slightly before its exit code is
+    collectible, so calling ``finished_procs()`` directly at that moment can
+    race and report an empty dict, masking which process failed entirely
+    (the bare ``Failed core proc(s): {}`` in #48031 / #45626). Briefly join
+    the proc(s) whose sentinels fired so their exit codes become visible, and
+    fall back to naming them with an unknown exit code if the race persists.
+    """
+    procs: list[BaseProcess] = list(proc_manager.processes) if proc_manager else []
+    if coord_process is not None:
+        procs.append(coord_process)
+    exited = set(connection.wait([proc.sentinel for proc in procs], timeout=0))
+    finished: dict[str, int | str] = {}
+    for proc in procs:
+        if proc.exitcode is None and proc.sentinel in exited:
+            # Sentinel fired but the exit code isn't collected yet; reap it.
+            proc.join(timeout=1.0)
+        if proc.exitcode is not None:
+            finished[proc.name] = proc.exitcode
+        elif proc.sentinel in exited:
+            finished[proc.name] = "unknown"
+    if not finished:
+        return "Failed core proc(s): {}"
+    return f"Failed core proc(s): {finished}"
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     addresses: EngineZmqAddresses,
@@ -1231,6 +1264,8 @@ def wait_for_engine_startup(
             poller.register(sentinel, zmq.POLLIN)
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+    wait_start = time.monotonic()
+    next_progress_log = wait_start + STARTUP_PROGRESS_LOG_PERIOD_S
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
@@ -1244,16 +1279,30 @@ def wait_for_engine_startup(
                     "Waiting for %d local, %d remote core engine proc(s) to start.",
                     *start_pending,
                 )
+            # Periodically surface progress at INFO level so a long startup is
+            # attributable (slow weight loading, cold JIT kernel compilation on
+            # first load, ...) rather than looking like a silent hang.
+            now = time.monotonic()
+            if now >= next_progress_log:
+                next_progress_log = now + STARTUP_PROGRESS_LOG_PERIOD_S
+                logger.info(
+                    "Still waiting for engine core proc(s) to start after %.0fs "
+                    "(%d local, %d remote pending). Large models can spend a "
+                    "long time here loading weights or JIT-compiling kernels "
+                    "on first load (e.g. cold FlashInfer cache).",
+                    now - wait_start,
+                    conn_pending[0] + start_pending[0],
+                    conn_pending[1] + start_pending[1],
+                )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
             # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
-            if coord_process is not None and coord_process.exitcode is not None:
-                finished[coord_process.name] = coord_process.exitcode
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
-                f"Failed core proc(s): {finished}"
+                f"{describe_failed_procs(proc_manager, coord_process)} "
+                f"(startup had been in progress for "
+                f"{time.monotonic() - wait_start:.0f}s)"
             )
 
         # Receive HELLO and READY messages from the input socket.
