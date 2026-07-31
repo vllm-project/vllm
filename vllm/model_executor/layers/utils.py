@@ -184,7 +184,11 @@ def rocm_unquantized_gemm_impl(
 
     if use_skinny:
         x_view = x.reshape(-1, x.size(-1))
-        if m > 8 and 0 < n <= 5:
+        # wvSplitK has no cost model, and two shape regimes measured on gfx950
+        # lose to the fallback GEMM: n == 5 at large m (0.27x at m=20480
+        # k=7168) and tall-skinny m from n >= 2 (0.07x at m=163840 k=256).
+        wvsplitk_regresses = on_gfx950() and ((n >= 5 and m >= 8192) or (m >= 100000))
+        if m > 8 and 0 < n <= 5 and not wvsplitk_regresses:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
