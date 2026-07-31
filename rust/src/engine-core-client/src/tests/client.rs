@@ -476,7 +476,6 @@ fn multipart_logprob_output_frames(request_id: &str) -> Vec<bytes::Bytes> {
             ]),
             Value::Nil,
             Value::Nil,
-            Value::Nil,
             Value::from(EngineCoreFinishReason::Length as u8),
         ])]),
         Value::Nil,
