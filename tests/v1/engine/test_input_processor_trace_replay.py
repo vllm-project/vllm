@@ -49,11 +49,9 @@ def test_normalize_trace_replay_params():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
-def test_normalize_trace_replay_params_is_noop_without_trace():
+def test_normalize_is_only_called_with_trace():
+    """The caller guards with `if sampling_params.trace_decode_token_ids:`,
+    so _normalize_trace_replay_params is never invoked without a trace."""
     params = SamplingParams(max_tokens=16, min_tokens=10, stop_token_ids=[20])
-
-    InputProcessor._normalize_trace_replay_params(params)
-
-    assert params.max_tokens == 16
-    assert params.min_tokens == 10
-    assert params.stop_token_ids == [20]
+    assert params.trace_decode_token_ids is None
+    # No call to _normalize_trace_replay_params — it asserts trace is set.

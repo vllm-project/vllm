@@ -37,19 +37,28 @@ def test_sampling_params_trace_field_preserved_by_clone():
 
 
 def test_sampling_params_trace_field_rejects_empty_list():
+    params = SamplingParams(trace_decode_token_ids=[])
     with pytest.raises(ValueError, match="non-empty"):
-        SamplingParams(trace_decode_token_ids=[])
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
 
 
 def test_sampling_params_trace_field_requires_single_output():
+    params = SamplingParams(n=2, trace_decode_token_ids=[1])
     with pytest.raises(ValueError, match="requires n=1"):
-        SamplingParams(n=2, trace_decode_token_ids=[1])
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
 
 
 @pytest.mark.parametrize("invalid_ids", [[-1, 5], [1, "2"]])
 def test_sampling_params_trace_field_rejects_invalid_token_ids(invalid_ids):
+    params = SamplingParams(trace_decode_token_ids=invalid_ids)
     with pytest.raises(ValueError, match="non-negative integers"):
-        SamplingParams(trace_decode_token_ids=invalid_ids)
+        params._validate_trace_replay(
+            _make_model_config(vocab_size=100), speculative_config=None
+        )
 
 
 def _make_model_config(vocab_size: int):
