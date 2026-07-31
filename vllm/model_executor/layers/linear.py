@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -29,7 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import (
-    dispatch_unquantized_gemm,
+    select_unquantized_gemm_impl,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -166,6 +167,10 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    @cached_property
+    def _gemm_impl(self) -> Callable[..., torch.Tensor]:
+        return select_unquantized_gemm_impl()
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -209,7 +214,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
 
 
 class LinearBase(PluggableLayer):
