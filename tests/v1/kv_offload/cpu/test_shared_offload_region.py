@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -610,3 +611,118 @@ def test_wait_for_file_size_timeout(tmp_path):
             _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
+
+
+def test_wait_for_file_size_fails_when_file_is_unlinked(tmp_path):
+    """A joiner must not wait on an inode removed by a failed creator."""
+    path = tmp_path / "unlinked.mmap"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    os.unlink(path)
+    try:
+        with pytest.raises(FileNotFoundError, match="removed"):
+            _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Constructor — capacity validation
+# ---------------------------------------------------------------------------
+
+
+def test_insufficient_space_raises_clear_error(monkeypatch):
+    """A failed creator capacity check must clean up and give a clear error."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_open = MagicMock(return_value=9999)
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+        ),
+    )
+
+    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
+    with pytest.raises(RuntimeError, match="kv_connector_extra_config"):
+        obj.__init__(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+    assert obj.fd is None
+
+
+def test_ftruncate_failure_cleans_up_creator(monkeypatch):
+    """A failed creator ftruncate must close and unlink before re-raising."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(
+        region.os,
+        "ftruncate",
+        MagicMock(side_effect=OSError("ftruncate failed")),
+    )
+
+    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
+    with pytest.raises(OSError, match="ftruncate failed"):
+        obj.__init__(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+    assert obj.fd is None
+
+
+def test_joiner_wait_failure_closes_fd(monkeypatch):
+    """A joiner must close its fd when creator initialization fails."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    mock_open = MagicMock(
+        side_effect=[FileExistsError(17, "File exists"), 9999],
+    )
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(
+        region,
+        "_wait_for_file_size",
+        MagicMock(side_effect=FileNotFoundError("creator removed mmap file")),
+    )
+
+    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
+    with pytest.raises(FileNotFoundError, match="creator removed"):
+        obj.__init__(
+            engine_id=str(uuid.uuid4()),
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_close.assert_called_once_with(9999)
+    assert obj.fd is None

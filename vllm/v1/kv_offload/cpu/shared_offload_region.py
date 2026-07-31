@@ -6,6 +6,9 @@ import time
 
 import torch
 
+from vllm.distributed.device_communicators.shm_broadcast import (
+    check_shm_free_space,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -16,8 +19,14 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
     while True:
-        if os.fstat(fd).st_size >= expected_size:
+        stat = os.fstat(fd)
+        if stat.st_size >= expected_size:
             return
+        if stat.st_nlink == 0:
+            raise FileNotFoundError(
+                "mmap file was removed before reaching "
+                f"the expected size of {expected_size} bytes"
+            )
         if time.monotonic() > deadline:
             raise TimeoutError(
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
@@ -61,22 +70,66 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        # Capacity check is a creator-path concern: only the worker that
+        # wins O_EXCL needs to reserve the region, so only that worker
+        # asks "is there enough space?". Doing this after O_EXCL avoids
+        # spurious failures on joiners who arrive after the creator has
+        # already populated the file (their cap check would see reduced
+        # free and fail, even though they have nothing to reserve).
         try:
-            # Exclusive create — only one worker succeeds
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
             )
-            os.ftruncate(self.fd, self.total_size_bytes)
-            self._creator = True
+        except FileExistsError:
+            # Joiner path — another worker won O_EXCL. Reopen and wait
+            # for the file to reach expected size.
+            self.fd = os.open(self.mmap_path, os.O_RDWR)
+            try:
+                _wait_for_file_size(self.fd, self.total_size_bytes)
+            except Exception:
+                fd = self.fd
+                self.fd = None
+                if fd is not None:
+                    os.close(fd)
+                raise
+            logger.info("Opened existing mmap file %s", self.mmap_path)
+        else:
+            # Creator path. We won O_EXCL, so we own the file: any
+            # failure here must clean up so concurrent joiners don't
+            # land on a 0-byte stub and spin in _wait_for_file_size
+            # for the full 30 s timeout.
             logger.info(
                 "Created mmap file %s (%.2f GB)",
                 self.mmap_path,
                 self.total_size_bytes / 1e9,
             )
-        except FileExistsError:
-            self.fd = os.open(self.mmap_path, os.O_RDWR)
-            _wait_for_file_size(self.fd, self.total_size_bytes)
-            logger.info("Opened existing mmap file %s", self.mmap_path)
+            try:
+                check_shm_free_space(self.total_size_bytes)
+                os.ftruncate(self.fd, self.total_size_bytes)
+            except (RuntimeError, OSError) as e:
+                try:
+                    os.unlink(self.mmap_path)
+                except OSError:
+                    logger.warning(
+                        "Failed to unlink mmap file %s",
+                        self.mmap_path,
+                        exc_info=True,
+                    )
+                fd = self.fd
+                self.fd = None
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        logger.warning("Failed to close fd %s", fd, exc_info=True)
+                if isinstance(e, RuntimeError):
+                    raise RuntimeError(
+                        f"{e} Reduce the CPU KV offloading capacity by lowering "
+                        "`--kv-offloading-size`, or `cpu_bytes_to_use` in "
+                        "`kv_connector_extra_config`."
+                    ) from e
+                raise
+            self._creator = True
 
         self.mmap_obj: mmap.mmap | None = mmap.mmap(
             self.fd,
