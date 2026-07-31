@@ -176,13 +176,14 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
-        # uses the unfused activation path. The fused kernel reads packed w13
-        # (gate = first half, up = second half), so it implements the
-        # *uninterleaved* SwiGLU-OAI variant.
+        # and situ use the unfused activation path. The fused kernel reads
+        # packed w13 (gate = first half, up = second half), so it implements
+        # the *uninterleaved* SwiGLU-OAI variant.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SITU,
         ]
 
     @staticmethod
