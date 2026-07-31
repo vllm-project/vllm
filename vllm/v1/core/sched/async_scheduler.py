@@ -60,7 +60,17 @@ class AsyncScheduler(Scheduler):
         # decrement them (it would underflow).
         if not is_stale:
             request.num_output_placeholders -= len(new_token_ids)
-            assert request.num_output_placeholders >= 0
+            if request.num_output_placeholders < 0:
+                logger.error(
+                    "num_output_placeholders underflow for request %s "
+                    "(%d after subtracting %d tokens); clamping to 0 and "
+                    "stopping request to avoid engine crash.",
+                    request.request_id,
+                    request.num_output_placeholders,
+                    len(new_token_ids),
+                )
+                request.num_output_placeholders = 0
+                request.status = RequestStatus.FINISHED_STOPPED
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
