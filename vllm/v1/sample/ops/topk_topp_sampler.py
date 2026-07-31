@@ -24,6 +24,7 @@ def _skip_aiter_sampler_on_gfx1250() -> bool:
 
     return on_gfx1250()
 
+
 def _aiter_topk_topp_unsupported_on_gfx942() -> bool:
     """AITER's ``top_k_top_p_sampling_from_probs`` is a gfx950-only prebuilt.
 
