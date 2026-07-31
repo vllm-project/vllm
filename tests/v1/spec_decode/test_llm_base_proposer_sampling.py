@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.platforms import current_platform
@@ -138,3 +140,20 @@ def test_parallel_draft_seeded_generators_are_deterministic_per_request():
     )
     assert out1.shape[0] == batch_size * k
     assert torch.equal(out1, out2)
+
+@pytest.mark.parametrize(
+    ("architecture", "expected"),
+    [
+        ("DeepSeekMTPModel", True),
+        ("KimiK3MTPModel", True),
+        ("MiniMaxM3ForCausalLM", False),
+    ],
+)
+def test_mtp_model_returns_tuple(architecture: str, expected: bool):
+    proposer = object.__new__(SpecDecodeBaseProposer)
+    proposer.method = "mtp"
+    proposer.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=[architecture])
+    )
+
+    assert proposer.model_returns_tuple() is expected

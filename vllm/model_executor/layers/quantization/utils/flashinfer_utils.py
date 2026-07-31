@@ -18,8 +18,22 @@ def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
 
+def has_flashinfer_situ_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "Situ")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
+
+    if activation == MoEActivation.SITU:
+        situ = getattr(ActivationType, "Situ", None)
+        if situ is None:
+            raise ValueError("The installed FlashInfer does not support SITU")
+        return situ
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -27,11 +41,11 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
         # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
-        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 

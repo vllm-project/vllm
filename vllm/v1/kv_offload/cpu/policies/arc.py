@@ -48,7 +48,7 @@ class ARCCachePolicy(CachePolicy):
     """
 
     def __init__(self, cache_capacity: int):
-        self.cache_capacity: int = cache_capacity
+        super().__init__(cache_capacity)
         self.target_t1_size: float = 0.0
         self.t1: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
         self.t2: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()

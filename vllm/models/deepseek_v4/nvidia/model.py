@@ -33,7 +33,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import (
@@ -764,7 +764,7 @@ class DeepseekV4MoE(nn.Module):
         self.physical_expert_start = self.experts_start_idx
         self.physical_expert_end = self.experts_end_idx
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -867,6 +867,7 @@ class DeepseekV4MoE(nn.Module):
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
         if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the MoERunner class
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,
@@ -1211,9 +1212,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes. Only allocate it
-        # when an MTP drafter can consume it; DSpark/DFlash use aux hidden
-        # states instead.
+        # refreshes it correctly across captured shapes. Allocated only when an
+        # MTP drafter can consume it: both readers of
+        # get_mtp_target_hidden_states() are gated on `method == "mtp"`, and the
+        # DFlash/DSpark speculators take aux hidden states instead. Upstream
+        # gates this on use_eagle() or uses_draft_model(), which also covers
+        # dspark/dflash/eagle and so reserves the buffer for drafters that never
+        # read it.
         if get_pp_group().is_last_rank and _needs_mtp_target_hidden_buffer(
             vllm_config
         ):

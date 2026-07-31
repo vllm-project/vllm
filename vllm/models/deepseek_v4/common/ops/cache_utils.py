@@ -717,34 +717,36 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
-    combined_indices: torch.Tensor | None = None,
-    combined_lens: torch.Tensor | None = None,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     combined_topk = sparse_prefill_combined_topk_size(topk, window_size)
-    if combined_indices is None:
+    if out is None:
         combined_indices = torch.full(
             (num_tokens, combined_topk),
             fill_value=-1,
             dtype=torch.int32,
             device=topk_indices.device,
         )
-    else:
-        assert combined_indices.shape[0] >= num_tokens
-        assert combined_indices.shape[1] >= combined_topk
-        assert combined_indices.dtype == torch.int32
-        assert combined_indices.device == topk_indices.device
-        combined_indices = combined_indices[:num_tokens, :combined_topk]
-        combined_indices.fill_(-1)
-    if combined_lens is None:
         combined_lens = torch.empty(
             num_tokens, dtype=torch.int32, device=topk_indices.device
         )
     else:
+        combined_indices, combined_lens = out
+        assert combined_indices.shape[0] >= num_tokens
+        assert combined_indices.shape[1] >= combined_topk
+        assert combined_indices.dtype == torch.int32
+        assert combined_indices.device == topk_indices.device
         assert combined_lens.shape[0] >= num_tokens
         assert combined_lens.dtype == torch.int32
         assert combined_lens.device == topk_indices.device
+        combined_indices = combined_indices[:num_tokens, :combined_topk]
         combined_lens = combined_lens[:num_tokens]
+        # The kernel does not write every column -- the no-out path relies on
+        # torch.full(-1) for exactly that reason -- so a caller-supplied buffer
+        # must be reset or stale rows from the previous step leak through as
+        # real indices.
+        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,

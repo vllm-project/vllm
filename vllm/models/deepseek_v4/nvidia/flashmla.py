@@ -25,7 +25,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     is_triton_sparse_mla_enabled,
     is_triton_sparse_mla_enabled_for_platform,
@@ -1124,8 +1124,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 top_k,
                 chunk_m,
                 chunk_n,
-                combined_indices=combined_indices_buffer,
-                combined_lens=combined_lens_buffer,
+                out=(combined_indices_buffer, combined_lens_buffer),
             )
             if triton_sparse_mla_enabled:
                 self._forward_sparse_mla_prefill_triton(

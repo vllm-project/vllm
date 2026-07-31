@@ -5,7 +5,11 @@
 from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
@@ -62,7 +66,11 @@ def build_offloading_config(
             OffloadingGroupConfig(
                 tokens_per_block=(
                     group.kv_cache_spec.block_size
-                    * parallel_config.decode_context_parallel_size
+                    * (
+                        parallel_config.decode_context_parallel_size
+                        if isinstance(group.kv_cache_spec, AttentionSpec)
+                        else 1
+                    )
                 ),
                 layer_names=tuple(group.layer_names),
                 compact_bytes_per_native_block_per_worker=compact_bytes,

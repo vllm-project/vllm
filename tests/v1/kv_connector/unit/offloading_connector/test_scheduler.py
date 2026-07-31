@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingManager,
     OffloadPolicy,
@@ -300,7 +301,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
 
     assert not tracker._pending_event_metadata
 
-    raw_events.append(OffloadingEvent(keys=[key], medium=MEDIUM_CPU, removed=False))
+    raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=False))
     events = list(runner.connector_scheduler.take_events())
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
@@ -321,7 +322,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     )
     assert key in tracker._pending_event_metadata
 
-    raw_events.append(OffloadingEvent(keys=[key], medium=MEDIUM_CPU, removed=True))
+    raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True))
     [event] = runner.connector_scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert event.medium == MEDIUM_CPU
@@ -356,7 +357,7 @@ def test_promotion_hit_precedes_stored_event_translation(
     raw_events: list[OffloadingEvent] = []
 
     def lookup(key, req_context):
-        raw_events.append(OffloadingEvent(keys=[key], medium=MEDIUM_CPU, removed=False))
+        raw_events.append(OffloadingEvent(keys=[key], medium=Medium.CPU, removed=False))
         return LookupResult.HIT
 
     def take_raw_events():

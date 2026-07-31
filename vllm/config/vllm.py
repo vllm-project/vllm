@@ -72,19 +72,48 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
         "LongcatFlashNgramForCausalLM",
         "Qwen2MoeForCausalLM",
     }
 )
 
+# Architectures that lack @support_torch_compile and are known-good under
+# breakable cudagraph. DeepSeek-V4 is deliberately absent -- see
+# _should_auto_enable_breakable_cudagraph for the measurement.
 _BREAKABLE_CUDAGRAPH_AUTO_ENABLE_ARCHITECTURES = frozenset(
     {
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
+        "KimiK3MTPModel",
+        "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
+
+# Architectures that default to V1 on ROCm: the V2 runner faults during the
+# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
+# TODO: fix V2 enablement
+ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "KimiK3ForConditionalGeneration",
+    }
+)
+
+
+@lru_cache
+def default_v2_model_runner_architectures() -> frozenset[str]:
+    """Architectures defaulting to the V2 model runner on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return (
+            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
+            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
+        )
+    return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
 class OptimizationLevel(IntEnum):
@@ -584,12 +613,17 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        # DSpark runs on BOTH the V1 and V2 GPU model runners. On our SM12x
-        # DeepSeek-V4 stack the V1 runner has correct long-context recall while
-        # V2 does not (V2 collapses under concurrency at long context), so DSpark
-        # is NOT force-routed to V2: it follows the normal runner selection (V1
-        # by default, since DeepSeek-V4 is not a default-V2 architecture). Opt
-        # into the V2 DSpark speculator explicitly with VLLM_USE_V2_MODEL_RUNNER=1.
+        # PCP runtime support is implemented only by the V2 model runner.
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            return True
+
+        # DSpark runs on BOTH the V1 and V2 GPU model runners. Upstream force-
+        # routes it to V2; we do not. On our SM12x DeepSeek-V4 stack the V1
+        # runner has correct long-context recall while V2 collapses under
+        # concurrency at long context, so DSpark follows the normal runner
+        # selection (V1 by default, since DeepSeek-V4 is not a default-V2
+        # architecture). Opt into the V2 DSpark speculator explicitly with
+        # VLLM_USE_V2_MODEL_RUNNER=1.
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
         # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
@@ -639,16 +673,20 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        if getattr(model_config, "is_hybrid", False):
+        architectures = getattr(model_config, "architectures", [])
+        default_architectures = default_v2_model_runner_architectures()
+        is_default_v2_architecture = any(
+            arch in default_architectures for arch in architectures
+        )
+
+        if getattr(model_config, "is_hybrid", False) and (
+            not is_default_v2_architecture
+        ):
             return False
 
         if getattr(model_config, "is_attention_free", False):
             return False
-        architectures = getattr(model_config, "architectures", [])
-        return (
-            any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
-            or not model_config.is_moe
-        )
+        return is_default_v2_architecture or not model_config.is_moe
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1475,6 +1513,11 @@ class VllmConfig:
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
+        elif self.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError(
+                "Prefill context parallelism requires Model Runner V2. "
+                "Remove VLLM_USE_V2_MODEL_RUNNER=0."
+            )
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -2283,14 +2326,6 @@ class VllmConfig:
 
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
-            assert block_size <= self.scheduler_config.max_num_batched_tokens, (
-                "In Mamba cache align mode, block_size "
-                f"({block_size}) must be <= "
-                "max_num_batched_tokens "
-                f"({self.scheduler_config.max_num_batched_tokens})."
-            )
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                assert self.scheduler_config.long_prefill_token_threshold >= block_size
             assert not self.scheduler_config.disable_chunked_mm_input, (
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "

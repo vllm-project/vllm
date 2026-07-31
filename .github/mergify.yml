@@ -375,17 +375,19 @@ pull_request_rules:
       add:
         - speculative-decoding
 
-- name: label-v1
-  description: Automatically apply v1 label
+- name: label-mrv2
+  description: Automatically apply mrv2 label
   conditions:
     - label != stale
     - or:
-      - files~=^vllm/v1/
-      - files~=^tests/v1/
+      # Model Runner V2 subtree. The trailing slash is required: the MRv1
+      # files (gpu_model_runner.py, gpu_worker.py, ...) sit one level up.
+      - files~=^vllm/v1/worker/gpu/
+      - title~=(?i)(?:\bmrv2\b|model[-\s]?runner[-\s]?v2)
   actions:
     label:
       add:
-        - v1
+        - mrv2
 
 - name: label-tpu
   description: Automatically apply tpu label

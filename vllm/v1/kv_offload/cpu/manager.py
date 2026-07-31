@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
-from typing import Literal
 
 from typing_extensions import override
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -33,12 +32,7 @@ from vllm.v1.kv_offload.cpu.fixed_page_allocator import (
 )
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
-from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-
-_CACHE_POLICIES: dict[str, type[CachePolicy]] = {
-    "lru": LRUCachePolicy,
-    "arc": ARCCachePolicy,
-}
+from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 
 # Policies that support compact variable-size eviction via evict_until.
 _COMPACT_SUPPORTED_POLICIES = frozenset({"lru", "arc"})
@@ -51,7 +45,9 @@ _COMPACT_SUPPORTED_POLICIES = frozenset({"lru", "arc"})
 
 class CPUOffloadingManager(OffloadingManager):
     """
-    An OffloadingManager with a pluggable CachePolicy (LRU or ARC).
+    An OffloadingManager with a pluggable CachePolicy, resolved by name via
+    CachePolicyFactory (built in: "lru", "arc"; external policies can either
+    register their own or be loaded out-of-tree via cache_policy_module_path).
 
     The manager owns all shared logic: ref-counting, event emission,
     block pool management, and the prepare_store/complete_store skeletons.
@@ -71,7 +67,8 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
-        cache_policy: Literal["lru", "arc"] = "lru",
+        cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
@@ -81,17 +78,14 @@ class CPUOffloadingManager(OffloadingManager):
         compact_cpu_budget_bytes: int | None = None,
         compact_page_size: int | None = None,
     ):
-        self.medium: str = MEDIUM_CPU
+        self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
-        policy_cls = _CACHE_POLICIES.get(cache_policy)
-        if policy_cls is None:
-            raise ValueError(
-                f"Unknown cache policy: {cache_policy!r}. "
-                f"Supported: {list(_CACHE_POLICIES)}"
-            )
+        policy_cls = CachePolicyFactory.get_cache_policy_cls(
+            cache_policy, cache_policy_module_path
+        )
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         # Track the number of blocks in the cache that are evictable. i.e. ref_cnt 0.
         self._num_evictable_cache_blocks: int = 0

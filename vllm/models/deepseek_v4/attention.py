@@ -22,9 +22,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
-    fused_q_kv_rmsnorm,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 
@@ -491,6 +491,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
 
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # MergedColumnParallelLinear returns (output, bias); bias is None.
+        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        return qr_kv
+
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
@@ -535,9 +540,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[2] = indexer_compressor_kv_score
 
         def fused_wqa_wkv() -> torch.Tensor:
-            # MergedColumnParallelLinear returns (output, bias); bias is None.
-            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
-            return qr_kv
+            return self._fused_wqa_wkv_gemm(hidden_states)
 
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
             fused_wqa_wkv,

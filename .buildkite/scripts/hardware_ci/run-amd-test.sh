@@ -387,6 +387,7 @@ initialize_native_environment() {
   local job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-local}}"
   local job_id_suffix=""
   local native_root=""
+  local hf_fstype=""
   local hf_mount=""
 
   if [[ "$(id -u)" -ne 0 ]]; then
@@ -435,6 +436,18 @@ initialize_native_environment() {
       echo "Native CI requires a persistent volume mounted at or above ${HF_HOME}" >&2
       return 1
     fi
+  fi
+
+  if command -v findmnt >/dev/null 2>&1; then
+    hf_fstype=$(findmnt -n -T "${HF_HOME}" -o FSTYPE 2>/dev/null || true)
+  fi
+  if [[ "${hf_fstype}" == nfs || "${hf_fstype}" == nfs4 ]]; then
+    # Keep hf-xet state local and avoid vectored writes on shared NFS.
+    export HF_XET_CACHE="${native_root}/cache/hf-xet"
+    export HF_XET_HIGH_PERFORMANCE=0
+    export HF_XET_RECONSTRUCTION_USE_VECTORED_WRITE=0
+    mkdir -p "${HF_XET_CACHE}" || return 1
+    echo "Configured hf-xet for shared ${hf_fstype} cache at ${HF_HOME}"
   fi
 }
 

@@ -265,6 +265,13 @@ class DeepseekV4FlashMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
+        active_topk_width = min(
+            max(
+                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
+                _C128A_TOPK_ALIGNMENT,
+            ),
+            self.c128a_max_compressed,
+        )
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -276,8 +283,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
             cm.slot_mapping,
             self.c128a_topk_buffer,
             self.c128a_decode_lens_buffer,
-            max_compressed_tokens=self.c128a_max_compressed,
-            max_seq_len=cm.max_seq_len,
+            max_compressed_tokens=active_topk_width,
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -305,105 +311,51 @@ def build_c128a_topk_metadata(
     topk_buffer: torch.Tensor,
     decode_lens_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
-    max_seq_len: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single kernel for all C128A tokens (decode + prefill).
 
     Decode tokens: position → block_table lookup → global slot ids + topk_lens.
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
-    Writes into pre-allocated buffers for CUDA graph address stability.
-    Returns slices of the buffers.
+    Writes into packed views of a pre-allocated buffer for CUDA graph stability.
+    Decode rows and prefill rows partition the same per-step token batch, so one
+    backing matrix is enough: decode takes the leading ``num_decode_tokens``
+    rows of the packed view and prefill the following ``num_prefill_tokens``.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
-    prefill_buffer = topk_buffer[num_decode_tokens:num_tokens]
 
-    if num_tokens == 0:
-        global_decode = topk_buffer[:num_decode_tokens, :0]
-        decode_lens = decode_lens_buffer[:num_decode_tokens]
-        prefill_local = prefill_buffer[:num_prefill_tokens, :0]
-        return global_decode, decode_lens, prefill_local
-
-    KERNEL_BLOCK_SIZE = 1024
-    # max_pos = largest absolute token position in the batch. Prefer the
-    # CPU-side max_seq_len (== max over per-request context lengths, already
-    # computed without a device sync) over positions.max().item(), which is a
-    # data-dependent device->host sync on the per-step C128A metadata hot path
-    # that serializes the launch stream and kills CPU/GPU overlap. max_seq_len
-    # is an upper bound on (max_pos + 1); effective_topk's 128-aligned ceiling
-    # makes feeding an upper bound buffer-safe (only rounds the width up within
-    # the finite set). Fall back to the device sync when it is unavailable.
-    if max_seq_len is not None:
-        max_pos = int(max_seq_len) - 1
-    else:
-        max_pos = int(positions.max().item())
-    effective_topk = _c128a_effective_topk_width(
-        max_pos=max_pos,
-        compress_ratio=compress_ratio,
-        max_compressed_tokens=max_compressed_tokens,
-        alignment=_C128A_TOPK_ALIGNMENT,
+    # view(-1) as a 1-d array, then carve out the two packed row ranges.
+    flat = topk_buffer.view(-1)
+    decode_end = num_decode_tokens * max_compressed_tokens
+    total_end = num_tokens * max_compressed_tokens
+    global_decode = flat[:decode_end].view(num_decode_tokens, max_compressed_tokens)
+    decode_lens = decode_lens_buffer[:num_decode_tokens]
+    prefill_local = flat[decode_end:total_end].view(
+        num_prefill_tokens, max_compressed_tokens
     )
 
-    global_decode = topk_buffer[:num_decode_tokens, :effective_topk]
-    decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer[:num_prefill_tokens, :effective_topk]
-
-    if num_decode_tokens > 0:
-        global_decode.fill_(-1)
-        decode_lens.zero_()
-    if num_prefill_tokens > 0:
-        prefill_local.fill_(-1)
-
-    if effective_topk == 0:
+    if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
-        topk_buffer,
-        topk_buffer.stride(0),
+        global_decode,
+        max_compressed_tokens,
         decode_lens_buffer,
-        prefill_buffer,
-        prefill_buffer.stride(0),
+        prefill_local,
+        max_compressed_tokens,
         positions,
         compress_ratio,
-        effective_topk,
+        max_compressed_tokens,
         num_decode_tokens,
         token_to_req_indices,
         block_table,
         block_table.stride(0),
         block_size,
         slot_mapping,
-        BLOCK_SIZE=KERNEL_BLOCK_SIZE,
+        BLOCK_SIZE=1024,
     )
     return global_decode, decode_lens, prefill_local
-
-
-def _c128a_effective_topk_width(
-    *,
-    max_pos: int,
-    compress_ratio: int,
-    max_compressed_tokens: int,
-    alignment: int,
-) -> int:
-    """Return the aligned C128A top-k width needed by ``max_pos``.
-
-    ``max_pos`` is the largest absolute token position in the batch. The width
-    is a 128-aligned ceiling clamped to ``max_compressed_tokens``, so passing an
-    upper bound for ``max_pos`` only ever rounds the width up within the same
-    finite set (buffer- and JIT-set-safe).
-    """
-    if max_pos < 0:
-        return 0
-    max_num_compressed = min(
-        max((max_pos + 1) // int(compress_ratio), 0),
-        int(max_compressed_tokens),
-    )
-    if max_num_compressed == 0:
-        return min(int(max_compressed_tokens), int(alignment))
-    return min(
-        int(max_compressed_tokens),
-        cdiv(max_num_compressed, int(alignment)) * int(alignment),
-    )
 
 
 @triton.jit

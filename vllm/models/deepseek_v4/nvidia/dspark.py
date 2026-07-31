@@ -675,7 +675,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
         self.ffn.finalize_mega_moe_weights()
 
 
-class DeepSeekV4DSpark(nn.Module):
+class DSparkDeepseekV4ForCausalLM(nn.Module):
     """DSpark draft model for fixed-block speculative decoding."""
 
     uses_query_start_loc_context_kv = True

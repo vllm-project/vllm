@@ -137,7 +137,10 @@ _TEXT_GENERATION_MODELS = {
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
-    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),
+    "KimiLinearForCausalLM": (
+        "vllm.models.kimi_k3",
+        "KimiLinearForCausalLM",
+    ),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
@@ -195,6 +198,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
+    "Qwen3_5ForCausalLM": ("qwen3_5", "Qwen3_5ForCausalLM"),
+    "Qwen3_5MoeForCausalLM": ("qwen3_5", "Qwen3_5MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
     "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
@@ -458,6 +463,10 @@ _MULTIMODAL_MODELS = {
     ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    "KimiK3ForConditionalGeneration": (
+        "vllm.models.kimi_k3",
+        "KimiK3ForConditionalGeneration",
+    ),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "MossTranscribeDiarizeForConditionalGeneration": (
         "moss_transcribe_diarize",
@@ -606,6 +615,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
+    "K3DSparkModel": (
+        "vllm.models.kimi_k3.nvidia.dspark_mla",
+        "K3DSparkForCausalLM",
+    ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -627,7 +640,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
-    "DeepSeekV4DSparkModel": ("vllm.models.deepseek_v4", "DeepSeekV4DSpark"),
+    "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
     "InklingMTPModel": ("vllm.models.inkling", "InklingMTP"),
@@ -647,6 +660,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
     "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
+    "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
@@ -797,6 +811,7 @@ class _ModelInfo:
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
+    supported_video_pruning_methods: tuple[str, ...]
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -827,6 +842,9 @@ class _ModelInfo:
                 supports_transcription(model) and model.supports_transcription_only
             ),
             has_noops=has_noops(model),
+            supported_video_pruning_methods=getattr(
+                model, "supported_video_pruning_methods", ()
+            ),
         )
 
 

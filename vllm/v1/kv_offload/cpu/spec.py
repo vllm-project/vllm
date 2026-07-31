@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import torch
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -21,6 +22,7 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
 
@@ -30,8 +32,7 @@ _COMPACT_PAGE_SIZE = 64 * 1024
 
 
 class CPUOffloadingSpec(OffloadingSpec):
-    BLOCK_SIZE_ALIGNMENT = 1
-    SUPPORTS_REPLICATED_LAYOUT = False
+    BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
 
     @classmethod
     def build_metric_definitions(
@@ -93,9 +94,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_blocks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
-        self.replicated_layout = (
-            config.replicated_layout and self.SUPPORTS_REPLICATED_LAYOUT
-        )
+        self.replicated_layout = config.replicated_layout and self._uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             num_copies = 1 if self.replicated_layout else world_size
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
@@ -124,6 +123,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.cache_policy_module_path: str | None = self.extra_config.get(
+            "cache_policy_module_path"
+        )
 
         # ---- Compact layout setup ----
         # Scheduler authority is the transported per-group aggregate charge.
@@ -225,6 +227,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 self._manager = CPUOffloadingManager(
                     num_blocks=self._compact_policy_capacity,
                     cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                    cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     store_threshold=store_threshold,
                     max_tracker_size=max_tracker_size,
@@ -236,12 +239,18 @@ class CPUOffloadingSpec(OffloadingSpec):
             else:
                 self._manager = CPUOffloadingManager(
                     num_blocks=self.num_blocks,
-                    cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                    cache_policy=self.eviction_policy,
+                    cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     store_threshold=store_threshold,
                     max_tracker_size=max_tracker_size,
                 )
         return self._manager
+
+    def _uses_shared_region(self) -> bool:
+        """Whether the worker CPU buffer is the shared mmap region (vs a private
+        per-rank tensor); replicated-layout dedup is gated on this being True."""
+        return current_platform.is_cuda_alike()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         if self._enable_compact_layout:
@@ -256,10 +265,30 @@ class CPUOffloadingSpec(OffloadingSpec):
                 compact_slice_accounting=self._compact_slice_accounting,
                 compact_cpu_budget_bytes_per_rank=self._compact_per_rank_budget,
             )
+
+        mmap_region: SharedOffloadRegion | None = None
+        # num_blocks == 0 would size the region to zero bytes, which cannot be
+        # mmap'd; fall back to the tensor path (empty tensors) as before.
+        if self._uses_shared_region() and self.num_blocks > 0:
+            # Replicated layout puts all ranks on slot 0 (single MLA copy);
+            # otherwise each rank takes its own slot by physical device index.
+            if self.replicated_layout:
+                rank = 0
+            else:
+                world_size = self.config.parallel.world_size
+                rank = torch.accelerator.current_device_index() % world_size
+            mmap_region = SharedOffloadRegion(
+                engine_id=self.config.engine_id,
+                num_blocks=self.num_blocks,
+                rank=rank,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+            )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
+            mmap_region=mmap_region,
         )
 
     @override
