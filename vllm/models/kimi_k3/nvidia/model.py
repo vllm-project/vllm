@@ -952,6 +952,10 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
+    # Aux taps are carried across pipeline stages in the IntermediateTensors
+    # payload, so EAGLE3-style drafting works under PP for this model.
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1041,14 +1045,19 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 cdiv(self.start_layer, self.attn_res_block_size),
                 self.config.hidden_size,
             )
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
-            }
+        tensors = {
+            "hidden_states": torch.zeros(
+                (batch_size, self.config.hidden_size), dtype=dtype, device=device
+            ),
+            "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
+        }
+        # Recv buffers for aux taps produced by earlier stages. Must match what
+        # pack_aux_hidden_states puts on the wire, since the PP transport sizes
+        # its buffers from this.
+        self.make_empty_aux_hidden_states(
+            tensors, batch_size, self.config.hidden_size, dtype, device
         )
+        return IntermediateTensors(tensors)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1074,7 +1083,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert hidden_states is not None
 
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if not get_pp_group().is_first_rank:
+            # A tap at exactly start_layer was computed by the previous stage
+            # and arrives with the intermediate tensors; recomputing it here
+            # would duplicate it.
+            aux_hidden_states = self.unpack_aux_hidden_states(intermediate_tensors)
+        elif self.start_layer in self.aux_hidden_state_layers:
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1136,9 +1150,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            # Forward the aux taps (this stage's plus any inherited from
+            # upstream) instead of dropping them, which is what made
+            # EAGLE3-style drafting impossible under pipeline parallelism.
+            self.pack_aux_hidden_states(tensors, aux_hidden_states)
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None

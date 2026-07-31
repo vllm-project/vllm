@@ -30,6 +30,8 @@ class PendingRecv:
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
+    # Draft proposals for the step this slot feeds, when spec decoding is on.
+    draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -44,7 +46,18 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
     # Exclude requests that we know are finished.
-    not_finishing = np.maximum(old_computed, prefill_len) + 1 < max_seq_len
+    # The scheduler advances num_computed_tokens by the full scheduled width
+    # (bonus + drafts) up front and only rolls the rejected part back in
+    # update_from_output, which under PP runs after the next batch has already
+    # been scheduled. Comparing the inflated count against max_seq_len would
+    # mark a request as finishing up to num_draft tokens early, after which the
+    # last rank stops broadcasting and the other ranks' last_sampled_tokens
+    # freeze, silently repeating a stale token. Discount the drafts: a
+    # redundant broadcast costs one small collective, a skipped one corrupts.
+    finish_computed = old_computed
+    if input_batch.num_draft_tokens_per_req is not None:
+        finish_computed = old_computed - input_batch.num_draft_tokens_per_req
+    not_finishing = np.maximum(finish_computed, prefill_len) + 1 < max_seq_len
     need_sampled_mask = produces_sample & not_finishing
     return need_sampled_mask if need_sampled_mask.any() else None
 
@@ -65,6 +78,7 @@ class PPHandler:
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
+        self.num_speculative_steps = num_speculative_steps
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
@@ -90,7 +104,9 @@ class PPHandler:
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
 
-    def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
+    def get_prev_sampled_outputs(
+        self,
+    ) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
@@ -116,12 +132,74 @@ class PPHandler:
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         self.main_stream.wait_event(slot.event)
-        return dict(
+        outputs = dict(
             sampled_tokens=slot.sampled_tokens,
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
         )
+        if slot.draft_tokens is not None:
+            # Scatter with the unfiltered mapping. A row whose request has since
+            # been freed writes to a slot nobody reads, and add_requests zeroes
+            # the row before any reuse, whereas the -1 sentinels in the filtered
+            # `idx_mapping` would alias the last row.
+            outputs["draft_update"] = (slot.draft_tokens, slot.idx_mapping)
+        return outputs
+
+    def broadcast_drafts(
+        self, draft_tokens: torch.Tensor, input_batch: InputBatch
+    ) -> None:
+        """Publish this step's proposals to the other PP ranks.
+
+        Only the last rank runs the drafter, but the first rank owns
+        embed_tokens and therefore builds the input embeddings for the whole
+        pipeline. Without this the non-last ranks embed the scheduler's
+        PLACEHOLDER_TOKEN_ID (-1) in the draft slots, and the last rank ends up
+        verifying real proposals against logits computed from placeholders.
+        """
+        assert self.is_last_rank
+        if compute_need_sampled_mask(input_batch) is None:
+            return
+        with torch.cuda.stream(self.broadcast_stream):
+            self.broadcast_stream.wait_stream(self.main_stream)
+            send = draft_tokens.contiguous()
+            torch.distributed.broadcast(
+                send, src=self.last_rank, group=self.broadcast_group
+            )
+            send.record_stream(self.broadcast_stream)
+
+    def receive_drafts(self, input_batch: InputBatch) -> None:
+        """Counterpart of `broadcast_drafts`.
+
+        Attaches to the slot `receive` just pushed so the proposals are
+        consumed at the same step as the sampled tokens they belong with. Both
+        sides gate on the same mask, so the wire order always matches.
+        """
+        assert not self.is_last_rank
+        if compute_need_sampled_mask(input_batch) is None:
+            return
+        num_reqs = input_batch.num_reqs
+        with torch.cuda.stream(self.broadcast_stream):
+            self.broadcast_stream.wait_stream(self.main_stream)
+            draft_tokens = torch.empty(
+                num_reqs,
+                self.num_speculative_steps,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            torch.distributed.broadcast(
+                draft_tokens, src=self.last_rank, group=self.broadcast_group
+            )
+            # Strictly later on broadcast_stream than the event `receive`
+            # recorded, so it also covers the sampled tensors. Replacing the
+            # slot's event keeps the consumer's single wait_event correct;
+            # waiting on the older event would not order this broadcast.
+            event = self.broadcast_stream.record_event()
+            draft_tokens.record_stream(self.main_stream)
+        slot = self.queue[-1]
+        if slot is not None:
+            slot.draft_tokens = draft_tokens
+            slot.event = event
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
@@ -186,8 +264,24 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            # receive() unconditionally allocates max_sample_len columns, but
+            # the non-spec sampler path (num_draft_tokens == 0) returns width 1,
+            # so an unpadded broadcast leaves the peer waiting on a larger count
+            # than the root sends. NCCL does not diagnose the mismatch: the root
+            # completes and the receiver hangs until the watchdog fires. Pad so
+            # both sides agree. post_update reads each row with
+            # sampled_tokens.stride(0) and stops at num_sampled, so the pad
+            # columns are never observed.
+            send_tokens = sampled_token_ids
+            width = send_tokens.shape[-1]
+            if width < self.max_sample_len:
+                padded = send_tokens.new_zeros(
+                    send_tokens.shape[0], self.max_sample_len
+                )
+                padded[:, :width] = send_tokens
+                send_tokens = padded
             torch.distributed.broadcast(
-                sampled_token_ids.contiguous(),
+                send_tokens.contiguous(),
                 src=self.last_rank,
                 group=self.broadcast_group,
             )

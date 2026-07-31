@@ -111,6 +111,7 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
+    supports_aux_hidden_states_over_pp,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -208,11 +209,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
-                if self.use_pp:
-                    raise ValueError(
-                        f"{self.speculative_config.method} with pipeline parallel "
-                        "is not supported."
-                    )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -315,6 +311,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
+                if self.use_pp and not supports_aux_hidden_states_over_pp(self.model):
+                    # The drafter runs on the last PP rank but taps layers that
+                    # may live on earlier stages, so the target must forward
+                    # those tensors along with its IntermediateTensors.
+                    raise ValueError(
+                        f"{self.speculative_config.method} with pipeline parallel "
+                        f"is not supported by {type(self.model).__name__}: it does "
+                        "not forward auxiliary hidden states across pipeline stages."
+                    )
+                pp_size = self.parallel_config.pipeline_parallel_size
+                if pp_size > 2:
+                    # The aux forwarding itself is size-agnostic: every stage
+                    # derives what it owes downstream from the same rule, and
+                    # the accounting is unit-tested up to pp=8. What has not
+                    # been exercised on hardware is a *middle* stage, which
+                    # pp>2 introduces and which must both adopt upstream taps
+                    # and contribute its own to the same payload. Given that
+                    # the failure mode of this feature is silently degraded
+                    # acceptance rather than a crash, refuse rather than let it
+                    # run unvalidated. Lifting this needs an end-to-end
+                    # acceptance-rate comparison at pp>2, not just a boot test.
+                    raise NotImplementedError(
+                        f"{self.speculative_config.method} with pipeline parallel "
+                        f"is currently supported only up to pipeline_parallel_size=2, "
+                        f"got {pp_size}."
+                    )
             if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.load_model(self.model)
                 eplb_models_added = self.eplb.maybe_register_speculator(
@@ -827,6 +849,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pp_handler is not None:
             outputs = self.pp_handler.get_prev_sampled_outputs()
             if outputs is not None:
+                # Land the proposals on the same step as the matching sampled
+                # tokens, so the next _prepare_inputs splices real draft ids
+                # into input_ids instead of placeholders.
+                draft_update = outputs.pop("draft_update", None)
+                if draft_update is not None:
+                    draft_tokens, draft_idx_mapping = draft_update
+                    self.req_states.draft_tokens[draft_idx_mapping] = draft_tokens
                 self.postprocess_sampled(**outputs)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
@@ -1466,6 +1495,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # sampled tokens broadcast from the last rank and update local state.
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(input_batch)
+            # Pair the last rank's post-propose draft send.
+            if self.num_speculative_steps > 0:
+                self.pp_handler.receive_drafts(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
@@ -1583,6 +1615,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
+            # The other PP ranks have no drafter, so hand them the proposals
+            # they must feed the target on the next step.
+            if self.pp_handler is not None:
+                self.pp_handler.broadcast_drafts(
+                    self.req_states.draft_tokens[input_batch.idx_mapping],
+                    input_batch,
+                )
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)

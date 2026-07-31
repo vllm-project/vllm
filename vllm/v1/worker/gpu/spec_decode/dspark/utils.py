@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import glob
+import json
+import os
+
+import torch
 import torch.nn as nn
+from safetensors import safe_open
 
 from vllm.config import VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+logger = init_logger(__name__)
 
 
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -42,9 +51,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
-    if get_pp_group().world_size != 1:
-        raise NotImplementedError("DSpark does not support pipeline parallelism.")
-
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
@@ -55,6 +61,13 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     target_embed = getattr(target_inner, "embed_tokens", None)
     draft_embed = getattr(draft_inner, "embed_tokens", None)
+    # Under PP the target's vocab embedding lives on the first stage, so on the
+    # last stage -- where the drafter runs -- there is only a PPMissingLayer to
+    # alias. PPMissingLayer.forward returns its input unchanged, which would
+    # feed raw int64 token ids into the draft backbone's norm. Load the real
+    # table from the target checkpoint instead.
+    if isinstance(target_embed, PPMissingLayer):
+        target_embed = _load_target_embed_tokens_for_pp(vllm_config)
     if target_embed is not None and _should_share(
         draft_model, "has_own_embed_tokens", draft_embed, target_embed
     ):
@@ -72,3 +85,69 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         draft_model.lm_head = target_lm_head
 
     return draft_model
+
+
+def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
+    """Build and load the target's vocab embedding on a non-first PP stage.
+
+    Mirrors the target's own construction (a VocabParallelEmbedding sharded over
+    the TP group) and loads the weight from the target checkpoint, which is
+    present in full on every node's model directory. Costs
+    vocab_size * hidden_size * dtype_size / tp_size bytes, e.g. 0.28 GiB per GPU
+    for a 163840 x 7168 bf16 table at TP8.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+    from vllm.platforms import current_platform
+
+    model_config = vllm_config.model_config
+    text_config = model_config.hf_text_config
+    model_dir = model_config.model
+
+    # Locate the embedding tensor: prefer the shard index, else scan the shards.
+    key = None
+    shard_path = None
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        for name, shard in weight_map.items():
+            if name.endswith("embed_tokens.weight"):
+                key = name
+                shard_path = os.path.join(model_dir, shard)
+                break
+    else:
+        for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+            with safe_open(path, framework="pt") as f:
+                # safe_open is not a dict and is not directly iterable.
+                for name in f.keys():  # noqa: SIM118
+                    if name.endswith("embed_tokens.weight"):
+                        key = name
+                        shard_path = path
+                        break
+            if key is not None:
+                break
+    if key is None:
+        raise RuntimeError(
+            "DSpark under pipeline parallelism needs the target's embed_tokens "
+            f"on the last stage, but no *embed_tokens.weight was found in "
+            f"{model_dir}"
+        )
+
+    with torch.device(current_platform.current_device()):
+        embed = VocabParallelEmbedding(
+            text_config.vocab_size,
+            text_config.hidden_size,
+            params_dtype=model_config.dtype,
+            prefix="dspark_pp.embed_tokens",
+        )
+    with safe_open(shard_path, framework="pt") as f:
+        embed.weight_loader(embed.weight, f.get_tensor(key))
+    logger.info(
+        "Loaded draft embed_tokens %s from %s (key %s) for PP",
+        tuple(embed.weight.shape),
+        os.path.basename(shard_path),
+        key,
+    )
+    return embed

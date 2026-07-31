@@ -1399,6 +1399,16 @@ class LocalArgmaxMixin:
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
+    # Whether this model forwards auxiliary hidden states across pipeline
+    # stages. EAGLE3-style drafting runs on the last PP rank but taps layers
+    # that may live on earlier stages, so those tensors have to ride along with
+    # the IntermediateTensors payload. Models opt in by implementing the
+    # `aux_hidden_states_over_pp` protocol below and setting this to True.
+    supports_aux_hidden_states_over_pp: ClassVar[bool] = False
+
+    # Key prefix for aux tensors carried in the IntermediateTensors payload.
+    AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
+
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = layers
 
@@ -1413,6 +1423,67 @@ class EagleModelMixin:
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states
+
+    def num_upstream_aux_hidden_states(self) -> int:
+        """How many aux tensors arrive from earlier pipeline stages.
+
+        Tap ids count *layers computed*, so a tap `a` is produced by the stage
+        whose window satisfies `start_layer < a <= end_layer`. Everything with
+        `a <= start_layer` was therefore produced upstream. Both sides derive
+        the count from the same rule, so send and recv agree with no
+        negotiation.
+        """
+        from vllm.distributed.parallel_state import get_pp_group
+
+        if get_pp_group().is_first_rank:
+            return 0
+        start_layer = getattr(self, "start_layer", 0)
+        return sum(1 for a in self.aux_hidden_state_layers if a <= start_layer)
+
+    def unpack_aux_hidden_states(
+        self, intermediate_tensors: "IntermediateTensors | None"
+    ) -> list[torch.Tensor]:
+        """Recover the aux tensors produced by earlier pipeline stages."""
+        if intermediate_tensors is None:
+            return []
+        out: list[torch.Tensor] = []
+        # IntermediateTensors has no __contains__, so consult the dict directly.
+        payload = intermediate_tensors.tensors
+        for i in range(self.num_upstream_aux_hidden_states()):
+            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+            if key not in payload:
+                break
+            out.append(payload[key])
+        return out
+
+    def pack_aux_hidden_states(
+        self,
+        tensors: dict[str, torch.Tensor],
+        aux_hidden_states: list[torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Add this stage's aux tensors (its own plus inherited) to the payload."""
+        for i, aux in enumerate(aux_hidden_states):
+            tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] = aux
+        return tensors
+
+    def make_empty_aux_hidden_states(
+        self,
+        tensors: dict[str, torch.Tensor],
+        batch_size: int,
+        hidden_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Pre-allocate recv buffers for the aux tensors arriving from upstream.
+
+        Must agree with `pack_aux_hidden_states` on the receiving stage, since
+        the PP transport sizes its buffers from this.
+        """
+        for i in range(self.num_upstream_aux_hidden_states()):
+            tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] = torch.zeros(
+                (batch_size, hidden_size), dtype=dtype, device=device
+            )
+        return tensors
 
 
 @runtime_checkable

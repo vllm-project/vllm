@@ -32,6 +32,23 @@ def set_eagle3_aux_hidden_state_layers(
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
 
 
+def supports_aux_hidden_states_over_pp(model: nn.Module) -> bool:
+    """Whether `model` carries its aux hidden states across pipeline stages.
+
+    EAGLE3-style drafting runs on the last PP rank but taps layers that may sit
+    on earlier stages, so the target has to forward those tensors with its
+    IntermediateTensors. Models that do opt in via
+    `EagleModelMixin.supports_aux_hidden_states_over_pp`.
+    """
+    parent_ref = model
+    if hasattr(model, "get_language_model"):
+        parent_ref = model.get_language_model()
+    elif hasattr(model, "language_model"):
+        parent_ref = model.language_model
+    inner = getattr(parent_ref, "model", None)
+    return bool(getattr(inner, "supports_aux_hidden_states_over_pp", False))
+
+
 def get_eagle3_aux_layers_from_config(
     spec_config: SpeculativeConfig,
 ) -> tuple[int, ...] | None:
