@@ -1026,6 +1026,53 @@ def test_fused_marlin_moe(
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("bad_dtype", [torch.bfloat16, torch.half])
+def test_fused_marlin_moe_rejects_non_fp32_topk_weights(bad_dtype):
+    """moe_wna16_marlin_gemm reads topk_weights as fp32.
+
+    Passing any other dtype used to be silently reinterpreted as float
+    (and read out of bounds for 2-byte dtypes), so the op must reject it.
+    """
+    import vllm._custom_ops as ops
+
+    e, m, n, k, topk = 4, 8, 64, 64, 2
+    moe_block_size = 16
+
+    def _dev(shape, dtype):
+        return torch.zeros(shape, device="cuda", dtype=dtype)
+
+    with pytest.raises(RuntimeError, match="topk_weights must be float"):
+        ops.moe_wna16_marlin_gemm(
+            _dev((m, k), torch.half),
+            None,
+            _dev((e, k // 16, n * 2), torch.int32),
+            None,
+            _dev((e, 1, n), torch.half),
+            None,
+            None,
+            None,
+            None,
+            None,
+            _dev((1024,), torch.int32),
+            _dev((m * topk,), torch.int32),
+            _dev((m * topk // moe_block_size + 1,), torch.int32),
+            _dev((1,), torch.int32),
+            _dev((m, topk), bad_dtype),
+            moe_block_size=moe_block_size,
+            top_k=topk,
+            mul_topk_weights=True,
+            b_q_type=scalar_types.uint4b8,
+            size_m=m,
+            size_n=n,
+            size_k=k,
+            is_k_full=True,
+            use_atomic_add=False,
+            use_fp32_reduce=True,
+            is_zp_float=False,
+        )
+
+
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.usefixtures("default_vllm_config")
