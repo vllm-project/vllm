@@ -11,6 +11,7 @@ import torch
 
 from tests.utils import requires_spawn_multiprocessing
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import (
@@ -61,7 +62,7 @@ class DummyLogitsProcessor(LogitsProcessor):
             "target_token"
         )
         if target_token is not None and not isinstance(target_token, int):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"target_token value {target_token} {type(target_token)} is not int"
             )
 
