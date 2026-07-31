@@ -11,7 +11,7 @@ namespace cpu_attention {
 
 namespace {
 
-#define BLOCK_SIZE_ALIGNMENT 32
+#define BLOCK_SIZE_ALIGNMENT 16
 #define HEAD_SIZE_ALIGNMENT 32
 #define MAX_Q_HEAD_NUM_PER_ITER 16
 
@@ -387,7 +387,7 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim, kv_cache_scalar_t> {
 };
 
 #ifdef ARM_BF16_SUPPORT
-// For BF16 on Arm, reuse the BFMMLA kernels with 32-token alignment.
+// For BF16 on Arm, reuse the BFMMLA kernels with the same token alignment.
 template <int64_t head_dim>
 class AttentionImpl<ISA::NEON, c10::BFloat16, head_dim, c10::BFloat16>
     : public AttentionImplNEONBFMMLA<BLOCK_SIZE_ALIGNMENT, ISA::NEON,
