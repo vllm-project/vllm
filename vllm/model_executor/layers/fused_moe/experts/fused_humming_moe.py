@@ -727,6 +727,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             outputs=output,
         )
 
+
 class HummingGroupedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -839,6 +840,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
         )
+
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
