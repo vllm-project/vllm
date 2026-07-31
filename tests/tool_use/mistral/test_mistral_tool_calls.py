@@ -219,7 +219,7 @@ _NOT_SET = object()
         pytest.param(
             [WEATHER_TOOL],
             "required",
-            30,
+            9,
             id="required",
         ),
     ],
