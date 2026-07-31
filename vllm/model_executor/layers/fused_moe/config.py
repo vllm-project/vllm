@@ -1050,7 +1050,9 @@ class FusedMoEParallelConfig:
 
     @property
     def use_all2all_kernels(self):
-        return self.use_ep and (self.dp_size > 1 or self.is_sequence_parallel)
+        return self.use_ep and (
+            self.dp_size > 1 or self.pcp_size > 1 or self.is_sequence_parallel
+        )
 
     @property
     def use_deepep_ht_kernels(self):
@@ -1311,6 +1313,10 @@ class FusedMoEConfig:
     swiglu_limit: float | None = None
     swiglu_alpha: float | None = None
     swiglu_beta: float | None = None
+
+    # SituGLU parameters used by Kimi sit(u/v2) activations.
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
 
     max_capture_size: int = 0
 

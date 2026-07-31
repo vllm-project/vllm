@@ -8,11 +8,12 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dcp_group
+from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -308,6 +309,8 @@ def sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
+    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -315,7 +318,8 @@ def sparse_attn_indexer(
     skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
-    attn_metadata = get_forward_context().attn_metadata
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
@@ -354,6 +358,8 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
             skip_k_cache_insert,
+            use_pcp,
+            dense_mha_metadata_layer_name,
             use_fp4_cache,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
@@ -373,21 +379,49 @@ def sparse_attn_indexer(
     # During speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens. Truncate k to avoid
     # out-of-bounds reads in the kernel.
+    # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
+    if use_pcp:
+        num_tokens //= get_pcp_group().world_size
     if k is not None:
         k = k[:num_tokens]
 
     if not skip_k_cache_insert:
+        assert k is not None
+        k, slot_mapping_for_cache = maybe_gather_indexer_k(
+            k,
+            slot_mapping,
+            num_decode_tokens,
+            use_pcp,
+        )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         ops.indexer_k_quant_and_cache(
             k,
             kv_cache,
-            slot_mapping,
+            slot_mapping_for_cache,
             quant_block_size,
             scale_fmt,
         )
+
+    # The indexer and main MLA may classify the same short extend differently
+    # because they use independent decode thresholds. Only the main MLA route
+    # can determine whether the top-k indices will be consumed.
+    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+        if dense_mha_layer:
+            mla_metadata = attn_metadata.get(dense_mha_layer)
+            prefill_metadata = getattr(mla_metadata, "prefill", None)
+            if (
+                getattr(prefill_metadata, "use_dense_mha", False)
+                and getattr(mla_metadata, "num_decode_tokens", -1) == 0
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                # Deliberately leave the buffer untouched. Dense MHA does not
+                # consume top-k indices for this batch; clearing it would be
+                # unnecessary work.
+                return topk_indices_buffer
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -498,7 +532,14 @@ def sparse_attn_indexer(
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
-        if decode_metadata.requires_padding:
+        if num_decode_tokens == 0:
+            padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
+            padded_q_scale = (
+                q_scale[:1].reshape(1, 1, *q_scale.shape[1:])
+                if q_scale is not None
+                else None
+            )
+        elif decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
@@ -663,6 +704,8 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
+    dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
@@ -718,6 +761,7 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -725,6 +769,7 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -777,6 +822,8 @@ class SparseAttnIndexer(CustomOp):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
+            self.use_pcp,
+            _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -46,7 +47,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig
-from ..nvfp4 import InklingNvfp4Config
 from .attention import InklingAttention, compute_log_scaling_tau
 from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
@@ -122,7 +122,7 @@ class InklingDecoderLayer(nn.Module):
         is_local: bool,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
+        force_dense_mlp: bool = False,
     ) -> None:
         super().__init__()
         # Per-layer owner of the conv state as a paged SWA cache. The 4 sconv
@@ -161,7 +161,7 @@ class InklingDecoderLayer(nn.Module):
             conv_owner=self.conv_state,
         )
         self.mlp_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if layer_id < config.dense_mlp_idx:
+        if force_dense_mlp or layer_id < config.dense_mlp_idx:
             self.mlp: nn.Module = InklingDenseMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.dense_intermediate_size,
@@ -170,14 +170,10 @@ class InklingDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
         else:
-            # InklingMoE decides per layer (from the checkpoint exclude list)
-            # whether the routed experts are NVFP4 or bf16; the shared sink
-            # experts are always bf16.
             self.mlp = InklingMoE(
                 config,
-                layer_id,
                 prefix=f"{prefix}.mlp",
-                nvfp4_config=nvfp4_config,
+                quant_config=quant_config,
             )
 
         # Short convolution on the attention-output and MLP-output residual
@@ -199,9 +195,12 @@ class InklingDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         pending: tuple[torch.Tensor | None, InklingShortConv] | None = None,
+        defer_mlp_add: bool = False,
         attn_in: torch.Tensor | None = None,
         log_scaling: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]:
+    ) -> (
+        torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor | None, InklingShortConv]]
+    ):
         # The previous sublayer's (pre-reduce, pre-sconv) delta is folded in
         # fused with its RS/sconv/AG and this layer's pre-attention rmsnorm.
         # A None delta means the partials sit in the NVLS symm buffer.
@@ -219,9 +218,13 @@ class InklingDecoderLayer(nn.Module):
             attn_output, hidden_states, self.attn_sconv, self.mlp_norm, positions
         )
         mlp_output = self.mlp(mlp_in)
-        # The caller folds mlp_output (pre-reduce, pre-sconv) into the next
-        # fused sconv+add+rmsnorm.
-        return hidden_states, (mlp_output, self.mlp_sconv)
+        if defer_mlp_add:
+            # Caller folds mlp_output (pre-reduce, pre-sconv) into the next
+            # fused sconv+add+rmsnorm.
+            return hidden_states, (mlp_output, self.mlp_sconv)
+        return _sconv_add_norm(
+            mlp_output, hidden_states, self.mlp_sconv, None, positions
+        )[1]
 
 
 class InklingReplicatedEmbedding(nn.Module):
@@ -252,7 +255,6 @@ class InklingModel(nn.Module):
         config: InklingModelConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
-        nvfp4_config: InklingNvfp4Config | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -269,7 +271,7 @@ class InklingModel(nn.Module):
         def get_layer(prefix: str) -> InklingDecoderLayer:
             idx = _layer_id(prefix + ".") or int(prefix.split(".")[-1])
             return InklingDecoderLayer(
-                config, idx, idx in local_ids, quant_config, prefix, nvfp4_config
+                config, idx, idx in local_ids, quant_config, prefix
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -330,6 +332,7 @@ class InklingModel(nn.Module):
                 positions,
                 hidden_states,
                 pending=pending,
+                defer_mlp_add=True,
                 attn_in=attn_in0,
                 log_scaling=log_scaling,
             )
@@ -351,7 +354,7 @@ class InklingModel(nn.Module):
         return self.norm(hidden_states)
 
 
-class _TmlForCausalLMBase(nn.Module, SupportsPP):
+class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
     """Shared text-backbone causal-LM scaffolding for both entry classes."""
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -371,15 +374,33 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP):
             "model.llm.embed": "model.embed_tokens",
             "model.llm.norm": "model.norm",
             "model.llm.unembed": "lm_head",
+            "language_model.layers.": "model.layers.",
+            "language_model.lm_head.": "lm_head.",
         },
         orig_to_new_suffix={
-            # NVFP4 scale
+            # ModelOpt NVFP4 scales
             ".w13_weight.scale": ".w13_weight_scale",
             ".w13_weight.scale2": ".w13_weight_scale_2",
             ".w2_weight.scale": ".w2_weight_scale",
             ".w2_weight.scale2": ".w2_weight_scale_2",
+            # Compressed tensors NVFP4 parameters
+            ".w13_weight.input_global_scale": ".w13_input_global_scale",
+            ".w13_weight.weight_global_scale": ".w13_weight_global_scale",
+            ".w13_weight.weight_packed": ".w13_weight_packed",
+            ".w13_weight.weight_scale": ".w13_weight_scale",
+            ".w2_weight.input_global_scale": ".w2_input_global_scale",
+            ".w2_weight.weight_global_scale": ".w2_weight_global_scale",
+            ".w2_weight.weight_packed": ".w2_weight_packed",
+            ".w2_weight.weight_scale": ".w2_weight_scale",
         },
     )
+    packed_modules_mapping = {
+        "qkvr": ["wq_du", "wk_dv", "wv_dv", "wr_du"],
+        "w13": ["w1", "w3"],
+    }
+    embedding_modules = {
+        "lm_head": "output_embeddings",
+    }
 
     def _build(
         self,
@@ -389,11 +410,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP):
     ) -> None:
         quant_config = vllm_config.quant_config
         self.config = text_config
-        # NVFP4 experts are detected directly from the checkpoint quant config;
-        # only the MoE experts are quantized (attention/dense MLP stay bf16).
-        self.nvfp4_config = InklingNvfp4Config.from_hf_config(
-            vllm_config.model_config.hf_config
-        )
         # Read by the MRV2 runner to publish per-request short-conv metadata.
         # Short convolution is intrinsic to Inkling, so this is always set.
         self.uses_sconv = True
@@ -401,7 +417,6 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP):
             config=text_config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
-            nvfp4_config=self.nvfp4_config,
         )
         initialize_lamport_rs_conv(
             text_config.hidden_size,

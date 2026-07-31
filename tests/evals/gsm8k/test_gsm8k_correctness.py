@@ -59,6 +59,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         seed=eval_config.get("seed", 42),
         request_timeout_seconds=request_timeout_seconds,
         gen_prefix=eval_config.get("gen_prefix", ""),
+        max_concurrency=eval_config.get("max_concurrency"),
     )
 
     return results

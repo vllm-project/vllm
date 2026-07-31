@@ -136,10 +136,12 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
 
     # We also keep q/k/v_scale on host (cpu) memory for attention
     # backends that require the scales to be on host instead of on device.
-    # e.g. Flashinfer
+    # e.g. Flashinfer & AITER
     layer._q_scale_float = 1.0
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
+    layer._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
+    layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._prob_scale_float = 1.0
 
     # Initialize q/k/v range constants used by calc_kv_scales
@@ -586,6 +588,8 @@ class Attention(nn.Module, AttentionLayerBase):
         self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
+        self._k_scale_cpu.fill_(self._k_scale_float)
+        self._v_scale_cpu.fill_(self._v_scale_float)
         # We only calculate the scales once
         self.calculate_kv_scales = False
 
@@ -790,7 +794,7 @@ def unified_kv_cache_update(
             layer_slot_mapping,
         )
 
-    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+    return key.new_empty(0)
 
 
 def unified_kv_cache_update_fake(
