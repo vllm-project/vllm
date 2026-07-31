@@ -106,7 +106,8 @@ def test_idx_mapping_indirection_and_negative_skip():
     # batch: [maps to state 1, masked (-1), maps to state 0].
     idx_mapping = _i32([1, -1, 0])
     sampled = _i64([1, 2, 3])
-    total_len = _i32([10, 0, 6 + 1])  # state 1 at step 1
+    # Indexed by req_state_idx: state 0 at total_len=10, state 1 at step 1.
+    total_len = _i32([10, 6 + 1])
     apply_trace_tokens(
         sampled, idx_mapping, trace_token_ids, trace_len, total_len, prompt_len
     )
