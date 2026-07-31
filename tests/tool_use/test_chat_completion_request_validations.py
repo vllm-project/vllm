@@ -40,28 +40,29 @@ def test_chat_completion_request_with_no_tools():
 
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
 def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
-    with pytest.raises(
-        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
-    ):
-        ChatCompletionRequest.model_validate(
+    # Finer-grained rules: "auto" without tools is a harmless no-op;
+    # "required"/named without any tool source (request level OR message
+    # level) is rejected.
+    expected = None if tool_choice == "auto" else VLLMValidationError
+    if expected is None:
+        request = ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
                 "model": "facebook/opt-125m",
                 "tool_choice": tool_choice,
             }
         )
-
-    with pytest.raises(
-        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
-    ):
-        ChatCompletionRequest.model_validate(
-            {
-                "messages": [{"role": "user", "content": "Hello"}],
-                "model": "facebook/opt-125m",
-                "tool_choice": tool_choice,
-                "tools": None,
-            }
-        )
+        assert request.tool_choice == tool_choice
+    else:
+        with pytest.raises(expected, match="tools must be declared"):
+            ChatCompletionRequest.model_validate(
+                {
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "model": "facebook/opt-125m",
+                    "tool_choice": tool_choice,
+                    "tools": None,
+                }
+            )
 
 
 def test_reasoning_content_normalized_to_reasoning():
@@ -179,6 +180,171 @@ def test_multiple_structured_outputs_rejected():
                 "structured_outputs": {
                     "json": {"type": "object"},
                     "regex": ".*",
+                },
+            }
+        )
+
+
+_SAMPLE_TOOL_DICT = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the weather",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def test_request_level_tools_still_default_tool_choice_auto():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "tools": [_SAMPLE_TOOL_DICT],
+        }
+    )
+    assert request.tool_choice == "auto"
+
+
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_message_level_tools_default_tool_choice_auto(role):
+    # Message-level tool declarations must also default tool_choice to
+    # "auto"; the field default "none" would tell the model not to call the
+    # tools the client just declared.
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": role, "content": "instructions", "tools": [_SAMPLE_TOOL_DICT]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert request.tool_choice == "auto"
+
+
+def test_message_level_tools_do_not_override_explicit_tool_choice():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "instructions",
+                    "tools": [_SAMPLE_TOOL_DICT],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+            "tool_choice": "required",
+        }
+    )
+    assert request.tool_choice == "required"
+
+
+def test_tools_on_other_roles_do_not_default_tool_choice_auto():
+    # tools on roles that are not passed through to the template (user,
+    # assistant, tool) must not influence the tool_choice default.
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "Hello", "tools": [_SAMPLE_TOOL_DICT]},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert request.tool_choice == "none"
+
+
+def test_auto_tool_choice_without_tools_allowed():
+    # "auto" without any tools is a harmless no-op: the model simply answers.
+    for tools_kwarg in ({}, {"tools": None}):
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tool_choice": "auto",
+                **tools_kwarg,
+            }
+        )
+        assert request.tool_choice == "auto"
+
+
+def test_required_tool_choice_without_any_tools_rejected():
+    # "required" is contradictory without any tool source: reject unless
+    # tools are declared at the request level OR on a message.
+    with pytest.raises(VLLMValidationError, match="tools must be declared"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tool_choice": "required",
+            }
+        )
+
+
+def test_required_tool_choice_with_message_level_tools_allowed():
+    # Tools declared on a system message satisfy the requirement.
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "system", "content": "", "tools": [SAMPLE_TOOL]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+            "tool_choice": "required",
+        }
+    )
+    assert request.tool_choice == "required"
+
+
+def test_named_tool_choice_without_any_tools_rejected():
+    # A named tool_choice with no tool declared anywhere is rejected.
+    with pytest.raises(VLLMValidationError, match="tools must be declared"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
+
+
+def test_named_tool_choice_with_message_level_tools_allowed():
+    # A named tool_choice without request-level tools is allowed when the
+    # named tool may be declared at the message level (not cross-checked).
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "system", "content": "", "tools": [SAMPLE_TOOL]},
+                {"role": "user", "content": "Hello"},
+            ],
+            "model": "facebook/opt-125m",
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+    )
+    assert request.tool_choice.function.name == "get_weather"
+
+
+def test_named_tool_choice_must_match_declared_tools():
+    # When request-level tools ARE present, a named tool_choice must still
+    # match one of them.
+    with pytest.raises(
+        VLLMValidationError, match="does not match any of the specified `tools`"
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [SAMPLE_TOOL],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "nondefined_function_name"},
                 },
             }
         )
