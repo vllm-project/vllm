@@ -73,6 +73,18 @@ class PendingPromotion:
 
 
 @dataclass(slots=True)
+class BackpressureState:
+    store_latency_ema: float = 0.0
+    is_under_pressure: bool = False
+    stores_dropped: int = 0
+
+
+_BP_EMA_ALPHA = 0.3
+_BP_HIGH_WATER_S = 1.0
+_BP_LOW_WATER_S = 0.5
+
+
+@dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
     pending_primary_stores: int = 0
