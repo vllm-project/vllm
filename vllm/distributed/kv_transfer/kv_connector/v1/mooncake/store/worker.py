@@ -1272,10 +1272,10 @@ class MooncakeStoreWorker:
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         self._kv_cache_config = kv_cache_config
+        self.token_dbs: list[ChunkedTokenDatabase] = []
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
-            self.token_dbs = []
             logger.info(
                 "Mooncake store in capacity-only mode: segment mounted "
                 "(global_segment_size=%d), KV transfer disabled.",
@@ -1331,7 +1331,7 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        self.token_dbs: list[ChunkedTokenDatabase] = [
+        self.token_dbs = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
                     metadata,
