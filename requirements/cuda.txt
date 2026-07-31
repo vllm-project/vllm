@@ -4,6 +4,7 @@
 numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
+helion==1.4.0
 torch==2.13.0
 torchaudio==2.11.0
 # These must be updated alongside torch
