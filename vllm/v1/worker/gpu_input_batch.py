@@ -862,6 +862,7 @@ class InputBatch:
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
+        del self.trace_decode_token_ids[num_reqs:]
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
