@@ -10,19 +10,21 @@ EuroBERT encoder (which it does not). Upstream ships a separate
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from transformers import PretrainedConfig
 
+from vllm.config import ModelConfig
 from vllm.model_executor.models.config import (
     MODELS_CONFIG_MAP,
     JinaEmbeddingsV5ModelConfig,
 )
 
 
-def _model_config(hf_config: PretrainedConfig) -> SimpleNamespace:
+def _model_config(hf_config: PretrainedConfig) -> ModelConfig:
     """Minimal stand-in for ModelConfig; only hf_config is read."""
-    return SimpleNamespace(hf_config=hf_config)
+    return cast(ModelConfig, SimpleNamespace(hf_config=hf_config))
 
 
 @pytest.mark.cpu_test
