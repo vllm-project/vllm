@@ -162,6 +162,7 @@ def resolve_mamba_align_size(
 class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     blocks_per_chunk: int
+    tokens_per_hash: int
     num_workers: int
     offload_prompt_only: bool
 
@@ -254,8 +255,29 @@ class SchedulerOffloadConfig(NamedTuple):
                 for idx, tokens_per_block in enumerate(spec.tokens_per_block)
             ),
             blocks_per_chunk=spec.blocks_per_chunk,
+            tokens_per_hash=spec.tokens_per_hash,
             offload_prompt_only=spec.offload_prompt_only,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PartialStoreCandidate:
+    group_idx: int
+    key: OffloadKey
+    block_id: int
+    block_idx: int
+
+
+@dataclass(frozen=True, slots=True)
+class GroupLoadPlan:
+    group_idx: int
+    keys: tuple[OffloadKey, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalLoadPlan:
+    boundary_tokens: int
+    groups: tuple[GroupLoadPlan, ...]
 
 
 @dataclass
@@ -286,6 +308,7 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    external_load_plan: ExternalLoadPlan | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
 
@@ -479,6 +502,35 @@ class OffloadingConnectorScheduler:
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
+        group_block_sizes = {
+            config.tokens_per_block for config in self.config.kv_group_configs
+        }
+        has_partial_mamba = any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            and group.kv_cache_spec.mamba_cache_mode == "align"
+            and group.kv_cache_spec.block_size > self.config.tokens_per_hash
+            for group in kv_cache_config.kv_cache_groups
+        )
+        self._mamba_group_ids = {
+            idx
+            for idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, MambaSpec)
+            and group.kv_cache_spec.mamba_cache_mode == "align"
+        }
+        has_sliding_window = any(
+            isinstance(group.kv_cache_spec, SlidingWindowSpec)
+            for group in kv_cache_config.kv_cache_groups
+        )
+        self._partial_tail_enabled = (
+            self.config.blocks_per_chunk == 1
+            and len(group_block_sizes) == 1
+            and has_partial_mamba
+            and not has_sliding_window
+            and not any(
+                config.is_eagle_group for config in self.config.kv_group_configs
+            )
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
@@ -627,8 +679,17 @@ class OffloadingConnectorScheduler:
                     group_state.offload_keys[chunks_to_skip:],
                     req_status.req_context,
                 )
+        if req_status.external_load_plan is not None:
+            self.manager.touch(
+                tuple(
+                    chain.from_iterable(
+                        group.keys for group in req_status.external_load_plan.groups
+                    )
+                ),
+                req_status.req_context,
+            )
 
-    def _lookup(self, req_status: RequestOffloadState) -> int | None:
+    def _lookup_complete_chunks(self, req_status: RequestOffloadState) -> int | None:
         """
         Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
@@ -801,6 +862,70 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens
 
+    def _make_boundary_key(
+        self, request: Request, group_idx: int, boundary_tokens: int
+    ) -> OffloadKey:
+        hash_idx = boundary_tokens // self.config.tokens_per_hash - 1
+        return make_offload_key(request.block_hashes[hash_idx], group_idx)
+
+    def _lookup(self, req_status: RequestOffloadState) -> int | None:
+        complete_hit = self._lookup_complete_chunks(req_status)
+        req_status.external_load_plan = None
+        if complete_hit is None or not self._partial_tail_enabled:
+            return complete_hit
+
+        local_tokens = req_status.num_locally_computed_tokens
+        complete_boundary = local_tokens + complete_hit
+        tokens_per_hash = self.config.tokens_per_hash
+        max_boundary = round_down(req_status.req.num_prompt_tokens - 1, tokens_per_hash)
+        if max_boundary <= complete_boundary:
+            return complete_hit
+
+        pending = False
+        for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+            group_plans: list[GroupLoadPlan] = []
+            boundary_pending = False
+            boundary_missed = False
+            for group_config, group_state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            ):
+                start_chunk_idx = local_tokens // group_config.tokens_per_chunk
+                full_chunk_count = boundary // group_config.tokens_per_chunk
+                keys = list(group_state.offload_keys[start_chunk_idx:full_chunk_count])
+                if boundary % group_config.tokens_per_chunk:
+                    keys.append(
+                        self._make_boundary_key(
+                            req_status.req, group_config.group_idx, boundary
+                        )
+                    )
+                if group_config.sliding_window_size_in_chunks is not None:
+                    keys = keys[-group_config.sliding_window_size_in_chunks :]
+                for key in keys:
+                    result = self.manager.lookup(key, req_status.req_context)
+                    if result is LookupResult.MISS:
+                        boundary_missed = True
+                        break
+                    if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
+                        boundary_pending = True
+                if boundary_missed:
+                    break
+                group_plans.append(GroupLoadPlan(group_config.group_idx, tuple(keys)))
+
+            pending |= boundary_pending
+            if (
+                not boundary_missed
+                and not boundary_pending
+                and len(group_plans) == len(self.config.kv_group_configs)
+            ):
+                req_status.external_load_plan = ExternalLoadPlan(
+                    boundary, tuple(group_plans)
+                )
+                return boundary - local_tokens
+
+        if pending and complete_hit == 0:
+            return None
+        return complete_hit
+
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
         req_context = _create_req_context(request)
@@ -880,6 +1005,14 @@ class OffloadingConnectorScheduler:
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
+        load_plan = req_status.external_load_plan
+        if load_plan is not None:
+            assert load_plan.boundary_tokens == num_cached_tokens
+        load_plan_by_group = (
+            {group.group_idx: group for group in load_plan.groups}
+            if load_plan is not None
+            else {}
+        )
 
         keys_to_load: list[OffloadKey] = []
         dst_block_ids: list[int] = []
@@ -923,12 +1056,15 @@ class OffloadingConnectorScheduler:
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
-            assert len(offload_keys) >= num_chunks
             if num_pending_gpu_blocks:
-                start_chunk_idx = (
-                    num_locally_computed_gpu_blocks // self.config.blocks_per_chunk
-                )
-                keys_to_load.extend(offload_keys[start_chunk_idx:num_chunks])
+                if group_config.group_idx in load_plan_by_group:
+                    keys_to_load.extend(load_plan_by_group[group_config.group_idx].keys)
+                else:
+                    assert len(offload_keys) >= num_chunks
+                    start_chunk_idx = (
+                        num_locally_computed_gpu_blocks // self.config.blocks_per_chunk
+                    )
+                    keys_to_load.extend(offload_keys[start_chunk_idx:num_chunks])
 
             dst_block_ids.extend(
                 block.block_id
@@ -968,6 +1104,7 @@ class OffloadingConnectorScheduler:
 
         if self._chunks_being_loaded is not None:
             self._chunks_being_loaded.update(keys_to_load)
+        req_status.external_load_plan = None
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """
@@ -1019,6 +1156,129 @@ class OffloadingConnectorScheduler:
                             in self._current_batch_allocated_block_ids
                         ):
                             group_state.block_ids[j] = 0
+
+    def _build_partial_tail_store_jobs(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[int, TransferJob]:
+        handoffs = scheduler_output.partial_tail_offloads
+        if not self._partial_tail_enabled or not handoffs:
+            return {}
+
+        store_jobs: dict[int, TransferJob] = {}
+        for req_id, entries in handoffs.items():
+            req_status = self._req_status.get(req_id)
+            if req_status is None or not entries:
+                continue
+            boundaries = {boundary for _, _, boundary in entries}
+            if len(boundaries) != 1:
+                logger.warning(
+                    "Request %s: partial-tail groups disagree on boundary", req_id
+                )
+                continue
+            boundary = boundaries.pop()
+            req = req_status.req
+            if (
+                boundary <= 0
+                or boundary % self.config.tokens_per_hash
+                or boundary > req.num_prompt_tokens
+                or (
+                    req_status.max_offload_tokens is not None
+                    and boundary > req_status.max_offload_tokens
+                )
+            ):
+                logger.warning(
+                    "Request %s: invalid partial-tail boundary %d", req_id, boundary
+                )
+                continue
+
+            cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
+            if not self._mamba_group_ids.issubset(cow_blocks):
+                logger.warning(
+                    "Request %s: missing recurrent partial-tail source", req_id
+                )
+                continue
+
+            candidates: list[PartialStoreCandidate] = []
+            valid = True
+            for group_config, group_state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            ):
+                block_idx = boundary // group_config.tokens_per_block
+                if boundary % group_config.tokens_per_block == 0:
+                    valid = False
+                    break
+                if group_config.group_idx in self._mamba_group_ids:
+                    block_id = cow_blocks[group_config.group_idx]
+                elif block_idx < len(group_state.block_ids):
+                    block_id = group_state.block_ids[block_idx]
+                else:
+                    valid = False
+                    break
+                if block_id == 0:
+                    valid = False
+                    break
+                candidates.append(
+                    PartialStoreCandidate(
+                        group_idx=group_config.group_idx,
+                        key=self._make_boundary_key(
+                            req, group_config.group_idx, boundary
+                        ),
+                        block_id=block_id,
+                        block_idx=block_idx,
+                    )
+                )
+            if not valid:
+                logger.warning(
+                    "Request %s: cannot represent partial-tail boundary %d",
+                    req_id,
+                    boundary,
+                )
+                continue
+
+            store_output = self.manager.prepare_store(
+                [candidate.key for candidate in candidates], req_status.req_context
+            )
+            if store_output is None:
+                self._connector_stats.increase_counter(
+                    _ConnectorMetricName.ALLOCATION_FAILURE
+                )
+                continue
+            if not store_output.keys_to_store:
+                continue
+
+            candidate_by_key = {candidate.key: candidate for candidate in candidates}
+            accepted = [candidate_by_key[key] for key in store_output.keys_to_store]
+            group_sizes = [0] * len(self.config.kv_group_configs)
+            block_indices = [0] * len(self.config.kv_group_configs)
+            src_block_ids: list[int] = []
+            for candidate in accepted:
+                group_sizes[candidate.group_idx] = 1
+                block_indices[candidate.group_idx] = candidate.block_idx
+                src_block_ids.append(candidate.block_id)
+
+            job_id = self._generate_job_id()
+            req_status.transfer_jobs.add(job_id)
+            source_blocks = [candidate.block_id for candidate in accepted]
+            for block_id in source_blocks:
+                self._block_id_to_pending_jobs.setdefault(block_id, set()).add(job_id)
+            self._jobs[job_id] = TransferJobStatus(
+                req_id=req_id,
+                pending_count=self.config.num_workers,
+                keys=set(store_output.keys_to_store),
+                is_store=True,
+                sliding_window_block_ids=source_blocks,
+            )
+            store_jobs[job_id] = TransferJob(
+                req_id=req_id,
+                src_spec=GPULoadStoreSpec(
+                    src_block_ids,
+                    group_sizes=group_sizes,
+                    block_indices=block_indices,
+                ),
+                dst_spec=store_output.store_spec,
+            )
+
+        return store_jobs
 
     def _build_store_jobs(
         self,
@@ -1248,9 +1508,11 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
+        partial_store_jobs = self._build_partial_tail_store_jobs(scheduler_output)
+        normal_store_jobs = self._build_store_jobs(scheduler_output)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=self._build_store_jobs(scheduler_output),
+            store_jobs=partial_store_jobs | normal_store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
 
@@ -1451,6 +1713,7 @@ class OffloadingConnectorScheduler:
             for group_state in status.group_states:
                 group_state.next_stored_chunk_idx = 0
             status.transfer_jobs.clear()
+            status.external_load_plan = None
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
