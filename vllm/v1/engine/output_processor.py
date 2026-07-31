@@ -412,7 +412,7 @@ class RequestState:
         sampling_mask = None
         if finished and self.sampling_mask_chunks:
             merged = SamplingMaskLists.merge(self.sampling_mask_chunks)
-            sampling_mask = SamplingMask(merged.token_ids, merged.offsets)
+            sampling_mask = SamplingMask(merged.to_nested_list())
 
         # Concatenate routed experts on finish
         routed_experts = None

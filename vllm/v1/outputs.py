@@ -72,6 +72,13 @@ class SamplingMaskLists(NamedTuple):
             None,
         )
 
+    def to_nested_list(self) -> list[list[int]]:
+        """Convert CSR representation to ``list[list[int]]``."""
+        return [
+            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
+            for i in range(len(self.offsets) - 1)
+        ]
+
     @staticmethod
     def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
         token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
