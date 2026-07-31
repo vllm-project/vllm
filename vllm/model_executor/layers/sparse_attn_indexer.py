@@ -765,11 +765,25 @@ class SparseAttnIndexer(CustomOp):
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
-        parallel_config = get_current_vllm_config().parallel_config
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        # The ROCm decode-logits workspace only holds decode rows, never the full
+        # max_num_batched_tokens prefill budget. Bound it by the decode-row count
+        # (query len <= 1 + num_speculative_tokens, x2 for parallel drafting).
+        scheduler_config = vllm_config.scheduler_config
+        num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        self.max_decode_tokens = min(
+            scheduler_config.max_num_batched_tokens,
+            scheduler_config.max_num_seqs * (1 + 2 * num_speculative_tokens),
+        )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -864,6 +878,7 @@ class SparseAttnIndexer(CustomOp):
                 self.head_dim,
                 self.max_model_len,
                 self.max_total_seq_len,
+                self.max_decode_tokens,
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
             )

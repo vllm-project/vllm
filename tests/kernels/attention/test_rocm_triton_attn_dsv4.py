@@ -204,6 +204,11 @@ def test_paged_mqa_logits_do_not_contain_nan(monkeypatch) -> None:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     device = torch.device("cuda")
+    # max_model_len deliberately exceeds every context length so the bounded
+    # scrub only has to clean [0, context) of each row.
+    max_model_len = 4096
+    ctx = [1000, 4096, 1]
+    batch = len(ctx)
 
     class FakeWorkspaceManager:
         def get_simultaneous(self, *shapes_and_dtypes):
@@ -245,19 +250,79 @@ def test_paged_mqa_logits_do_not_contain_nan(monkeypatch) -> None:
         mod, "current_workspace_manager", lambda: FakeWorkspaceManager()
     )
 
-    q_fp8 = torch.empty((1, 1, 1, 1), dtype=torch.uint8, device=device)
+    q_fp8 = torch.empty((batch, 1, 1, 1), dtype=torch.uint8, device=device)
     kv_cache_fp8 = torch.empty((1, 1, 1, 5), dtype=torch.uint8, device=device)
+    context_lens = torch.tensor(ctx, dtype=torch.int32, device=device)
     logits = mod.rocm_fp8_paged_mqa_logits(
         q_fp8,
         kv_cache_fp8,
-        torch.empty((1, 1), dtype=torch.float32, device=device),
-        torch.ones(1, dtype=torch.int32, device=device),
-        torch.zeros((1, 1), dtype=torch.int32, device=device),
+        torch.empty((batch, 1), dtype=torch.float32, device=device),
+        context_lens,
+        torch.zeros((batch, 1), dtype=torch.int32, device=device),
         torch.empty(0, dtype=torch.int32, device=device),
-        1,
+        max_model_len,
     )
 
-    assert not torch.isnan(logits).any()
+    # The region top_k_per_row_decode reads (next_n=1 => [0, context)) must be
+    # NaN-free; the tail past the context is never read, so it is left as-is.
+    for row, length in enumerate(ctx):
+        assert not torch.isnan(logits[row, :length]).any()
+
+
+@pytest.mark.parametrize("next_n", [1, 2])
+@torch.inference_mode()
+def test_sanitize_decode_logits_matches_nan_to_num(next_n) -> None:
+    """The bounded NaN scrub must equal a full-width ``nan_to_num_`` over exactly
+    the region ``top_k_per_row_decode`` reads (``[0, row_end)`` per row) for both
+    the 1D (plain decode) and 2D (native MTP) context-length layouts, and must
+    leave the tail past ``row_end`` untouched.
+
+    The scrubbed logits are compared directly rather than the top-k output:
+    ``top_k_per_row_decode`` is non-deterministic across launches, so feeding it
+    byte-identical input is the strongest deterministic equivalence guarantee.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import sanitize_decode_logits_
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    max_model_len = 8192
+
+    # Per-row effective context, matching sampler.cu's row-end convention:
+    #   1D (batch,)         -> row_end = seq_len (next_n == 1)
+    #   2D (batch, next_n)  -> row_end = seq_lens[row]
+    base_ctx = torch.tensor([2000, 5000, 300, 8192], dtype=torch.int32, device=device)
+    if next_n == 1:
+        seq_lens = base_ctx
+        row_end = base_ctx.tolist()
+    else:
+        seq_lens = torch.stack(
+            [torch.clamp(base_ctx - j, min=0) for j in range(next_n)], dim=1
+        ).contiguous()
+        row_end = seq_lens.reshape(-1).tolist()
+    num_rows = len(row_end)
+
+    logits = torch.randn(num_rows, max_model_len, dtype=torch.float32, device=device)
+    for r in range(num_rows):
+        end = row_end[r]
+        if end > 0:
+            logits[r, torch.arange(0, end, 37, device=device)] = float("nan")
+        # A NaN just past the read region must survive the (bounded) scrub.
+        if end < max_model_len:
+            logits[r, end] = float("nan")
+
+    ref = logits.clone()
+    ref.nan_to_num_(float("-inf"))
+    got = logits.clone()
+    sanitize_decode_logits_(got, seq_lens, next_n)
+
+    for r in range(num_rows):
+        end = row_end[r]
+        # Read region: byte-identical to nan_to_num_, and NaN-free.
+        assert torch.equal(got[r, :end], ref[r, :end])
+        assert not torch.isnan(got[r, :end]).any()
+        # Tail past row_end is left exactly as the kernel received it.
+        assert torch.equal(torch.isnan(got[r, end:]), torch.isnan(logits[r, end:]))
+        assert torch.equal(got[r, end:].nan_to_num(), logits[r, end:].nan_to_num())
 
 
 @torch.inference_mode()

@@ -380,6 +380,62 @@ def paged_mqa_logits_module():
     return None
 
 
+@triton.jit
+def _sanitize_decode_logits_kernel(
+    logits_ptr,  # [num_rows, max_model_len] float32
+    seq_lens_ptr,  # int32; (batch,) 1D or (batch, next_n) flattened
+    stride_row,
+    next_n,
+    max_model_len,
+    IS_2D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # Scrub only [0, row_end), the columns top_k_per_row_decode reads, mirroring
+    # its row-end rule in csrc/libtorch_stable/sampler.cu.
+    row = tl.program_id(0)
+    if IS_2D:
+        row_end = tl.load(seq_lens_ptr + row)
+    else:
+        batch_idx = row // next_n
+        next_n_idx = row % next_n
+        row_end = tl.load(seq_lens_ptr + batch_idx) - next_n + next_n_idx + 1
+    row_end = tl.maximum(row_end, 0)
+    row_end = tl.minimum(row_end, max_model_len)
+    base = logits_ptr + row * stride_row
+    for col in tl.range(0, row_end, BLOCK_N):
+        offs = col + tl.arange(0, BLOCK_N)
+        mask = offs < row_end
+        vals = tl.load(base + offs, mask=mask, other=0.0)
+        vals = tl.where(vals != vals, float("-inf"), vals)
+        tl.store(base + offs, vals, mask=mask)
+
+
+def sanitize_decode_logits_(
+    out_logits: torch.Tensor,
+    context_lens: torch.Tensor,
+    next_n: int,
+) -> None:
+    """In-place NaN -> -inf scrub bounded to the columns the sparse top-k reads.
+
+    The paged MQA logits kernel can emit NaN in the valid region (#49714), but
+    ``top_k_per_row_decode`` only reads ``[0, row_end)`` per row, so a full-width
+    ``nan_to_num_`` over ``max_model_len`` is wasted bandwidth. ``context_lens``
+    is ``(batch,)`` for plain/flatten decode or ``(batch, next_n)`` for MTP.
+    """
+    num_rows, num_cols = out_logits.shape
+    is_2d = context_lens.dim() == 2
+    seq_lens = context_lens.reshape(-1) if is_2d else context_lens
+    _sanitize_decode_logits_kernel[(num_rows,)](
+        out_logits,
+        seq_lens,
+        out_logits.stride(0),
+        next_n,
+        num_cols,
+        IS_2D=is_2d,
+        BLOCK_N=2048,
+    )
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -442,7 +498,7 @@ def rocm_fp8_paged_mqa_logits(
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
-            out_logits.nan_to_num_(float("-inf"))
+            sanitize_decode_logits_(out_logits, context_lens, next_n)
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
@@ -605,6 +661,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
+    max_decode_tokens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
@@ -625,6 +682,7 @@ def rocm_aiter_sparse_attn_indexer(
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
+    max_decode_tokens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
@@ -650,16 +708,17 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
 
-        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        # Decode logits buffer for rocm_fp8_paged_mqa_logits. It only ever holds
+        # batch_size * next_n <= max_decode_tokens rows, so reserve that instead
+        # of the full prefill budget (hidden_states.shape[0]).
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+                ((max_decode_tokens, max_model_len), torch.float32),
             )
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    (q_fp8.shape[1], max_decode_tokens, max_model_len),
                     torch.float32,
                 ),
             )
@@ -686,6 +745,7 @@ def rocm_aiter_sparse_attn_indexer(
             head_dim,
             max_model_len,
             total_seq_lens,
+            max_decode_tokens,
             topk_indices_buffer,
             skip_k_cache_insert,
         )

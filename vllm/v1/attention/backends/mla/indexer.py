@@ -560,9 +560,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.model_config.max_model_len,
             self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
         )
+        # Only the flatten decode path reads this (see _prepare_decode_tensors),
+        # so skip the max_model_len-wide allocation when it cannot run.
         self.expanded_block_table_buffer = torch.zeros(
             (
-                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_batched_tokens if self.use_flattening else 0,
                 max_num_blocks_per_req,
             ),
             dtype=torch.int32,
@@ -650,6 +652,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         min_decode_len = int(decode_lens_cpu.min().item())
         if not use_native and max_decode_len > 1:
             assert self.decode_seq_lens_buffer.dim() == 1
+            # Reachable only under use_flattening, which gates the allocation:
+            # the decode split bounds max_decode_len by decode_threshold.
+            assert self.expanded_block_table_buffer.shape[0] > 0
             if min_decode_len == max_decode_len:
                 # Uniform decode lengths.
                 num_decode_tokens = num_decodes * max_decode_len
