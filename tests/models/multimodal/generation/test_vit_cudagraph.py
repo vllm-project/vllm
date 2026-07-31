@@ -62,7 +62,21 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def gemma3_chat_template(content: str) -> str:
+    return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "gemma3": VitCudagraphTestConfig(
+        model="google/gemma-3-4b-it",
+        modalities=["image"],
+        image_prompt=gemma3_chat_template("<start_of_image>What is in this image?"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        dtype="bfloat16",
+        max_model_len=4096,
+    ),
     "llama4": VitCudagraphTestConfig(
         model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
         modalities=["image"],
@@ -157,6 +171,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "Describe this video in one sentence."
         ),
         needs_video_metadata=True,
+        vllm_runner_kwargs={"enable_chunked_prefill": True},
         marks=[pytest.mark.core_model],
     ),
     "internvl": VitCudagraphTestConfig(
@@ -233,6 +248,19 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
+    ),
+    "gemma4": VitCudagraphTestConfig(
+        model="google/gemma-4-E2B-it",
+        image_prompt=(
+            "<bos><start_of_turn>user\n<|image|>\nWhat is in this image?<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        ),
+        video_prompt=(
+            "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
+            "<end_of_turn>\n<start_of_turn>model\n"
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
     ),
 }
 

@@ -351,6 +351,69 @@ print(response.choices[0].message.reasoning)
 print(response.choices[0].message.content)
 ```
 
+## Suppressing Reasoning Output
+
+You can suppress reasoning content from API responses using the `include_reasoning` parameter. When set to `false`, reasoning tokens are still generated (so model quality is unaffected) but excluded from the response. This reduces network traffic without changing inference behavior.
+
+The parameter is supported in both the Chat Completions API and the Responses API, for streaming and non-streaming requests.
+
+When `include_reasoning=false`, vLLM also suppresses per-token metadata (logprobs and token IDs) to prevent leaking reasoning content through decoded token text in logprob entries or raw token IDs.
+
+### Chat Completions API
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+model = client.models.list().data[0].id
+
+# Reasoning is included by default (include_reasoning=True)
+response = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    extra_body={"include_reasoning": False},
+)
+
+msg = response.choices[0].message
+assert msg.content  # Content is still present
+assert not getattr(msg, "reasoning", None)  # Reasoning is suppressed
+```
+
+Streaming works the same way, reasoning deltas are omitted from chunks:
+
+```python
+stream = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    stream=True,
+    extra_body={"include_reasoning": False},
+)
+
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    # delta.reasoning will always be None
+    if delta.content:
+        print(delta.content, end="", flush=True)
+```
+
+### Responses API
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+response = client.responses.create(
+    model=client.models.list().data[0].id,
+    input="What is 15 * 37?",
+    include_reasoning=False,
+)
+
+# No "reasoning" items in output
+types = [item.type for item in response.output]
+assert "reasoning" not in types
+```
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`), Anthropic Messages API (`/v1/messages`) and the Responses API (`/v1/responses`).
@@ -439,7 +502,7 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
         end_token: str = "</think>"
 
         @classmethod
-        def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        def from_tokenizer(cls, tokenizer: PythonBackend) -> Reasoner:
             return cls(
                 start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
                 end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],

@@ -7,6 +7,8 @@
 
 from typing import Any
 
+import numpy as np
+
 # Patch torch APIs
 import torch
 
@@ -15,21 +17,39 @@ def noop(*args: Any, **kwargs: Any) -> None:
     pass
 
 
+def fake_pin_memory(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    return self
+
+
 class _EventPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.record = noop
+        self.wait = noop
         self.synchronize = noop
 
 
 class _StreamPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.wait_stream = noop
+        self.wait_event = noop
+        self.record_event = noop
+        self.synchronize = noop
+        self.query = lambda: True
+        self.device = torch.device("cpu")
 
     def __enter__(self, *args, **kwargs):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
+
+
+from vllm.utils.cpu_resource_utils import get_memory_node_info
+
+
+def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
+    meminfo = get_memory_node_info()
+    return meminfo.available_memory, meminfo.total_memory
 
 
 torch.Event = _EventPlaceholder
@@ -39,17 +59,23 @@ torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = noop
+torch.Tensor.pin_memory = fake_pin_memory
+torch.Tensor.record_stream = noop
+torch.accelerator.get_memory_info = get_memory_info
 
 # Patch vLLM torch utils
 import vllm.utils.torch_utils as torch_utils
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
+    data: list | np.ndarray | torch.Tensor,
     device: str | torch.device,
-    pin_memory: bool = False,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        return data.to(dtype=dtype)
     return torch.tensor(data, dtype=dtype, device="cpu")
 
 
@@ -60,3 +86,9 @@ import vllm.v1.worker.gpu.buffer_utils as gpu_buffer_utils
 import vllm.v1.worker.cpu.buffer_utils as cpu_buffer_utils
 
 gpu_buffer_utils.UvaBuffer = cpu_buffer_utils.UvaBuffer
+
+# Patch Triton
+from vllm.triton_utils import HAS_TRITON, tl
+
+if HAS_TRITON:
+    tl.debug_barrier = noop

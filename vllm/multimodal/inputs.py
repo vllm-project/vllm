@@ -66,7 +66,10 @@ these are directly passed to the model without HF processing.
 """
 
 VideoItem: TypeAlias = Union[
-    HfVideoItem, "torch.Tensor", tuple[HfVideoItem, dict[str, Any]]
+    HfVideoItem,
+    "torch.Tensor",
+    tuple[HfVideoItem, dict[str, Any]],
+    MediaWithBytes[tuple[HfVideoItem, dict[str, Any]]],
 ]
 """
 A `transformers.video_utils.VideoInput` representing a single video item. 
@@ -226,40 +229,57 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 
-def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
+def nested_tensors_equal(
+    a: NestedTensors,
+    b: NestedTensors,
+    check_dtype: bool = True,
+) -> bool:
     """
     Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
+
+    If `check_dtype` is `True`, the tensors must have the same dtype.
     """
+    check_dtype_func = (
+        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    )
     if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and torch.equal(a, b)
+        return (
+            isinstance(b, torch.Tensor)
+            and torch.equal(a, b)
+            and check_dtype_func(a, b, check_dtype)
+        )
     elif isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and torch.equal(b, a)
+        return (
+            isinstance(a, torch.Tensor)
+            and torch.equal(b, a)
+            and check_dtype_func(b, a, check_dtype)
+        )
 
     if isinstance(a, list):
         return (
             isinstance(b, list)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, list):
         return (
             isinstance(a, list)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     if isinstance(a, tuple):
         return (
             isinstance(b, tuple)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, tuple):
         return (
             isinstance(a, tuple)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     # Both a and b are scalars
@@ -454,6 +474,8 @@ class BaseMultiModalField(ABC):
             device = "cpu"
         if pin_memory and self.keep_on_cpu:
             pin_memory = False
+        if device == "cpu" or device == torch.device("cpu"):
+            pin_memory = False
 
         batch = [elem.data for elem in elems]
         out = self._reduce_data(batch, pin_memory=pin_memory)
@@ -488,7 +510,13 @@ class MultiModalBatchedField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.stack(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                return batch[0].unsqueeze(0).contiguous()
+                out = batch[0].unsqueeze(0)
+                if not pin_memory:
+                    return out.contiguous()
+                # Avoid extra copy - pinning unpinned memory will make it contiguous
+                if not out.is_contiguous() and out.is_pinned():
+                    out = out.contiguous()
+                return out.pin_memory()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
                 out = torch.empty(
@@ -538,7 +566,13 @@ class MultiModalFlatField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                return batch[0].contiguous()
+                out = batch[0]
+                if not pin_memory:
+                    return out.contiguous()
+                # Avoid extra copy - pinning unpinned memory will make it contiguous
+                if not out.is_contiguous() and out.is_pinned():
+                    out = out.contiguous()
+                return out.pin_memory()
 
             dim = self.dim + (self.dim < 0) * len(batch[0].shape)
 
