@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=ubuntu:22.04
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.16.post6"
+ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 # TheRock configuration
