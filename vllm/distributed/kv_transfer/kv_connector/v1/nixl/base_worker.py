@@ -2415,11 +2415,24 @@ class NixlBaseConnectorWorker:
         # not per-token data, so trimming would corrupt the transfer.
         remote_block_ids = list(remote_block_ids)
         if not self._has_mamba:
+            local_block_ids = list(local_block_ids)
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
-                assert num_local_blocks <= len(remote_group)
-                if num_local_blocks < len(remote_group):
+                num_remote_blocks = len(remote_group)
+                if num_local_blocks < num_remote_blocks:
+                    # Decoder already has a prefix cached locally; read only
+                    # the matching suffix from the remote blocks.
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif num_local_blocks > num_remote_blocks:
+                    # Decoder allocated more blocks than the remote produced.
+                    # This happens when the decode prompt is longer than the
+                    # prefiller prompt (the disagg proxy appends the first
+                    # sampled token) and that extra token starts a fresh block
+                    # with no remote counterpart -- e.g. a prefiller prompt that
+                    # is an exact multiple of the block size. Read only the
+                    # blocks the remote has; the trailing block(s) are computed
+                    # locally during decode.
+                    local_block_ids[i] = local_block_ids[i][:num_remote_blocks]
         else:
             # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support so far.HeteroTP
             # can cause different kernel block counts due to logical block rounding.
