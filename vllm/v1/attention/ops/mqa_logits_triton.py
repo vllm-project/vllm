@@ -102,9 +102,12 @@ def _fp8_paged_mqa_logits_kernel(
 
     q_offset = context_len - next_n + next_n_id
 
+    # int64: unified-KV-pool layer views carry a large block stride (~1e6
+    # elements), so int32 `block_idx * stride` wraps once a batch touches
+    # roughly >2k pool blocks (long context or concurrent sequences).
     block_idx = tl.load(
         block_tables_ptr + batch_id * stride_bt_b + block_rk * stride_bt_k
-    )
+    ).to(tl.int64)
 
     offs_h = tl.arange(0, BLOCK_H)
     offs_d = tl.arange(0, BLOCK_D)
