@@ -44,7 +44,8 @@ class TraceReplayState:
 
     def apply_staged_writes(self) -> None:
         self.trace_len.copy_to_uva()
-        self.trace_token_ids.apply_write()
+        if np.any(self.use_trace):
+            self.trace_token_ids.apply_write()
 
     def apply_trace(
         self,
