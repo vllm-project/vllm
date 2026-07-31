@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorSidecarConfig,
-    KVConnectorSidecarTransfers,
+    KVConnectorSidecarTransferPlan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -87,7 +87,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         connector_metadata: KVConnectorMetadata,
         kv_group_id: int,
-    ) -> KVConnectorSidecarTransfers:
+    ) -> KVConnectorSidecarTransferPlan:
         if self._block_sidecar_config is None:
             return super().get_block_sidecar_transfers(
                 connector_metadata,

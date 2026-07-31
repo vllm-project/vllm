@@ -158,7 +158,7 @@ class KVConnectorSidecarConfig:
 
 
 @dataclass(frozen=True)
-class KVConnectorSidecarTransfer:
+class KVConnectorSidecarBlockMap:
     """One normalized block mapping for connector sidecar data."""
 
     gpu_block_ids: np.ndarray
@@ -167,11 +167,11 @@ class KVConnectorSidecarTransfer:
 
 
 @dataclass(frozen=True)
-class KVConnectorSidecarTransfers:
+class KVConnectorSidecarTransferPlan:
     """Normalized load/store mappings for one connector step."""
 
-    load: KVConnectorSidecarTransfer | None = None
-    store: KVConnectorSidecarTransfer | None = None
+    load: KVConnectorSidecarBlockMap | None = None
+    store: KVConnectorSidecarBlockMap | None = None
 
 
 class KVConnectorWorkerMetadata(ABC):
@@ -489,7 +489,7 @@ class KVConnectorBase_V1(ABC):
         self,
         connector_metadata: KVConnectorMetadata,
         kv_group_id: int,
-    ) -> KVConnectorSidecarTransfers:
+    ) -> KVConnectorSidecarTransferPlan:
         """Normalize this step's internal KV jobs for sidecar consumers."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support KV block sidecars"

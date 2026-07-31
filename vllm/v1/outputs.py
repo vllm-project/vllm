@@ -229,13 +229,8 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Per-step routing slot indices captured by the worker (output_rank).
-    # ``(num_scheduled_tokens,)`` int: the physical KV-cache slot each scheduled
-    # token's routing was scattered into the scheduler-shared slot buffer. The
-    # scheduler reads the routing back from that buffer by these slots for
-    # decode tokens. Only the slots are returned (not the routing payload),
-    # and they ride this step's output so they stay paired with the step under
-    # async scheduling. ``None`` when ``enable_return_routed_experts`` is off.
+    # Physical KV-cache slots whose routed-expert rows were written by the
+    # worker into the shared slot buffer for this step.
     routed_experts_slots: np.ndarray | None = None
 
     @staticmethod

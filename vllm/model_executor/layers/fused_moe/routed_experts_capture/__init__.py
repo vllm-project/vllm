@@ -15,8 +15,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture.capturer import
     RoutedExpertsCapturer,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
-    get_num_experts,
-    get_num_experts_per_token,
     get_routed_experts_output_rank,
     get_routing_slot_shape_and_dtype,
     require_full_attn_group_id,
@@ -34,8 +32,6 @@ __all__ = [
     "RoutedExpertsTensors",
     "RoutedExpertsWorkerWriter",
     "RoutedExpertsWriteTask",
-    "get_num_experts",
-    "get_num_experts_per_token",
     "get_routed_experts_output_rank",
     "get_routing_slot_shape_and_dtype",
     "require_full_attn_group_id",
