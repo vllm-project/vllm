@@ -532,13 +532,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
                 break
             indices.append(target_frame)
             prev_kept_ts = target_frame / video_fps
-        # Because HF sample_frames includes the last frame,
-        # we will use HF as the standard.
-        last_frame_idx = total_frames
-        last_ts = last_frame_idx / video_fps
-        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
-            indices.append(last_frame_idx)
-
         if not indices:
             indices = [0]
         return indices
