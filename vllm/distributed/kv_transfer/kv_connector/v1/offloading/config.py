@@ -8,7 +8,9 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -26,6 +28,45 @@ if TYPE_CHECKING:
 def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
     """Return whether a KV cache tensor uses a packed block stride."""
     return bool(kv_cache_tensor.block_stride)
+
+
+def _mla_layer_specs(spec: KVCacheSpec) -> list[KVCacheSpec] | None:
+    """Per-layer specs of an all-MLA group, or ``None`` if it is not all-MLA.
+
+    ``UniformTypeKVCacheSpecs`` groups several layers of one attention type,
+    so unwrap it and check each layer. Exact type checks keep wrappers and
+    sliding-window variants out.
+    """
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        layer_specs = list(spec.kv_cache_specs.values())
+        if not layer_specs:
+            return None
+        return (
+            layer_specs
+            if all(type(s) is MLAAttentionSpec for s in layer_specs)
+            else None
+        )
+    return [spec] if type(spec) is MLAAttentionSpec else None
+
+
+def _all_groups_are_mla(groups) -> bool:
+    """Whether every KV cache group holds only MLA layers."""
+    return bool(groups) and all(
+        _mla_layer_specs(group.kv_cache_spec) is not None for group in groups
+    )
+
+
+def _expected_mla_bytes_per_block(groups) -> int:
+    """Bytes one block occupies across all groups, one MLA page per layer."""
+    total = 0
+    for group in groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            # Already the sum over the layers it wraps.
+            total += spec.page_size_bytes
+        else:
+            total += spec.page_size_bytes * len(group.layer_names)
+    return total
 
 
 def build_offloading_config(
@@ -117,13 +158,13 @@ def build_offloading_config(
     )
     replicated_layout = (
         vllm_config.model_config.use_mla
-        # Exact type: fail closed on wrappers and sliding-window variants.
-        and type(single_group_spec) is MLAAttentionSpec
+        # Every group must be MLA. Exact type per layer, so wrappers and
+        # sliding-window variants still fail closed.
+        and _all_groups_are_mla(kv_cache_config.kv_cache_groups)
         # Page accounting: one MLA page per layer, no packed/mixed rows.
         and worker_kv_bytes_per_block > 0
         and worker_kv_bytes_per_block
-        == single_group_spec.page_size_bytes
-        * len(kv_cache_config.kv_cache_groups[0].layer_names)
+        == _expected_mla_bytes_per_block(kv_cache_config.kv_cache_groups)
         # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.tensor_parallel_size > 1
         and parallel_config.pipeline_parallel_size == 1
