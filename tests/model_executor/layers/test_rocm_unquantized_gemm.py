@@ -18,7 +18,8 @@ from vllm.model_executor.layers import utils
 
 
 def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
-    x = torch.randn(1, 64, dtype=torch.float16)
+    x = torch.randn(2, 128, dtype=torch.float16)[:, ::2]
+    assert not x.is_contiguous()
     weight = torch.randn(128, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
@@ -38,6 +39,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     ref = torch.nn.functional.linear(x, weight, None)
 
     wvsplitk_mock.assert_called_once()
+    assert wvsplitk_mock.call_args.args[1].is_contiguous()
     llmm1_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
@@ -70,7 +72,8 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch):
 
 
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
-    x = torch.randn(16, 1024, dtype=torch.float16)
+    x = torch.randn(16, 2048, dtype=torch.float16)[:, ::2]
+    assert not x.is_contiguous()
     weight = torch.randn(256, 1024, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
@@ -90,5 +93,6 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     ref = torch.nn.functional.linear(x, weight, None)
 
     wvsplitkrc_mock.assert_called_once()
+    assert wvsplitkrc_mock.call_args.args[0].is_contiguous()
     wvsplitk_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
