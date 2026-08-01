@@ -610,7 +610,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -932,6 +938,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             status=status,
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
+            ec_transfer_params=context.ec_transfer_params,
         )
 
         if request.store:
@@ -1068,6 +1075,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
             )
+            if not request.include_reasoning:
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
@@ -1342,10 +1352,14 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,

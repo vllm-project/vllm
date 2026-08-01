@@ -6,7 +6,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -18,6 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -430,7 +430,7 @@ def test_json_schema_response_format_missing_schema():
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid response_format structural_tag",
     ):
         CompletionRequest(
@@ -445,7 +445,7 @@ def test_structural_tag_response_format_invalid(format_value):
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
     with pytest.raises(
-        ValidationError,
+        VLLMValidationError,
         match="Invalid structured_outputs structural_tag",
     ):
         CompletionRequest(
@@ -473,4 +473,153 @@ def test_negative_prompt_token_ids_flat():
             model=MODEL_NAME,
             prompt=[-1],
             max_tokens=10,
+        )
+
+
+class TestCompletionPromptListLimit:
+    """Regression tests for CVE: unbounded prompt list fan-out."""
+
+    def test_scalar_prompt_allowed(self):
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="hello",
+            max_tokens=1,
+        )
+        assert request.prompt == "hello"
+
+    def test_single_token_list_allowed(self):
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[1, 2, 3],
+            max_tokens=1,
+        )
+        assert request.prompt == [1, 2, 3]
+
+    def test_bounded_text_prompt_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "10")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["a", "b", "c"],
+            max_tokens=1,
+        )
+        assert request.prompt == ["a", "b", "c"]
+
+    def test_bounded_token_id_prompt_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "10")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[[1], [2], [3]],
+            max_tokens=1,
+        )
+        assert request.prompt == [[1], [2], [3]]
+
+    def test_oversized_text_prompt_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(
+            Exception, match="prompt list length 10 exceeds the maximum"
+        ):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=["x"] * 10,
+                max_tokens=1,
+            )
+
+    def test_oversized_token_id_prompt_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(
+            Exception, match="prompt list length 10 exceeds the maximum"
+        ):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=[[1]] * 10,
+                max_tokens=1,
+            )
+
+    def test_exact_limit_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["x"] * 5,
+            max_tokens=1,
+        )
+        assert len(request.prompt) == 5
+
+    def test_one_over_limit_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(Exception, match="prompt list length 6 exceeds the maximum"):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt=["x"] * 6,
+                max_tokens=1,
+            )
+
+    def test_oversized_prompt_embeds_list_rejected(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        with pytest.raises(Exception, match="prompt_embeds list length 10 exceeds"):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt_embeds=[b"\x00"] * 10,
+                max_tokens=1,
+            )
+
+    def test_bounded_prompt_embeds_list_allowed(self, monkeypatch):
+        monkeypatch.setenv("VLLM_MAX_COMPLETION_PROMPTS", "5")
+        from vllm import envs
+
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt_embeds=[b"\x00"] * 5,
+            max_tokens=1,
+        )
+        assert len(request.prompt_embeds) == 5
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            **{field_name: "2"},
         )

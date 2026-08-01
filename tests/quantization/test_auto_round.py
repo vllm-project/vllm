@@ -8,17 +8,26 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
+from typing import Any, cast
+
 import pytest
+import torch
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
+    INCMxfp4Scheme,
+    INCMxfp8Scheme,
     INCWna16Scheme,
     resolve_scheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear import (
+    INCMxfp8LinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
     INCLinearScheme,
@@ -48,7 +57,65 @@ MODELS = [
         ),
         id="auto_round:auto_awq",
     ),
+    pytest.param(
+        "Intel/Qwen3-8B-w2g64-for-ut",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_xpu()),
+            reason="INC int2 on XPU requires the ARK backend.",
+        ),
+        id="auto_round:auto_gptq_int2_tp2",
+    ),
+    pytest.param(
+        "INC4AI/Qwen3-8B-MXFP8-AR",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
+        ),
+        id="auto_round:llm_compressor_mxfp8",
+    ),
 ]
+
+QWEN3_AUTOROUND_MODELS = [
+    pytest.param(
+        "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3-1.7B MXFP4 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:mxfp4:qwen3-1p7b",
+    ),
+    pytest.param(
+        "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:w4a16:qwen3-30b-a3b",
+    ),
+    pytest.param(
+        "INCModel/Qwen3-30B-A3B-12L-MXFP4-test",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B MXFP4 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:mxfp4:qwen3-30b-a3b",
+    ),
+]
+
+MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
+    "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
+    "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
+    "Intel/Qwen3-8B-w2g64-for-ut": {
+        "block_size": 64,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 512,
+    },
+    "INC4AI/Qwen3-8B-MXFP8-AR": {
+        "block_size": 64,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 512,
+    },
+}
 
 
 @pytest.mark.skipif(
@@ -59,9 +126,9 @@ MODELS = [
     ),
     reason="Only supports CPU/XPU/CUDA backend.",
 )
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):
-    with vllm_runner(model) as llm:
+    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
@@ -108,6 +175,65 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     }
     kwargs.update(overrides)
     return INCLayerConfig(**kwargs)
+
+
+def make_qwen3_autoround_config(kind: str) -> INCConfig:
+    configs = {
+        "qwen3_1p7b_mxfp4": {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "extra_config": {
+                "model.layers.0.self_attn.q_proj": {
+                    "bits": 16,
+                    "data_type": "float",
+                },
+            },
+        },
+        "qwen3_30b_a3b_w4a16": {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:auto_gptq",
+            "data_type": "int",
+            "extra_config": {
+                "model.layers.0.mlp.gate": {
+                    "bits": 16,
+                    "data_type": "float",
+                },
+            },
+        },
+        "qwen3_30b_a3b_mxfp4": {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "act_bits": 4,
+            "act_group_size": 32,
+            "act_data_type": "mx_fp",
+            "extra_config": {
+                "model.layers.0.mlp.gate": {
+                    "bits": 16,
+                    "data_type": "float",
+                },
+                "model.layers.0.self_attn.q_proj": {
+                    "bits": 16,
+                    "data_type": "float",
+                },
+            },
+        },
+    }
+    try:
+        config = configs[kind]
+    except KeyError as err:
+        raise AssertionError(f"unknown qwen3 autoround config: {kind}") from err
+    return INCConfig.from_config(config)
 
 
 def test_inc_config_parser_exact_match() -> None:
@@ -209,6 +335,27 @@ def test_inc_config_parser_parallel_lm_head_defaults_to_unquantized() -> None:
     assert layer_config.bits == 16
 
 
+def test_inc_config_parser_suffix_match_for_lm_head() -> None:
+    """Short extra_config key should match fully-qualified lm_head layer name."""
+    layer = object.__new__(ParallelLMHead)
+    config = make_config(
+        extra_config={
+            "lm_head": {
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+            }
+        }
+    )
+
+    layer_config = config.config_parser.resolve(layer, "model.language_model.lm_head")
+
+    assert layer_config.quantized is True
+    assert layer_config.bits == 4
+    assert layer_config.group_size == 128
+    assert layer_config.sym is True
+
+
 def test_inc_config_parser_fused_moe_requires_consistent_configs() -> None:
     config = make_config(
         extra_config={
@@ -255,6 +402,39 @@ def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
         config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.qkv_proj")
 
 
+def test_inc_mxfp8() -> None:
+    config = make_config(
+        weight_bits=8,
+        group_size=32,
+        sym=True,
+        packing_format="auto_round:llm_compressor",
+        data_type="mx_fp",
+    )
+
+    assert config.weight_bits == 8
+    assert config.group_size == 32
+    assert config.data_type == "mx_fp"
+    assert config.packing_format == "auto_round:llm_compressor"
+
+
+def test_inc_config_rejects_invalid_mxfp8_activation_config() -> None:
+    with pytest.raises(AssertionError, match="act_dynamic=True"):
+        INCConfig.from_config(
+            {
+                "bits": 8,
+                "group_size": 32,
+                "sym": True,
+                "packing_format": "auto_round:llm_compressor",
+                "data_type": "mx_fp",
+                "act_bits": 8,
+                "act_data_type": "mx_fp",
+                "act_group_size": 32,
+                "act_sym": True,
+                "act_dynamic": False,
+            }
+        )
+
+
 def test_inc_layer_config_mx_fp_helpers() -> None:
     layer_config = INCLayerConfig(
         bits=4,
@@ -286,6 +466,317 @@ def test_inc_resolve_scheme_selects_wna16() -> None:
     assert isinstance(scheme, INCWna16Scheme)
 
 
+def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
+    config = INCConfig.from_config(
+        {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp4e2m1",
+        }
+    )
+
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "model.layers.0.mlp.down_proj"
+    )
+
+    assert config.sym is True
+    assert layer_config.is_mxfp4 is True
+    assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
+
+
+def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
+    monkeypatch,
+) -> None:
+    class DummyKernel:
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda: DummyKernel(),
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+
+    config = make_qwen3_autoround_config("qwen3_1p7b_mxfp4")
+
+    assert (
+        INCConfig.override_quantization_method(
+            {"quant_method": "auto-round"}, user_quant=None
+        )
+        == "inc"
+    )
+    ignored_method = config.get_quant_method(
+        object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
+    )
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "model.layers.0.mlp.gate_proj"
+    )
+    method = INCMxfp4Scheme().get_linear_method(
+        config,
+        object.__new__(LinearBase),
+        "model.layers.0.mlp.gate_proj",
+        layer_config,
+    )
+
+    assert isinstance(ignored_method, UnquantizedLinearMethod)
+    assert layer_config.bits == 4
+    assert layer_config.group_size == 32
+    assert layer_config.is_mxfp4 is True
+    assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCMxfp4LinearMethod)
+    assert isinstance(method.scheme.kernel, DummyKernel)
+
+
+def test_qwen3_30b_a3b_w4a16_autoround_routes_to_gptq_moe(
+    monkeypatch,
+) -> None:
+    captured = {}
+    expected_method = object()
+
+    class DummyMoeConfig:
+        pass
+
+    def fake_resolve_gptq_moe(layer, layer_config):
+        captured["layer"] = layer
+        captured["layer_config"] = layer_config
+        return expected_method
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._resolve_gptq_moe",
+        fake_resolve_gptq_moe,
+    )
+
+    config = make_qwen3_autoround_config("qwen3_30b_a3b_w4a16")
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    method = config.get_quant_method(layer, "model.layers.0.mlp")
+
+    assert method is expected_method
+    assert captured["layer"] is layer
+    assert captured["layer_config"].bits == 4
+    assert captured["layer_config"].group_size == 32
+    assert captured["layer_config"].is_gptq is True
+    assert captured["layer_config"].is_wna16_int is True
+
+
+def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
+    monkeypatch,
+) -> None:
+    class DummyMoeConfig:
+        pass
+
+    class DummyMxfp4MoEMethod:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe.INCMxfp4MoEMethod",
+        DummyMxfp4MoEMethod,
+    )
+
+    config = make_qwen3_autoround_config("qwen3_30b_a3b_mxfp4")
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+
+    ignored_method = config.get_quant_method(
+        object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
+    )
+    method = config.get_quant_method(layer, "model.layers.0.mlp")
+    layer_config = config.config_parser.resolve(DummyLayer(), "model.layers.0.mlp")
+
+    assert isinstance(ignored_method, UnquantizedLinearMethod)
+    assert layer_config.bits == 4
+    assert layer_config.group_size == 32
+    assert layer_config.is_mxfp4 is True
+    assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
+    assert isinstance(method, DummyMxfp4MoEMethod)
+    assert method.moe_config is layer.moe_config
+
+
+def test_inc_mxfp4_linear_method_registers_and_processes_weights(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class DummyKernel:
+        def process_weights_after_loading(self, layer) -> None:
+            captured["processed_layer"] = layer
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda: DummyKernel(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+
+    layer = torch.nn.Module()
+    method = INCMxfp4LinearMethod(
+        make_layer_config(group_size=32, data_type="mx_fp4e2m1")
+    )
+
+    method.create_weights(
+        layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[16, 32],
+        input_size=64,
+        output_size=48,
+        params_dtype=torch.bfloat16,
+    )
+
+    assert layer.weight_packed.shape == (48, 32)
+    assert layer.weight_packed.dtype is torch.uint8
+    assert layer.weight_scale.shape == (48, 2)
+    assert layer.weight_scale.dtype is torch.uint8
+    assert layer.logical_widths == [16, 32]
+    assert layer.input_size_per_partition == 64
+    assert layer.output_size_per_partition == 48
+
+    packed_data = layer.weight_packed.data
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.data.data_ptr() == packed_data.data_ptr()
+    assert not hasattr(layer, "weight_packed")
+    assert captured["processed_layer"] is layer
+
+
+def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
+    monkeypatch,
+) -> None:
+    captured = {}
+    expected_quant_config = object()
+    expected_kernel = object()
+    expected_experts_cls = object()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
+        "CutlassExpertsMxfp4._supports_current_device",
+        lambda: False,
+    )
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
+        "select_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.XPU, expected_experts_cls),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
+        "make_mxfp4_moe_quant_config",
+        lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
+        or expected_quant_config,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
+        "make_mxfp4_moe_kernel",
+        lambda **kwargs: captured.update({"kernel_kwargs": kwargs}) or expected_kernel,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe import (
+        INCMxfp4MoEMethod,
+    )
+
+    method = INCMxfp4MoEMethod(moe=cast(Any, "moe-config"))
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: "routing-tables"
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=64,
+        intermediate_size_per_partition=32,
+        params_dtype=torch.bfloat16,
+    )
+
+    assert method.experts_cls is expected_experts_cls
+    assert layer.w13_weight_packed.shape == (2, 64, 32)
+    assert layer.w2_weight_packed.shape == (2, 64, 16)
+    assert layer.w13_weight_scale.shape == (2, 64, 2)
+    assert layer.w2_weight_scale.shape == (2, 64, 1)
+
+    w13_packed_data = layer.w13_weight_packed.data
+    w2_packed_data = layer.w2_weight_packed.data
+    method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
+    assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
+    assert not hasattr(layer, "w13_weight_packed")
+    assert not hasattr(layer, "w2_weight_packed")
+    assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
+    assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
+    assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config
+    assert captured["kernel_kwargs"]["moe_config"] == "moe-config"
+    assert captured["kernel_kwargs"]["experts_cls"] is expected_experts_cls
+    assert captured["kernel_kwargs"]["routing_tables"] == "routing-tables"
+    assert method.moe_kernel is expected_kernel
+
+
+def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
+    captured = {}
+    expected_method = object()
+
+    class DummyMoeConfig:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._resolve_gptq_moe",
+        lambda layer, layer_config: captured.update(
+            {"layer": layer, "layer_config": layer_config}
+        )
+        or expected_method,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+    method = INCWna16Scheme().get_moe_method(
+        make_config(),
+        layer,
+        "model.layers.0.mlp",
+        make_layer_config(group_size=32),
+    )
+
+    assert method is expected_method
+    assert captured["layer"] is layer
+    assert captured["layer_config"].is_gptq is True
+
+
+def test_inc_resolve_scheme_selects_mxfp8() -> None:
+    layer_config = INCLayerConfig(
+        bits=8,
+        group_size=32,
+        sym=True,
+        packing_format="auto_round:llm_compressor",
+        backend="auto",
+        data_type="mx_fp",
+        quantized=True,
+    )
+
+    scheme = resolve_scheme(layer_config)
+
+    assert isinstance(scheme, INCMxfp8Scheme)
+
+
 class DummyLinearScheme(INCLinearScheme):
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -303,6 +794,76 @@ class DummyLinearScheme(INCLinearScheme):
     def apply_weights(self, layer, x, bias=None):
         self.calls.append(("apply_weights", layer, x, bias))
         return "applied"
+
+
+def test_inc_mxfp8_linear_scheme_delegates_to_kernel(monkeypatch) -> None:
+    class DummyKernel:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def process_weights_after_loading(self, layer) -> None:
+            self.calls.append(("process", layer))
+
+        def apply_weights(self, layer, x, bias=None):
+            self.calls.append(("apply", layer, x, bias))
+            return "applied"
+
+    kernel = DummyKernel()
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
+        lambda: kernel,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.ModelWeightParameter",
+        lambda **kwargs: torch.nn.Parameter(kwargs["data"], requires_grad=False),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.GroupQuantScaleParameter",
+        lambda **kwargs: torch.nn.Parameter(kwargs["data"], requires_grad=False),
+    )
+
+    scheme = INCMxfp8LinearScheme()
+    layer = torch.nn.Module()
+
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[48, 16],
+        input_size=64,
+        output_size=64,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+
+    assert layer.weight.shape == (64, 64)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale.shape == (64, 2)
+    assert layer.weight_scale.dtype == torch.uint8
+
+    scheme.process_weights_after_loading(layer)
+    result = scheme.apply_weights(layer, torch.randn(1, 64), None)
+
+    assert result == "applied"
+    assert [call[0] for call in kernel.calls] == ["process", "apply"]
+
+
+def test_inc_mxfp8_linear_scheme_requires_block_32_input(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear.init_mxfp8_linear_kernel",
+        lambda: object(),
+    )
+    scheme = INCMxfp8LinearScheme()
+
+    with pytest.raises(ValueError, match="divisible by 32"):
+        scheme.create_weights(
+            layer=torch.nn.Module(),
+            input_size_per_partition=48,
+            output_partition_sizes=[32],
+            input_size=48,
+            output_size=32,
+            params_dtype=torch.bfloat16,
+            weight_loader=lambda *args, **kwargs: None,
+        )
 
 
 def test_inc_linear_method_delegates() -> None:
@@ -349,6 +910,132 @@ def test_wna16_xpu_prefers_ark_when_available(monkeypatch) -> None:
 
     assert isinstance(method, INCLinearMethod)
     assert isinstance(method.scheme, INCARKLinearMethod)
+
+
+def test_inc_config_from_config_accepts_xpu_int2() -> None:
+    def _make_int2_raw_config(**overrides) -> dict[str, object]:
+        kwargs = {
+            "bits": 2,
+            "group_size": 64,
+            "sym": True,
+            "data_type": "int",
+            "quant_method": "auto-round",
+        }
+        kwargs.update(overrides)
+
+        return kwargs
+
+    config = INCConfig.from_config(_make_int2_raw_config())
+
+    assert config.weight_bits == 2
+    assert config.group_size == 64
+    assert config.sym is True
+    assert config.data_type == "int"
+    assert config.packing_format == "auto_round:auto_gptq"
+    assert config.backend == "auto"
+
+
+def test_wna16_xpu_int2_prefers_ark_when_available(monkeypatch) -> None:
+    class DummyQuantLinear:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
+        lambda: (True, None, object(), DummyQuantLinear),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(weight_bits=2, group_size=64),
+        object(),
+        "layer",
+        make_layer_config(bits=2, group_size=64),
+    )
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCARKLinearMethod)
+
+
+def test_wna16_xpu_int2_requires_ark_when_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
+        lambda: (False, "missing", None, None),
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match="INC int2 on XPU requires the ARK backend",
+    ):
+        INCWna16Scheme().get_linear_method(
+            make_config(weight_bits=2, group_size=64),
+            object(),
+            "layer",
+            make_layer_config(bits=2, group_size=64),
+        )
+
+
+def test_wna16_xpu_int2_unsupported_config_still_raises(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    with pytest.raises(NotImplementedError, match="unsupported config"):
+        INCWna16Scheme().get_linear_method(
+            make_config(weight_bits=2, sym=False),
+            object(),
+            "layer",
+            make_layer_config(bits=2, sym=False),
+        )
+
+
+def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    class DummyQuantLinear:
+        pass
+
+    class DummyLayer(torch.nn.Module):
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
+        lambda: (True, None, object(), DummyQuantLinear),
+    )
+
+    layer = DummyLayer()
+    method = INCARKLinearMethod(make_layer_config(bits=2, group_size=64))
+
+    method.create_weights(
+        layer=layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[32, 32],
+        input_size=64,
+        output_size=64,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+
+    assert method.pack_factor == 16
+    assert layer.qweight.shape == (4, 64)
+    assert layer.qweight.dtype == torch.int32
+    assert layer.scales.shape == (1, 64)
+    assert layer.scales.dtype == torch.bfloat16
+    assert layer.qzeros.shape == (1, 4)
+    assert layer.qzeros.dtype == torch.int32
+    assert layer.g_idx.shape == (64,)
+    assert layer.g_idx.dtype == torch.int32
+    assert layer.in_features == 64
+    assert layer.out_features == 64
+    assert layer.params_dtype == torch.bfloat16
 
 
 def test_wna16_xpu_falls_back_when_ark_unavailable(monkeypatch) -> None:
@@ -452,10 +1139,10 @@ def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
 
     with pytest.raises(NotImplementedError, match="unsupported config"):
         INCWna16Scheme().get_linear_method(
-            make_config(sym=False),
+            make_config(weight_bits=2, sym=False),
             object(),
             "layer",
-            make_layer_config(sym=False),
+            make_layer_config(bits=2, sym=False),
         )
 
 
@@ -511,6 +1198,34 @@ def test_inc_get_quant_method_linear_uses_resolved_scheme(monkeypatch) -> None:
     assert method is sentinel
 
 
+def test_inc_get_quant_method_lm_head_uses_suffix_match(monkeypatch) -> None:
+    """lm_head extra_config should apply to fully-qualified prefix."""
+    config = make_config(
+        extra_config={
+            "lm_head": {
+                "bits": 4,
+                "group_size": 128,
+                "sym": True,
+            }
+        }
+    )
+    layer = object.__new__(ParallelLMHead)
+    sentinel = object()
+
+    class DummyScheme:
+        def get_linear_method(self, _config, _layer, _prefix, _layer_config):
+            return sentinel
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.factory.resolve_scheme",
+        lambda _layer_config: DummyScheme(),
+    )
+
+    method = config.get_quant_method(layer, "model.language_model.lm_head")
+
+    assert method is sentinel
+
+
 def test_inc_get_quant_method_moe_uses_resolved_scheme(monkeypatch) -> None:
     config = make_config()
     layer = object.__new__(RoutedExperts)
@@ -550,7 +1265,8 @@ def test_resolve_gptq_moe_falls_back_to_moe_wna16(monkeypatch) -> None:
             captured["moe"] = moe
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
+        "vllm.model_executor.layers.quantization.utils.marlin_utils."
+        "check_moe_marlin_supports_layer",
         lambda *args, **kwargs: False,
     )
     monkeypatch.setattr(
@@ -600,10 +1316,6 @@ def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
             captured["moe"] = moe
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
-        lambda *args, **kwargs: True,
-    )
-    monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.utils.marlin_utils."
         "check_moe_marlin_supports_layer",
         lambda *args, **kwargs: True,
@@ -636,10 +1348,6 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
             captured["cfg"] = cfg
             captured["moe"] = moe
 
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
-        lambda *args, **kwargs: True,
-    )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.utils.marlin_utils.check_moe_marlin_supports_layer",
         lambda *args, **kwargs: True,

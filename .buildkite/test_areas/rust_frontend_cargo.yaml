@@ -4,7 +4,7 @@ steps:
 - label: Rust Frontend Cargo Style + Clippy
   key: rust-frontend-cargo-style-clippy
   depends_on: []
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   device: cpu-medium
   no_plugin: true
   source_file_dependencies:
@@ -18,7 +18,7 @@ steps:
 - label: Rust Frontend Cargo Tests
   key: rust-frontend-cargo-tests
   depends_on: []
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   device: cpu-medium
   no_plugin: true
   source_file_dependencies:

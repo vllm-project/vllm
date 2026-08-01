@@ -14,9 +14,9 @@ from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
-    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
@@ -26,6 +26,7 @@ from vllm.multimodal.video import (
     PyNvVideoCodecVideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
+    VideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
@@ -199,7 +200,11 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
     assert metadata["frames_indices"] == [0, 9]
 
 
-def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("hw_decoders", [1, 3])
+def test_pynvvideocodec_decoder_slots_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    hw_decoders: int,
+):
     class FakeSlot:
         pass
 
@@ -207,10 +212,13 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
     old_slots = PyNvVideoCodecVideoBackend._decoder_slots
     old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
     old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
     try:
         PyNvVideoCodecVideoBackend._decoder_slots = []
         PyNvVideoCodecVideoBackend._active_decoder_slots = 0
         PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+        PyNvVideoCodecVideoBackend._max_decoder_slots = None
+        PyNvVideoCodecVideoBackend._configure_decoder_slots(hw_decoders)
 
         def fake_create_slot(cls):
             nonlocal create_count
@@ -229,7 +237,7 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
         with ExitStack() as stack:
             retained_slots = [
                 stack.enter_context(PyNvVideoCodecVideoBackend._borrow_decoder_slot())
-                for _ in range(PYNVVIDEOCODEC_MAX_RETAINED_DECODERS)
+                for _ in range(hw_decoders)
             ]
 
             def borrow_extra_slot():
@@ -246,11 +254,34 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
         assert not thread.is_alive()
 
         assert seen_slots[0] in retained_slots
-        assert create_count == PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+        assert create_count == hw_decoders
     finally:
         PyNvVideoCodecVideoBackend._decoder_slots = old_slots
         PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
         PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+
+
+def test_pynvvideocodec_decoder_slots_are_configured_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(PyNvVideoCodecVideoBackend, "_max_decoder_slots", None)
+
+    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
+    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
+
+    with pytest.raises(RuntimeError, match="already configured as 2, got 3"):
+        PyNvVideoCodecVideoBackend._configure_decoder_slots(3)
+
+
+@pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
+def test_pynvvideocodec_rejects_invalid_hw_decoders(hw_decoders: object):
+    with pytest.raises(ValueError, match="hw_decoders must be a positive integer"):
+        VideoBackend.load_bytes(
+            b"fake video",
+            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            hw_decoders=hw_decoders,  # type: ignore[arg-type]
+        )
 
 
 def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
@@ -304,6 +335,13 @@ def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
 # ============================================================================
 
 
+def test_cosmos3_edge_uses_qwen3_vl_video_backend():
+    backend = get_video_loader_backend_for_processor("Cosmos3EdgeVideoProcessor")
+
+    assert backend == "qwen3_vl"
+    assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
+
+
 @pytest.mark.parametrize(
     "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
@@ -350,6 +388,12 @@ def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
             Qwen2VLVideoBackend,
             {"fps": 2},
             id="qwen2_5_vl",
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M3",
+            MiniMaxM3VideoBackend,
+            None,
+            id="minimax_m3_vl",
         ),
     ],
 )

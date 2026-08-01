@@ -228,20 +228,12 @@ def _try_get_processor_chat_template(
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
-    from transformers import (
-        PreTrainedTokenizer,
-        PreTrainedTokenizerFast,
-        ProcessorMixin,
-    )
+    from transformers import ProcessorMixin, PythonBackend, TokenizersBackend
 
     try:
         processor = cached_get_processor(
             tokenizer.name_or_path,
-            processor_cls=(
-                PreTrainedTokenizer,
-                PreTrainedTokenizerFast,
-                ProcessorMixin,
-            ),
+            processor_cls=(PythonBackend, TokenizersBackend, ProcessorMixin),
             trust_remote_code=trust_remote_code,
         )
         if (
@@ -619,15 +611,15 @@ _cached_resolve_chat_template_kwargs = lru_cache(_resolve_chat_template_kwargs)
 
 @lru_cache
 def _get_hf_base_chat_template_params() -> frozenset[str]:
-    from transformers import PreTrainedTokenizer
+    from transformers import PythonBackend
 
     # Get standard parameters from HuggingFace's base tokenizer class.
-    # This dynamically extracts parameters from PreTrainedTokenizer's
+    # This dynamically extracts parameters from PythonBackend's
     # apply_chat_template method, ensuring compatibility with tokenizers
     # that use **kwargs to receive standard parameters.
 
     # Read signature from HF's base class - the single source of truth
-    base_sig = inspect.signature(PreTrainedTokenizer.apply_chat_template)
+    base_sig = inspect.signature(PythonBackend.apply_chat_template)
 
     # Exclude VAR_KEYWORD (**kwargs) and VAR_POSITIONAL (*args) placeholders
     return frozenset(
@@ -1130,6 +1122,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             and mm_uuids is not None
             and mm_data is not None
         ):
+            mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
+
             # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
@@ -1282,8 +1276,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
 
-    @staticmethod
     def _apply_prompt_embeds_to_engine_input(
+        self,
         engine_input: MultiModalInput,
         prompt_embeds_tensors: list[torch.Tensor],
         mm_updates: MultiModalPromptUpdates,
@@ -1306,6 +1300,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         pe_kwargs_items: list[MultiModalKwargsItem] = []
         pe_hashes: list[str] = []
         pe_placeholders: list[PlaceholderRange] = []
+        mm_config = self.model_config.get_multimodal_config()
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
@@ -1319,7 +1314,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                     }
                 )
             )
-            pe_hashes.append(MultiModalHasher.hash_kwargs(prompt_embeds=tensor))
+            pe_hashes.append(
+                MultiModalHasher.hash_kwargs(
+                    mm_config.mm_hasher_algorithm, prompt_embeds=tensor
+                )
+            )
             # `is_embed=None` matches the existing image_embeds-style
             # "no encoder, just splice the tensor directly" semantics.
             pe_placeholders.append(
