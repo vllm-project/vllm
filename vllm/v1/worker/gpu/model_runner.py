@@ -1217,6 +1217,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ubatch_slot_mappings,
                     self.attn_groups,
                     self.kv_cache_config,
+                    ubatch_idx=i,
                 )
             )
             slot_mappings_by_layer.append(
