@@ -137,12 +137,20 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        # Served model name (a constant) for the OTel `gen_ai.request.model`
+        # span attribute. `served_model_name` may be a list or None; normalize
+        # to a single string, falling back to the model id.
+        served_model_name = self.model_config.served_model_name
+        if isinstance(served_model_name, list):
+            served_model_name = served_model_name[0] if served_model_name else None
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            model_name=served_model_name or self.model_config.model,
         )
 
         # EngineCore (starts the engine in background process).
@@ -297,6 +305,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        operation_name: str | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -360,6 +369,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                operation_name=operation_name,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -541,6 +551,7 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        operation_name: str | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -571,6 +582,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                operation_name=operation_name,
             )
 
             # The output_handler task pushes items into the queue.

@@ -20,6 +20,8 @@ from .utils import (
     SpanAttributes,
     contains_trace_headers,
     extract_trace_headers,
+    is_gen_ai_latest_semconv_enabled,
+    latest_gen_ai_semconv_attributes,
     log_tracing_disabled_warning,
 )
 
@@ -33,6 +35,8 @@ __all__ = [
     "SpanKind",
     "extract_trace_context",
     "extract_trace_headers",
+    "is_gen_ai_latest_semconv_enabled",
+    "latest_gen_ai_semconv_attributes",
     "log_tracing_disabled_warning",
     "contains_trace_headers",
     "otel_import_error_traceback",
