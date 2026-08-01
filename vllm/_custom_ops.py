@@ -3937,6 +3937,190 @@ def cpu_attention_with_kv_cache(
     )
 
 
+def cpu_mla_decode(
+    query: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    output: torch.Tensor,
+    key: torch.Tensor | None,
+    value: torch.Tensor | None,
+    loc: torch.Tensor,
+    attn_logits: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+) -> None:
+    torch.ops._C.decode_attention_cpu(
+        query,
+        k_buffer,
+        v_buffer,
+        output,
+        key,
+        value,
+        loc,
+        attn_logits,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+    )
+
+
+def cpu_mla_extend(
+    q_extend: torch.Tensor,
+    k_extend: torch.Tensor | None,
+    v_extend: torch.Tensor | None,
+    o_extend: torch.Tensor,
+    k_buffer: torch.Tensor,
+    v_buffer: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_start_loc: torch.Tensor,
+    max_len_extend: int,
+    sm_scale: float,
+    logit_cap: float,
+    is_cross_attn: bool,
+    sliding_window_size: int,
+    encoder_lens: torch.Tensor | None,
+    sinks: torch.Tensor | None,
+    tree_mask: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.extend_attention_cpu(
+        q_extend,
+        k_extend,
+        v_extend,
+        o_extend,
+        k_buffer,
+        v_buffer,
+        req_to_token,
+        req_pool_indices,
+        seq_lens,
+        extend_seq_lens,
+        extend_start_loc,
+        max_len_extend,
+        sm_scale,
+        logit_cap,
+        is_cross_attn,
+        sliding_window_size,
+        encoder_lens,
+        sinks,
+        tree_mask,
+    )
+
+
+def bmm_cpu(
+    out: torch.Tensor,
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    is_vnni: bool,
+    scale: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.bmm_cpu(out, mat1, mat2, is_vnni, scale)
+
+
+def cpu_mla_qkv_rope_fused(
+    hidden_states: torch.Tensor,
+    qkv_a_proj_weight: torch.Tensor,
+    q_b_proj_weight: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    eps: float,
+    use_int8_w8a8: bool,
+    use_fp8_w8a16: bool,
+    qkv_a_proj_scale: torch.Tensor | None,
+    q_b_proj_scale: torch.Tensor | None,
+    w_scale: torch.Tensor | None,
+    is_vnni: bool,
+    block_size: list[int] | None,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    num_heads: int,
+    qk_nope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.qkv_proj_with_rope_fused_weight(
+        hidden_states,
+        qkv_a_proj_weight,
+        q_b_proj_weight,
+        q_a_layernorm_weight,
+        kv_a_layernorm_weight,
+        positions,
+        cos_sin_cache,
+        eps,
+        use_int8_w8a8,
+        use_fp8_w8a16,
+        qkv_a_proj_scale,
+        q_b_proj_scale,
+        w_scale,
+        is_vnni,
+        block_size,
+        q_lora_rank,
+        kv_lora_rank,
+        qk_rope_head_dim,
+        num_heads,
+        qk_nope_head_dim,
+    )
+
+
+if hasattr(torch.ops._C, "qkv_proj_with_rope_fused_weight"):
+
+    @register_fake("_C::qkv_proj_with_rope_fused_weight")
+    def qkv_proj_with_rope_fused_weight_fake(
+        hidden_states: torch.Tensor,
+        qkv_a_proj_weight: torch.Tensor,
+        q_b_proj_weight: torch.Tensor,
+        q_a_layernorm_weight: torch.Tensor,
+        kv_a_layernorm_weight: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        eps: float,
+        use_int8_w8a8: bool,
+        use_fp8_w8a16: bool,
+        qkv_a_proj_scale: torch.Tensor | None,
+        q_b_proj_scale: torch.Tensor | None,
+        w_scale: torch.Tensor | None,
+        is_vnni: bool,
+        block_size: list[int] | None,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        num_heads: int,
+        qk_nope_head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_seqs = hidden_states.size(0)
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        q = hidden_states.new_empty((num_seqs, num_heads, qk_head_dim))
+        k_input = hidden_states.new_empty(
+            (num_seqs, 1, kv_lora_rank + qk_rope_head_dim)
+        )
+        v_input = k_input.narrow(-1, 0, kv_lora_rank)
+        return q, k_input, v_input
+
+
+def cpu_mla_concat_and_cache(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    torch.ops._C.concat_and_cache_mla_cpu(kv_c_normed, k_pe, kv_cache, slot_mapping)
+
+
 def cpu_gemm_wna16(
     input: torch.Tensor,
     q_weight: torch.Tensor,
