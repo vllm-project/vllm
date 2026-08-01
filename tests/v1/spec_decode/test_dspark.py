@@ -481,7 +481,13 @@ def test_dspark_shares_target_embedding_and_lm_head(monkeypatch):
     assert proposer.model.head is not old_head
 
 
-def test_load_dspark_model_shares_direct_draft_embedding_and_head(monkeypatch):
+@pytest.mark.parametrize(
+    ("draft_architecture", "uses_target_quant_config"),
+    [("DSparkDraftModel", True), ("Qwen3DSparkModel", False)],
+)
+def test_load_dspark_model_shares_direct_draft_embedding_and_head(
+    monkeypatch, draft_architecture, uses_target_quant_config
+):
     class DummyPPGroup:
         world_size = 1
 
@@ -509,22 +515,46 @@ def test_load_dspark_model_shares_direct_draft_embedding_and_head(monkeypatch):
     draft = DraftModel()
     old_embed = draft.embed_tokens
     old_head = draft.head
+    target_quant_config = object()
+    draft_quant_config = object()
+    loaded_vllm_config = None
     spec_config = SimpleNamespace(
-        draft_model_config=object(),
+        draft_model_config=SimpleNamespace(
+            architectures=[draft_architecture],
+            hf_config=SimpleNamespace(num_hidden_layers=0),
+        ),
         attention_backend="FLASH_ATTN",
+        kv_cache_dtype=None,
     )
     vllm_config = SimpleNamespace(
         speculative_config=spec_config,
         attention_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(),
+        quant_config=target_quant_config,
+        load_config=SimpleNamespace(),
     )
 
+    def fake_get_model(**kwargs):
+        nonlocal loaded_vllm_config
+        loaded_vllm_config = kwargs["vllm_config"]
+        return draft
+
     monkeypatch.setattr(dspark_utils, "get_pp_group", lambda: DummyPPGroup())
-    monkeypatch.setattr(dspark_utils, "get_model", lambda **kwargs: draft)
+    monkeypatch.setattr(dspark_utils, "get_model", fake_get_model)
     monkeypatch.setattr(dspark_utils, "replace", fake_replace)
+    monkeypatch.setattr(
+        "vllm.model_executor.models.utils.get_draft_quant_config",
+        lambda _: draft_quant_config,
+    )
 
     loaded = dspark_utils.load_dspark_model(target, vllm_config)
 
     assert loaded is draft
+    assert loaded_vllm_config is not None
+    expected_quant_config = (
+        target_quant_config if uses_target_quant_config else draft_quant_config
+    )
+    assert loaded_vllm_config.quant_config is expected_quant_config
     assert draft.embed_tokens is target.model.embed_tokens
     assert draft.head is target.lm_head
     assert draft.embed_tokens is not old_embed
@@ -592,5 +622,3 @@ def test_dspark_triton_context_kv_store_matches_reference():
     )
 
     assert torch.allclose(cache.float(), cache_ref.float(), atol=2e-2, rtol=2e-2)
-
-
