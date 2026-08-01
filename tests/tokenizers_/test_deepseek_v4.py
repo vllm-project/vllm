@@ -288,3 +288,103 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def _split_turn_messages():
+    """One logical assistant turn replayed as consecutive messages."""
+    return [
+        {"role": "user", "content": "Check the server"},
+        {"role": "assistant", "content": "Let me check the server status."},
+        {
+            "role": "assistant",
+            "reasoning": "The user wants a health check. I should run uptime.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "shell_exec",
+                        "arguments": '{"command": "uptime"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "up 5 days",
+        },
+    ]
+
+
+def test_deepseek_v4_merges_consecutive_assistant_messages():
+    messages = _split_turn_messages()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "shell_exec",
+                "description": "Run a shell command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tools=tools,
+        tokenize=False,
+        thinking=True,
+    )
+
+    # The split turn renders as one canonical turn:
+    # reasoning, then content, then tool calls.
+    assert (
+        "<｜Assistant｜><think>"
+        "The user wants a health check. I should run uptime."
+        "</think>Let me check the server status.\n\n<｜DSML｜tool_calls>"
+    ) in prompt
+    # No orphaned reasoning blocks: the only dangling <think> opener is the
+    # generation prompt.
+    assert prompt.count("<think>") - 1 == prompt.count("</think>")
+    # The merged turn ends with a single EOS.
+    assert prompt.count("<｜end▁of▁sentence｜>") == 1
+    assert prompt.endswith("<｜Assistant｜><think>")
+
+
+def test_deepseek_v4_merges_consecutive_assistant_messages_drop_thinking():
+    messages = _split_turn_messages()
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+        thinking=True,
+    )
+
+    # Without request tools, reasoning from earlier turns is dropped, but the
+    # split turn still renders as a single assistant turn (one EOS).
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>Check the server<｜Assistant｜></think>"
+        "Let me check the server status.\n\n<｜DSML｜tool_calls>\n"
+        '<｜DSML｜invoke name="shell_exec">\n'
+        '<｜DSML｜parameter name="command" string="true">'
+        "uptime</｜DSML｜parameter>\n"
+        "</｜DSML｜invoke>\n</｜DSML｜tool_calls><｜end▁of▁sentence｜>"
+        "<｜User｜><tool_result>up 5 days</tool_result><｜Assistant｜><think>"
+    )
