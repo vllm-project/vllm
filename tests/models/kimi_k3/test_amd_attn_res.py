@@ -103,22 +103,24 @@ def test_amd_attn_res_matches_reference(
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "num_blocks", "hidden_size"),
+    ("num_tokens", "num_blocks", "hidden_size", "row_padding"),
     [
-        pytest.param(0, 0, 128, id="empty"),
-        pytest.param(1, 0, 7168, id="decode-no-blocks"),
-        pytest.param(16, 2, 7168, id="decode-four-warps"),
-        pytest.param(1, 4, 7168, id="decode-eight-warps"),
+        pytest.param(0, 0, 128, 0, id="empty"),
+        pytest.param(1, 0, 7168, 0, id="decode-no-blocks"),
+        pytest.param(16, 2, 7168, 7, id="decode-four-warps-padded"),
+        pytest.param(1, 4, 7168, 0, id="decode-eight-warps"),
     ],
 )
 def test_amd_attn_res_rmsnorm_matches_reference(
     num_tokens: int,
     num_blocks: int,
     hidden_size: int,
+    row_padding: int,
 ) -> None:
     eps = 1e-5
-    prefix = _randn_with_row_padding(num_tokens, hidden_size)
-    blocks = _randn_with_row_padding(num_tokens, 8, hidden_size)
+    output_norm_eps = 1e-3
+    prefix = _randn_with_row_padding(num_tokens, hidden_size, padding=row_padding)
+    blocks = _randn_with_row_padding(num_tokens, 8, hidden_size, padding=row_padding)
     norm_weight = 1 + 0.1 * torch.randn(
         hidden_size, device="cuda", dtype=torch.bfloat16
     )
@@ -140,7 +142,7 @@ def test_amd_attn_res_rmsnorm_matches_reference(
         mixed,
         (hidden_size,),
         output_norm_weight,
-        eps,
+        output_norm_eps,
     )
     original_prefix = prefix.clone()
     original_blocks = blocks.clone()
@@ -153,7 +155,7 @@ def test_amd_attn_res_rmsnorm_matches_reference(
         output_norm_weight,
         num_blocks,
         eps,
-        eps,
+        output_norm_eps,
     )
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
