@@ -45,10 +45,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
     IndexerTopkCapturer,
     get_indexer_attn_group_id,
+    get_sparse_attn_indexers,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.offloader import (
@@ -321,11 +321,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
     def init_indexer_topk_capturer(self) -> None:
-        indexers = [
-            module
-            for module in self.model.modules()
-            if isinstance(module, SparseAttnIndexer)
-        ]
+        indexers = get_sparse_attn_indexers(self.model)
         if not indexers:
             raise RuntimeError(
                 "--enable-return-indexer-topk requires SparseAttnIndexer layers."
