@@ -1115,6 +1115,10 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         self.fuse_qkv_a_proj = (
             hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
         )
+        # `packed_modules_mapping` is a class attribute, so mutating it in place would
+        # leak this instance's fused-layer entries into every later instance of the same
+        # class. Copy it onto the instance first.
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if self.fuse_qkv_a_proj:
             self.packed_modules_mapping["fused_qkv_a_proj"] = [
                 "q_a_proj",

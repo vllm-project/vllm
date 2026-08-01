@@ -445,6 +445,10 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.config = config
         self.quant_config = quant_config
         # Only perform the following mapping when Qwen2MoeMLP exists
+        # `packed_modules_mapping` is a class attribute, so mutating it in place would
+        # leak this instance's fused-layer entries into every later instance of the same
+        # class. Copy it onto the instance first.
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if (
             getattr(config, "mlp_only_layers", [])
             or config.shared_expert_intermediate_size > 0

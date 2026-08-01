@@ -570,6 +570,10 @@ class Qwen3MoeForCausalLM(
         self.config = config
         self.quant_config = quant_config
         # Only perform the following mapping when Qwen3MoeMLP exists
+        # `packed_modules_mapping` is a class attribute, so mutating it in place would
+        # leak this instance's fused-layer entries into every later instance of the same
+        # class. Copy it onto the instance first.
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if getattr(config, "mlp_only_layers", []):
             self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
         self.model = Qwen3MoeModel(
