@@ -372,19 +372,11 @@ class OpenAIServingResponses(GenerateBaseServing):
         else:
             _, engine_inputs = await self._make_request(request, prev_response)
 
-        # 4. Sum the lengths of the prompt token IDs
-        total_input_tokens = 0
-        for engine_input in engine_inputs:
-            prompt_token_ids = engine_input.get("prompt_token_ids")
-            if prompt_token_ids is not None:
-                total_input_tokens += len(prompt_token_ids)
-            else:
-                # Fallback: preprocess_chat should always return token IDs
-                # for chat models. If it doesn't, we log a warning.
-                logger.warning(
-                    "prompt_token_ids missing in engine_input during count_tokens; "
-                    "token count may be inaccurate."
-                )
+        total_input_tokens = sum(  # type: ignore
+            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
+            for engine_input in engine_inputs
+            if "prompt_token_ids" in engine_input
+        )
 
         return ResponsesCountTokensResponse(input_tokens=total_input_tokens)
     
