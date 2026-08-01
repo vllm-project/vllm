@@ -340,6 +340,7 @@ class RustFrontendProcessManager:
         engine_start_index: int,
         engine_count: int,
         stats_update_address: str | None = None,
+        control_channel_address: str | None = None,
     ):
         import os
         import subprocess
@@ -363,6 +364,10 @@ class RustFrontendProcessManager:
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
+
+        if control_channel_address is not None:
+            cmd.extend(["--control-channel-address", control_channel_address])
+
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
         args_dict = jsonify_non_default_args(

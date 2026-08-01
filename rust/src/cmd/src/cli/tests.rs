@@ -733,6 +733,8 @@ fn frontend_args_accept_json() {
         "ipc:///tmp/output.sock",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
+        "--control-channel-address",
+        "tcp://127.0.0.1:9000",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_count":2}"#,
     ])
@@ -747,6 +749,9 @@ fn frontend_args_accept_json() {
                     output_address: "ipc:///tmp/output.sock",
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
+                    ),
+                    control_channel_address: Some(
+                        "tcp://127.0.0.1:9000",
                     ),
                     engine_start_index: 0,
                     engine_count: 1,
