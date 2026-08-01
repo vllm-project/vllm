@@ -107,6 +107,9 @@ def get_mla_prefill_backend(
     """
     from vllm.platforms import current_platform
 
+    if current_platform.is_cpu():
+        return MLAPrefillBackendEnum.CPU_NATIVE.get_class()
+
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
         logger.info_once(
