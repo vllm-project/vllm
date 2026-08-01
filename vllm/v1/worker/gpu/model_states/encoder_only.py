@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -8,20 +8,18 @@ import torch.nn as nn
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    KVCacheConfig,
-)
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -95,6 +93,52 @@ class EncoderOnlyModelState(DefaultModelState):
         self._dummy_slot_mapping = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+        self.token_type_ids: dict[str, torch.Tensor] = {}
+
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        super().add_request(req_index, new_req_data)
+        pooling_params = new_req_data.pooling_params
+        if pooling_params is None or pooling_params.extra_kwargs is None:
+            return
+
+        token_type_start = pooling_params.extra_kwargs.get("compressed_token_type_ids")
+        if token_type_start is not None:
+            assert new_req_data.prompt_token_ids is not None
+            self.token_type_ids[new_req_data.req_id] = (
+                torch.arange(len(new_req_data.prompt_token_ids), dtype=torch.int32)
+                >= token_type_start
+            ).to(torch.int32)
+
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        self.token_type_ids.pop(req_id, None)
+
+    def prepare_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, torch.Tensor | None]:
+        model_inputs = super().prepare_inputs(input_batch, req_states)
+        if not self.token_type_ids:
+            return model_inputs
+
+        token_type_ids_cpu = torch.zeros(
+            input_batch.num_tokens_after_padding,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        offset = 0
+        for i, req_id in enumerate(input_batch.req_ids):
+            num_tokens = int(input_batch.num_scheduled_tokens[i])
+            request_token_type_ids = self.token_type_ids.get(req_id)
+            if request_token_type_ids is not None:
+                start = int(input_batch.num_computed_tokens_np[i])
+                token_type_ids_cpu[offset : offset + num_tokens].copy_(
+                    request_token_type_ids[start : start + num_tokens]
+                )
+            offset += num_tokens
+        model_inputs["token_type_ids"] = token_type_ids_cpu.to(
+            self.device, non_blocking=True
+        )
+        return model_inputs
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         # Encoder groups are built here rather than in init_attn_backend, so
@@ -104,7 +148,7 @@ class EncoderOnlyModelState(DefaultModelState):
         for group in self.encoder_attn_groups:
             builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
-                self.vllm_config, cast(AttentionSpec, group.kv_cache_spec)
+                self.vllm_config, group.kv_cache_spec
             )
             if cg_support.value < support.value:
                 support = cg_support
