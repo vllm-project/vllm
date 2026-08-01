@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -70,6 +72,55 @@ def test_sparse_flashmla_metadata_smoke():
     assert tile_md.tile_scheduler_metadata is None
     assert tile_md.num_splits is None
     assert num_splits is None
+
+
+def test_deepseek_v4_dspark_warmup_without_topk_buffer(monkeypatch):
+    from vllm.models.deepseek_v4.nvidia import flashmla as flashmla_mod
+
+    workspace_calls = []
+
+    class FakeWorkspaceManager:
+        def get_simultaneous(self, *shapes_and_dtypes):
+            workspace_calls.append(shapes_and_dtypes)
+
+    monkeypatch.setattr(
+        flashmla_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None),
+    )
+    monkeypatch.setattr(
+        flashmla_mod,
+        "current_workspace_manager",
+        lambda: FakeWorkspaceManager(),
+    )
+
+    attn = SimpleNamespace(
+        compress_ratio=1,
+        max_model_len=1024,
+        window_size=128,
+        max_num_batched_tokens=16,
+        topk_indices_buffer=None,
+        PREFILL_CHUNK_SIZE=4,
+    )
+    q = torch.ones((2, 1, 16), dtype=torch.bfloat16)
+    output = torch.ones_like(q)
+
+    flashmla_mod.DeepseekV4FlashMLAAttention.forward_mqa(
+        attn,
+        q,
+        torch.empty_like(q),
+        torch.arange(2),
+        output,
+    )
+
+    torch.testing.assert_close(output, torch.zeros_like(output))
+    assert workspace_calls == [
+        (
+            ((4, 144, 16), torch.bfloat16),
+            ((16, 128), torch.int32),
+            ((16,), torch.int32),
+        )
+    ]
 
 
 def test_sparse_flashmla_decode_smoke():
