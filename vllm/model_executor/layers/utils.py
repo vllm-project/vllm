@@ -189,7 +189,7 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1))
         if not x_view.is_contiguous():
             x_view = x_view.contiguous()
-        if m > 8 and 0 < n <= 5 and weight.is_contiguous():
+        if m > 8 and 0 < n <= 5:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
