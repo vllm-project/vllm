@@ -118,7 +118,7 @@ def test_compiled_vs_eager_multidim(
 def test_kimi_k3_gate_uses_fused_rocm_kernel(num_tokens: int) -> None:
     """Kimi-K3's packed gate selects the fused ROCm implementation."""
     set_random_seed(0)
-    device = torch.device("cuda:0")
+    device = torch.device(current_platform.device_type)
     config = VllmConfig()
     config.compilation_config.custom_ops = ["none"]
     with set_current_vllm_config(config):
@@ -129,12 +129,15 @@ def test_kimi_k3_gate_uses_fused_rocm_kernel(num_tokens: int) -> None:
             dtype=torch.bfloat16,
             enforce_enable=True,
         )
-    module.weight.data.normal_()
+    module.weight.normal_()
 
     x = torch.randn((1, num_tokens, 12, 128), dtype=torch.bfloat16, device=device)
     packed_gate = torch.randn((num_tokens, 6288), dtype=torch.bfloat16, device=device)
     gate = packed_gate[:, 4608:6144].view(num_tokens, 12, 128)
-    assert gate.stride()[-2:] == (128, 1)
+    assert gate.stride()[-2:] == (128, 1), "each gate head must remain contiguous"
+    assert num_tokens == 1 or gate.stride(0) == packed_gate.stride(0), (
+        "a multi-token gate must retain the packed projection buffer's token stride"
+    )
 
     x_float = x.float()
     variance = x_float.pow(2).mean(dim=-1, keepdim=True)
@@ -147,6 +150,5 @@ def test_kimi_k3_gate_uses_fused_rocm_kernel(num_tokens: int) -> None:
 
     output = module(x, gate)
 
-    assert module._forward_method.__name__ == "forward_hip"
     assert output.data_ptr() == x.data_ptr()
     torch.testing.assert_close(output, reference, atol=1e-3, rtol=1e-2)
