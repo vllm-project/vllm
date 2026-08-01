@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.engine.protocol import (
         DeltaMessage,
         ExtractedToolCallInformation,
+        FunctionCall,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.parser.engine.parser_engine import ParserEngine
@@ -32,7 +33,34 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.utils import Tool
 
 
-class ParserEngineReasoningAdapter(ReasoningParser):
+class _ParserEngineAdapterMixin:
+    """Shared one-pass parsing for the two parser-engine adapters.
+
+    This internal mixin keeps model output text aligned with its token IDs.
+    Tool-only parsing starts in ``CONTENT`` to preserve the ToolParser contract.
+    """
+
+    _parser_engine: ParserEngine
+
+    def parse_model_output(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int],
+        *,
+        parse_reasoning: bool,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        """Parse aligned text and token IDs through one parser engine pass."""
+        reasoning, content, tool_calls = self._parser_engine.parse(
+            model_output,
+            request,
+            model_output_token_ids=model_output_token_ids,
+            _initial_state=None if parse_reasoning else ParserState.CONTENT,
+        )
+        return reasoning if parse_reasoning else None, content, tool_calls
+
+
+class ParserEngineReasoningAdapter(_ParserEngineAdapterMixin, ReasoningParser):
     """Adapts a :class:`ParserEngine` to the :class:`ReasoningParser`
     interface so parser engines can be used as reasoning parsers in the
     existing serving code.
@@ -125,7 +153,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         return self._parser_engine.count_reasoning_tokens(token_ids)
 
 
-class ParserEngineToolAdapter(ToolParser):
+class ParserEngineToolAdapter(_ParserEngineAdapterMixin, ToolParser):
     """Adapts a :class:`ParserEngine` to the :class:`ToolParser` interface.
 
     :meth:`extract_tool_calls` starts the parser engine in ``CONTENT``

@@ -306,6 +306,28 @@ class MistralParser(ParserEngine):
             )
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
 
+    def _parse_non_streaming(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int],
+        *,
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+        """Preserve pre-v11 JSON-array extraction behind ``parse()``."""
+        # Pre-v11 emits a legacy JSON-array format that is not modeled by the
+        # declarative engine grammar.
+        if not self._is_pre_v11:
+            return super()._parse_non_streaming(
+                model_output,
+                request,
+                model_output_token_ids,
+                initial_state=initial_state,
+            )
+
+        tool_call_info = self._legacy_extract_tool_calls(model_output, request)
+        return None, tool_call_info.content, tool_call_info
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -526,7 +548,7 @@ class MistralParser(ParserEngine):
     def _legacy_extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest | None,
+        request: ChatCompletionRequest | ResponsesRequest | None,
     ) -> ExtractedToolCallInformation:
         """Pre-v11 non-streaming extraction.
 
