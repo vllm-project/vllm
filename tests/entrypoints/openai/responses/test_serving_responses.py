@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
@@ -11,6 +13,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
+    ResponseStatus,
     ResponseTextConfig,
     ResponseTextDeltaEvent,
 )
@@ -152,6 +155,102 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
         "auto",
         "code_interpreter",
         "web_search_preview",
+    }
+
+
+def _make_stored_response(
+    response_id: str, status: ResponseStatus
+) -> ResponsesResponse:
+    request = ResponsesRequest(request_id=response_id, input="test")
+    sampling_params = SamplingParams(max_tokens=1)
+    return ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status=status,
+    )
+
+
+@pytest.fixture
+def bounded_response_store() -> OpenAIServingResponses:
+    serving = object.__new__(OpenAIServingResponses)
+    serving.max_store_entries = 2
+    serving.response_store = {}
+    serving.response_store_lock = asyncio.Lock()
+    serving.msg_store = {}
+    serving.event_store = {}
+    return serving
+
+
+@pytest.mark.asyncio
+async def test_response_store_evicts_related_state(
+    bounded_response_store: OpenAIServingResponses,
+) -> None:
+    for response_id in ("response-1", "response-2", "response-3"):
+        bounded_response_store.msg_store[response_id] = []
+        bounded_response_store.event_store[response_id] = (
+            deque(),
+            asyncio.Event(),
+        )
+        await bounded_response_store._store_response(
+            _make_stored_response(response_id, "completed")
+        )
+
+    expected_ids = {"response-2", "response-3"}
+    assert set(bounded_response_store.response_store) == expected_ids
+    assert set(bounded_response_store.msg_store) == expected_ids
+    assert set(bounded_response_store.event_store) == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_response_store_retrieval_refreshes_recency(
+    bounded_response_store: OpenAIServingResponses,
+) -> None:
+    await bounded_response_store._store_response(
+        _make_stored_response("response-1", "completed")
+    )
+    await bounded_response_store._store_response(
+        _make_stored_response("response-2", "completed")
+    )
+
+    response = await bounded_response_store.retrieve_responses(
+        "response-1", starting_after=None, stream=False
+    )
+    assert isinstance(response, ResponsesResponse)
+
+    await bounded_response_store._store_response(
+        _make_stored_response("response-3", "completed")
+    )
+    assert set(bounded_response_store.response_store) == {
+        "response-1",
+        "response-3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_response_store_does_not_evict_active_responses(
+    bounded_response_store: OpenAIServingResponses,
+) -> None:
+    bounded_response_store.max_store_entries = 1
+    await bounded_response_store._store_response(
+        _make_stored_response("queued", "queued")
+    )
+    await bounded_response_store._store_response(
+        _make_stored_response("in-progress", "in_progress")
+    )
+    await bounded_response_store._store_response(
+        _make_stored_response("completed-1", "completed")
+    )
+    await bounded_response_store._store_response(
+        _make_stored_response("completed-2", "completed")
+    )
+
+    assert set(bounded_response_store.response_store) == {
+        "queued",
+        "in-progress",
+        "completed-2",
     }
 
 
