@@ -1,10 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::borrow::Cow;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use fastokens::Tokenizer as FastokensTokenizer;
 use fastokens::decoders::Decoder as FastokensDecoder;
+use fastokens::pre_tokenized::{
+    PreTokenizedString as FastokensPreTokenizedString, Split as FastokensSplit,
+};
+use fastokens::{PreTokenizer as FastokensPreTokenizer, Split as FastokensSplitPreTokenizer};
 use thiserror_ext::AsReport as _;
-use tokenizers::Tokenizer as HfTokenizer;
+use tokenizers::{
+    AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, Tokenizer as HfTokenizer,
+};
 use tracing::{info, warn};
 
 use crate::byte_level_decode::decode_byte_level;
@@ -12,6 +22,8 @@ use crate::hf::added_tokens::load_tokenizer_json_with_extra_tokens;
 use crate::{Result, Tokenizer};
 
 mod added_tokens;
+
+static EMPTY_HF_ADDED_VOCABULARY: LazyLock<AddedVocabulary> = LazyLock::new(AddedVocabulary::new);
 
 enum Backend {
     Hf(Box<HfTokenizer>),
@@ -48,6 +60,85 @@ fn decode_fastokens_byte_level(
         })
         .collect::<Result<_>>()?;
     Ok(decode_byte_level(tokens))
+}
+
+fn encode_hf_ordinary(tokenizer: &HfTokenizer, text: &str) -> tokenizers::Result<Vec<u32>> {
+    let mut pretokenized =
+        EMPTY_HF_ADDED_VOCABULARY.extract_and_normalize(tokenizer.get_normalizer(), text);
+
+    if let Some(pre_tokenizer) = tokenizer.get_pre_tokenizer() {
+        pre_tokenizer.pre_tokenize(&mut pretokenized)?;
+    }
+    pretokenized.tokenize(|normalized| tokenizer.get_model().tokenize(normalized.get()))?;
+    let encoding = pretokenized.into_encoding(None, 0, OffsetType::Byte)?;
+    let encoding = tokenizer.post_process(encoding, None, false)?;
+    Ok(encoding.get_ids().to_vec())
+}
+
+fn fastokens_fused_split(tokenizer: &FastokensTokenizer) -> Option<&FastokensSplitPreTokenizer> {
+    // Keep this predicate aligned with fastokens::Tokenizer::detect_fused_byte_level.
+    let FastokensPreTokenizer::Sequence(steps) = tokenizer.pre_tokenizer()? else {
+        return None;
+    };
+    let [
+        FastokensPreTokenizer::Split(split),
+        FastokensPreTokenizer::ByteLevel(byte_level),
+    ] = steps.as_slice()
+    else {
+        return None;
+    };
+    byte_level.is_bulk_only().then_some(split)
+}
+
+fn fastokens_pre_tokenized_ordinary(
+    tokenizer: &FastokensTokenizer,
+    text: &str,
+) -> FastokensPreTokenizedString {
+    // This is fastokens::Tokenizer::build_pre_tokenized with added_tokens = None.
+    let normalized = tokenizer
+        .normalizer()
+        .map_or(Cow::Borrowed(text), |normalizer| normalizer.normalize(text));
+    match normalized {
+        Cow::Borrowed(_) => FastokensPreTokenizedString::from_text(text),
+        Cow::Owned(text) => {
+            let len = text.len();
+            FastokensPreTokenizedString::new(
+                text,
+                vec![FastokensSplit {
+                    range: 0..len,
+                    token_id: None,
+                }],
+            )
+        }
+    }
+}
+
+fn encode_fastokens_ordinary(
+    tokenizer: &FastokensTokenizer,
+    text: &str,
+) -> std::result::Result<Vec<u32>, fastokens::Error> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut pretokenized = fastokens_pre_tokenized_ordinary(tokenizer, text);
+    let ids = if let Some(split) = fastokens_fused_split(tokenizer) {
+        split.pre_tokenize(&mut pretokenized)?;
+        pretokenized
+            .tokenize_batched(|buffer, splits, output| {
+                tokenizer.model().tokenize_batch_fused(buffer, splits, output)
+            })
+            .map_err(fastokens::Error::Model)?
+    } else {
+        if let Some(pre_tokenizer) = tokenizer.pre_tokenizer() {
+            pre_tokenizer.pre_tokenize(&mut pretokenized)?;
+        }
+        pretokenized
+            .tokenize(|text, output| tokenizer.model().tokenize_into(text, output))
+            .map_err(fastokens::Error::Model)?
+    };
+
+    Ok(tokenizer.post_process(ids, false))
 }
 
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
@@ -153,6 +244,17 @@ impl Tokenizer for HuggingFaceTokenizer {
         }
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        match &self.backend {
+            Backend::Hf(tokenizer) => encode_hf_ordinary(tokenizer, text)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+            Backend::Fastokens(tokenizer) | Backend::FastokensByteLevel(tokenizer) => {
+                encode_fastokens_ordinary(tokenizer, text)
+                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))
+            }
+        }
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         match &self.backend {
             Backend::Hf(t) => t
@@ -197,11 +299,18 @@ impl Tokenizer for HuggingFaceTokenizer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use serde_json::{Value, json};
     use tempfile::tempdir;
     use tokenizers::models::bpe::BPE;
+    use tokenizers::pre_tokenizers::byte_level::ByteLevel;
     use tokenizers::{AddedToken, Tokenizer as HfTokenizer};
 
     use super::{HuggingFaceTokenizer, Tokenizer};
+
+    const REGULAR_TOKEN: &str = "<|regular|>";
+    const SPECIAL_TOKEN: &str = "<|special|>";
 
     fn tiny_bpe_tokenizer() -> HfTokenizer {
         let vocab = [
@@ -227,6 +336,186 @@ mod tests {
             .build()
             .expect("build bpe tokenizer");
         HfTokenizer::new(model)
+    }
+
+    fn ordinary_test_tokenizer_json(fused: bool, with_added_tokens: bool) -> Value {
+        let mut alphabet: Vec<char> = ByteLevel::alphabet().into_iter().collect();
+        alphabet.sort_unstable();
+        let vocab = alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(id, token)| (token.to_string(), json!(id)))
+            .collect::<serde_json::Map<_, _>>();
+
+        let pre_tokenizer = if fused {
+            json!({
+                "type": "Sequence",
+                "pretokenizers": [
+                    {
+                        "type": "Split",
+                        "pattern": {"Regex": "\\S+|\\s+"},
+                        "behavior": "Isolated",
+                        "invert": false
+                    },
+                    {
+                        "type": "ByteLevel",
+                        "add_prefix_space": false,
+                        "trim_offsets": true,
+                        "use_regex": false
+                    }
+                ]
+            })
+        } else {
+            json!({
+                "type": "ByteLevel",
+                "add_prefix_space": false,
+                "trim_offsets": true,
+                "use_regex": true
+            })
+        };
+        let added_tokens = with_added_tokens.then(|| {
+            json!([
+                {
+                    "id": 256,
+                    "content": REGULAR_TOKEN,
+                    "single_word": false,
+                    "lstrip": false,
+                    "rstrip": false,
+                    "normalized": true,
+                    "special": false
+                },
+                {
+                    "id": 257,
+                    "content": SPECIAL_TOKEN,
+                    "single_word": false,
+                    "lstrip": false,
+                    "rstrip": false,
+                    "normalized": false,
+                    "special": true
+                }
+            ])
+        });
+
+        json!({
+            "version": "1.0",
+            "truncation": {
+                "direction": "Right",
+                "max_length": 24,
+                "strategy": "LongestFirst",
+                "stride": 0
+            },
+            "padding": null,
+            "added_tokens": added_tokens.unwrap_or_else(|| json!([])),
+            "normalizer": {"type": "NFC"},
+            "pre_tokenizer": pre_tokenizer,
+            "post_processor": {
+                "type": "ByteLevel",
+                "add_prefix_space": false,
+                "trim_offsets": true,
+                "use_regex": true
+            },
+            "decoder": {
+                "type": "ByteLevel",
+                "add_prefix_space": false,
+                "trim_offsets": true,
+                "use_regex": true
+            },
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "ignore_merges": false,
+                "vocab": vocab,
+                "merges": []
+            }
+        })
+    }
+
+    fn write_tokenizer_json(dir: &Path, name: &str, value: &Value) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(value).expect("serialize tokenizer"),
+        )
+        .expect("write tokenizer");
+        path
+    }
+
+    fn assert_ordinary_matches_added_empty(
+        constructor: fn(&Path) -> crate::Result<HuggingFaceTokenizer>,
+        fused: bool,
+    ) {
+        let dir = tempdir().expect("create temp dir");
+        let added_path = write_tokenizer_json(
+            dir.path(),
+            "with-added.json",
+            &ordinary_test_tokenizer_json(fused, true),
+        );
+        let empty_path = write_tokenizer_json(
+            dir.path(),
+            "added-empty.json",
+            &ordinary_test_tokenizer_json(fused, false),
+        );
+        let tokenizer = constructor(&added_path).expect("load tokenizer with added tokens");
+        let added_empty = constructor(&empty_path).expect("load tokenizer with empty added tokens");
+
+        if let super::Backend::Fastokens(inner) | super::Backend::FastokensByteLevel(inner) =
+            &tokenizer.backend
+        {
+            assert_eq!(super::fastokens_fused_split(inner).is_some(), fused);
+        }
+
+        assert_eq!(
+            tokenizer.encode(REGULAR_TOKEN, false).unwrap(),
+            vec![tokenizer.token_to_id(REGULAR_TOKEN).unwrap()]
+        );
+        assert_eq!(
+            tokenizer.encode(SPECIAL_TOKEN, false).unwrap(),
+            vec![tokenizer.token_to_id(SPECIAL_TOKEN).unwrap()]
+        );
+
+        for text in [
+            "",
+            "hello",
+            "Cafe\u{301}",
+            REGULAR_TOKEN,
+            SPECIAL_TOKEN,
+            "hello <|regular|> Cafe\u{301} <|special|> tail",
+        ] {
+            assert_eq!(
+                tokenizer.encode_ordinary(text).unwrap(),
+                added_empty.encode(text, false).unwrap(),
+                "fused={fused}, text={text:?}",
+            );
+        }
+        if matches!(&tokenizer.backend, super::Backend::Hf(_)) {
+            assert_eq!(
+                tokenizer
+                    .encode_ordinary("hello <|regular|> Cafe\u{301} <|special|> tail")
+                    .unwrap()
+                    .len(),
+                24,
+                "HF post-processing must retain configured truncation",
+            );
+        }
+    }
+
+    #[test]
+    fn hf_ordinary_matches_original_encode_with_added_empty() {
+        for fused in [false, true] {
+            assert_ordinary_matches_added_empty(HuggingFaceTokenizer::new_hf, fused);
+        }
+    }
+
+    #[test]
+    fn fastokens_ordinary_matches_original_encode_with_added_empty() {
+        for fused in [false, true] {
+            assert_ordinary_matches_added_empty(HuggingFaceTokenizer::new_fastokens, fused);
+        }
     }
 
     #[test]

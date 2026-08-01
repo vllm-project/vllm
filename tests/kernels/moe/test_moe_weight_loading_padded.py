@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for FusedMoE weight loading with padded hidden dimensions.
+"""Tests for FusedMoEFactory weight loading with padded hidden dimensions.
 
 When using DeepEP backends or NIXL EP with models like nemotron_h,
 hidden_size may be rounded up (e.g., 2688 -> 3072) for backend requirements.
@@ -59,6 +59,55 @@ class TestGetHiddenDim:
         # shard_dim outside the data dimensions should raise
         with pytest.raises(ValueError, match="not a valid data dimension"):
             RoutedExperts._get_hidden_dim(shard_dim=0, ndim=3)
+
+
+class TestOrientFusedWeight:
+    """Unit tests for _orient_fused_weight.
+
+    E=8 experts, hidden=3072, intermediate=1024.
+    """
+
+    HIDDEN = 3072
+
+    def test_w13_standard_orientation_is_untouched(self):
+        weight = torch.randn(8, 2048, self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, "w1", self.HIDDEN)
+        assert result.shape == (8, 2048, self.HIDDEN)
+
+    def test_w13_transposed_checkpoint_is_normalised(self):
+        # e.g. Qwen3 VL MoE stores [experts, hidden, 2 * intermediate]
+        weight = torch.randn(8, self.HIDDEN, 2048)
+        result = RoutedExperts._orient_fused_weight(weight, "w3", self.HIDDEN)
+        assert result.shape == (8, 2048, self.HIDDEN)
+
+    def test_w2_standard_orientation_is_untouched(self):
+        weight = torch.randn(8, self.HIDDEN, 1024)
+        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1024)
+
+    def test_w2_transposed_checkpoint_is_normalised(self):
+        weight = torch.randn(8, 1024, self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1024)
+
+    def test_w13_per_channel_scale_is_untouched(self):
+        # A fused per-channel scale has no hidden dim, so transposing it would
+        # leave chunk()/TP sharding operating on the wrong axis.
+        scale = torch.randn(8, 2048, 1)
+        result = RoutedExperts._orient_fused_weight(scale, "w1", self.HIDDEN)
+        assert result.shape == (8, 2048, 1)
+        assert result.chunk(2, dim=1)[0].shape == (8, 1024, 1)
+
+    def test_w2_per_channel_scale_is_untouched(self):
+        scale = torch.randn(8, self.HIDDEN, 1)
+        result = RoutedExperts._orient_fused_weight(scale, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1)
+
+    def test_block_scale_is_untouched(self):
+        # Block scales are [experts, 2 * intermediate / block, hidden / block]
+        scale = torch.randn(8, 16, 24)
+        result = RoutedExperts._orient_fused_weight(scale, "w1", self.HIDDEN)
+        assert result.shape == (8, 16, 24)
 
 
 class TestNarrowExpertDataForPadding:
@@ -325,3 +374,24 @@ class TestWeightLoadingWithPaddedHiddenSize:
                 shard_id="w2",
                 expert_id=0,
             )
+
+
+class TestPerTensorScaleCoercion:
+    """Regression test for shape-(1,) per-tensor scales (issue #43297).
+
+    llm-compressor NVFP4 emits per-tensor weight and input scales as
+    shape-(1,) tensors. `_to_scalar` collapses them to a 0-D scalar so the
+    scalar-slot assignments in the weight loader neither broadcast nor raise.
+    """
+
+    def test_collapses_to_scalar(self):
+        # shape-(1,) and 0-D both reduce to a 0-D scalar.
+        for loaded_weight in (torch.tensor([0.5]), torch.tensor(0.5)):
+            scalar = RoutedExperts._to_scalar(loaded_weight)
+            assert scalar.shape == ()
+            assert scalar.item() == pytest.approx(0.5)
+
+    def test_rejects_non_scalar(self):
+        # numel > 1 must fail loudly instead of silently picking an element.
+        with pytest.raises(RuntimeError):
+            RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))

@@ -58,6 +58,10 @@ class ServeSubcommand(CLISubcommand):
             uvloop.run(serve_grpc(args))
             return
 
+        rust_frontend_path = (
+            envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+        )
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(
@@ -103,7 +107,7 @@ class ServeSubcommand(CLISubcommand):
         # - Hybrid LB: Use local DP size (internal LB for local ranks only)
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            if is_multi_port or is_external_lb or envs.VLLM_RUST_FRONTEND_PATH:
+            if is_multi_port or is_external_lb or rust_frontend_path:
                 args.api_server_count = 1
             elif is_hybrid_lb:
                 args.api_server_count = args.data_parallel_size_local or 1
@@ -120,7 +124,7 @@ class ServeSubcommand(CLISubcommand):
                         "Defaulting api_server_count to data_parallel_size (%d).",
                         args.api_server_count,
                     )
-        elif envs.VLLM_RUST_FRONTEND_PATH and args.api_server_count > 1:
+        elif rust_frontend_path and args.api_server_count > 1:
             logger.warning(
                 "Ignoring --api-server-count=%d when using rust front-end process",
                 args.api_server_count,
@@ -140,7 +144,7 @@ class ServeSubcommand(CLISubcommand):
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
-        elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
+        elif args.api_server_count > 1 or rust_frontend_path:
             run_multi_api_server(args)
         else:
             # Single API server (this process).
@@ -256,7 +260,9 @@ def run_headless(args: argparse.Namespace):
 
 def run_multi_api_server(args: argparse.Namespace):
     assert not args.headless
-    rust_frontend_path = envs.VLLM_RUST_FRONTEND_PATH
+    rust_frontend_path = (
+        envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+    )
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
@@ -281,7 +287,7 @@ def run_multi_api_server(args: argparse.Namespace):
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     engine_args._api_process_count = num_api_servers
@@ -320,14 +326,23 @@ def run_multi_api_server(args: argparse.Namespace):
         defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
     )
 
-    with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses, num_api_servers
-    ) as (local_engine_manager, coordinator, addresses, tensor_queue):
+    with launch_core_engines(vllm_config, executor_class, log_stats, addresses) as (
+        local_engine_manager,
+        coordinator,
+        addresses,
+        tensor_queue,
+    ):
         stats_update_address = (
             coordinator.get_stats_publish_address() if coordinator else None
         )
 
         if rust_frontend_path:
+            if parallel_config.local_engines_only:
+                expected_engine_start_index = parallel_config.data_parallel_rank
+                expected_engine_count = parallel_config.data_parallel_size_local
+            else:
+                expected_engine_start_index = 0
+                expected_engine_count = parallel_config.data_parallel_size
             # Start rust front-end process.
             api_server_manager = RustFrontendProcessManager(
                 binary_path=rust_frontend_path,
@@ -335,7 +350,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 args=args,
                 input_address=addresses.inputs[0],
                 output_address=addresses.outputs[0],
-                engine_count=parallel_config.data_parallel_size,
+                engine_start_index=expected_engine_start_index,
+                engine_count=expected_engine_count,
                 stats_update_address=stats_update_address,
             )
         else:

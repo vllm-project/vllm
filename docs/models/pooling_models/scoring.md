@@ -20,7 +20,7 @@ The score models is designed to compute similarity scores between two input prom
     - `LLM.score`
 - Online APIs:
     - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
-    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
@@ -440,7 +440,7 @@ More examples can be found here: [examples/pooling/score](../../../examples/pool
 
 ## Supported Features
 
-AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
+As cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
 
 ### Score Template
 
