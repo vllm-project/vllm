@@ -127,6 +127,8 @@ def test_attention_group_routes_builder_initialization_to_ubatch_slots():
     from vllm.v1.worker.utils import AttentionGroup
 
     class Builder:
+        requires_block_table_width = False
+
         def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
             size = (len(created_builders) + 1) * 1024
             (self.workspace,) = current_workspace_manager().get_simultaneous(
