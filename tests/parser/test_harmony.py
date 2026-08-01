@@ -13,8 +13,9 @@ from openai_harmony import (
     Role,
 )
 from transformers import AutoTokenizer
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
 
-from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -24,8 +25,6 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.structured_output.backend_types import StructuredOutputOptions
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -932,17 +931,6 @@ class TestAdjustRequest:
         "FINAL_STRUCTURAL_TAG",
     )
 
-    @pytest.fixture(scope="class")
-    def xgrammar_backend(self, gpt_oss_tokenizer):
-        return XgrammarBackend(
-            VllmConfig(
-                device_config=DeviceConfig(device="cpu"),
-                structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
-            ),
-            tokenizer=gpt_oss_tokenizer,
-            vocab_size=len(gpt_oss_tokenizer.get_vocab()),
-        )
-
     @staticmethod
     def _build_request(
         request_kind: Literal["chat", "responses"],
@@ -1046,7 +1034,6 @@ class TestAdjustRequest:
     @classmethod
     def _assert_structured_outputs_admission(
         cls,
-        xgrammar_backend: XgrammarBackend,
         adjusted_request: ChatCompletionRequest | ResponsesRequest,
         expected_admission: Sequence[str],
     ) -> None:
@@ -1055,18 +1042,15 @@ class TestAdjustRequest:
         assert structured_outputs.structural_tag is not None
         assert structured_outputs.all_non_structural_tag_constraints_none()
 
-        grammar = xgrammar_backend.compile_grammar(
-            StructuredOutputOptions.STRUCTURAL_TAG,
-            structured_outputs.structural_tag,
-        )
+        grammar = Grammar.from_structural_tag(structured_outputs.structural_tag)
         expected_admission_set = set(expected_admission)
 
         for sample_name in cls.ADMISSION_SAMPLES:
-            token_ids = xgrammar_backend.tokenizer.encode(
+            admitted = _is_grammar_accept_string(
+                grammar,
                 getattr(cls, sample_name),
-                add_special_tokens=False,
+                require_termination=False,
             )
-            admitted = grammar.validate_tokens(token_ids) == token_ids
             should_admit = sample_name in expected_admission_set
             assert admitted is should_admit, (
                 f"Expected structured_outputs admission for {sample_name} "
@@ -1199,7 +1183,6 @@ class TestAdjustRequest:
     def test_adjust_request(
         self,
         harmony_parser,
-        xgrammar_backend,
         request_kind,
         request_kwargs,
         expected_admission,
@@ -1208,7 +1191,6 @@ class TestAdjustRequest:
         adjusted_request = harmony_parser.adjust_request(request)
         self._assert_format_cleared(adjusted_request)
         self._assert_structured_outputs_admission(
-            xgrammar_backend,
             adjusted_request,
             expected_admission,
         )
