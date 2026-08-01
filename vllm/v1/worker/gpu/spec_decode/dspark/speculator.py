@@ -50,6 +50,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.num_query_per_req = self.num_speculative_steps
         else:
             self.num_query_per_req = 1 + self.num_speculative_steps
+        self.sample_step_major = True
 
         # DSpark consumes mean-pooled target aux hidden states at the target
         # layers, combined to hidden_size via main_proj. Store that combined
@@ -101,12 +102,16 @@ class DSparkSpeculator(DFlashSpeculator):
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
-        # Per-(req, position) head hidden, ordered (req, step).
-        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        # sample_indices is step-major for DSpark, so the LM-head output is
+        # born contiguous for each sequential Markov step.
+        sample_indices = self.sample_indices.view(n_spec, self.max_num_reqs)[
+            :, :num_reqs
+        ].reshape(num_sample)
+        sample_hidden = head_hidden[sample_indices]
         # Draft-vocab logits; sampled ids are remapped to target vocab below.
         base_logits = self.model.compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
-        base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
+        base_logits = base_logits.view(n_spec, num_reqs, vocab_size)
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
@@ -118,8 +123,7 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
+            logits_i = self.model.add_markov_bias(base_logits[i], markov_embed)
             if self.draft_logits is not None:
                 # Probabilistic: sample in target vocab (a reduced draft vocab is
                 # scattered into its target columns; full vocab is already there).
