@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -194,6 +196,68 @@ def _ragged_from_rows(
         torch.tensor(flat, dtype=torch.int32, device=device),
         torch.tensor(indptr, dtype=torch.int32, device=device),
     )
+
+
+@torch.inference_mode()
+def test_paged_mqa_logits_do_not_contain_nan(monkeypatch) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+
+    class FakeWorkspaceManager:
+        def get_simultaneous(self, *shapes_and_dtypes):
+            return [
+                torch.empty(shape, dtype=dtype, device=device)
+                for shape, dtype in shapes_and_dtypes
+            ]
+
+    def fake_paged_mqa_logits(
+        q_fp8,
+        kv_cache_fp8,
+        weights,
+        out_logits,
+        context_lens,
+        block_tables,
+        max_seq_len,
+        **kwargs,
+    ):
+        del (
+            q_fp8,
+            kv_cache_fp8,
+            weights,
+            context_lens,
+            block_tables,
+            max_seq_len,
+            kwargs,
+        )
+        out_logits.fill_(float("nan"))
+
+    monkeypatch.setattr(mod, "_ON_GFX942", False)
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        mod,
+        "paged_mqa_logits_module",
+        lambda: SimpleNamespace(deepgemm_fp8_paged_mqa_logits=fake_paged_mqa_logits),
+    )
+    monkeypatch.setattr(
+        mod, "current_workspace_manager", lambda: FakeWorkspaceManager()
+    )
+
+    q_fp8 = torch.empty((1, 1, 1, 1), dtype=torch.uint8, device=device)
+    kv_cache_fp8 = torch.empty((1, 1, 1, 5), dtype=torch.uint8, device=device)
+    logits = mod.rocm_fp8_paged_mqa_logits(
+        q_fp8,
+        kv_cache_fp8,
+        torch.empty((1, 1), dtype=torch.float32, device=device),
+        torch.ones(1, dtype=torch.int32, device=device),
+        torch.zeros((1, 1), dtype=torch.int32, device=device),
+        torch.empty(0, dtype=torch.int32, device=device),
+        1,
+    )
+
+    assert not torch.isnan(logits).any()
 
 
 @torch.inference_mode()

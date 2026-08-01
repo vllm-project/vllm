@@ -429,7 +429,6 @@ def rocm_fp8_paged_mqa_logits(
             (out_logits,) = current_workspace_manager().get_simultaneous(
                 ((batch_size * next_n, max_model_len), torch.float32),
             )
-            out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -443,6 +442,7 @@ def rocm_fp8_paged_mqa_logits(
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
+            out_logits.nan_to_num_(float("-inf"))
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
@@ -715,7 +715,6 @@ def rocm_aiter_sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
