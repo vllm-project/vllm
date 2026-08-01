@@ -85,14 +85,8 @@ def batch_transfer_weights(
     assert len(all_params) > 0
     p2p_ops = []
     for param in all_params:
-        transfer_param = param
-        if not param.is_contiguous():
-            # PyNccl transfers flat memory and does not honor tensor strides.
-            transfer_param = (
-                param.contiguous()
-                if is_sender
-                else torch.empty_like(param, memory_format=torch.contiguous_format)
-            )
+        # PyNccl transfers flat memory and does not honor tensor strides.
+        transfer_param = param.contiguous()
         op = object.__new__(P2POp)
         op.op = torch.distributed.isend if is_sender else torch.distributed.irecv
         op.tensor = transfer_param
