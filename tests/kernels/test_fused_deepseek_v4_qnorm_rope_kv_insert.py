@@ -125,7 +125,11 @@ def rmsnorm_no_weight(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def _op_available() -> bool:
-    return hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
+    # The helpers below call the `_out` form (upstream #49236 split the op), so
+    # gate on that one -- the allocating name existing proves nothing about it.
+    return hasattr(
+        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out"
+    )
 
 
 def _full_cache_fp8_op_available() -> bool:
@@ -329,9 +333,7 @@ def test_quant_insert_writes_caller_owned_q_out():
     kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
     positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
     cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
-    k_cache = torch.zeros(
-        2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
-    )
+    k_cache = torch.zeros(2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device)
     slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
     q_out = torch.full(
         (num_tokens, padded_heads, HEAD_DIM),
@@ -340,11 +342,13 @@ def test_quant_insert_writes_caller_owned_q_out():
         device=device,
     )
 
-    returned = _call_fused_out(
+    # _call_fused_out hands back the very object it was passed, so comparing
+    # data_ptr() against q_out would be a tautology. That the kernel wrote into
+    # the caller's buffer is proved by checking q_out's contents below.
+    _call_fused_out(
         q, q_out, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, block_size
     )
 
-    assert returned.data_ptr() == q_out.data_ptr()
     q_ref = apply_rope_gptj_last_k(
         rmsnorm_no_weight(q, eps), positions, cos_sin_cache
     ).to(dtype)
@@ -365,9 +369,7 @@ def test_quant_insert_allows_inplace_q_when_unpadded():
     kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
     positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
     cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
-    k_cache = torch.zeros(
-        2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
-    )
+    k_cache = torch.zeros(2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device)
     slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
 
     q_out = _call_fused(

@@ -22,7 +22,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_fused_post_pre_tilelang,
     mhc_fused_post_pre_tilelang_reuse_residual,
     mhc_post_hc_head_tilelang,
     mhc_pre_tilelang,

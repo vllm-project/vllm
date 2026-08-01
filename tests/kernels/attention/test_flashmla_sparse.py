@@ -92,6 +92,89 @@ def test_compute_global_topk_indices_and_lens_bounds_block_table_gather():
     # Rejected entries must not be counted, or downstream reads padding as real.
     torch.testing.assert_close(lens.cpu(), torch.tensor([2, 3], dtype=torch.int32))
 
+
+def test_compute_global_topk_indices_and_lens_masks_padding_tokens():
+    """A padding row must emit -1 slots, not real ones.
+
+    ``d64074e6f0`` folded ``is_valid_token`` into the per-entry predicate
+    alongside the block-table bound. Both existing tests pass all-True masks, so
+    that half of the change had no coverage: a regression that only zeroed
+    ``topk_lens`` while still writing real slot ids would pass them, and the
+    stale slots would then be read by whatever consumes the buffer without
+    re-checking the length.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Triton sparse index kernel")
+
+    from vllm.models.deepseek_v4.common.ops import compute_global_topk_indices_and_lens
+
+    device = torch.device("cuda")
+    block_size = 4
+    block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32, device=device)
+    local_indices = torch.tensor(
+        [[0, 1, 2, 3], [2, 3, 4, 5]],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req_indices = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    # Row 1 is a padding token: every one of its indices is individually valid
+    # and in range, so only the mask can reject them.
+    is_valid_token = torch.tensor([True, False], dtype=torch.bool, device=device)
+
+    indices, lens = compute_global_topk_indices_and_lens(
+        local_indices,
+        token_to_req_indices,
+        block_table,
+        block_size=block_size,
+        is_valid_token=is_valid_token,
+    )
+
+    assert lens.cpu().tolist() == [4, 0]
+    padded_row = indices.cpu()[1]
+    assert (padded_row == -1).all(), (
+        f"padding row must be all -1, got {padded_row.tolist()}"
+    )
+
+
+def test_fused_qnorm_rope_kv_insert_out_is_defunctionalized():
+    """The op DSv4 attention actually calls must be in the defunctionalize list.
+
+    Upstream #49236 split this op into an allocating ``..._insert`` and a
+    caller-buffered ``..._insert_out``; ``DeepseekV4Attention`` calls the ``_out``
+    form. Registering only the old name still imports, still serves and still
+    produces correct numbers -- it just silently loses the copy elision this pass
+    exists to provide, which no other test would notice.
+    """
+    import torch as _torch
+
+    if not hasattr(
+        _torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out"
+    ):
+        pytest.skip("vllm._C was not built with the DSv4 fused insert op")
+
+    import inspect
+
+    from vllm.compilation.passes.utility import fix_functionalization
+    from vllm.models.deepseek_v4 import attention as dsv4_attention
+
+    called = {
+        name
+        for name in (
+            "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+            "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out",
+        )
+        if name in inspect.getsource(dsv4_attention)
+    }
+    assert "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out" in called
+
+    registered = inspect.getsource(fix_functionalization)
+    for name in called:
+        assert f'"{name}"' in registered, (
+            f"{name} is called by DSv4 attention but never appended to "
+            "fused_deepseek_v4_mla_targets"
+        )
+
+
 def test_deepseek_v4_c128a_dynamic_topk_packed_buffers():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the Triton C128A metadata kernel")
@@ -156,11 +239,13 @@ def test_deepseek_v4_dspark_warmup_without_topk_buffer(monkeypatch):
             return tuple(torch.empty(0) for _ in shapes_and_dtypes)
 
     monkeypatch.setattr(
-        flashmla_mod, "get_forward_context",
+        flashmla_mod,
+        "get_forward_context",
         lambda: SimpleNamespace(attn_metadata=None),
     )
     monkeypatch.setattr(
-        flashmla_mod, "current_workspace_manager",
+        flashmla_mod,
+        "current_workspace_manager",
         lambda: FakeWorkspaceManager(),
     )
 

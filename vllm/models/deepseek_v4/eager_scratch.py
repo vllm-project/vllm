@@ -23,13 +23,28 @@ class DeepseekV4EagerScratchPool:
         index_q_head_dim: int,
         index_topk: int,
         device: torch.device | str,
+        *,
+        allocate_q: bool = True,
     ) -> None:
         self.max_num_tokens = max_num_tokens
         self.index_topk = index_topk
-        self._q = torch.empty(
-            (max_num_tokens, padded_q_heads, q_head_dim),
-            dtype=torch.bfloat16,
-            device=device,
+        # DeepseekV4Attention writes Q in place whenever padded_q_heads equals
+        # the per-rank head count, and only falls back to this buffer otherwise.
+        # padded_q_heads is model-wide (get_padded_num_q_heads is a pure
+        # classmethod of the single attention class the process selects), so the
+        # caller can decide once at construction whether the buffer can ever be
+        # read. On the default SM12x config it cannot, and it is by far the
+        # largest thing in the pool -- 256 MiB at TP=2 with the standard
+        # max_num_batched_tokens=8192, against 36 MiB for all the aux views
+        # combined -- charged against KV-cache headroom for its whole lifetime.
+        self._q = (
+            torch.empty(
+                (max_num_tokens, padded_q_heads, q_head_dim),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            if allocate_q
+            else None
         )
 
         fp4_specs = (
@@ -96,6 +111,15 @@ class DeepseekV4EagerScratchPool:
         return views
 
     def q_out(self, num_tokens: int) -> torch.Tensor:
+        if self._q is None:
+            # Reaching here means padded_q_heads != the per-rank head count
+            # after all, so the construction-time decision was wrong. Fail
+            # loudly: silently re-allocating would hide a real config drift.
+            raise RuntimeError(
+                "DeepseekV4EagerScratchPool was built with allocate_q=False, so "
+                "attention was expected to write Q in place. Rebuild the pool "
+                "with allocate_q=True."
+            )
         output = self._q_outputs.get(num_tokens)
         if output is None:
             output = self._q[:num_tokens]
