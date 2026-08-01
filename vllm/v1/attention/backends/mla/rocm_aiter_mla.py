@@ -1085,17 +1085,30 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert decode.max_qo_len is not None
         assert decode.paged_kv_indptr is not None
         assert decode.paged_kv_indices is not None
-        if decode.use_gluon_decode:
+        if decode.use_gluon_decode or (
+            self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+            and int(decode.max_qo_len) > 1
+        ):
             if type(q) is tuple:
                 q_nope, q_pe = q
             else:
                 q_nope, q_pe = torch.split(
                     q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
                 )
-            B, num_q_heads, _ = q_nope.shape
+            num_tokens, num_q_heads, _ = q_nope.shape
+            qlen = int(decode.max_qo_len)
+            if num_tokens % qlen != 0:
+                raise ValueError(
+                    f"Gluon MLA requires uniform query lengths, got "
+                    f"{num_tokens} tokens and query length {qlen}"
+                )
+            batch_size = num_tokens // qlen
+            if qlen > 1:
+                # Gluon applies the causal tail for native 4-D MTP queries.
+                q_nope = q_nope.view(batch_size, qlen, num_q_heads, self.kv_lora_rank)
+                q_pe = q_pe.view(batch_size, qlen, num_q_heads, self.qk_rope_head_dim)
             o = torch.empty(
-                B,
-                num_q_heads,
+                *q_nope.shape[:-1],
                 self.kv_lora_rank,
                 dtype=decode.attn_out_dtype,
                 device=q_nope.device,
@@ -1116,87 +1129,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 kv_scale=1.0,
                 min_kv_seq_len=decode.min_kv_seq_len,
             )
-            return o, None
-
-        # 12-head (<16) multi-token verify (DSpark): the asm path has no
-        # gqa<16, qseqlen>1 kernel. Flatten each verify token to its own
-        # qseqlen=1 gluon decode, mirroring the TRITON_MLA / sparse-backend
-        # flatten but on the fast gluon kernel. The block is causal -- the
-        # target is checking draft tokens, so position t must not see t+1 --
-        # and attention rows are independent, so giving row t the KV range
-        # [0, context + t] is exactly causal multi-token attention.
-        if (
-            self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
-            and int(decode.max_qo_len) > 1
-        ):
-            qlen = int(decode.max_qo_len)
-            if type(q) is tuple:
-                q_nope, q_pe = q
-            else:
-                q_nope, q_pe = torch.split(
-                    q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-                )
-            B, num_q_heads, _ = q_nope.shape
-            o = torch.empty(
-                B,
-                num_q_heads,
-                self.kv_lora_rank,
-                dtype=decode.attn_out_dtype,
-                device=q_nope.device,
-            )
-            kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
-            # Expand per-request paged-KV to per-verify-token. Row r*qlen+t is
-            # request r's verify token t, and seq_lens counts the tokens
-            # scheduled in this step, so a request's KV range already spans its
-            # whole verify block and context_r = seq_len_r - qlen. Token t may
-            # attend to [0, context_r + t], i.e. seq_len_r - (qlen - 1) + t
-            # entries. paged_kv_indices lists a request's pages in ascending
-            # position order, so each row's causal window is a prefix of that
-            # request's slice and only the row length changes. Rows clamp to
-            # zero for cudagraph padding requests, whose seq_len is 0. Fully
-            # vectorized (no host loop).
-            old_indptr = decode.paged_kv_indptr
-            per_req_len = old_indptr[1:] - old_indptr[:-1]
-            dev = q_nope.device
-            row_req = torch.arange(per_req_len.shape[0], device=dev).repeat_interleave(
-                qlen
-            )
-            row_len = (
-                (
-                    per_req_len.unsqueeze(1)
-                    - (qlen - 1)
-                    + torch.arange(qlen, device=dev, dtype=per_req_len.dtype)
-                )
-                .clamp_(min=0)
-                .flatten()
-            )
-            new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
-                torch.int32
-            )
-            total = int(new_indptr[-1].item())
-            within = torch.arange(total, device=dev, dtype=torch.int64) - new_indptr[
-                :-1
-            ].to(torch.int64).repeat_interleave(row_len)
-            src = (
-                old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
-            )
-            new_indices = decode.paged_kv_indices[src]
-            mla_gluon = _get_mla_gluon()
-            mla_gluon(
-                q_nope=q_nope,
-                q_pe=q_pe,
-                kv_c=kv_buffer,
-                o=o,
-                page_table=new_indices,
-                seq_info=new_indptr,
-                sm_scale=self.scale,
-                k_pe=None,
-                kv_pe_offset=self.kv_lora_rank,
-                use_2d_view=False,
-                kv_scale=1.0,
-                min_kv_seq_len=int(row_len.min()),
-            )
-            return o, None
+            return o.view(num_tokens, num_q_heads, self.kv_lora_rank), None
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
