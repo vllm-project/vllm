@@ -104,10 +104,10 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        if not on_mi3xx():
-            return False, "requires MI3xx."
+        if get_cdna_version() <= 2:
+            return False, "requires CDNA3+"
 
         if compute_capability is not None and compute_capability < 94:
             return False, "requires compute capability 94 and above."

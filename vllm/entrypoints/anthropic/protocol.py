@@ -133,6 +133,17 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",

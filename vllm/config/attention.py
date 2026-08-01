@@ -89,13 +89,15 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses the default (16 on PyTorch >= 2.9, 128 otherwise)."""
+    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
+    for encoder-only attention or older PyTorch versions."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
-    128 otherwise)."""
+    If None, uses the KV cache block size for paged KV attention on
+    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
+    versions."""
 
     def compute_hash(self) -> str:
         """

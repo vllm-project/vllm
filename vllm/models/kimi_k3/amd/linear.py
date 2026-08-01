@@ -15,7 +15,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -260,7 +260,7 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=num_experts,
             top_k=num_experts_per_token,

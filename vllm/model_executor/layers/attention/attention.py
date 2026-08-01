@@ -680,6 +680,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size=self.head_size,
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
                 tq_slot_size=tq_config.slot_size_aligned,
             )
         else:
@@ -794,7 +795,7 @@ def unified_kv_cache_update(
             layer_slot_mapping,
         )
 
-    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+    return key.new_empty(0)
 
 
 def unified_kv_cache_update_fake(

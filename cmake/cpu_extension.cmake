@@ -257,7 +257,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND OR S390_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
@@ -368,7 +368,23 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
 
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
-    FetchContent_MakeAvailable(oneDNN)
+
+    if(S390_FOUND)
+        FetchContent_GetProperties(oneDNN)
+        if(NOT onednn_POPULATED)
+            FetchContent_Populate(oneDNN)
+            # Patch s390x helpers.h: ALWAYS_INLINE on operator+= breaks C++20/GCC14
+            file(READ "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" _helpers_content)
+            string(REPLACE
+                "vec_type_t<T> &ALWAYS_INLINE operator+="
+                "ALWAYS_INLINE vec_type_t<T> &operator+="
+                _helpers_content "${_helpers_content}")
+            file(WRITE "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" "${_helpers_content}")
+            add_subdirectory("${onednn_SOURCE_DIR}" "${onednn_BINARY_DIR}")
+        endif()
+    else()
+        FetchContent_MakeAvailable(oneDNN)
+    endif()
     set(CMAKE_BUILD_TYPE ${VLLM_BUILD_TYPE})
     add_library(dnnl_ext OBJECT "csrc/cpu/dnnl_helper.cpp")
     target_include_directories(

@@ -39,6 +39,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
 | `BertModel` | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | |
 | `BertSpladeSparseEmbeddingModel` | SPLADE | `naver/splade-v3` | | |
+| `BgeM3EmbeddingModel` | BGE-M3 | `BAAI/bge-m3` | | |
 | `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | ✅︎ |
 | `Gemma3TextModel`<sup>C</sup> | Gemma 3-based | `google/embeddinggemma-300m`, etc. | ✅︎ | ✅︎ |
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
