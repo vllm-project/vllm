@@ -442,7 +442,7 @@ vllm bench serve \
     --num-prompts -1
 ```
 
-Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructured data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
 #### BFCL (Tool-Calling) Benchmark
 
