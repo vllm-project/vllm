@@ -299,6 +299,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             query_start_loc_np=query_start_loc_np,
         )
 
+    def _prepare_target_hidden_states(
+        self,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_target_tokens: int,
+    ) -> torch.Tensor:
+        if not aux_hidden_states:
+            return last_hidden_states
+        hidden_states = self.model.combine_hidden_states(
+            torch.cat(aux_hidden_states, dim=-1)
+        )
+        return hidden_states[:num_target_tokens]
+
     @torch.inference_mode()
     def propose(
         self,
@@ -339,12 +352,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
         # request's query length to include any rejected positions.
-        if aux_hidden_states:
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
+        hidden_states = self._prepare_target_hidden_states(
+            last_hidden_states,
+            aux_hidden_states,
+            num_target_tokens,
+        )
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
 
         if dummy_run and skip_attn_for_dummy_run:

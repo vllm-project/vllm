@@ -973,6 +973,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             and parallel_config.tensor_parallel_size > 1
             and (use_mega_moe or parallel_config.data_parallel_size > 1)
         )
+        self._keep_aux_hidden_states_sequence_sharded = False
 
         self.vocab_size = config.vocab_size
 
@@ -1059,6 +1060,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def enable_sequence_sharded_raw_aux_hidden_states(self) -> bool:
+        if not self.use_sequence_parallel:
+            return False
+        self._keep_aux_hidden_states_sequence_sharded = True
+        return True
+
+    def gather_sequence_sharded_aux_hidden_states(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        assert self._keep_aux_hidden_states_sequence_sharded
+        return sp_all_gather(hidden_states)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1079,8 +1092,19 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             residual = intermediate_tensors["residual"]
         assert hidden_states is not None
 
+        keep_aux_hidden_states_sequence_sharded = (
+            self.use_sequence_parallel
+            and getattr(self, "_keep_aux_hidden_states_sequence_sharded", False)
+        )
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        keep_initial_aux_hidden_state_sharded = (
+            keep_aux_hidden_states_sequence_sharded
+            and self.start_layer in self.aux_hidden_state_layers
+        )
+        if (
+            self.start_layer in self.aux_hidden_state_layers
+            and not keep_initial_aux_hidden_state_sharded
+        ):
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1095,6 +1119,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
+
+        if keep_initial_aux_hidden_state_sharded:
+            aux_hidden_states.append(hidden_states)
 
         prefix_sum = None
         if self.use_attn_res:
@@ -1127,9 +1154,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                     assert residual is not None
                     aux_hidden_state = hidden_states + residual
 
-                if self.use_sequence_parallel:
+                if (
+                    self.use_sequence_parallel
+                    and not keep_aux_hidden_states_sequence_sharded
+                ):
                     # Gather SP-sharded aux hidden states.
-                    # TODO: Optimize this.
                     aux_hidden_state = sp_all_gather(aux_hidden_state)
                     aux_hidden_state = aux_hidden_state[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)

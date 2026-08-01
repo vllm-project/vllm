@@ -214,6 +214,101 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     assert layer.mlp.num_tokens == 2
 
 
+def _make_sequence_parallel_target_model(
+    *,
+    aux_hidden_state_layers: tuple[int, ...],
+) -> kimi_model.KimiLinearModel:
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = True
+    model._keep_aux_hidden_states_sequence_sharded = False
+    model.use_attn_res = False
+    model.start_layer = 0
+    model.end_layer = 1
+    model.aux_hidden_state_layers = aux_hidden_state_layers
+
+    def layer_forward(**kwargs):
+        hidden_states = kwargs["hidden_states"]
+        return hidden_states * 2, None, hidden_states * 3
+
+    object.__setattr__(model, "layers", [Mock(side_effect=layer_forward)])
+    return model
+
+
+def test_kimi_start_layer_aux_stays_full_by_default(monkeypatch):
+    model = _make_sequence_parallel_target_model(aux_hidden_state_layers=(0,))
+    full_hidden_states = torch.arange(6, dtype=torch.float32).view(3, 2)
+    padded_hidden_states = torch.nn.functional.pad(full_hidden_states, (0, 0, 0, 1))
+    local_hidden_states = padded_hidden_states[:2]
+
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(kimi_model, "sp_shard", Mock(return_value=local_hidden_states))
+    all_gather = Mock(return_value=padded_hidden_states * 5)
+    monkeypatch.setattr(kimi_model, "sp_all_gather", all_gather)
+
+    output, aux_hidden_states = model.forward(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=None,
+        inputs_embeds=full_hidden_states,
+    )
+
+    torch.testing.assert_close(output, full_hidden_states * 5)
+    assert len(aux_hidden_states) == 1
+    torch.testing.assert_close(aux_hidden_states[0], full_hidden_states)
+    all_gather.assert_called_once()
+    torch.testing.assert_close(all_gather.call_args.args[0], local_hidden_states * 5)
+
+
+def test_kimi_can_keep_raw_aux_sequence_sharded_with_padding(monkeypatch):
+    model = _make_sequence_parallel_target_model(aux_hidden_state_layers=(0, 1))
+    assert model.enable_sequence_sharded_raw_aux_hidden_states()
+
+    full_hidden_states = torch.arange(6, dtype=torch.float32).view(3, 2)
+    padded_hidden_states = torch.nn.functional.pad(full_hidden_states, (0, 0, 0, 1))
+    local_hidden_states = padded_hidden_states[2:]
+
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(kimi_model, "sp_shard", Mock(return_value=local_hidden_states))
+    all_gather = Mock(return_value=padded_hidden_states * 5)
+    monkeypatch.setattr(kimi_model, "sp_all_gather", all_gather)
+
+    output, aux_hidden_states = model.forward(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=None,
+        inputs_embeds=full_hidden_states,
+    )
+
+    torch.testing.assert_close(output, full_hidden_states * 5)
+    assert len(aux_hidden_states) == 2
+    torch.testing.assert_close(aux_hidden_states[0], local_hidden_states)
+    torch.testing.assert_close(aux_hidden_states[1], local_hidden_states * 5)
+    assert aux_hidden_states[0].shape[0] == 2
+    torch.testing.assert_close(aux_hidden_states[0][-1], torch.zeros(2))
+    all_gather.assert_called_once()
+
+
+def test_kimi_raw_aux_capability_is_noop_without_sequence_parallel():
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = False
+    model._keep_aux_hidden_states_sequence_sharded = False
+
+    assert not model.enable_sequence_sharded_raw_aux_hidden_states()
+    assert not model._keep_aux_hidden_states_sequence_sharded
+
+
 def test_kimi_mtp_restores_sequence_parallel_output(monkeypatch):
     layer = object.__new__(kimi_mtp.KimiK3MultiTokenPredictorLayer)
     nn.Module.__init__(layer)

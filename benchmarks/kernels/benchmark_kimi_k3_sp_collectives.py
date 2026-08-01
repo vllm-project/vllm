@@ -16,8 +16,15 @@ from vllm.distributed.device_communicators.custom_all_reduce import CustomAllred
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=("collectives", "dspark", "both"),
+        default="collectives",
+    )
     parser.add_argument("--tokens", type=int, nargs="+", default=[8, 32, 128, 1024])
     parser.add_argument("--hidden-size", type=int, default=7168)
+    parser.add_argument("--draft-hidden-size", type=int, default=7168)
+    parser.add_argument("--num-aux-hidden-states", type=int, default=5)
     parser.add_argument("--graph-repeats", type=int, default=20)
     parser.add_argument("--warmup-replays", type=int, default=5)
     parser.add_argument("--samples", type=int, default=15)
@@ -197,6 +204,143 @@ def benchmark_shape(
     }
 
 
+@torch.inference_mode()
+def benchmark_dspark_aux_projection(
+    comm: CustomAllreduce,
+    global_tokens: int,
+    target_hidden_size: int,
+    draft_hidden_size: int,
+    num_aux_hidden_states: int,
+    context_weight: torch.Tensor,
+    norm_weight: torch.Tensor,
+    graph_repeats: int,
+    warmup_replays: int,
+    samples: int,
+    device_group: dist.ProcessGroup,
+    cpu_group: dist.ProcessGroup,
+) -> dict[str, float | int]:
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    padded_tokens = (global_tokens + world_size - 1) // world_size * world_size
+    local_tokens = padded_tokens // world_size
+    device = torch.accelerator.current_device_index()
+
+    local_aux = [
+        torch.full(
+            (local_tokens, target_hidden_size),
+            rank + i / num_aux_hidden_states,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        for i in range(num_aux_hidden_states)
+    ]
+    gathered_aux = [
+        torch.empty(
+            (padded_tokens, target_hidden_size),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        for _ in range(num_aux_hidden_states)
+    ]
+    full_cat = torch.empty(
+        (padded_tokens, num_aux_hidden_states * target_hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    local_cat = torch.empty(
+        (local_tokens, num_aux_hidden_states * target_hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    before_projected = torch.empty(
+        (padded_tokens, draft_hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    before_output = torch.empty_like(before_projected)
+    local_projected = torch.empty(
+        (local_tokens, draft_hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    local_output = torch.empty_like(local_projected)
+    after_output = torch.empty_like(before_projected)
+
+    def custom_all_gather(input_: torch.Tensor, output: torch.Tensor) -> None:
+        ops.mnnvl_lamport_all_gather(
+            comm._ptr,
+            input_,
+            output,
+            comm.mnnvl_lamport_ag_local_ptr,
+            comm.mnnvl_lamport_ag_multicast_ptr,
+            comm.mnnvl_lamport_ag_epoch_ptr,
+            comm.mnnvl_buffer_size,
+        )
+
+    def before() -> None:
+        for local, gathered in zip(local_aux, gathered_aux, strict=True):
+            custom_all_gather(local, gathered)
+        torch.cat(gathered_aux, dim=-1, out=full_cat)
+        torch.mm(full_cat, context_weight.t(), out=before_projected)
+        ops.rms_norm(before_output, before_projected, norm_weight, 1e-6)
+
+    def after() -> None:
+        torch.cat(local_aux, dim=-1, out=local_cat)
+        torch.mm(local_cat, context_weight.t(), out=local_projected)
+        ops.rms_norm(local_output, local_projected, norm_weight, 1e-6)
+        custom_all_gather(local_output, after_output)
+
+    before_graph = capture_graph(before, graph_repeats)
+    after_graph = capture_graph(after, graph_repeats)
+    before_us = (
+        max_rank_graph_time(
+            before_graph,
+            graph_repeats,
+            warmup_replays,
+            samples,
+            device_group,
+            cpu_group,
+        )
+        * 1000
+    )
+    after_us = (
+        max_rank_graph_time(
+            after_graph,
+            graph_repeats,
+            warmup_replays,
+            samples,
+            device_group,
+            cpu_group,
+        )
+        * 1000
+    )
+    before_graph.replay()
+    after_graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(before_output, after_output, rtol=2e-2, atol=2e-2)
+
+    element_size = local_aux[0].element_size()
+    local_aux_bytes = local_tokens * target_hidden_size * element_size
+    local_projected_bytes = local_tokens * draft_hidden_size * element_size
+    return {
+        "global_tokens": global_tokens,
+        "padded_tokens": padded_tokens,
+        "world_size": world_size,
+        "target_hidden_size": target_hidden_size,
+        "draft_hidden_size": draft_hidden_size,
+        "num_aux_hidden_states": num_aux_hidden_states,
+        "before_collectives": num_aux_hidden_states,
+        "after_collectives": 1,
+        "before_received_bytes_per_rank": (
+            num_aux_hidden_states * local_aux_bytes * (world_size - 1)
+        ),
+        "after_received_bytes_per_rank": (local_projected_bytes * (world_size - 1)),
+        "before_us": before_us,
+        "after_us": after_us,
+        "speedup": before_us / after_us,
+    }
+
+
 def main() -> None:
     args = parse_args()
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -214,21 +358,68 @@ def main() -> None:
     assert comm.mnnvl_only
     assert comm.mnnvl_multicast_ptr
 
-    results = [
-        benchmark_shape(
-            comm,
-            tokens,
-            args.hidden_size,
-            args.graph_repeats,
-            args.warmup_replays,
-            args.samples,
-            device_group,
-            cpu_group,
+    collective_results = None
+    if args.mode in ("collectives", "both"):
+        collective_results = [
+            benchmark_shape(
+                comm,
+                tokens,
+                args.hidden_size,
+                args.graph_repeats,
+                args.warmup_replays,
+                args.samples,
+                device_group,
+                cpu_group,
+            )
+            for tokens in args.tokens
+        ]
+
+    dspark_results = None
+    if args.mode in ("dspark", "both"):
+        torch.manual_seed(0)
+        context_weight = torch.empty(
+            (
+                args.draft_hidden_size,
+                args.num_aux_hidden_states * args.hidden_size,
+            ),
+            dtype=torch.bfloat16,
+            device=local_rank,
         )
-        for tokens in args.tokens
-    ]
+        context_weight.normal_(std=0.01)
+        norm_weight = torch.ones(
+            args.draft_hidden_size,
+            dtype=torch.bfloat16,
+            device=local_rank,
+        )
+        dspark_results = [
+            benchmark_dspark_aux_projection(
+                comm,
+                tokens,
+                args.hidden_size,
+                args.draft_hidden_size,
+                args.num_aux_hidden_states,
+                context_weight,
+                norm_weight,
+                args.graph_repeats,
+                args.warmup_replays,
+                args.samples,
+                device_group,
+                cpu_group,
+            )
+            for tokens in args.tokens
+        ]
+
     if dist.get_rank() == 0:
-        print(json.dumps(results, indent=2), flush=True)
+        if args.mode == "collectives":
+            output = collective_results
+        elif args.mode == "dspark":
+            output = dspark_results
+        else:
+            output = {
+                "collectives": collective_results,
+                "dspark": dspark_results,
+            }
+        print(json.dumps(output, indent=2), flush=True)
 
     comm.close()
     dist.destroy_process_group(cpu_group)
