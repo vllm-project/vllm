@@ -2,33 +2,6 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
-- label: V1 Spec Decode
-  device: h200_35gb
-  key: v1-spec-decode
-  timeout_in_minutes: 40
-  source_file_dependencies:
-    - vllm/config/
-    - vllm/distributed/
-    - vllm/inputs/
-    - vllm/model_executor/
-    - vllm/platforms/
-    - vllm/sampling_params.py
-    - vllm/transformers_utils/
-    - vllm/utils/
-    - vllm/v1/
-    - tests/v1/spec_decode
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    # TODO: create another `optional` test group for slow tests
-    - pytest -v -s -m 'not slow_test' v1/spec_decode
-  mirror:
-    amd:
-      dind: false
-      device: mi300_1
-      timeout_in_minutes: 50
-      depends_on:
-      - image-build-amd
-
 - label: V1 Sample + Logits
   key: v1-sample-logits
   timeout_in_minutes: 83
