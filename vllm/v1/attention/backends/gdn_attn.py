@@ -488,6 +488,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
             block_size = self.kv_cache_spec.block_size
             if align_mode:
+                # A prefill chunk may end mid-block, so the block start does not
+                # always hold a checkpoint; decode_base wins until decode itself
+                # crosses the boundary and flushes it below.
                 effective_base = torch.maximum(
                     decode_base_d, (num_computed_d // block_size) * block_size
                 )

@@ -241,6 +241,7 @@ class GDNReplaySSMBuildCase:
     expected_write_pos: list[int]
     expected_is_flush: list[int]
     mamba_cache_mode: str = "none"
+    block_size: int = BLOCK_SIZE
 
 
 GDN_REPLAYSSM_BUILD_CASES = {
@@ -361,6 +362,23 @@ GDN_REPLAYSSM_BUILD_CASES = {
         expected_is_flush=[0, 0, 1],
         mamba_cache_mode="align",
     ),
+    # block_size (64) > buffer_len, so the block anchor and the ring period are
+    # distinct. A prefill may end mid-block, so decode_base must win over the
+    # block start until decode itself crosses the next boundary:
+    #   row 0 anchors on decode_base 150, not block start 128 (else wp 6)
+    #   row 1 completes 192 and flushes mid-ring (wp 9)
+    #   row 2 re-anchors on block start 192, now that 192 holds the checkpoint
+    "align_block_larger_than_buffer": GDNReplaySSMBuildCase(
+        seq_lens=[151, 192, 201],
+        query_lens=[1, 1, 1],
+        is_prefilling=[False, False, False],
+        decode_base=[150, 150, 150],
+        buffer_len=16,
+        expected_write_pos=[0, 9, 8],
+        expected_is_flush=[0, 1, 0],
+        mamba_cache_mode="align",
+        block_size=64,
+    ),
 }
 
 
@@ -368,11 +386,12 @@ def _create_replayssm_gdn_builder(
     buffer_len: int,
     mamba_cache_mode: str = "none",
     full_cuda_graph: bool = False,
+    block_size: int = BLOCK_SIZE,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
     )
     if full_cuda_graph:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
@@ -382,7 +401,7 @@ def _create_replayssm_gdn_builder(
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     mamba_spec = MambaSpec(
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
     )
@@ -399,7 +418,7 @@ def _build_replayssm(
     case: GDNReplaySSMBuildCase,
 ) -> GDNAttentionMetadata:
     batch = BatchSpec(seq_lens=case.seq_lens, query_lens=case.query_lens)
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+    common = create_common_attn_metadata(batch, case.block_size, DEVICE).replace(
         is_prefilling=torch.tensor(case.is_prefilling, dtype=torch.bool),
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
@@ -459,7 +478,9 @@ def test_replayssm_first_token_prefill_stays_prefill():
     ids=GDN_REPLAYSSM_BUILD_CASES.keys(),
 )
 def test_replayssm_write_pos(case: GDNReplaySSMBuildCase):
-    builder = _create_replayssm_gdn_builder(case.buffer_len, case.mamba_cache_mode)
+    builder = _create_replayssm_gdn_builder(
+        case.buffer_len, case.mamba_cache_mode, block_size=case.block_size
+    )
     meta = _build_replayssm(builder, case)
 
     assert meta.write_pos_d is not None and meta.is_flush_d is not None
