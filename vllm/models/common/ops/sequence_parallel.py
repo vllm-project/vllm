@@ -12,17 +12,12 @@ from vllm.distributed import (
 )
 
 
-def _custom_collective(
-    name: str,
-    x: torch.Tensor,
-) -> torch.Tensor | None:
+def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
     device_communicator = get_tp_group().device_communicator
     if device_communicator is None:
         return None
     collective = getattr(device_communicator, name, None)
-    if collective is None:
-        return None
-    return collective(x)
+    return None if collective is None else collective(x)
 
 
 def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
@@ -45,12 +40,12 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
 
 
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
-    assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-x.shape[0]) % tp_size
     if sp_pad > 0:
-        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+        pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
+        x = torch.nn.functional.pad(x, pad)
     chunk = x.shape[0] // tp_size
     return x[tp_rank * chunk : (tp_rank + 1) * chunk]
 
