@@ -57,6 +57,7 @@ fn request_output(
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
+        indexer_topk: None,
         num_nans_in_logits: 0,
     }
 }
@@ -83,6 +84,7 @@ fn request_output_with_logprobs(
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
+        indexer_topk: None,
         num_nans_in_logits: 0,
     }
 }

@@ -233,6 +233,7 @@ fn request_output(
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
+        indexer_topk: None,
         num_nans_in_logits: 0,
     }
 }
@@ -2605,6 +2606,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         trace_headers: None,
                         prefill_stats: None,
                         routed_experts: None,
+                        indexer_topk: None,
                         num_nans_in_logits: 0,
                     },
                 ],

@@ -524,6 +524,7 @@ def test_all_logprobs(example_prompts):
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
+@large_gpu_mark(min_gb=4)
 def test_logprobs_mode(logprobs_mode: LogprobsMode):
     """Test with LLM engine with different logprobs_mode.
     For logprobs, we should have non-positive values.
@@ -564,6 +565,7 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         cleanup_dist_env_and_memory()
 
 
+@large_gpu_mark(min_gb=4)
 def test_prompt_logprobs_mode():
     """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
     must return different values. Prompt tokens skip sampling processors,

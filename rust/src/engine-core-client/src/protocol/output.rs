@@ -76,7 +76,7 @@ pub struct EngineCoreEvent {
 /// Engine-core output for a single request.
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/engine/__init__.py#L154-L184>
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
@@ -109,6 +109,10 @@ pub struct EngineCoreOutput {
     pub prefill_stats: Option<PrefillStats>,
     #[serde(default)]
     pub routed_experts: Option<OpaqueValue>,
+    /// Per-token indexer topk indices (sparse-attention selected KV slots).
+    /// `None` when `enable_return_indexer_topk` is off.
+    #[serde(default)]
+    pub indexer_topk: Option<OpaqueValue>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -383,6 +387,7 @@ mod tests {
                 trace_headers: None,
                 prefill_stats: None,
                 routed_experts: None,
+                indexer_topk: None,
                 num_nans_in_logits: 0,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
@@ -436,6 +441,7 @@ mod tests {
                             trace_headers: None,
                             prefill_stats: None,
                             routed_experts: None,
+                            indexer_topk: None,
                             num_nans_in_logits: 0,
                         },
                     ],
