@@ -38,7 +38,7 @@ from .model import (
     get_spec_layer_idx_from_weight_name,
     make_kimi_k3_mega_moe_expert_params_mapping,
 )
-from .ops.sequence_parallel import sp_all_gather, sp_padding_mask, sp_shard
+from .ops.sequence_parallel import sp_all_gather, sp_padding_mask
 
 logger = init_logger(__name__)
 
@@ -112,13 +112,16 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
                 self.enorm.variance_epsilon,
             )
         )
-        if self.mtp_block.use_sequence_parallel:
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-                forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding, hidden_states
-                )
-            hidden_states = sp_shard(hidden_states)
+        # The block shards its replicated input itself (no all-gather needed).
+        if (
+            self.mtp_block.use_sequence_parallel
+            and envs.VLLM_MOE_SKIP_PADDING
+            and is_forward_context_available()
+        ):
+            forward_context = get_forward_context()
+            forward_context.is_padding = sp_padding_mask(
+                forward_context.is_padding, hidden_states
+            )
 
         hidden_states, _, residual = self.mtp_block(
             positions=positions,

@@ -82,6 +82,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -709,10 +710,9 @@ class KimiDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.layer_idx = int(prefix.rsplit(".", 1)[1])
 
         self.is_moe = config.is_moe
-        layer_idx = self.layer_idx
+        layer_idx = extract_layer_index(prefix)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
@@ -729,6 +729,10 @@ class KimiDecoderLayer(nn.Module):
             and parallel_config.enable_expert_parallel
             and parallel_config.tensor_parallel_size > 1
             and (use_mega_moe or parallel_config.data_parallel_size > 1)
+        )
+        # The first layer's input is TP-replicated
+        self.sp_input_is_replicated = self.use_sequence_parallel and (
+            layer_idx == 0 or layer_idx >= config.num_hidden_layers
         )
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
@@ -816,6 +820,15 @@ class KimiDecoderLayer(nn.Module):
             self.is_block_write_layer = layer_idx % self.attn_res_block_size == 0
             self.block_write_idx = layer_idx // self.attn_res_block_size
             self.prev_valid_blocks = cdiv(layer_idx, self.attn_res_block_size)
+            if self.sp_input_is_replicated:
+                # No earlier block to mix in, so the norm depends on this layer's
+                # input alone; the caller seeds block 0 from the shard.
+                assert self.prev_valid_blocks == 0 and self.is_block_write_layer
+            self.pre_attn_block_write_idx = (
+                self.block_write_idx
+                if self.is_block_write_layer and not self.sp_input_is_replicated
+                else -1
+            )
             self.self_attention_res_norm = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
@@ -862,7 +875,13 @@ class KimiDecoderLayer(nn.Module):
         if not self.use_attn_res:
             assert hidden_states is not None
             if residual is None:
-                residual = hidden_states
+                # A replicated input is normalized in full while the residual
+                # keeps the sequence shard.
+                residual = (
+                    sp_shard(hidden_states)
+                    if self.sp_input_is_replicated
+                    else hidden_states
+                )
                 hidden_states = self.input_layernorm(hidden_states)
             else:
                 hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -878,7 +897,7 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj.weight.squeeze(0),
             self.input_layernorm.weight,
             num_blocks=self.prev_valid_blocks,
-            block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
+            block_write_idx=self.pre_attn_block_write_idx,
             eps=self.self_attention_res_norm.variance_epsilon,
             output_norm_eps=self.input_layernorm.variance_epsilon,
         )
@@ -930,7 +949,8 @@ class KimiDecoderLayer(nn.Module):
         )
         assert hidden_states is not None
 
-        if self.use_sequence_parallel:
+        # A replicated input is normalized in full, so it needs no all-gather.
+        if self.use_sequence_parallel and not self.sp_input_is_replicated:
             hidden_states = sp_all_gather(hidden_states)
             # Remove SP padding before attention.
             hidden_states = hidden_states[: positions.shape[0]]
@@ -1093,18 +1113,24 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding, hidden_states
                 )
-            hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
         prefix_sum = None
         if self.use_attn_res:
-            block_residual = hidden_states.new_empty(
-                hidden_states.size(0),
+            sp_hidden_states = (
+                sp_shard(hidden_states) if self.use_sequence_parallel else hidden_states
+            )
+            block_residual = sp_hidden_states.new_empty(
+                sp_hidden_states.size(0),
                 self.num_attn_res_blocks,
-                hidden_states.size(1),
+                sp_hidden_states.size(1),
             )
             if residual is not None:
                 block_residual[:, : residual.size(1), :].copy_(residual)
+            if self.use_sequence_parallel:
+                # The first layer normalizes the replicated prefix in full, so
+                # block 0 is seeded from the shard here instead.
+                block_residual[:, 0, :].copy_(sp_hidden_states)
             prefix_sum = hidden_states
             hidden_states = None
             residual = block_residual
