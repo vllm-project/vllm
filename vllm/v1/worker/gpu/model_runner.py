@@ -56,6 +56,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -291,7 +292,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Do not rely on pooling_runner here, since this information is needed
             # on the first PP rank, while pooling_runner is only initialized
             # on the last PP rank.
-            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
+            tasks.extend(
+                PoolingRunner.get_supported_tasks(self.model, self.model_config)
+            )
         return tuple(tasks)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
@@ -302,7 +305,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
-            logger.info("Loading model from scratch...")
+            logger.info_once("Loading model from scratch...")
 
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
@@ -454,16 +457,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks = cdiv(
                 block_table_max_model_len, spec.block_size * self.dcp_size
             )
-            # Align to a multiple of (128 / block_size) as required by some attention
-            # backends such as TRTLLM (#39324)
-            if spec.block_size <= 128:
-                alignment = 128 // spec.block_size
-                max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
             # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
             if isinstance(spec, MambaSpec):
                 max_num_blocks = (
                     max_num_blocks if self.cache_config.enable_prefix_caching else 1
                 ) + spec.num_speculative_blocks
+                max_num_blocks = get_block_table_width(
+                    max_num_blocks, spec.block_size, token_alignment=None
+                )
+            else:
+                max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
