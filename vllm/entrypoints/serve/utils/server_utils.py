@@ -39,7 +39,7 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 logger = init_logger("vllm.entrypoints.openai.server_utils")
 
 
-GUARDED_PREFIX = ("/v1", "/v2", "/inference")
+GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 
 
 class AuthenticationMiddleware:
