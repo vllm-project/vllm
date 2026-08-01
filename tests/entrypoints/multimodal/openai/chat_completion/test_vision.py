@@ -678,3 +678,38 @@ async def test_completions_with_image_with_incorrect_uuid_format(
             messages,
             context=f"incorrect uuid format url={image_url}",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
+async def test_completion_api_with_media_urls(
+    client: openai.AsyncOpenAI, model_name: str, image_url: str
+):
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="<|user|>\n<|image_1|>\nWhat's in this image?<|end|>\n<|assistant|>\n",
+        max_tokens=32,
+        temperature=0.0,
+        extra_body={"media_urls": {"image": [image_url]}},
+    )
+    assert len(completion.choices[0].text) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("raw_image_url", [TEST_IMAGE_ASSETS[0]])
+async def test_completion_api_with_base64_media_urls(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    raw_image_url: str,
+    url_encoded_image: dict[str, str],
+):
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="<|user|>\n<|image_1|>\nWhat's in this image?<|end|>\n<|assistant|>\n",
+        max_tokens=32,
+        temperature=0.0,
+        extra_body={"media_urls": {"image": [url_encoded_image[raw_image_url]]}},
+    )
+    assert len(completion.choices[0].text) > 0
