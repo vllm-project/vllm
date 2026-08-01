@@ -28,21 +28,11 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
-# Pinning one config removes a failure in which the KDA path emits NaNs when the
-# Triton cache is cold: roughly 30-40% of responses degenerate into repeated
-# punctuation, while a warm cache never shows it. Verified end to end at 0/2638
-# malformed responses across 5-shot and 20-shot gsm8k, at no measurable
-# throughput cost.
-#
-# What the pin removes is the autotune benchmarking, not a bad config. The
-# kernel is config-invariant -- all nine configs produce bit-identical output --
-# and it neither writes to its inputs nor leaves any of its outputs unwritten,
-# so the config that autotuning selects cannot account for the corruption. The
-# mechanism is not established; this is an empirical mitigation.
-#
-# Only ROCm reaches this file, so there is no CUDA search to preserve here:
-# KimiGatedDeltaNetAttention imports the kimi_k3/nvidia copy off ROCm.
-_RECOMPUTE_W_U_CONFIGS = [triton.Config({}, num_warps=2, num_stages=2)]
+# num_stages=4 is excluded. The `u` loop has a trip count of 2 (V / BV), and a
+# 4-stage pipeline over it emits a third, consumer-less async copy into LDS that
+# the `w` loop then reuses; at num_warps=4 that races on gfx950 and `u` comes
+# back with non-deterministic O(1e38) garbage once a batch reaches 4096 tokens.
+_RECOMPUTE_W_U_NUM_STAGES = [2, 3]
 
 
 @triton.heuristics(
@@ -53,7 +43,11 @@ _RECOMPUTE_W_U_CONFIGS = [triton.Config({}, num_warps=2, num_stages=2)]
     }
 )
 @triton.autotune(
-    configs=_RECOMPUTE_W_U_CONFIGS,
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in _RECOMPUTE_W_U_NUM_STAGES
+    ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
 )
 @triton.jit(do_not_specialize=["T"])
