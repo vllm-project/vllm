@@ -1131,6 +1131,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # if CUDA endif
   endif()
 
+  # Built for every supported HIP arch; kda_decode.py gates the kernel at
+  # runtime on the head and conv shapes it implements.
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")
+    set(VLLM_ENABLE_FUSED_KDA_DECODE_HIP ON)
+  endif()
+
   message(STATUS "Enabling C_stable extension.")
   list(REMOVE_DUPLICATES VLLM_STABLE_EXT_SRC)
   define_extension_target(
@@ -1171,6 +1179,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+    if(VLLM_ENABLE_FUSED_KDA_DECODE_HIP)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
   endif()
 
   # On ROCm, _C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in

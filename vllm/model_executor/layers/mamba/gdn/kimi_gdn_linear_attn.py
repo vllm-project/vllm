@@ -8,10 +8,12 @@ from einops import rearrange
 from torch import nn
 from torch.nn.parameter import Parameter
 
+from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import (
@@ -38,6 +40,8 @@ from ..mamba_utils import (
 )
 from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from ..ops.gather_initial_states import gather_initial_states
+
+logger = init_logger(__name__)
 
 # Empirical lower bound for the KDA gate to avoid numerical underflow.
 _KDA_GATE_LOGBOUND_MIN = -5.0
@@ -250,16 +254,53 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
         delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.weight,
-            {
-                "weight_loader": _make_fused_conv1d_weight_loader(
-                    [self.projection_size] * 3,
-                    self.tp_size,
-                    self.tp_rank,
+        # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
+        # into one kernel, which wants a width-major fp32 conv weight staged at
+        # load time. Everything else keeps the [channel, width] layout.
+        decode_conv1d_weight = None
+        if current_platform.is_rocm():
+            # Imported lazily: vllm.models.kimi_k3 imports this module, so a
+            # top-level import here would be circular.
+            from vllm.models.kimi_k3.amd.ops.kda_decode import (
+                is_fused_kda_decode_supported,
+                make_decode_conv1d_weight_loader,
+                make_decode_norm_weight_loader,
+            )
+
+            conv_state_dtype, _ = self.get_state_dtype()
+            if is_fused_kda_decode_supported(
+                self.local_num_heads,
+                self.head_dim,
+                self.conv_size,
+                self.num_spec,
+                vllm_config.model_config.dtype,
+                conv_state_dtype,
+            ):
+                logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
+                decode_conv1d_weight = torch.empty(
+                    3,
+                    self.conv_size,
+                    self.local_projection_size,
+                    dtype=self.conv1d.weight.dtype,
+                    device=self.conv1d.weight.device,
                 )
-            },
+        self.register_buffer(
+            "decode_conv1d_weight", decode_conv1d_weight, persistent=False
         )
+        if decode_conv1d_weight is None:
+            conv1d_weight_loader = _make_fused_conv1d_weight_loader(
+                [self.projection_size] * 3,
+                self.tp_size,
+                self.tp_rank,
+            )
+        else:
+            conv1d_weight_loader = make_decode_conv1d_weight_loader(
+                [self.projection_size] * 3,
+                self.tp_size,
+                self.tp_rank,
+                decode_conv1d_weight,
+            )
+        set_weight_attrs(self.conv1d.weight, {"weight_loader": conv1d_weight_loader})
 
         self.A_log = nn.Parameter(
             torch.empty(self.local_num_heads, dtype=torch.float32)
@@ -301,6 +342,22 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 prefix=f"{prefix}.g_b_proj",
             )
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        decode_norm_weight = None
+        if decode_conv1d_weight is not None:
+            # Upcast once at load time; a BF16 norm weight slows the fused
+            # decode kernel's epilogue.
+            decode_norm_weight = torch.empty(
+                self.head_dim,
+                dtype=torch.float32,
+                device=self.o_norm.weight.device,
+            )
+            if hasattr(self.o_norm.weight, "weight_loader"):
+                delattr(self.o_norm.weight, "weight_loader")
+            set_weight_attrs(
+                self.o_norm.weight,
+                {"weight_loader": make_decode_norm_weight_loader(decode_norm_weight)},
+            )
+        self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
         self.o_proj = RowParallelLinear(
             self.projection_size,
             self.hidden_size,
@@ -431,6 +488,33 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        if (
+            self.decode_conv1d_weight is not None
+            and self.decode_norm_weight is not None
+            and spec_sequence_masks is None
+            and m.num_prefills == 0
+            and m.num_decodes > 0
+        ):
+            assert non_spec_state_indices_tensor is not None
+            ops.fused_kda_decode(
+                x=mixed_qkv,
+                weight=self.decode_conv1d_weight,
+                bias=self.conv1d.bias,
+                conv_state=conv_state,
+                raw_g=g1,
+                raw_beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
+                state=recurrent_state,
+                out=core_attn_out[:, :num_actual_tokens],
+                lower_bound=self.gate_lower_bound,
+                output_gate=g2[:num_actual_tokens],
+                norm_weight=self.decode_norm_weight,
+                norm_eps=self.o_norm.eps,
+            )
+            return
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
