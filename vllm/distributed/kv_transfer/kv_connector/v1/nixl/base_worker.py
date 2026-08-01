@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import zmq
 
+from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -32,6 +33,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+    HostReadStager,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -481,6 +485,8 @@ class NixlBaseConnectorWorker:
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
+        # Set when the local KV destination is host memory; see host_staging.
+        self._host_stager: HostReadStager | None = None
         # A posted READ cannot be aborted, so failure remains pending until
         # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
@@ -1280,6 +1286,7 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
+        self._maybe_init_host_stager()
 
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
@@ -2023,6 +2030,7 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers, is_recv=True)
+        done_recving.update(self._advance_host_staging())
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2168,6 +2176,67 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
+    def _maybe_init_host_stager(self) -> None:
+        """Enable device staging when every local KV region is host memory.
+
+        UCX falls back to TCP loopback for a remote-device to local-host read,
+        which measures ~0.20 GB/s against ~22 GB/s for the device-to-device read
+        the same stack performs. Staging through device memory composes the fast
+        remote read with a fast local device-to-host copy.
+        """
+        stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
+        if stage_bytes <= 0 or not self.region_mem_types:
+            return
+        if any(mem_type != "DRAM" for mem_type in self.region_mem_types):
+            # Mixed layouts already split VRAM/DRAM reads; only the all-host
+            # case is handled here.
+            return
+        # A KV group may mix descriptor lengths (GLM-5.2's host source holds
+        # MLA latent pages alongside smaller DSA indexer pages); the stager
+        # keeps one staging pool per length.
+        desc_lens = np.array(
+            [int(entry[1]) for entry in self.src_blocks_data], dtype=np.int64
+        )
+        host_addrs = np.array(
+            [int(entry[0]) for entry in self.src_blocks_data], dtype=np.uint64
+        )
+        try:
+            self._host_stager = HostReadStager(
+                desc_lens=desc_lens,
+                host_addrs=host_addrs,
+                device=torch.device(f"cuda:{self.device_id}"),
+                nixl_wrapper=self.nixl_wrapper,
+                memory_type=self.nixl_memory_type,
+                backends=self.nixl_backends,
+                stage_bytes=stage_bytes,
+                num_slots=max(envs.VLLM_NIXL_HOST_STAGE_SLOTS, 1),
+            )
+        except Exception:
+            logger.exception(
+                "NIXL host read staging setup failed; falling back to direct "
+                "host reads (set VLLM_NIXL_HOST_STAGE_BYTES=0 to silence)"
+            )
+            self._host_stager = None
+
+    def _advance_host_staging(self) -> set[str]:
+        """Drive the staging pipeline; return req_ids whose KV is fully landed."""
+        if self._host_stager is None:
+            return set()
+        done, failed = self._host_stager.advance()
+        for req_id in done:
+            self._send_pending_recv_notifs(req_id)
+        for req_id in failed:
+            self._log_failure(
+                failure_type="transfer_failed",
+                msg="host-staged read failed; marking blocks invalid",
+                req_id=req_id,
+            )
+            self.xfer_stats.record_failed_transfer()
+            with self._failed_recv_lock:
+                self._failed_recv_pending.add(req_id)
+            self._pending_recv_notifs.pop(req_id, None)
+        return done
+
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]], *, is_recv: bool
     ) -> set[str]:
@@ -2277,6 +2346,8 @@ class NixlBaseConnectorWorker:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         self._pending_recv_notifs.pop(req_id, None)
+        if self._host_stager is not None:
+            self._host_stager.abort(req_id)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
@@ -2584,6 +2655,9 @@ class NixlBaseConnectorWorker:
         except Exception:
             logger.exception("NIXL transfer-handle release failed at shutdown.")
         self._recving_transfers.clear()
+        if self._host_stager is not None:
+            for req_id in list(self._host_stager.active_req_ids):
+                self._host_stager.abort(req_id)
         try:
             for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)

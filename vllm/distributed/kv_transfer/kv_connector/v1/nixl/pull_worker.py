@@ -345,6 +345,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 )
                 return True
 
+            if self._host_stager is not None:
+                # Local destination is host memory: read into device staging and
+                # copy down, instead of letting UCX fall back to TCP loopback.
+                # Notify the remote only once every chunk has landed, which the
+                # stager reports through _advance_host_staging.
+                self._pending_recv_notifs.setdefault(request_id, []).append(
+                    (self._remote_agents[dst_engine_id][(0, remote_rank)], notif_id)
+                )
+                self._host_stager.submit(
+                    request_id,
+                    remote_block_descs_ids,
+                    local_block_descs_ids,
+                    remote_xfer_side_handle,
+                )
+                return True
+
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
