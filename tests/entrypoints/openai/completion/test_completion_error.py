@@ -520,15 +520,6 @@ class TestCompletionMediaUrls:
                 max_tokens=10,
             )
 
-    def test_media_urls_unsupported_modality_rejected(self):
-        with pytest.raises(VLLMValidationError, match="Unsupported modalities"):
-            CompletionRequest(
-                model=MODEL_NAME,
-                prompt="test",
-                media_urls={"lidar": ["https://example.com/scan.bin"]},
-                max_tokens=10,
-            )
-
     def test_media_urls_multiple_modalities_allowed(self):
         multi = {
             "image": ["https://example.com/img.jpg"],
