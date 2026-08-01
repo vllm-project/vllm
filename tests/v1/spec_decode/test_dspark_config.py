@@ -60,6 +60,67 @@ def test_dspark_standard_rejection_uses_probabilistic_draft_sampling(monkeypatch
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+def _dspark_configs(block_size: int):
+    draft_model_config = SimpleNamespace(
+        model="DeepSeek-V4-Flash-0731",
+        architectures=["DSparkDraftModel"],
+        hf_config=SimpleNamespace(
+            model_type="deepseek_v4", dspark_block_size=block_size
+        ),
+        max_model_len=4096,
+        verify_with_parallel_config=lambda parallel_config: None,
+    )
+    target_model_config = SimpleNamespace(
+        model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        quantization=None,
+        tokenizer="deepseek-ai/DeepSeek-V4-Flash-0731",
+        tokenizer_mode="deepseek_v4",
+        trust_remote_code=True,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        dtype="auto",
+        seed=0,
+        tokenizer_revision=None,
+        hf_overrides={},
+        max_model_len=4096,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="auto",
+        hf_config=SimpleNamespace(
+            model_type="deepseek_v4", dspark_block_size=block_size
+        ),
+    )
+    target_parallel_config = SimpleNamespace(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        enable_expert_parallel=False,
+        distributed_executor_backend="mp",
+    )
+    return draft_model_config, target_model_config, target_parallel_config
+
+
+def test_dspark_rejects_num_speculative_tokens_above_block_size():
+    """DSpark drafts exactly one block per pass; extra slots are never accepted.
+
+    Measured on 2x GB10 with DeepSeek-V4-Flash-0731 (block size 5): positions 5
+    and 6 accepted 0.000 in every sample and mean acceptance length fell from
+    2.19 to 2.03 (probabilistic) and 2.11 to 1.75 (greedy). The validator used to
+    allow >= and its message recommended 7, so users paid 40% more draft compute
+    for strictly worse acceptance.
+    """
+    import pytest
+
+    _, target_model_config, target_parallel_config = _dspark_configs(5)
+    with pytest.raises(ValueError, match="num_speculative_tokens =="):
+        SpeculativeConfig(
+            method="dspark",
+            num_speculative_tokens=7,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
+        )
+
+
 def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
     num_reqs = 2
     num_speculative_steps = 3
