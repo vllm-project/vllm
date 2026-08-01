@@ -1321,7 +1321,7 @@ vllm bench mm-processor \
   --output-json results.json
 ```
 
-See [`vllm bench mm-processor`](../cli/bench/mm_processor.md) for the full argument reference.
+See [`vllm bench mm-processor`](https://docs.vllm.ai/en/latest/cli/bench/mm_processor/) for the full argument reference.
 
 </details>
 
