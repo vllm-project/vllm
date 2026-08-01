@@ -590,8 +590,7 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
-    global_topk_indices: torch.Tensor | None = None,
-    topk_lens: torch.Tensor | None = None,
+    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -601,17 +600,16 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    if global_topk_indices is None:
+    if output_buffers is None:
         global_topk_indices = torch.empty_like(topk_indices)
-    else:
-        assert global_topk_indices.shape == topk_indices.shape
-        assert global_topk_indices.dtype == topk_indices.dtype
-        assert global_topk_indices.device == topk_indices.device
-    if topk_lens is None:
         topk_lens = torch.empty(
             num_tokens, dtype=torch.int32, device=topk_indices.device
         )
     else:
+        global_topk_indices, topk_lens = output_buffers
+        assert global_topk_indices.shape == topk_indices.shape
+        assert global_topk_indices.dtype == topk_indices.dtype
+        assert global_topk_indices.device == topk_indices.device
         assert topk_lens.shape == (num_tokens,)
         assert topk_lens.dtype == torch.int32
         assert topk_lens.device == topk_indices.device

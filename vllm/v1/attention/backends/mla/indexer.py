@@ -23,7 +23,6 @@ from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
 )
-from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -38,7 +37,6 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 logger = init_logger(__name__)
 
@@ -479,6 +477,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
+    requires_block_table_width = True
 
     @classmethod
     def get_cudagraph_support(
@@ -488,7 +487,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
@@ -577,15 +576,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        max_num_blocks_per_req = cdiv(
-            self.vllm_config.model_config.max_model_len,
-            self.kv_cache_spec.block_size * get_kv_cache_shard_count(),
-        )
         self.expanded_block_table_buffer = torch.zeros(
-            (
-                scheduler_config.max_num_batched_tokens,
-                max_num_blocks_per_req,
-            ),
+            (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
             device=self.device,
         )

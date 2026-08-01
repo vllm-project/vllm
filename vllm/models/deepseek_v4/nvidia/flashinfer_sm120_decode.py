@@ -424,8 +424,10 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
                         attn_metadata.block_table[:num_reqs],
                         block_size,
                         swa_metadata.is_valid_token[num_decode_tokens:num_tokens],
-                        global_topk_indices=attn_metadata.c128a_prefill_topk_indices,
-                        topk_lens=attn_metadata.c128a_prefill_topk_lens,
+                        output_buffers=(
+                            attn_metadata.c128a_prefill_topk_indices,
+                            attn_metadata.c128a_prefill_topk_lens,
+                        ),
                     )
                     attn_metadata.c128a_global_prefill_topk_indices = (
                         global_indices.view(num_prefill_tokens, 1, -1)

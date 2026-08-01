@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -35,8 +37,7 @@ def test_compute_global_topk_indices_and_lens_allows_inplace_output():
         block_table,
         block_size=4,
         is_valid_token=is_valid_token,
-        global_topk_indices=local_indices,
-        topk_lens=lens,
+        output_buffers=(local_indices, lens),
     )
 
     assert actual_indices.data_ptr() == local_indices.data_ptr()
@@ -129,6 +130,61 @@ def test_deepseek_v4_c128a_dynamic_topk_packed_buffers():
     assert prefill_local[0, :4].cpu().tolist() == list(range(4))
     assert torch.all(global_decode[0, 2:] == -1)
     assert torch.all(prefill_local[0, 4:] == -1)
+
+
+def test_deepseek_v4_dspark_warmup_without_topk_buffer(monkeypatch):
+    """SWA-only warmup must not require the sparse top-k buffer.
+
+    During DSpark startup profile_run calls forward_mqa with no attention
+    metadata. The SWA-only draft layer (compress_ratio <= 1) never allocates
+    topk_indices_buffer, so a bare assert on it fails after the full target and
+    draft model are already loaded (vllm-project/vllm#50615).
+
+    Adapted from vllm-project/vllm#50693: that PR asserts the exact workspace
+    tuple produced by upstream's inlined reservation, which we do not use -- our
+    reservation goes through _prefill_workspace_reservation_specs and is shared
+    with the warmup module. Assert the contract instead: no crash, output zeroed,
+    and a workspace still requested.
+    """
+    from vllm.models.deepseek_v4.nvidia import flashmla as flashmla_mod
+
+    workspace_calls = []
+
+    class FakeWorkspaceManager:
+        def get_simultaneous(self, *shapes_and_dtypes):
+            workspace_calls.append(shapes_and_dtypes)
+            return tuple(torch.empty(0) for _ in shapes_and_dtypes)
+
+    monkeypatch.setattr(
+        flashmla_mod, "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None),
+    )
+    monkeypatch.setattr(
+        flashmla_mod, "current_workspace_manager",
+        lambda: FakeWorkspaceManager(),
+    )
+
+    cls = flashmla_mod.DeepseekV4FlashMLAAttention
+    attn = SimpleNamespace(
+        compress_ratio=1,
+        max_model_len=1024,
+        window_size=128,
+        max_num_batched_tokens=16,
+        topk_indices_buffer=None,
+        PREFILL_CHUNK_SIZE=4,
+        # _prefill_workspace_reservation_specs needs these too; upstream's
+        # inlined version did not.
+        head_dim=16,
+        n_local_heads=2,
+        _reserve_prefill_workspace=cls._reserve_prefill_workspace,
+    )
+    q = torch.ones((2, 1, 16), dtype=torch.bfloat16)
+    output = torch.ones_like(q)
+
+    cls.forward_mqa(attn, q, torch.empty_like(q), torch.arange(2), output)
+
+    torch.testing.assert_close(output, torch.zeros_like(output))
+    assert workspace_calls, "SWA-only warmup should still reserve a workspace"
 
 
 def test_sparse_flashmla_metadata_smoke():
