@@ -122,7 +122,7 @@ class Parser:
         self._tool_parser: ToolParser | None = None
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                tokenizer, *args, **kwargs
+                tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
