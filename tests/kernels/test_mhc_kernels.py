@@ -355,3 +355,83 @@ def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
 
     out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
     torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_broadcast_tilelang_without_deep_gemm(
+    num_tokens, hidden_size, hc_mult, monkeypatch
+):
+    """The broadcast variant must fall back to the TileLang prenorm GEMM when
+    DeepGEMM is unsupported (pre-Hopper), like its guarded siblings, instead
+    of calling tf32_hc_prenorm_gemm unconditionally and asserting
+    "Unsupported architecture"."""
+    from vllm.model_executor.kernels.mhc.tilelang import mhc_pre_broadcast_tilelang
+
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm.is_deep_gemm_supported", lambda: False
+    )
+
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    residual = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = 2 * hc_mult + hc_mult2
+    fn = (
+        torch.randn((hc_mult3, hc_mult, hidden_size), dtype=torch.float)
+        * 1e-4
+        * (1 + torch.arange(hc_mult).mul(0.01).view(1, -1, 1))
+    )
+    fn_broadcast = fn.sum(1)
+    fn = fn.flatten(1, 2)
+    hc_scale = torch.randn((3,), dtype=torch.float) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float) * 0.1
+    norm_weight = torch.randn((hidden_size,), dtype=torch.bfloat16) * 0.1 + 1.0
+
+    hc_sinkhorn_eps = hc_pre_eps = rms_eps = 1e-6
+    norm_eps = 1e-6
+    sinkhorn_repeat = 20
+    hc_post_alpha = 1.0
+
+    expanded = residual.unsqueeze(1).expand(num_tokens, hc_mult, hidden_size)
+    post_ref, comb_ref, layer_ref = mhc_pre_ref(
+        expanded,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
+    x = layer_ref.float()
+    layer_ref_normed = (
+        x * torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
+    ).bfloat16() * norm_weight
+
+    residual_out, post, comb, layer_input = mhc_pre_broadcast_tilelang(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        fn_broadcast=fn_broadcast,
+    )
+
+    torch.testing.assert_close(residual_out, expanded.contiguous())
+    torch.testing.assert_close(post, post_ref, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(comb, comb_ref, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(layer_input, layer_ref_normed, atol=5e-2, rtol=1e-2)
