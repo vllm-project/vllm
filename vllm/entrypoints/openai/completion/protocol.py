@@ -556,8 +556,6 @@ class CompletionRequest(OpenAIBaseModel):
 
         return data
 
-    _FETCHABLE_MODALITIES = frozenset({"image", "video", "audio"})
-
     @model_validator(mode="before")
     @classmethod
     def validate_media_urls(cls, data):
@@ -575,14 +573,6 @@ class CompletionRequest(OpenAIBaseModel):
         if isinstance(prompt, list) and len(prompt) > 1 and not is_list_of(prompt, int):
             raise VLLMValidationError(
                 "`media_urls` is only supported with a single prompt.",
-                parameter="media_urls",
-            )
-
-        unknown = set(media_urls.keys()) - cls._FETCHABLE_MODALITIES
-        if unknown:
-            raise VLLMValidationError(
-                f"Unsupported modalities in `media_urls`: {unknown}. "
-                f"Supported: {sorted(cls._FETCHABLE_MODALITIES)}",
                 parameter="media_urls",
             )
 
