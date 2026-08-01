@@ -476,49 +476,71 @@ def test_negative_prompt_token_ids_flat():
         )
 
 
-class TestCompletionImageUrls:
-    """`image_urls` are rejected when combined with inputs that cannot
-    carry multi-modal data (prompt_embeds) or with multiple prompts."""
+class TestCompletionMediaUrls:
+    """`media_urls` validation: rejected with prompt_embeds, multiple
+    prompts, or unsupported modalities."""
 
-    IMAGE_URLS = ["https://example.com/image.png"]
+    MEDIA_URLS = {"image": ["https://example.com/image.png"]}
 
-    def test_image_urls_with_single_prompt_allowed(self):
+    def test_media_urls_with_single_prompt_allowed(self):
         request = CompletionRequest(
             model=MODEL_NAME,
             prompt="<image>\nDescribe the image.",
-            image_urls=self.IMAGE_URLS,
+            media_urls=self.MEDIA_URLS,
             max_tokens=10,
         )
-        assert request.image_urls == self.IMAGE_URLS
+        assert request.media_urls == self.MEDIA_URLS
 
-    def test_image_urls_with_token_ids_prompt_allowed(self):
+    def test_media_urls_with_token_ids_prompt_allowed(self):
         request = CompletionRequest(
             model=MODEL_NAME,
             prompt=[1, 2, 3],
-            image_urls=self.IMAGE_URLS,
+            media_urls=self.MEDIA_URLS,
             max_tokens=10,
         )
-        assert request.image_urls == self.IMAGE_URLS
+        assert request.media_urls == self.MEDIA_URLS
 
-    def test_image_urls_with_prompt_embeds_rejected(self):
+    def test_media_urls_with_prompt_embeds_rejected(self):
         with pytest.raises(
             VLLMValidationError, match="not supported with `prompt_embeds`"
         ):
             CompletionRequest(
                 model=MODEL_NAME,
                 prompt_embeds=b"\x00",
-                image_urls=self.IMAGE_URLS,
+                media_urls=self.MEDIA_URLS,
                 max_tokens=10,
             )
 
-    def test_image_urls_with_multiple_prompts_rejected(self):
+    def test_media_urls_with_multiple_prompts_rejected(self):
         with pytest.raises(VLLMValidationError, match="single prompt"):
             CompletionRequest(
                 model=MODEL_NAME,
                 prompt=["Prompt one", "Prompt two"],
-                image_urls=self.IMAGE_URLS,
+                media_urls=self.MEDIA_URLS,
                 max_tokens=10,
             )
+
+    def test_media_urls_unsupported_modality_rejected(self):
+        with pytest.raises(VLLMValidationError, match="Unsupported modalities"):
+            CompletionRequest(
+                model=MODEL_NAME,
+                prompt="test",
+                media_urls={"lidar": ["https://example.com/scan.bin"]},
+                max_tokens=10,
+            )
+
+    def test_media_urls_multiple_modalities_allowed(self):
+        multi = {
+            "image": ["https://example.com/img.jpg"],
+            "audio": ["https://example.com/clip.wav"],
+        }
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="<image>\n<audio>\nDescribe.",
+            media_urls=multi,
+            max_tokens=10,
+        )
+        assert request.media_urls == multi
 
 
 class TestCompletionPromptListLimit:

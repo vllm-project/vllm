@@ -243,12 +243,16 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    image_urls: list[Annotated[str, Field(min_length=1)]] | None = Field(
+    media_urls: dict[str, list[Annotated[str, Field(min_length=1)]]] | None = Field(
         default=None,
         description=(
-            "Either a URL of the image or the base64 encoded image data. The "
-            "input prompt must contain the correct image placeholder token (one "
-            "per image). Not supported for multiple prompts or `prompt_embeds`."
+            "Multimodal media URLs keyed by modality. Each value is a list "
+            "of URLs (http/https, base64 data URL, or file:// URL). "
+            "The input prompt must contain the correct placeholder tokens "
+            "(one per item). Supported modalities: image, video, audio. "
+            "Not supported for multiple prompts or `prompt_embeds`. "
+            'Example: {"image": ["https://example.com/photo.jpg"], '
+            '"audio": ["data:audio/wav;base64,..."]}'
         ),
     )
 
@@ -552,23 +556,34 @@ class CompletionRequest(OpenAIBaseModel):
 
         return data
 
+    _FETCHABLE_MODALITIES = frozenset({"image", "video", "audio"})
+
     @model_validator(mode="before")
     @classmethod
-    def validate_image_urls(cls, data):
-        if not data.get("image_urls"):
+    def validate_media_urls(cls, data):
+        media_urls = data.get("media_urls")
+        if not media_urls:
             return data
 
         if data.get("prompt_embeds") is not None:
             raise VLLMValidationError(
-                "`image_urls` is not supported with `prompt_embeds`.",
-                parameter="image_urls",
+                "`media_urls` is not supported with `prompt_embeds`.",
+                parameter="media_urls",
             )
 
         prompt = data.get("prompt")
         if isinstance(prompt, list) and len(prompt) > 1 and not is_list_of(prompt, int):
             raise VLLMValidationError(
-                "`image_urls` is only supported with a single prompt.",
-                parameter="image_urls",
+                "`media_urls` is only supported with a single prompt.",
+                parameter="media_urls",
+            )
+
+        unknown = set(media_urls.keys()) - cls._FETCHABLE_MODALITIES
+        if unknown:
+            raise VLLMValidationError(
+                f"Unsupported modalities in `media_urls`: {unknown}. "
+                f"Supported: {sorted(cls._FETCHABLE_MODALITIES)}",
+                parameter="media_urls",
             )
 
         return data
