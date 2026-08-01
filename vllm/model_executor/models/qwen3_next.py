@@ -492,14 +492,10 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
+        input_is_sequence_parallel: bool = False,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
-        input_is_sequence_parallel = (
-            self.use_attn_reduce_scatter_for_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
-        )
 
         if residual is None:
             residual = hidden_states
@@ -662,13 +658,14 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
+        hidden_states_are_sequence_parallel = False
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             if (
-                hidden_states.shape[0] != full_num_tokens
+                hidden_states_are_sequence_parallel
                 and not layer.use_attn_reduce_scatter_for_moe
             ):
                 hidden_states, residual = _all_gather_hidden_and_residual(
@@ -677,20 +674,27 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                     full_num_tokens,
                     self.config.hidden_size,
                 )
+                hidden_states_are_sequence_parallel = False
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                input_is_sequence_parallel=hidden_states_are_sequence_parallel,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
+            hidden_states_are_sequence_parallel = (
+                layer.use_attn_reduce_scatter_for_moe
+            )
+            if (
+                (layer_idx + 1) in self.aux_hidden_state_layers
+                and hidden_states_are_sequence_parallel
+            ):
                 hidden_states, residual = _all_gather_hidden_and_residual(
                     hidden_states,
                     residual,
                     full_num_tokens,
                     self.config.hidden_size,
                 )
+                hidden_states_are_sequence_parallel = False
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -699,7 +703,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if hidden_states.shape[0] != full_num_tokens:
+        if hidden_states_are_sequence_parallel:
             hidden_states, residual = _all_gather_hidden_and_residual(
                 hidden_states,
                 residual,
