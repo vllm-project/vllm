@@ -37,16 +37,18 @@ def test_ngram_max_len(num_speculative_tokens: int, vllm_runner):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
-def test_ngram_gpu_max_len(num_speculative_tokens: int):
+def test_ngram_gpu_max_len(num_speculative_tokens: int, vllm_runner):
     """V2 GPU n-gram counterpart of ``test_ngram_max_len``.
 
     Verifies that the V2 model runner with ``method="ngram_gpu"`` correctly
     handles the ``max_model_len`` boundary across various speculative-token
     counts.
     """
-    llm = LLM(
-        model="facebook/opt-125m",
+    with vllm_runner(
+        "facebook/opt-125m",
+        trust_remote_code=False,
         max_model_len=100,
+        enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
         speculative_config={
             "method": "ngram_gpu",
@@ -54,9 +56,9 @@ def test_ngram_gpu_max_len(num_speculative_tokens: int):
             "prompt_lookup_min": 3,
             "num_speculative_tokens": num_speculative_tokens,
         },
-    )
-    sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
-    llm.generate(_PROMPTS, sampling_params)
+    ) as runner:
+        sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
+        runner.llm.generate(_PROMPTS, sampling_params)
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
