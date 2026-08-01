@@ -1385,3 +1385,26 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+# ======================================================================
+# cache_salt pass-through (Issue #46688)
+# ======================================================================
+
+
+class TestCacheSalt:
+    def test_cache_salt_passed_through(self):
+        """cache_salt on the Anthropic request reaches the converted
+        ChatCompletionRequest so prefix-cache isolation works via /v1/messages."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            cache_salt="tenant-abc-secret-salt",
+        )
+        result = _convert(request)
+        assert result.cache_salt == "tenant-abc-secret-salt"
+
+    def test_cache_salt_defaults_to_none(self):
+        """Omitting cache_salt leaves it unset (unchanged default behavior)."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+        result = _convert(request)
+        assert result.cache_salt is None
