@@ -30,7 +30,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_1
+      device: mi355_1
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -48,7 +48,8 @@ steps:
     - pytest -v -s v1/test_tensor_ipc_queue.py
   mirror:
     amd:
-      device: mi250_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -64,7 +65,8 @@ steps:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi250_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -80,7 +82,8 @@ steps:
     - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
   mirror:
     amd:
-      device: mi250_1
+      dind: false
+      device: mi355_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -119,7 +122,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd

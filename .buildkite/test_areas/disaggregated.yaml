@@ -16,7 +16,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       depends_on:
         - image-build-amd
@@ -67,7 +67,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 40
       depends_on:
         - image-build-amd
@@ -93,7 +93,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 60
       depends_on:
         - image-build-amd
@@ -119,7 +119,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 55
       depends_on:
         - image-build-amd
@@ -192,7 +192,7 @@ steps:
   mirror:
     amd:
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
         - image-build-amd
