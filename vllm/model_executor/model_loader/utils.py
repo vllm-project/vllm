@@ -250,9 +250,9 @@ def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], 
     if key in _MODEL_ARCH_BY_HASH:
         return _MODEL_ARCH_BY_HASH[key]
 
-    model_arch = _get_model_architecture(model_config)
-    _MODEL_ARCH_BY_HASH[key] = model_arch
-    return model_arch
+    model_cls_and_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_cls_and_arch
+    return model_cls_and_arch
 
 
 def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
