@@ -560,9 +560,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # A mixed non-spec batch is decode-first: the decodes are
                 # length-1 sequences, and the chunk kernel returns NaN for those.
                 # Send them to the recurrent kernel and give the chunk kernel the
-                # prefill tail only. GDNAttentionMetadata already rebases
-                # cu_seqlens, state indices and the initial-state mask for this
-                # split, matching how qwen_gdn_linear_attn splits its batch.
+                # prefill tail only.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
                 if split_non_spec:
