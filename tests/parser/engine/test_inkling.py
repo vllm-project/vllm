@@ -178,6 +178,13 @@ class TestArgConverter:
 
 
 class TestNonStreaming:
+    @pytest.mark.parametrize("suffix", ["", END_MESSAGE, END_SAMPLING])
+    def test_bare_text_after_model_opener(self, parser, mock_request, suffix):
+        reasoning, content, tools = parser.parse(f"hello world{suffix}", mock_request)
+        assert reasoning is None
+        assert content == "hello world"
+        assert tools is None
+
     def test_plain_text(self, parser, mock_request):
         reasoning, content, tools = parser.parse(
             f"{TEXT_START}hello world{END_MESSAGE}", mock_request
@@ -425,6 +432,28 @@ class TestPromptSeededState:
         assert delta is not None
         assert delta.content is None
         assert delta.tool_calls[0].function.name == "get_weather"
+
+    def test_generation_prompt_header_flushes_bare_text_at_finish(
+        self, parser, mock_request
+    ):
+        prompt_token_ids = [_TML_VOCAB[END_MESSAGE], _TML_VOCAB[MSG_MODEL]]
+        first = parser.parse_delta(
+            "plain ",
+            [ord(char) for char in "plain "],
+            mock_request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
+        )
+        assert first is None
+
+        second = parser.parse_delta(
+            "answer",
+            [ord(char) for char in "answer"],
+            mock_request,
+            finished=True,
+        )
+        assert second is not None
+        assert second.content == "plain answer"
 
 
 class TestToolCallFiltering:
