@@ -1172,6 +1172,12 @@ class MooncakeStoreWorker:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
         )
+        # Mirrors MooncakeStoreConnector._capacity_only.
+        self._capacity_only = self.kv_role == "kv_consumer" and not (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "enable_lookup", True
+            )
+        )
         self.cache_config = vllm_config.cache_config
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
@@ -1266,6 +1272,17 @@ class MooncakeStoreWorker:
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         self._kv_cache_config = kv_cache_config
+        self.token_dbs: list[ChunkedTokenDatabase] = []
+
+        # a capacity-only instance does not need below utils
+        if self._capacity_only:
+            logger.info(
+                "Mooncake store in capacity-only mode: segment mounted "
+                "(global_segment_size=%d), KV transfer disabled.",
+                store_config.global_segment_size,
+            )
+            return
+
         # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
         # self.block_size (= scheduler_block_size) so the coordinator's
         # ``block_size % hash_block_size == 0`` invariant holds.
@@ -1314,7 +1331,7 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        self.token_dbs: list[ChunkedTokenDatabase] = [
+        self.token_dbs = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
                     metadata,
@@ -1405,6 +1422,8 @@ class MooncakeStoreWorker:
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
+        if self._capacity_only:
+            return
         if not kv_caches:
             logger.warning("No KV caches to offload.")
             return
@@ -1541,6 +1560,9 @@ class MooncakeStoreWorker:
         compute is launched on the compute stream) for better
         compute-I/O overlap.
         """
+        if self._capacity_only:
+            return set(), set()
+
         # Issue async loads
         for request in meta.requests:
             load_spec = request.load_spec
@@ -1659,6 +1681,9 @@ class MooncakeStoreWorker:
         hit covering all ``num_tokens`` is re-derived below the request end so
         the last token is recomputed for sampling.
         """
+        if self._capacity_only:
+            return 0
+
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return 0
