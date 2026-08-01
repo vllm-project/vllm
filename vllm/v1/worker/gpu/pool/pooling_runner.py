@@ -17,7 +17,13 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.states import RequestState
 
 _SUPPORTED_TASKS: frozenset[PoolingTask] = frozenset(
-    {"embed", "classify", "token_classify"}
+    {"embed", "classify", "token_classify", "embed&token_classify"}
+)
+# Tasks whose output length scales with the prompt. `embed&token_classify`
+# concatenates a fixed-size embedding with per-token weights, so it is
+# per-token too.
+_TOKEN_TASKS: frozenset[PoolingTask] = frozenset(
+    {"token_classify", "embed&token_classify"}
 )
 
 
@@ -56,10 +62,10 @@ class PoolingRunner:
 
     @staticmethod
     def _get_enabled_tasks(model_config: ModelConfig) -> frozenset[PoolingTask]:
-        # Token classification is validated only for unchunked encoder-only prefill.
+        # Per-token pooling is validated only for unchunked encoder-only prefill.
         if model_config.attn_type == "encoder_only":
             return _SUPPORTED_TASKS
-        return _SUPPORTED_TASKS - {"token_classify"}
+        return _SUPPORTED_TASKS - _TOKEN_TASKS
 
     @staticmethod
     def get_supported_tasks(
