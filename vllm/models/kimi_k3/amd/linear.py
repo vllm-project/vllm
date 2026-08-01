@@ -349,15 +349,18 @@ class KimiMoE(nn.Module):
     def _apply_preroute_fp8(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         preroute_fp8 = self._preroute_fp8
-        if preroute_fp8 is None or not preroute_fp8.supports_input(hidden_states):
+        if preroute_fp8 is None or not preroute_fp8.supports_inputs(
+            hidden_states, self.gate.weight
+        ):
             return None
 
         assert self.activation_situ_beta is not None
         assert self.activation_situ_linear_beta is not None
         return preroute_fp8(
             hidden_states,
+            self.gate.weight,
             self.activation_situ_beta,
             self.activation_situ_linear_beta,
         )
@@ -365,10 +368,15 @@ class KimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
         # The explicitly enabled FP8 representation takes precedence when both
         # pre-route flags are set. Unsupported inputs fall back to exact BF16.
-        preroute_output = self._apply_preroute_fp8(hidden_states)
+        router_logits = None
+        preroute_fp8 = self._apply_preroute_fp8(hidden_states)
+        if preroute_fp8 is None:
+            preroute_output = None
+        else:
+            routed_hidden_states, shared_output, router_logits = preroute_fp8
+            preroute_output = (routed_hidden_states, shared_output)
         if preroute_output is None and self._preroute_bf16 is not None:
             assert self.routed_expert_down_proj is not None
             assert self.shared_experts is not None
@@ -378,6 +386,8 @@ class KimiMoE(nn.Module):
                 self.shared_experts.gate_up_proj.weight,
                 self.shared_experts.down_proj.weight,
             )
+        if router_logits is None:
+            router_logits, _ = self.gate(hidden_states)
         if preroute_output is None:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,

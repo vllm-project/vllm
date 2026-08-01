@@ -112,23 +112,25 @@ def supports_kimi_k3_preroute_fp8(
     shared_gate_up_scale: torch.Tensor,
     shared_down_weight: torch.Tensor,
     shared_down_scale: torch.Tensor,
+    router_weight: torch.Tensor,
 ) -> bool:
-    """Return whether both fixed-shape AITER FP8 primitives are available."""
+    """Return whether the fixed-shape AITER FP8 primitives are available."""
 
     try:
         from aiter.ops.flydsl.kimi_k3_moe_preroute_fp8 import (
-            supports_kimi_k3_moe_dual_projection_fp8,
+            supports_kimi_k3_moe_tri_projection_fp8,
             supports_kimi_k3_shared_down_fp8_weight,
         )
     except (ImportError, ModuleNotFoundError):
         return False
 
-    return supports_kimi_k3_moe_dual_projection_fp8(
+    return supports_kimi_k3_moe_tri_projection_fp8(
         hidden_states,
         routed_weight,
         routed_scale,
         shared_gate_up_weight,
         shared_gate_up_scale,
+        router_weight,
     ) and supports_kimi_k3_shared_down_fp8_weight(
         shared_down_weight,
         shared_down_scale,
@@ -144,20 +146,22 @@ def _kimi_k3_preroute_fp8_impl(
     shared_gate_up_scale: torch.Tensor,
     shared_down_weight: torch.Tensor,
     shared_down_scale: torch.Tensor,
+    router_weight: torch.Tensor,
     situ_beta: float,
     situ_linear_beta: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.flydsl.kimi_k3_moe_preroute_fp8 import (
-        kimi_k3_moe_dual_projection_fp8,
+        kimi_k3_moe_tri_projection_fp8,
         kimi_k3_shared_down_fp8,
     )
 
-    routed, shared_gate_up = kimi_k3_moe_dual_projection_fp8(
+    routed, shared_gate_up, router_logits = kimi_k3_moe_tri_projection_fp8(
         hidden_states,
         routed_weight,
         routed_scale,
         shared_gate_up_weight,
         shared_gate_up_scale,
+        router_weight,
     )
     shared_output = kimi_k3_shared_down_fp8(
         shared_gate_up,
@@ -166,7 +170,7 @@ def _kimi_k3_preroute_fp8_impl(
         situ_beta=situ_beta,
         situ_linear_beta=situ_linear_beta,
     )
-    return routed, shared_output
+    return routed, shared_output, router_logits
 
 
 def _kimi_k3_preroute_fp8_fake(
@@ -177,9 +181,10 @@ def _kimi_k3_preroute_fp8_fake(
     shared_gate_up_scale: torch.Tensor,
     shared_down_weight: torch.Tensor,
     shared_down_scale: torch.Tensor,
+    router_weight: torch.Tensor,
     situ_beta: float,
     situ_linear_beta: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     del (
         routed_scale,
         shared_gate_up_weight,
@@ -192,6 +197,10 @@ def _kimi_k3_preroute_fp8_fake(
     return (
         hidden_states.new_empty((hidden_states.shape[0], routed_weight.shape[0])),
         hidden_states.new_empty(hidden_states.shape),
+        hidden_states.new_empty(
+            (hidden_states.shape[0], router_weight.shape[0]),
+            dtype=torch.float32,
+        ),
     )
 
 
@@ -381,7 +390,11 @@ class KimiK3PrerouteFp8Weights(nn.Module):
             return None
         return cls(*source_weights)
 
-    def supports_input(self, hidden_states: torch.Tensor) -> bool:
+    def supports_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        router_weight: torch.Tensor,
+    ) -> bool:
         return supports_kimi_k3_preroute_fp8(
             hidden_states,
             self.routed_weight,
@@ -390,14 +403,16 @@ class KimiK3PrerouteFp8Weights(nn.Module):
             self.shared_gate_up_scale,
             self.shared_down_weight,
             self.shared_down_scale,
+            router_weight,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        router_weight: torch.Tensor,
         situ_beta: float,
         situ_linear_beta: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.kimi_k3_preroute_fp8(
             hidden_states,
             self.routed_weight,
@@ -406,6 +421,7 @@ class KimiK3PrerouteFp8Weights(nn.Module):
             self.shared_gate_up_scale,
             self.shared_down_weight,
             self.shared_down_scale,
+            router_weight,
             situ_beta,
             situ_linear_beta,
         )

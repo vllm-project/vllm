@@ -230,6 +230,11 @@ def test_amd_moe_preroute_fp8_matches_weight_quantized_reference() -> None:
         device="cuda",
         dtype=torch.bfloat16,
     )
+    router_weight = torch.randn(
+        (896, 7168),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
     original_hidden = hidden.clone()
 
     weights = KimiK3PrerouteFp8Weights(
@@ -237,11 +242,12 @@ def test_amd_moe_preroute_fp8_matches_weight_quantized_reference() -> None:
         shared_gate_up_weight,
         shared_down_weight,
     )
-    assert weights.supports_input(hidden)
-    assert not weights.supports_input(hidden.expand(8, -1))
+    assert weights.supports_inputs(hidden, router_weight)
+    assert not weights.supports_inputs(hidden.expand(8, -1), router_weight)
 
-    routed, shared = weights(
+    routed, shared, router_logits = weights(
         hidden,
+        router_weight,
         situ_beta=4.0,
         situ_linear_beta=25.0,
     )
@@ -268,8 +274,16 @@ def test_amd_moe_preroute_fp8_matches_weight_quantized_reference() -> None:
         .float()
     )
     shared_reference = F.linear(activated, shared_down_dequant)
+    router_reference = F.linear(hidden, router_weight).float()
 
     assert _relative_rmse(routed, routed_reference) < 0.035
     assert _relative_rmse(shared, shared_reference) < 0.06
+    assert _relative_rmse(router_logits, router_reference) < 0.01
+    torch.testing.assert_close(
+        router_logits.topk(16, dim=-1).indices,
+        router_reference.topk(16, dim=-1).indices,
+        atol=0,
+        rtol=0,
+    )
     assert F.cosine_similarity(shared.float(), shared_reference.float()).item() > 0.998
     torch.testing.assert_close(hidden, original_hidden, atol=0, rtol=0)
