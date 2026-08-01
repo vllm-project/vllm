@@ -11,32 +11,7 @@
  *
  * The recurrent state is [128, 128] fp32 per (sequence, head), read and written
  * once per token, so the kernel is bound by that 128 KiB of HBM traffic and the
- * shape is chosen to reach streaming bandwidth rather than to minimise FLOPs.
- *
- * Structural differences from the CUDA kernel in
- * `fused_kda_decode_kernel.cu`, which this file mirrors numerically:
- *
- *  - No LDS staging of the recurrent state. The CUDA version double-buffers
- *    32-row chunks through shared memory because `cp.async` can only target
- *    shared memory, but every state element is touched by exactly one lane, so
- *    on CDNA the rows are read straight into registers with
- *    `global_load_dwordx4` and written back in place. That removes 32 KiB of
- *    LDS, the double-buffer barriers, and the chunk prefetch bookkeeping.
- *  - Each lane owns a 16-wide k-slice of one state row and reductions run over
- *    16-lane DPP groups (`v_add_f32_dpp`). `__shfl_xor` lowers to
- *    `ds_bpermute` on CDNA -- an LDS-crossbar op -- and the recurrence needs
- *    two reductions per row, so a 32-lane shuffle butterfly costs ~190 LDS
- *    round trips per thread. Within a 16-lane DPP row the same reduction is
- *    four full-rate VALU instructions.
- *  - The whole 64 KiB state slice is loaded before the conv1d prologue rather
- *    than inside the recurrence loop. Nothing in the prologue feeds the
- *    addresses, so the loads fly under it; this is what moves the kernel from
- *    ~4.0 to ~5.4 TB/s at decode-sized batches.
- *  - State accesses are non-temporal. The state a sequence touches this step is
- *    not read again until the next token, ~3 GB of traffic later, so caching it
- *    only evicts data that is still live.
- *  - No PDL: `cudaGridDependencySynchronize` and the programmatic-launch
- *    attributes have no HIP equivalent, and the launch is a plain <<<>>>.
+ * shape is chosen to reach streaming bandwidth rather than to minimize FLOPs.
  */
 
 #include <cstdint>
