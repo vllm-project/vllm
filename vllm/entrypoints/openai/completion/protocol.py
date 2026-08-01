@@ -243,6 +243,19 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    media_urls: dict[str, list[Annotated[str, Field(min_length=1)]]] | None = Field(
+        default=None,
+        description=(
+            "Multimodal media URLs keyed by modality. Each value is a list "
+            "of URLs (http/https, base64 data URL, or file:// URL). "
+            "The input prompt must contain the correct placeholder tokens "
+            "(one per item). Supported modalities: image, video, audio. "
+            "Not supported for multiple prompts or `prompt_embeds`. "
+            'Example: {"image": ["https://example.com/photo.jpg"], '
+            '"audio": ["data:audio/wav;base64,..."]}'
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -539,6 +552,38 @@ class CompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "Either prompt or prompt_embeds must be provided and non-empty.",
                 parameter="prompt",
+            )
+
+        return data
+
+    _FETCHABLE_MODALITIES = frozenset({"image", "video", "audio"})
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_media_urls(cls, data):
+        media_urls = data.get("media_urls")
+        if not media_urls:
+            return data
+
+        if data.get("prompt_embeds") is not None:
+            raise VLLMValidationError(
+                "`media_urls` is not supported with `prompt_embeds`.",
+                parameter="media_urls",
+            )
+
+        prompt = data.get("prompt")
+        if isinstance(prompt, list) and len(prompt) > 1 and not is_list_of(prompt, int):
+            raise VLLMValidationError(
+                "`media_urls` is only supported with a single prompt.",
+                parameter="media_urls",
+            )
+
+        unknown = set(media_urls.keys()) - cls._FETCHABLE_MODALITIES
+        if unknown:
+            raise VLLMValidationError(
+                f"Unsupported modalities in `media_urls`: {unknown}. "
+                f"Supported: {sorted(cls._FETCHABLE_MODALITIES)}",
+                parameter="media_urls",
             )
 
         return data

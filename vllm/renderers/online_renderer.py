@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any
 
 from openai_harmony import Message as OpenAIMessage
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -30,6 +32,7 @@ from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
+    MultiModalDataDict,
     PromptType,
     SingletonPrompt,
     tokens_input,
@@ -345,6 +348,13 @@ class OnlineRenderer:
             )
             for prompt in prompts
         ]
+
+        if media_urls := getattr(request, "media_urls", None):
+            mm_data = await self._resolve_media_urls(media_urls)
+            for p in parsed_prompts:
+                if not isinstance(p, bytes):
+                    p["multi_modal_data"] = mm_data
+
         tok_params = request.build_tok_params(model_config)
 
         return await renderer.render_cmpl_async(
@@ -357,6 +367,35 @@ class OnlineRenderer:
             },
             skip_mm_cache=skip_mm_cache,
         )
+
+    async def _resolve_media_urls(
+        self, media_urls: dict[str, list[str]]
+    ) -> MultiModalDataDict:
+        from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY
+
+        connector = MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=(
+                self.model_config.multimodal_config.media_io_kwargs
+                if self.model_config.multimodal_config
+                else None
+            ),
+            allowed_local_media_path=(self.model_config.allowed_local_media_path),
+        )
+
+        fetchers = {
+            "image": connector.fetch_image_async,
+            "video": connector.fetch_video_async,
+            "audio": connector.fetch_audio_async,
+        }
+
+        mm_data: dict[str, list[object]] = {}
+        for modality, urls in media_urls.items():
+            fetch_fn = fetchers[modality]
+            mm_data[modality] = list(
+                await asyncio.gather(*(fetch_fn(url) for url in urls))
+            )
+        return mm_data
 
     async def preprocess_chat(
         self,
