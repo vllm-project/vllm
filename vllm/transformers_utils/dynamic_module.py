@@ -34,27 +34,30 @@ def try_get_class_from_dynamic_module(
     but ignoring any errors.
     """
     try:
-        resolve_trust_remote_code(
+        trust_remote_code = resolve_trust_remote_code(
             trust_remote_code,
             pretrained_model_name_or_path,
             has_local_code=False,
             has_remote_code=True,
         )
 
-        return get_class_from_dynamic_module(
-            class_reference,
-            pretrained_model_name_or_path,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            resume_download=resume_download,
-            proxies=proxies,
-            token=token,
-            revision=revision,
-            local_files_only=local_files_only,
-            repo_type=repo_type,
-            code_revision=code_revision,
-            **kwargs,
-        )
+        if trust_remote_code:
+            return get_class_from_dynamic_module(
+                class_reference,
+                pretrained_model_name_or_path,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                resume_download=resume_download,
+                proxies=proxies,
+                token=token,
+                revision=revision,
+                local_files_only=local_files_only,
+                repo_type=repo_type,
+                code_revision=code_revision,
+                **kwargs,
+            )
+        else:
+            return None
     except Exception:
         location = "ModelScope" if envs.VLLM_USE_MODELSCOPE else "HF Hub"
 
