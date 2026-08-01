@@ -14,6 +14,9 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFileSearchCallCompletedEvent,
+    ResponseFileSearchCallInProgressEvent,
+    ResponseFileSearchCallSearchingEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -72,6 +75,9 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+MIN_FILE_SEARCH_RESULTS = 1
+MAX_FILE_SEARCH_RESULTS = 50
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -635,6 +641,23 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return data
 
+    @model_validator(mode="after")
+    def check_file_search_limits(self):
+        for tool in self.tools:
+            if tool.type != "file_search":
+                continue
+            max_num_results = tool.max_num_results
+            if max_num_results is not None and not (
+                MIN_FILE_SEARCH_RESULTS <= max_num_results <= MAX_FILE_SEARCH_RESULTS
+            ):
+                raise VLLMValidationError(
+                    "file_search max_num_results must be between "
+                    f"{MIN_FILE_SEARCH_RESULTS} and {MAX_FILE_SEARCH_RESULTS}",
+                    parameter="tools",
+                    value=max_num_results,
+                )
+        return self
+
 
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
@@ -851,6 +874,9 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseReasoningTextDoneEvent
     | ResponseReasoningPartAddedEvent
     | ResponseReasoningPartDoneEvent
+    | ResponseFileSearchCallInProgressEvent
+    | ResponseFileSearchCallSearchingEvent
+    | ResponseFileSearchCallCompletedEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent

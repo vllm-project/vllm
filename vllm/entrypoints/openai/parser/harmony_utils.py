@@ -161,6 +161,21 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     )
 
 
+def create_file_search_tool_definition(_tool: Tool) -> ToolDescription:
+    return ToolDescription.new(
+        name="file_search",
+        description="Search the configured knowledge base.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+
+
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
@@ -178,13 +193,16 @@ def get_developer_message(
             ):
                 pass
 
-            elif tool.type == "function":
+            elif tool.type == "function" or tool.type == "file_search":
                 function_tools.append(tool)
             else:
                 raise ValueError(f"tool type {tool.type} not supported")
         if function_tools:
             function_tool_descriptions = [
-                create_tool_definition(tool) for tool in function_tools
+                create_file_search_tool_definition(tool)
+                if tool.type == "file_search"
+                else create_tool_definition(tool)
+                for tool in function_tools
             ]
             dev_msg_content = dev_msg_content.with_function_tools(
                 function_tool_descriptions

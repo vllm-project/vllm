@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
@@ -12,6 +13,7 @@ from typing import Any, Final
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -22,6 +24,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role as OpenAIHarmonyRole
 from pydantic import TypeAdapter
 
 from vllm import envs
@@ -77,6 +80,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
     StreamingState,
     _StateType,
+    consume_file_search_tool_result,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -145,6 +149,12 @@ def _extract_allowed_tools_from_mcp_requests(
 
         allowed_tools_map[tool.server_label] = allowed_tools_val
     return allowed_tools_map
+
+
+def _get_harmony_tools(request: ResponsesRequest) -> list[Tool]:
+    if request.tool_choice == "none":
+        return []
+    return request.tools
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -458,12 +468,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             context: ConversationContext
-            function_tool_names = extract_function_tool_names(request.tools)
+            harmony_tools = _get_harmony_tools(request)
+            function_tool_names = extract_function_tool_names(harmony_tools)
             if self.use_harmony:
                 context = HarmonyContext(
                     messages,
                     available_tools,
                     function_tool_names,
+                    tools=harmony_tools,
                     response_parser=response_parser,
                 )
             else:
@@ -810,19 +822,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
-            output = []
-            harmony_msgs = context.messages[context.num_init_messages :]
-            if harmony_msgs:
-                fn_names = context.function_tool_names
-                for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
-                output.extend(
-                    harmony_to_response_output(
-                        harmony_msgs[-1],
-                        fn_names,
-                        incomplete=context.last_append_flush_status,
-                    )
-                )
+            output = self._make_response_output_items_with_harmony(context, request)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -1106,6 +1106,60 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         ]
 
+    def _make_response_output_items_with_harmony(
+        self,
+        context: HarmonyContext,
+        request: ResponsesRequest,
+    ) -> list[ResponseOutputItem]:
+        output_items: list[ResponseOutputItem] = []
+        harmony_messages = context.messages[context.num_init_messages :]
+        if not harmony_messages:
+            return output_items
+
+        function_names = context.function_tool_names
+        for message in harmony_messages[:-1]:
+            output_items.extend(harmony_to_response_output(message, function_names))
+        output_items.extend(
+            harmony_to_response_output(
+                harmony_messages[-1],
+                function_names,
+                incomplete=context.last_append_flush_status,
+            )
+        )
+        if request.include and "file_search_call.results" in request.include:
+            return self._attach_file_search_results(output_items, context)
+        return output_items
+
+    def _attach_file_search_results(
+        self,
+        output_items: list[ResponseOutputItem],
+        context: HarmonyContext,
+    ) -> list[ResponseOutputItem]:
+        results_payloads: list[list[dict[str, Any]]] = []
+        for message in context.messages[context.num_init_messages :]:
+            if (
+                message.author.role == OpenAIHarmonyRole.TOOL
+                and message.author.name == "functions.file_search"
+            ):
+                for content in message.content:
+                    try:
+                        payload = json.loads(content.text)
+                    except json.JSONDecodeError:
+                        continue
+                    results = (
+                        payload.get("results") if isinstance(payload, dict) else None
+                    )
+                    if isinstance(results, list):
+                        results_payloads.append(results)
+
+        results_iter = iter(results_payloads)
+        return [
+            item.model_copy(update={"results": next(results_iter, None)})
+            if isinstance(item, ResponseFileSearchToolCall)
+            else item
+            for item in output_items
+        ]
+
     def _get_harmony_builtin_tool_descriptions(
         self, request: ResponsesRequest, tool_types: set[str]
     ) -> dict[str, str | None]:
@@ -1156,7 +1210,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         request_input = request.input
         if prev_response is None:
             # New conversation.
-            tool_types = extract_tool_types(request.tools)
+            harmony_tools = _get_harmony_tools(request)
+            tool_types = extract_tool_types(harmony_tools)
             with_custom_tools = has_custom_tools(tool_types)
             instructions = request.instructions
             if instructions is None and isinstance(request_input, list):
@@ -1166,7 +1221,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_descriptions = self._get_harmony_builtin_tool_descriptions(
                 request, tool_types
             )
-            tools = request.tools if with_custom_tools else None
+            tools = harmony_tools if with_custom_tools else None
             messages.extend(
                 build_harmony_preamble(
                     instructions=instructions,
@@ -1423,13 +1478,33 @@ class OpenAIServingResponses(GenerateBaseServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = StreamingState()
+        state = StreamingState(
+            include_file_search_results=(
+                request.include is not None
+                and "file_search_call.results" in request.include
+            ),
+            processed_message_count=context.num_init_messages
+            if isinstance(context, HarmonyContext)
+            else 0,
+        )
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
 
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
+
+            for message in ctx.messages[state.processed_message_count :]:
+                if (
+                    message.author.role == OpenAIHarmonyRole.TOOL
+                    and message.author.name == "functions.file_search"
+                ):
+                    events = consume_file_search_tool_result(message, state)
+                    for event in events:
+                        yield _increment_sequence_number_and_return(event)
+                    if events:
+                        state.reset_for_new_item()
+            state.processed_message_count = len(ctx.messages)
 
             for segment in ctx.last_append_segments:
                 if segment.delta:
@@ -1449,7 +1524,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                         completed_message, state, self.tool_server
                     ):
                         yield _increment_sequence_number_and_return(event)
-                    state.reset_for_new_item()
+                    if state.pending_file_search_item is None:
+                        state.reset_for_new_item()
 
     async def responses_stream_generator(
         self,

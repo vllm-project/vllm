@@ -11,6 +11,7 @@ Handles two directions:
 import json
 
 from openai.types.responses import (
+    ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -326,6 +327,42 @@ def _parse_function_call(
     return output_items
 
 
+def _parse_file_search_call(
+    message: Message, incomplete: bool = False
+) -> list[ResponseOutputItem]:
+    """Parse file_search function calls into file_search tool call items."""
+    output_items: list[ResponseOutputItem] = []
+    for content in message.content:
+        queries = _parse_file_search_queries(content.text)
+        output_items.append(
+            ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=f"fs_{random_uuid()}",
+                queries=queries,
+                results=None,
+                status="incomplete" if incomplete else "completed",
+            )
+        )
+    return output_items
+
+
+def _parse_file_search_queries(text: str) -> list[str]:
+    """Extract query strings from file_search tool call arguments."""
+    try:
+        args = json.loads(text)
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        return []
+    queries = args.get("queries")
+    if isinstance(queries, list):
+        return [query for query in queries if isinstance(query, str) and query]
+    query = args.get("query")
+    if isinstance(query, str) and query:
+        return [query]
+    return []
+
+
 def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
@@ -455,6 +492,13 @@ def harmony_to_response_output(
         if recipient.startswith("browser."):
             if not incomplete:
                 output_items.append(_parse_browser_tool_call(message, recipient))
+
+        # file_search tool calls (built-in, wrapped as a function tool)
+        elif (
+            recipient == "functions.file_search"
+            and "file_search" not in function_tool_names
+        ):
+            output_items.extend(_parse_file_search_call(message, incomplete=incomplete))
 
         # Function calls (with or without "functions." prefix)
         elif is_function_recipient(recipient, function_tool_names):
