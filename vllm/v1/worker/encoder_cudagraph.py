@@ -73,7 +73,11 @@ class EncoderCudaGraphManager:
         user_max_vision_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
-        multimodal_config = vllm_config.model_config.multimodal_config
+        self.budget_graphs: dict[str, dict[int, BudgetGraphMetadata]] = {}
+        self.graph_pool: Any | None = None
+        self.graph_hits = 0
+        self.graph_misses = 0
+        self.log_stats_interval = 100
 
         # Invariant: max_batch_size <= min_token_budget.
         # This ensures per_image_output = budget // max_batch_size >= 1
@@ -135,6 +139,7 @@ class EncoderCudaGraphManager:
                     min(self.token_budgets),
                 )
 
+        multimodal_config = vllm_config.model_config.multimodal_config
         assert multimodal_config is not None
         if multimodal_config.get_limit_per_prompt("video") == 0:
             self.max_frames_per_batch = 0
@@ -145,47 +150,53 @@ class EncoderCudaGraphManager:
             max_frames_per_video = self.config.max_frames_per_video
             self.max_frames_per_batch = self.max_batch_size * max_frames_per_video
 
-        mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (
-            mm_config is not None
-            and mm_config.mm_encoder_tp_mode == "data"
+            multimodal_config.mm_encoder_tp_mode == "data"
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
-        self.budget_graphs: dict[str, dict[int, BudgetGraphMetadata]] = {}
-        self.graph_pool: Any | None = None
-        self.graph_hits = 0
-        self.graph_misses = 0
-        self.log_stats_interval = 100
-
         if self.config.enable_dual_path_graph:
-            max_budget = self.token_budgets[-1]
-            self.global_token_budgets = self._generate_budgets(
-                self.config.global_token_per_image,
-                max_budget,
-            )
-            self.local_token_budgets = self._generate_budgets(
-                self.config.local_token_per_patch,
-                max_budget,
-            )
-            # When `image_width <= 640 and image_height <= 640`, the mm inputs
-            # will only contain global image, without generating local patches.
-            self.local_token_budgets.insert(0, 0)
+            user_global_budgets = comp_config.encoder_cudagraph_global_token_budgets
+            user_local_budgets = comp_config.encoder_cudagraph_local_token_budgets
+
+            if user_global_budgets:
+                self.global_token_budgets = sorted(user_global_budgets)
+            else:
+                max_budget = self.token_budgets[-1]
+                self.global_token_budgets = self._generate_budgets(
+                    self.config.global_token_per_image,
+                    max_budget,
+                )
+
+            if user_local_budgets:
+                self.local_token_budgets = sorted(user_local_budgets)
+            else:
+                max_budget = self.token_budgets[-1]
+                self.local_token_budgets = self._generate_budgets(
+                    self.config.local_token_per_patch,
+                    max_budget,
+                )
+                # When `image_width <= 640 and image_height <= 640`, the mm
+                # inputs will only contain global image, without generating
+                # local patches.
+                self.local_token_budgets.insert(0, 0)
+
             logger.info(
                 "EncoderCudaGraphManager dual-path mode: "
                 "global_budgets=%s, local_budgets=%s",
                 self.global_token_budgets,
                 self.local_token_budgets,
             )
-        else:
-            logger.info(
-                "EncoderCudaGraphManager initialized with "
-                "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
-                self.token_budgets,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                self.use_dp,
-            )
+            return
+
+        logger.info(
+            "EncoderCudaGraphManager initialized with "
+            "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
+            self.token_budgets,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            self.use_dp,
+        )
 
     @staticmethod
     def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:
