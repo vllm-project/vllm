@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
@@ -19,6 +20,10 @@ from vllm.models.kimi_k3.nvidia.kda import (
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
+from vllm.models.kimi_k3.nvidia.ops.kda_mixed import (
+    pack_kda_mixed_inputs,
+    scatter_rms_norm_kda_mixed_outputs,
+)
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
@@ -27,6 +32,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 DEVICE = "cuda"
@@ -755,3 +761,265 @@ def test_flashkda_correctness():
 
     assert_close("o", expected_out, actual_out, 0.01)
     assert_close("ht", expected_state, actual_state, 0.01)
+
+
+def _stable_kda_partition(
+    num_tokens: int,
+    num_non_spec: int,
+    index_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    generator = torch.Generator().manual_seed(23)
+    is_spec = torch.ones(num_tokens, dtype=torch.bool)
+    if num_non_spec:
+        non_spec_positions = torch.randperm(num_tokens, generator=generator)[
+            :num_non_spec
+        ]
+        is_spec[non_spec_positions] = False
+    indices = torch.argsort(is_spec, stable=True).to(
+        device=DEVICE,
+        dtype=index_dtype,
+    )
+    return indices[:num_non_spec], indices[num_non_spec:]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_non_spec"),
+    [(0, 0), (17, 0), (17, 17), (17, 8), (32, 13)],
+)
+@torch.inference_mode()
+def test_kda_mixed_boundary_ops_match_existing_cuda_path(
+    default_vllm_config,
+    dtype: torch.dtype,
+    index_dtype: torch.dtype,
+    num_tokens: int,
+    num_non_spec: int,
+):
+    torch.manual_seed(11)
+    H, D = 6, 128
+    qkv_width = 3 * H * D
+    eps = 1e-5
+    non_spec_indices, spec_indices = _stable_kda_partition(
+        num_tokens,
+        num_non_spec,
+        index_dtype,
+    )
+    packed_indices = torch.cat((non_spec_indices, spec_indices))
+
+    mixed_qkv = torch.randn(
+        num_tokens,
+        qkv_width + 7,
+        dtype=dtype,
+        device=DEVICE,
+    )[:, :qkv_width]
+    g1 = torch.randn(
+        1,
+        num_tokens,
+        H,
+        D + 3,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :D]
+    beta = torch.randn(
+        1,
+        num_tokens,
+        H + 3,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :H]
+    packed_qkv, packed_g1, packed_beta = pack_kda_mixed_inputs(
+        mixed_qkv,
+        g1,
+        beta,
+        non_spec_indices,
+        spec_indices,
+    )
+    torch.testing.assert_close(
+        packed_qkv,
+        mixed_qkv.index_select(0, packed_indices),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        packed_g1,
+        g1.index_select(1, packed_indices),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        packed_beta,
+        beta.index_select(1, packed_indices),
+        rtol=0,
+        atol=0,
+    )
+    assert packed_qkv.is_contiguous()
+    assert packed_g1.is_contiguous()
+    assert packed_beta.is_contiguous()
+
+    num_spec = num_tokens - num_non_spec
+    non_spec_output = torch.randn(
+        1,
+        num_non_spec,
+        H,
+        D + 5,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :D]
+    spec_output = torch.randn(
+        1,
+        num_spec,
+        H,
+        D + 5,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :D]
+    num_padding = 3
+    gate = torch.randn(
+        num_tokens + num_padding,
+        H,
+        D + 5,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :D]
+    norm = FusedRMSNormGated(
+        D,
+        activation="sigmoid",
+        device=torch.device(DEVICE),
+        dtype=dtype,
+    )
+    torch.nn.init.normal_(norm.weight)
+    output = torch.full(
+        (1, num_tokens + num_padding, H, D + 5),
+        17.0,
+        dtype=dtype,
+        device=DEVICE,
+    )[..., :D]
+    expected = output.clone()
+    expected.index_copy_(1, non_spec_indices, non_spec_output)
+    expected.index_copy_(1, spec_indices, spec_output)
+    if num_tokens:
+        expected[:, :num_tokens].copy_(
+            norm.forward_cuda(expected[:, :num_tokens].clone(), gate[:num_tokens])
+        )
+    output_ptr = output.data_ptr()
+
+    scatter_rms_norm_kda_mixed_outputs(
+        non_spec_output,
+        spec_output,
+        non_spec_indices,
+        spec_indices,
+        gate,
+        norm.weight,
+        output,
+        eps,
+    )
+
+    assert output.data_ptr() == output_ptr
+    torch.testing.assert_close(output, expected, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(
+        output[:, num_tokens:],
+        torch.full_like(output[:, num_tokens:], 17.0),
+        rtol=0,
+        atol=0,
+    )
+
+
+@torch.inference_mode()
+def test_kda_mixed_boundary_ops_float32_fallback(default_vllm_config):
+    T, N, H, D = 9, 4, 2, 128
+    non_spec_indices, spec_indices = _stable_kda_partition(T, N, torch.int64)
+    packed_indices = torch.cat((non_spec_indices, spec_indices))
+    mixed_qkv = torch.randn(T, 3 * H * D, device=DEVICE)
+    g1 = torch.randn(1, T, H, D, device=DEVICE)
+    beta = torch.randn(1, T, H, device=DEVICE)
+
+    packed_qkv, packed_g1, packed_beta = pack_kda_mixed_inputs(
+        mixed_qkv,
+        g1,
+        beta,
+        non_spec_indices,
+        spec_indices,
+    )
+    torch.testing.assert_close(packed_qkv, mixed_qkv.index_select(0, packed_indices))
+    torch.testing.assert_close(packed_g1, g1.index_select(1, packed_indices))
+    torch.testing.assert_close(packed_beta, beta.index_select(1, packed_indices))
+
+    non_spec_output = torch.randn(1, N, H, D, device=DEVICE)
+    spec_output = torch.randn(1, T - N, H, D, device=DEVICE)
+    gate = torch.randn(T, H, D, device=DEVICE)
+    norm = FusedRMSNormGated(
+        D,
+        activation="sigmoid",
+        device=torch.device(DEVICE),
+        dtype=torch.float32,
+    )
+    torch.nn.init.normal_(norm.weight)
+    output = torch.empty(1, T, H, D, device=DEVICE)
+    expected = torch.empty_like(output)
+    expected.index_copy_(1, non_spec_indices, non_spec_output)
+    expected.index_copy_(1, spec_indices, spec_output)
+    expected.copy_(norm.forward_cuda(expected.clone(), gate))
+
+    scatter_rms_norm_kda_mixed_outputs(
+        non_spec_output,
+        spec_output,
+        non_spec_indices,
+        spec_indices,
+        gate,
+        norm.weight,
+        output,
+        norm.eps,
+    )
+    torch.testing.assert_close(output, expected)
+
+
+@torch.inference_mode()
+def test_kda_mixed_boundary_custom_op_registration():
+    T, N, H, D = 7, 3, 2, 128
+    non_spec_indices, spec_indices = _stable_kda_partition(T, N, torch.int64)
+    mixed_qkv = torch.randn(
+        T,
+        3 * H * D,
+        dtype=torch.float16,
+        device=DEVICE,
+    )
+    g1 = torch.randn(1, T, H, D, dtype=torch.float16, device=DEVICE)
+    beta = torch.randn(1, T, H, dtype=torch.float16, device=DEVICE)
+    opcheck(
+        torch.ops.vllm.kimi_k3_pack_kda_mixed_inputs,
+        (mixed_qkv, g1, beta, non_spec_indices, spec_indices),
+    )
+
+    non_spec_output = torch.randn(
+        1,
+        N,
+        H,
+        D,
+        dtype=torch.float16,
+        device=DEVICE,
+    )
+    spec_output = torch.randn(
+        1,
+        T - N,
+        H,
+        D,
+        dtype=torch.float16,
+        device=DEVICE,
+    )
+    gate = torch.randn(T, H, D, dtype=torch.float16, device=DEVICE)
+    weight = torch.randn(D, dtype=torch.float16, device=DEVICE)
+    output = torch.empty(1, T, H, D, dtype=torch.float16, device=DEVICE)
+    opcheck(
+        torch.ops.vllm.kimi_k3_scatter_rms_norm_kda_mixed_outputs,
+        (
+            non_spec_output,
+            spec_output,
+            non_spec_indices,
+            spec_indices,
+            gate,
+            weight,
+            output,
+            1e-5,
+        ),
+    )

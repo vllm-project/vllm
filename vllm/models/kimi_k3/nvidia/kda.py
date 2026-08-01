@@ -42,6 +42,10 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
+from vllm.models.kimi_k3.nvidia.ops.kda_mixed import (
+    pack_kda_mixed_inputs,
+    scatter_rms_norm_kda_mixed_outputs,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -594,12 +598,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             else:
                 assert spec_token_indx is not None
                 assert non_spec_token_indx is not None
-                mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
-                g1_spec = g1.index_select(1, spec_token_indx)
-                beta_spec = beta.index_select(1, spec_token_indx)
-                mixed_qkv_ns = mixed_qkv.index_select(0, non_spec_token_indx)
-                g1_ns = g1.index_select(1, non_spec_token_indx)
-                beta_ns = beta.index_select(1, non_spec_token_indx)
+                packed_qkv, packed_g1, packed_beta = pack_kda_mixed_inputs(
+                    mixed_qkv,
+                    g1,
+                    beta,
+                    non_spec_token_indx,
+                    spec_token_indx,
+                )
+                num_non_spec_tokens = non_spec_token_indx.numel()
+                mixed_qkv_ns = packed_qkv[:num_non_spec_tokens]
+                g1_ns = packed_g1[:, :num_non_spec_tokens]
+                beta_ns = packed_beta[:, :num_non_spec_tokens]
+                mixed_qkv_spec = packed_qkv[num_non_spec_tokens:]
+                g1_spec = packed_g1[:, num_non_spec_tokens:]
+                beta_spec = packed_beta[:, num_non_spec_tokens:]
         else:
             mixed_qkv_spec = g1_spec = beta_spec = None
             mixed_qkv_ns, g1_ns, beta_ns = mixed_qkv, g1, beta
@@ -763,8 +775,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # Restore the scheduler's original token order for mixed batches.
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            assert spec_token_indx is not None
+            assert non_spec_token_indx is not None
+            scatter_rms_norm_kda_mixed_outputs(
+                core_attn_out_non_spec,
+                core_attn_out_spec,
+                non_spec_token_indx,
+                spec_token_indx,
+                g2,
+                self.o_norm.weight,
+                core_attn_out,
+                self.o_norm.eps,
+            )
+            return
         elif core_attn_out_non_spec is not None:
             # TODO: prefill and decode kernels write directly to core_attn_out
             core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
