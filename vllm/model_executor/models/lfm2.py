@@ -13,6 +13,15 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.lfm25_fused_qk_norm_rope import (
+    FUSED_QK_NORM_ROPE_ENABLED,
+    fused_lfm25_qk_rmsnorm_rope,
+)
+from vllm.model_executor.layers.lfm25_fused_silu_fp8 import (
+    FUSED_SILU_FP8_ENABLED,
+    fused_lfm25_silu_fp8_linear,
+    supports_fused_lfm25_silu_fp8_linear,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -85,8 +94,11 @@ class Lfm2MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.w13(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.w2(x)
+        if supports_fused_lfm25_silu_fp8_linear(self.w2):
+            x = fused_lfm25_silu_fp8_linear(gate_up, self.w2)
+        else:
+            x = self.act_fn(gate_up)
+            x, _ = self.w2(x)
         return x
 
 
@@ -169,13 +181,36 @@ class Lfm2Attention(nn.Module):
         n_tokens, _ = hidden_states.shape
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(n_tokens, self.num_heads, self.head_dim).contiguous()
-        k = k.view(n_tokens, self.num_kv_heads, self.head_dim).contiguous()
-        q = self.q_layernorm(q)
-        k = self.k_layernorm(k)
-        q, k = self.rotary_emb(positions, q, k)
-        q = q.view(n_tokens, self.num_heads * self.head_dim)
-        k = k.view(n_tokens, self.num_kv_heads * self.head_dim)
+        if (
+            FUSED_QK_NORM_ROPE_ENABLED
+            and qkv.is_cuda
+            and qkv.dtype in (torch.bfloat16, torch.float16)
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and self.rotary_emb.rotary_dim == self.head_dim
+            and hasattr(self.rotary_emb, "_match_cos_sin_cache_dtype")
+        ):
+            cos_sin_cache = self.rotary_emb._match_cos_sin_cache_dtype(q)
+            q, k = fused_lfm25_qk_rmsnorm_rope(
+                q,
+                k,
+                self.q_layernorm.weight,
+                self.k_layernorm.weight,
+                cos_sin_cache,
+                positions.flatten(),
+                self.q_layernorm.variance_epsilon,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.rotary_emb.rotary_dim,
+            )
+        else:
+            q = q.view(n_tokens, self.num_heads, self.head_dim).contiguous()
+            k = k.view(n_tokens, self.num_kv_heads, self.head_dim).contiguous()
+            q = self.q_layernorm(q)
+            k = self.k_layernorm(k)
+            q, k = self.rotary_emb(positions, q, k)
+            q = q.view(n_tokens, self.num_heads * self.head_dim)
+            k = k.view(n_tokens, self.num_kv_heads * self.head_dim)
         attn_output = self.attn(q, k, v)
         output, _ = self.out_proj(attn_output)
         return output
