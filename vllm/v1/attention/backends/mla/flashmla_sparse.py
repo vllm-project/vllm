@@ -218,11 +218,13 @@ class FlashMLASparseMetadata(AttentionMetadata):
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
 
+
 # Maximum tokens per prefill chunk buffer to stay within CUDA grid limits (SM90 Hopper limit)
 MAX_PREFILL_CHUNK_TOKENS = 131072
 
+
 def get_prefill_workspace_size(max_model_len: int):
-    # Cap total workspace size per chunk to MAX_PREFILL_CHUNK_TOKENS to prevent 
+    # Cap total workspace size per chunk to MAX_PREFILL_CHUNK_TOKENS to prevent
     # CUDA phase1.cuh grid dimension assertions during sparse prefill
     calculated_size = max_model_len * 5
     return min(calculated_size, MAX_PREFILL_CHUNK_TOKENS * 5)
@@ -429,7 +431,7 @@ class FlashMLASparseMetadataBuilder(
             # Chunk prefill requests to fit within workspace size and kernel bounds
             max_prefill_buffer_size = min(
                 get_prefill_workspace_size(self.vllm_config.model_config.max_model_len),
-                MAX_PREFILL_CHUNK_TOKENS
+                MAX_PREFILL_CHUNK_TOKENS,
             )
             chunk_bounds = split_prefill_chunks(
                 prefill_seq_lens_cpu, max_prefill_buffer_size

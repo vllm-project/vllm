@@ -432,7 +432,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         # Guard against incompatible FP8 KV-Cache + Block Size combinations on FlashMLA
         kv_dtype = getattr(args, "kv_cache_dtype", "auto")
         block_size = getattr(args, "block_size", 16)
-        
+
         if kv_dtype == "fp8" and block_size > 128:
             raise ValueError(
                 f"Invalid configuration for DeepSeek FlashMLA: "
@@ -446,6 +446,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         speculative_config = getattr(args, "speculative_config", None)
         if max_model_len and max_model_len > 128000 and speculative_config:
             import logging
+
             logger = logging.getLogger(__name__)
             logger.warning(
                 "High context length (>128k) combined with speculative decoding "
