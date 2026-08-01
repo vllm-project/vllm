@@ -622,6 +622,15 @@ class VllmConfig:
     @property
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        if (
+            self.model_config is not None
+            and self.model_config.enable_return_indexer_topk
+        ):
+            if use_v2_model_runner is False:
+                raise ValueError(
+                    "--enable-return-indexer-topk requires Model Runner V2."
+                )
+            return True
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
@@ -1052,6 +1061,24 @@ class VllmConfig:
             ):
                 raise ValueError(
                     "--enable-return-routed-experts is incompatible with KV "
+                    "connectors (PD disaggregation, KV cache offload)."
+                )
+
+        if (
+            self.model_config is not None
+            and self.model_config.enable_return_indexer_topk
+        ):
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "--enable-return-indexer-topk is incompatible with "
+                    "pipeline parallelism (PP > 1)."
+                )
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+            ):
+                raise ValueError(
+                    "--enable-return-indexer-topk is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 

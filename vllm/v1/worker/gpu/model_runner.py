@@ -45,6 +45,11 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+    IndexerTopkCapturer,
+    get_indexer_attn_group_id,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -65,6 +70,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
+    IndexerTopkTensors,
     ModelRunnerOutput,
     RoutedExpertsTensors,
     make_empty_encoder_model_runner_output,
@@ -296,6 +302,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
+        self.indexer_topk_capturer: IndexerTopkCapturer | None = None
+        self.indexer_topk_attn_group_id = -1
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -311,6 +319,38 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
         )
         bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
+
+    def init_indexer_topk_capturer(self) -> None:
+        indexers = [
+            module
+            for module in self.model.modules()
+            if isinstance(module, SparseAttnIndexer)
+        ]
+        if not indexers:
+            raise RuntimeError(
+                "--enable-return-indexer-topk requires SparseAttnIndexer layers."
+            )
+
+        capturer = IndexerTopkCapturer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            num_indexer_layers=len(indexers),
+            index_topk=indexers[0].topk_tokens,
+            device=self.device,
+        )
+        for layer_id, indexer in enumerate(indexers):
+
+            def capture_fn(
+                topk_indices: torch.Tensor,
+                compact_layer_id: int = layer_id,
+            ) -> None:
+                capturer.capture(compact_layer_id, topk_indices)
+
+            indexer.capture_fn = capture_fn
+
+        self.indexer_topk_capturer = capturer
+        self.indexer_topk_attn_group_id = get_indexer_attn_group_id(
+            self.kv_cache_config
+        )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1253,6 +1293,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.indexer_topk_capturer is not None:
+            self.indexer_topk_capturer.clear_buffer()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1498,6 +1540,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert slot_mappings is not None
             routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
 
+        indexer_topk = None
+        if self.indexer_topk_capturer is not None and not dummy_run:
+            assert slot_mappings is not None
+            indexer_topk = IndexerTopkTensors(
+                topk_data=self.indexer_topk_capturer.get_device_buffer()[
+                    :num_toks
+                ].clone(),
+                slot_mapping=slot_mappings[self.indexer_topk_attn_group_id][
+                    :num_toks
+                ].clone(),
+            )
+
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -1507,6 +1561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
             routed_experts=routed_experts,
+            indexer_topk=indexer_topk,
         )
 
         if not self.is_last_pp_rank:
@@ -1530,6 +1585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         routed_experts = self.execute_model_state.routed_experts
+        indexer_topk = self.execute_model_state.indexer_topk
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1596,6 +1652,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             routed_experts=routed_experts,
+            indexer_topk=indexer_topk,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1782,6 +1839,7 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
     routed_experts: RoutedExpertsTensors | None
+    indexer_topk: IndexerTopkTensors | None
 
 
 def sort_batch_req_ids(
