@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from collections.abc import Mapping
 from typing import Any
 
@@ -98,14 +99,14 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
-        # The draft's attention differs from the target's in causality.
-        return replace(
-            self.vllm_config,
-            attention_config=replace(
-                self.vllm_config.attention_config,
-                use_non_causal=self.requires_non_causal,
-            ),
+        # Shallow copy to avoid re-running VllmConfig's pydantic validators
+        # (which reject expert-parallel with non-MoE draft model_config).
+        cfg = copy.copy(self.vllm_config)
+        cfg.attention_config = replace(
+            self.vllm_config.attention_config,
+            use_non_causal=self.requires_non_causal,
         )
+        return cfg
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
@@ -174,6 +175,22 @@ class DFlashSpeculator(DraftModelSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
+
+        # FA3 AOT scheduling reads num_heads_q/kv/headdim from model_config
+        # (the TARGET model). When GQA ratios differ between target and draft,
+        # pack_gqa decisions diverge causing scheduler_metadata shape mismatch.
+        # Patch the draft metadata builders to use draft head counts.
+        pc = self.vllm_config.parallel_config
+        draft_heads_q = self.draft_model_config.get_num_attention_heads(pc)
+        draft_heads_kv = self.draft_model_config.get_num_kv_heads(pc)
+        draft_headdim = self.draft_model_config.get_head_size()
+        for groups in self.attn_groups:
+            for group in groups:
+                builder = group.get_metadata_builder(0)
+                if hasattr(builder, 'num_heads_q'):
+                    builder.num_heads_q = draft_heads_q
+                    builder.num_heads_kv = draft_heads_kv
+                    builder.headdim = draft_headdim
 
         self.draft_kv_cache_group_ids = [
             gid for gid, g in enumerate(self.attn_groups) if g
