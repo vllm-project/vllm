@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, TypeAlias
 
 import regex as re
 import torch
@@ -57,7 +57,7 @@ from .ops.norm import add_rmsnorm, embed_rmsnorm
 from .sconv_swa_attn import _ATTN, _MLP, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
 
-InklingDelta = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+InklingDelta: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def _layer_id(name: str) -> int | None:
