@@ -1934,14 +1934,23 @@ class Scheduler(SchedulerInterface):
             ):
                 req_offset = indexer_topk_offsets[req_id]
                 end = req_offset + num_tokens_scheduled
-                block_ids = self._it_block_ids.pop(req_id, [])
+                block_ids = self._it_block_ids.get(req_id, [])
                 if num_output_tokens_before == 0:
                     # Prefill completed: read full prompt topk from slot
                     # buffer using the block-ID snapshot taken at
                     # schedule time (immune to async preemption).
                     if request.sampling_params is not None:
                         prompt_start = request.sampling_params.indexer_topk_prompt_start
-                        assert prompt_start < request.num_prompt_tokens
+                        if (
+                            prompt_start < 0
+                            or prompt_start >= request.num_prompt_tokens
+                        ):
+                            raise ValueError(
+                                "indexer_topk_prompt_start "
+                                f"({prompt_start}) must be >= 0 and "
+                                "< num_prompt_tokens "
+                                f"({request.num_prompt_tokens})"
+                            )
                     else:
                         prompt_start = 0
                     indexer_topk = self.indexer_topk_mgr.get(
@@ -2368,6 +2377,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_indexer_topk:
+            self._it_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing

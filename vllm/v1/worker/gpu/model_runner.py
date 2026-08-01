@@ -42,10 +42,10 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
     IndexerTopkCapturer,
     get_indexer_attn_group_id,
+    get_sparse_attn_indexers,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -292,11 +292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.req_states.max_model_len = max_model_len
 
     def init_indexer_topk_capturer(self) -> None:
-        indexers = [
-            module
-            for module in self.model.modules()
-            if isinstance(module, SparseAttnIndexer)
-        ]
+        indexers = get_sparse_attn_indexers(self.model)
         if not indexers:
             raise RuntimeError(
                 "--enable-return-indexer-topk requires SparseAttnIndexer layers."

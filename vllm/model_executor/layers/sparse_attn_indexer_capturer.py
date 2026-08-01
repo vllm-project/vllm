@@ -21,6 +21,7 @@ Key differences from routed_experts:
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -33,6 +34,9 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
 
 def _get_index_topk(hf_config) -> int:
@@ -63,14 +67,29 @@ def _get_num_indexer_layers(hf_config) -> int:
     skip_offset = getattr(hf_config, "index_skip_topk_offset", 2)
 
     if pattern is not None:
+        # The model only applies the pattern where it has an entry. Layers
+        # beyond a short pattern still build an indexer.
         return sum(
-            1 for i in range(min(len(pattern), num_hidden_layers)) if pattern[i] != "S"
+            1
+            for i in range(num_hidden_layers)
+            if i >= len(pattern) or pattern[i] != "S"
         )
     count = 0
     for layer_id in range(num_hidden_layers):
         if max(layer_id - skip_offset + 1, 0) % freq == 0:
             count += 1
     return count
+
+
+def get_sparse_attn_indexers(
+    model: torch.nn.Module,
+) -> list[SparseAttnIndexer]:
+    """Return indexers owned by the target model only."""
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+
+    return [
+        module for module in model.modules() if isinstance(module, SparseAttnIndexer)
+    ]
 
 
 def get_indexer_attn_group_id(kv_cache_config: KVCacheConfig) -> int:
@@ -135,7 +154,10 @@ class IndexerTopkCapturer:
         """
         batch_size = topk_indices.shape[0]
         if compact_layer_id >= self.device_buffer.shape[1]:
-            return
+            raise IndexError(
+                f"indexer capture layer {compact_layer_id} exceeds buffer "
+                f"layer dim {self.device_buffer.shape[1]}"
+            )
         self.device_buffer[:batch_size, compact_layer_id, :] = topk_indices
 
     def clear_buffer(self) -> None:
