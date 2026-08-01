@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pytest
 from openai_harmony import (
     Conversation,
+    HarmonyError,
     Message,
     RenderConversationConfig,
     Role,
@@ -48,15 +49,6 @@ def chat_request():
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": "Hello"}],
     )
-
-
-@pytest.fixture
-def malformed_msgs_str() -> list[str]:
-    return [
-        "<|channel|>analysis<|message|>thinking<|end|>",
-        "<|start|>assistant<|channel|>commentary<|message|>thinking<|end|>",
-        '<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>',
-    ]
 
 
 def encode_output(harmony_str: str) -> list[int]:
@@ -139,22 +131,13 @@ def tool_call_entries(delta_message) -> list[tuple[int, str | None, str | None]]
     ]
 
 
-def assert_parser_is_reset(harmony_parser: HarmonyParser):
-    assert harmony_parser._parser is None
-    assert harmony_parser._num_processed_messages == 0
-    assert harmony_parser._current_message_tokens == []
-
-
 class TestFlush:
     def test_flush(self, harmony_parser):
         harmony_parser.process_chunk(
             encode_output("<|channel|>analysis<|message|>Think")
         )
 
-        flushed_segments = harmony_parser.flush()
-        assert flushed_segments is not None
-        assert len(flushed_segments) == 1
-        flushed = flushed_segments[0]
+        flushed = harmony_parser.flush()
 
         assert flushed is not None
         assert flushed.channel == "analysis"
@@ -162,27 +145,15 @@ class TestFlush:
         assert flushed.delta == ""
         assert flushed.completed_message is not None
         assert get_text(flushed.completed_message) == "Think"
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
-    def test_flush_recovers_invalid_output(self, harmony_parser, malformed_msgs_str):
-        for msg_str in malformed_msgs_str[:-1]:
-            chunk = harmony_parser.process_chunk(encode_output(msg_str))
-            assert "".join(segment.delta for segment in chunk.segments) == "thinking"
+    def test_flush_raises_and_resets_on_non_terminal_eos(self, harmony_parser):
+        harmony_parser.process_chunk(encode_output("<|channel|>analysis"))
 
-        last_msg_str = malformed_msgs_str[-1]
-        harmony_parser.process_chunk(encode_output(last_msg_str))
-        flushed_segments = harmony_parser.flush()
-        assert len(flushed_segments) == 2
-        delta_segment = flushed_segments[0]
-        message_segment = flushed_segments[1]
+        with pytest.raises(HarmonyError):
+            harmony_parser.flush()
 
-        assert delta_segment.channel == "final"
-        assert delta_segment.recipient is None
-        assert delta_segment.delta == last_msg_str
-        assert message_segment.channel == "final"
-        assert message_segment.recipient is None
-        assert get_text(message_segment.completed_message) == last_msg_str
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
 
 class TestParse:
@@ -393,7 +364,7 @@ class TestParse:
         assert reasoning is None
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
     def test_interrupted_reasoning_first_message(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -407,7 +378,7 @@ class TestParse:
         assert reasoning == "I'm in the middle of thinking"
         assert content is None
         assert tool_calls is None
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
     def test_truncated_output(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -423,23 +394,24 @@ class TestParse:
         assert reasoning == "I'm thinking."
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
-    def test_malformed_msgs_recovers_raw_content(
-        self, harmony_parser, chat_request, malformed_msgs_str
-    ):
-        combined_output = "".join(malformed_msgs_str)
-
-        reasoning, content, tool_calls = harmony_parser.parse(
-            "",
-            chat_request,
-            model_output_token_ids=encode_output(combined_output),
+    def test_malformed_final_recovers_raw_content(self, harmony_parser, chat_request):
+        raw_output = (
+            "<|channel|>analysis<|message|>thinking<|end|>"
+            '<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>'
         )
 
-        assert reasoning == "thinking"
-        assert content == "thinking\n" + malformed_msgs_str[-1]
+        reasoning, content, tool_calls = harmony_parser.parse(
+            raw_output,
+            chat_request,
+            model_output_token_ids=encode_output(raw_output),
+        )
+
+        assert content == raw_output
+        assert reasoning is None
         assert tool_calls is None
-        assert_parser_is_reset(harmony_parser)
+        assert harmony_parser._parser is None
 
     @pytest.mark.parametrize(
         ("harmony_str", "expected_content"),
@@ -517,7 +489,7 @@ class TestParseDelta:
         assert second_delta is not None
         assert second_delta.content == "Answer"
         assert second_delta.reasoning is None
-        assert_parser_is_reset(parser)
+        assert parser._parser is None
 
     def test_multi_token(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
@@ -534,33 +506,25 @@ class TestParseDelta:
         assert delta.reasoning is None
         assert not delta.tool_calls
 
-    def test_malformed_msgs_recovers_raw_content(
-        self, gpt_oss_tokenizer, chat_request, malformed_msgs_str
+    def test_malformed_final_recovers_raw_content(
+        self, gpt_oss_tokenizer, chat_request
     ):
         parser = HarmonyParser(gpt_oss_tokenizer)
 
-        for msg_str in malformed_msgs_str[:-1]:
-            delta = parser.parse_delta(
-                delta_text="",
-                delta_token_ids=encode_output(msg_str),
-                request=chat_request,
-                finished=False,
-            )
-            assert delta.reasoning or delta.content == "thinking"
-            assert not delta.tool_calls
-
-        last_delta = parser.parse_delta(
-            delta_text="",
-            delta_token_ids=encode_output(malformed_msgs_str[-1]),
+        delta = parser.parse_delta(
+            delta_text='final {"answer": "hi"}',
+            delta_token_ids=encode_output(
+                '<|channel|>final {"answer": "hi"}<|return|>'
+            ),
             request=chat_request,
             finished=True,
         )
 
-        assert last_delta is not None
-        assert last_delta.content == malformed_msgs_str[-1]
-        assert last_delta.reasoning is None
-        assert not last_delta.tool_calls
-        assert_parser_is_reset(parser)
+        assert delta is not None
+        assert delta.content == 'final {"answer": "hi"}'
+        assert delta.reasoning is None
+        assert not delta.tool_calls
+        assert parser._parser is None
 
     @pytest.mark.parametrize("tool_channel", ["commentary", "analysis"])
     def test_tool_call_split_across_deltas(
