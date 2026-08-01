@@ -90,6 +90,7 @@ class HarmonyParser(DelegatingParser):
         self._parser: StreamableParser | None = None
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
+        self._encountered_parse_error = False
 
         # For error recovery
         self._current_message_tokens: list[int] = []
@@ -110,8 +111,42 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages += 1
         return msg
 
+    def _reset_parser_state(self) -> None:
+        # Reset to the initial assistant-parser state for the next turn.
+        self._parser = None
+        self._num_processed_messages = 0
+        self._encountered_parse_error = False
+        self._current_message_tokens.clear()
+
+    def _recover_raw_current_message(self) -> list[Segment]:
+        if not self._current_message_tokens:
+            return []
+
+        final_channel = "final"
+        text = self.model_tokenizer.decode(self._current_message_tokens)
+        msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
+            final_channel
+        )
+        return [
+            Segment(
+                channel=final_channel,
+                recipient=None,
+                delta=text,
+                completed_message=None,
+            ),
+            Segment(
+                channel=msg.channel,
+                recipient=msg.recipient,
+                delta="",
+                completed_message=msg,
+            ),
+        ]
+
     def flush(self) -> list[Segment]:
-        segments: list[Segment] = []
+        if self._encountered_parse_error:
+            self._reset_parser_state()
+            return []
+
         try:
             self._harmony_parser.process_eos()
             msg = self._poll_completed_message()
@@ -120,38 +155,23 @@ class HarmonyParser(DelegatingParser):
                 "Harmony parser ended in a non-terminal state; returning the "
                 "recovered raw output."
             )
-
-            final_channel = "final"
-            text = self.model_tokenizer.decode(self._current_message_tokens)
-            segments.append(
-                Segment(
-                    channel=final_channel,
-                    recipient=None,
-                    delta=text,
-                    completed_message=None,
-                )
-            )
-            msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
-                final_channel
-            )
-
-        # Reset to the initial assistant-parser state for the next turn.
-        self._parser = None
-        self._num_processed_messages = 0
-        self._current_message_tokens.clear()
-
-        if msg is None:
+            segments = self._recover_raw_current_message()
+            self._reset_parser_state()
             return segments
 
-        segments.append(
+        self._reset_parser_state()
+
+        if msg is None:
+            return []
+
+        return [
             Segment(
                 channel=msg.channel,
                 recipient=msg.recipient,
                 delta="",
                 completed_message=msg,
             )
-        )
-        return segments
+        ]
 
     def parse(
         self,
@@ -306,13 +326,22 @@ class HarmonyParser(DelegatingParser):
         return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
-        if not token_ids:
+        if not token_ids or self._encountered_parse_error:
             return ChunkResult(segments=[], reasoning_token_count=0)
 
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError as err:
+                logger.warning(
+                    "Harmony parser error at token ID %d, returning partial parse: %r",
+                    token_id,
+                    err,
+                )
+                self._encountered_parse_error = True
+                break
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
