@@ -2666,3 +2666,22 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def test_worker_records_receive_event_before_queueing_partial_load():
+    worker_instance = _make_bare_worker()
+    worker_instance.kv_role = "kv_consumer"
+    worker_instance.load_async = True
+    worker_instance.kv_recv_threads = []
+    event = MagicMock()
+    request = _make_load_req("req", [b"h0"], token_len=16)
+    meta = SimpleNamespace(
+        requests=[request], preempted_req_ids=set(), unfinished_request_ids=set()
+    )
+
+    with patch.object(torch.cuda, "Event", return_value=event):
+        worker_instance.get_finished(set(), meta)
+
+    event.record.assert_called_once_with()
+    assert request.current_event is event
+    assert worker_instance.recv_request_queue.get_nowait() is request

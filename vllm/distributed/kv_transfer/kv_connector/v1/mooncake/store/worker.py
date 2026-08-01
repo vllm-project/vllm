@@ -1008,6 +1008,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list.extend(g_sizes)
             block_id_list.extend(g_block_ids)
 
+        # CoW page copies are enqueued on the compute stream before this event
+        # is recorded. Do not let RDMA overwrite a shared tail destination
+        # until those copies have completed.
+        if req_meta.current_event is not None:
+            req_meta.current_event.synchronize()
+
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
         key_list_c = _rotate_list(key_list, rotation)
@@ -1541,13 +1547,22 @@ class MooncakeStoreWorker:
         compute is launched on the compute stream) for better
         compute-I/O overlap.
         """
-        # Issue async loads
-        for request in meta.requests:
+        # Record after the model runner enqueues scheduler-issued CoW copies.
+        # Receive threads wait on this event before writing partial pages.
+        load_requests = [
+            request
+            for request in meta.requests
+            if request.load_spec is not None and request.load_spec.can_load
+        ]
+        load_event = None
+        if load_requests:
+            load_event = torch.cuda.Event()
+            load_event.record()
+        for request in load_requests:
             load_spec = request.load_spec
-            if load_spec is None or not load_spec.can_load:
-                continue
-
+            assert load_spec is not None
             load_spec.token_len = load_spec.kvpool_cached_tokens
+            request.current_event = load_event
             self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
