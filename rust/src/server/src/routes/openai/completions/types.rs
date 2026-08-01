@@ -184,6 +184,11 @@ pub struct CompletionRequest {
     /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
+    /// Multimodal media URLs keyed by modality (image, video, audio).
+    /// Each value is a list of URLs (http/https, base64 data URL, or
+    /// file:// URL). The prompt must contain placeholder tokens.
+    pub media_urls: Option<HashMap<String, Vec<String>>>,
+
     /// Additional fields
     #[serde(flatten)]
     pub other: Map<String, Value>,
