@@ -19,7 +19,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 
-from .op import exp
+from .op import exp, log
 
 
 @triton.heuristics(
