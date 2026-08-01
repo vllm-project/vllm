@@ -1990,16 +1990,8 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 response=final_response,
             )
-            # Attach the vLLM-specific opt-in echoes at the event top level
-            # (not nested under `response`), mirroring the chat path's final
-            # streaming chunk. `ResponseCompletedEvent`'s base allows extra
-            # fields, so these serialize via model_dump().
             if request.return_rendered_prompts and isinstance(
                 final_response, ResponsesResponse
             ):
                 completed_event.rendered_prompts = final_response.rendered_prompts
-            if request.return_raw_output and isinstance(
-                final_response, ResponsesResponse
-            ):
-                completed_event.raw_output_texts = final_response.raw_output_texts
             yield _increment_sequence_number_and_return(completed_event)
