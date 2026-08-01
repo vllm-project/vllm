@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 import vllm.envs as envs
@@ -790,6 +792,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # flydsl kernels, which need w13 weight+scale in interleave layout.
         # Default a16w4 keeps the separated layout.
         guinterleave = envs.AITER_SITUV2_A8W4
+        if guinterleave:
+            # Force the fp8 (_gui_) stage-1 kernel at all M; the bf16 downgrade
+            # (M < AITER_BF16_FP8_MOE_BOUND) misreads the interleaved w13 layout.
+            os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         w13 = rocm_aiter_ops.shuffle_weight_a16w4(
             layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
         )
