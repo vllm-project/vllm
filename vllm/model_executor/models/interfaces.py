@@ -1407,7 +1407,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
