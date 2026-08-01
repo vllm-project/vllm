@@ -2755,6 +2755,11 @@ class Scheduler(SchedulerInterface):
         For observability, it also accumulates the total number of tokens that
         will need to be recomputed across all affected requests.
 
+        Hybrid KV cache groups can use different block grids, so a block index
+        does not identify one common token boundary across all groups. Affected
+        hybrid requests therefore restart from the beginning instead of trying
+        to derive an unsafe partial prefix.
+
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
@@ -2774,21 +2779,44 @@ class Scheduler(SchedulerInterface):
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
         blocks_to_evict: set[int] = set()
-        # If a block is invalid and shared by multiple requests in the batch,
-        # these requests must be rescheduled, but only the first will recompute
-        # it. This set tracks blocks already marked for recomputation.
+        # For a single cache group, shared invalid blocks need only be
+        # recomputed by the first affected request in the batch.
         marked_invalid_block_ids: set[int] = set()
+        # Windowed groups use one shared null block for token positions that do
+        # not retain KV. It contains no request data and must never make a
+        # request look affected or be evicted on a request's behalf.
+        null_block_id = self.kv_cache_manager.block_pool.null_block.block_id
         for request in requests:
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_ids_per_group = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
+
+            if len(req_block_ids_per_group) > 1:
+                has_invalid_block = any(
+                    block_id != null_block_id and block_id in invalid_block_ids
+                    for req_block_ids in req_block_ids_per_group
+                    for block_id in req_block_ids
+                )
+                if has_invalid_block:
+                    total_affected_tokens += req_num_computed_tokens
+                    request.num_computed_tokens = 0
+                    if evict_blocks:
+                        blocks_to_evict.update(
+                            block_id
+                            for req_block_ids in req_block_ids_per_group
+                            for block_id in req_block_ids
+                            if block_id != null_block_id
+                        )
+                    affected_req_ids.add(req_id)
+                continue
+
+            (req_block_ids,) = req_block_ids_per_group
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
