@@ -63,9 +63,8 @@ from vllm.v1.sample.logits_processor import (
     RequestLogitsProcessor,
 )
 from vllm.v1.worker.encoder_cudagraph_defs import (
-    EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
-    EncoderCudaGraphReplayBuffers,
+    EncoderCudaGraphPathConfig,
     EncoderItemSpec,
 )
 
@@ -695,11 +694,16 @@ class DeepseekOCRForCausalLM(
     def get_encoder_cudagraph_config(self):
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=["pixel_values"],
             out_hidden_size=self.projector_config.n_embed,
-            enable_dual_path_graph=True,
-            global_token_per_image=self.global_image_output_token,
-            local_token_per_patch=self.single_patch_output_token,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.global_image_output_token
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.single_patch_output_token,
+                    allow_zero_tokens=True,
+                ),
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -717,6 +721,7 @@ class DeepseekOCRForCausalLM(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ) -> list[EncoderItemSpec]:
         item_specs = []
         for image_spatial_crop in mm_kwargs["images_spatial_crop"]:
@@ -730,45 +735,13 @@ class DeepseekOCRForCausalLM(
                 EncoderItemSpec(
                     input_size=num_input_tokens,
                     output_tokens=num_output_tokens,
-                    global_output_tokens=global_output_token,
-                    local_output_tokens=local_output_token,
+                    path_output_tokens={
+                        "global": global_output_token,
+                        "local": local_output_token,
+                    },
                 )
             )
         return item_specs
-
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        pixel_values = mm_kwargs["pixel_values"]
-        images_crop = mm_kwargs["images_crop"]
-        images_spatial_crop = mm_kwargs["images_spatial_crop"]
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "images_crop": images_crop[:0],
-                "images_spatial_crop": images_spatial_crop[:0],
-            }
-
-        is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
-        patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
-        cum_patches = [0]
-        for num_patches in patches_per_image:
-            cum_patches.append(cum_patches[-1] + int(num_patches))
-
-        selected_pv = pixel_values[indices]
-        selected_ic = torch.cat(
-            [images_crop[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-        selected_sp = images_spatial_crop[indices]
-
-        return {
-            "pixel_values": selected_pv,
-            "images_crop": selected_ic,
-            "images_spatial_crop": selected_sp,
-        }
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -805,11 +778,12 @@ class DeepseekOCRForCausalLM(
             )
             values = {"images_crop": dummy_images_crop}
 
-        return EncoderCudaGraphCaptureInputs(values=values)
+        return values
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
@@ -821,7 +795,7 @@ class DeepseekOCRForCausalLM(
         else:
             values = {"images_crop": mm_kwargs["images_crop"]}
 
-        return EncoderCudaGraphReplayBuffers(values=values)
+        return values
 
     def _batched_encoder_forward_global_path(
         self,
@@ -884,46 +858,14 @@ class DeepseekOCRForCausalLM(
             images_crop = values["images_crop"]
             return self._batched_encoder_forward_local_path(images_crop)
 
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        """Eager encoder forward with optional per-path execution.
-
-        ``path="default"``: full forward (global + local + assembly).
-        ``path="global"``: global-only batched forward with newlines.
-        ``path="local"``: local-only batched forward without newlines.
-        """
-        if path == "default":
-            # Original eager implementation: process each image one by one
-            # (with both global and local paths) and concatenate results.
-            image_input = DeepseekOCRImagePixelInputs(
-                type="pixel_values",
-                data=mm_kwargs["pixel_values"],
-                images_crop=mm_kwargs["images_crop"],
-                images_spatial_crop=mm_kwargs["images_spatial_crop"],
-            )
-            vision_embeddings = self._process_image_input(image_input)
-            return torch.cat(vision_embeddings, dim=0)
-
-        assert path in ("global", "local")
-        if path == "global":
-            pixel_values = mm_kwargs["pixel_values"]
-            return self._batched_encoder_forward_global_path(pixel_values)
-        else:
-            images_crop = mm_kwargs["images_crop"]
-            return self._batched_encoder_forward_local_path(images_crop)
-
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Assemble per-image embeddings from global and local encoder outputs.
@@ -943,6 +885,8 @@ class DeepseekOCRForCausalLM(
            ``_assemble_patch_grid``, then concatenates
            ``[local_tiled, global, view_seperator]``.
         """
+        output = outputs["global"]
+        local_output = outputs.get("local")
         bsz = len(indices)
         n_embed = output.shape[-1]
 

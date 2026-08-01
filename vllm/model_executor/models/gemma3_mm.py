@@ -695,7 +695,6 @@ class Gemma3ForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=["pixel_values"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -713,6 +712,7 @@ class Gemma3ForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
@@ -727,33 +727,6 @@ class Gemma3ForConditionalGeneration(
             for np in num_patches
         ]
 
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        pixel_values = mm_kwargs["pixel_values"]
-        num_patches = mm_kwargs["num_patches"]
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "num_patches": num_patches[:0],
-            }
-        cum_patches = [0]
-        for p in num_patches:
-            cum_patches.append(cum_patches[-1] + int(p))
-
-        selected_pv = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-        selected_np = num_patches[indices]
-
-        return {
-            "pixel_values": selected_pv,
-            "num_patches": selected_np,
-        }
-
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -763,10 +736,6 @@ class Gemma3ForConditionalGeneration(
         dtype: torch.dtype,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
         mm_tokens_per_image = self.config.mm_tokens_per_image
         num_images = min(
             token_budget // mm_tokens_per_image,
@@ -784,24 +753,17 @@ class Gemma3ForConditionalGeneration(
         )
         values = {"pixel_values": dummy_pixel_values}
 
-        return EncoderCudaGraphCaptureInputs(
-            values,
-        )
+        return values
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphReplayBuffers,
-        )
-
-        return EncoderCudaGraphReplayBuffers(
-            values={"pixel_values": mm_kwargs["pixel_values"]},
-        )
+        return {"pixel_values": mm_kwargs["pixel_values"]}
 
     def encoder_cudagraph_forward(
         self,
@@ -812,11 +774,3 @@ class Gemma3ForConditionalGeneration(
         image_features = self.vision_tower(pixel_values)
         image_features = self.multi_modal_projector(image_features)
         return image_features.flatten(end_dim=1)
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        image_input = self._parse_and_validate_image_input(**mm_kwargs)
-        results = self._process_image_input(image_input)
-        return torch.cat(results, dim=0)

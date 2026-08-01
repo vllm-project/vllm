@@ -83,7 +83,6 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
@@ -358,14 +357,6 @@ class KimiVLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=[
-                "pixel_values",
-                "pos_embeds",
-                "rope_freqs_cis",
-                "cu_seqlens",
-                "max_seqlen",
-                "merge_gather_idx",
-            ],
             out_hidden_size=self.hidden_size,
         )
 
@@ -395,6 +386,7 @@ class KimiVLForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
@@ -407,38 +399,6 @@ class KimiVLForConditionalGeneration(
             for h, w in self._get_grid_hws(mm_kwargs)
         ]
 
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        grid_hws = self._get_grid_hws(mm_kwargs)
-        pixel_values = mm_kwargs["pixel_values"]
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "image_grid_hws": pixel_values.new_zeros((0, 2), dtype=torch.long),
-            }
-
-        patches_per_item = [h * w for h, w in grid_hws]
-        cum_patches = [0]
-        for p in patches_per_item:
-            cum_patches.append(cum_patches[-1] + p)
-
-        selected_pv = torch.cat(
-            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-        selected_grid = torch.tensor(
-            [grid_hws[i] for i in indices],
-            dtype=torch.long,
-            device=pixel_values.device,
-        )
-        return {
-            "pixel_values": selected_pv,
-            "image_grid_hws": selected_grid,
-        }
-
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -448,10 +408,6 @@ class KimiVLForConditionalGeneration(
         dtype: torch.dtype,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
         kh, kw = self.config.vision_config.merge_kernel_size
         # Ceil so the buffer fits the worst case of one item using the full
         # budget. Floor under-allocates when budget is not a multiple of
@@ -493,11 +449,12 @@ class KimiVLForConditionalGeneration(
         )
         values = buffers | {"pixel_values": dummy_pixel_values}
 
-        return EncoderCudaGraphCaptureInputs(values=values)
+        return values
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
@@ -509,7 +466,7 @@ class KimiVLForConditionalGeneration(
             device=mm_kwargs["pixel_values"].device,
         )
         values = buffers | {"pixel_values": mm_kwargs["pixel_values"]}
-        return EncoderCudaGraphReplayBuffers(values=values)
+        return values
 
     def encoder_cudagraph_forward(
         self,
@@ -522,16 +479,6 @@ class KimiVLForConditionalGeneration(
             pixel_values, grid_hw=None, encoder_metadata=metadata
         )
         return self.multi_modal_projector(image_features)
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        pixel_values = mm_kwargs["pixel_values"]
-        image_grid_hws = mm_kwargs["image_grid_hws"]
-        image_features = self.vision_tower(pixel_values, image_grid_hws)
-        return self.multi_modal_projector(torch.cat(image_features))
 
     def _parse_and_validate_image_input(
         self, **kwargs: object

@@ -725,18 +725,21 @@ class Step3VLForConditionalGeneration(
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
+            EncoderCudaGraphPathConfig,
         )
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=[
-                "pixel_values",
-                "patch_pixel_values",
-            ],
             out_hidden_size=self.config.hidden_size,
-            enable_dual_path_graph=True,
-            global_token_per_image=self.img_output_tokens,
-            local_token_per_patch=self.patch_output_tokens,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.img_output_tokens
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.patch_output_tokens,
+                    allow_zero_tokens=True,
+                ),
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -753,6 +756,7 @@ class Step3VLForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
@@ -771,44 +775,13 @@ class Step3VLForConditionalGeneration(
                 output_tokens=(
                     self.img_output_tokens + num_patch * self.patch_output_tokens
                 ),
-                global_output_tokens=self.img_output_tokens,
-                local_output_tokens=num_patch * self.patch_output_tokens,
+                path_output_tokens={
+                    "global": self.img_output_tokens,
+                    "local": num_patch * self.patch_output_tokens,
+                },
             )
             for num_patch in num_patches
         ]
-
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        pixel_values = mm_kwargs["pixel_values"]
-        patch_pixel_values = mm_kwargs["patch_pixel_values"]
-        num_patches = mm_kwargs["num_patches"]
-
-        # calcute the accumulated patch counts
-        cum_patches = [0]
-        for p in num_patches:
-            cum_patches.append(cum_patches[-1] + p)
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "patch_pixel_values": patch_pixel_values[:0],
-                "num_patches": num_patches[:0],
-            }
-
-        selected_pv = pixel_values[indices]
-        selected_np = num_patches[indices]
-        selected_ppv = torch.cat(
-            [patch_pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
-        )
-
-        return {
-            "pixel_values": selected_pv,
-            "patch_pixel_values": selected_ppv,
-            "num_patches": selected_np,
-        }
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -819,10 +792,6 @@ class Step3VLForConditionalGeneration(
         dtype: torch.dtype,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
         assert path in ("global", "local")
         if path == "global":
             max_num_images = token_budget // self.img_output_tokens
@@ -848,9 +817,7 @@ class Step3VLForConditionalGeneration(
             )
             values = {"patch_pixel_values": dummy_patch_pixel_values}
 
-        return EncoderCudaGraphCaptureInputs(
-            values=values,
-        )
+        return values
 
     def encoder_cudagraph_forward(
         self,
@@ -863,32 +830,22 @@ class Step3VLForConditionalGeneration(
         else:
             return self._batched_encoder_forward(values["patch_pixel_values"])
 
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        assert path in ("global", "local")
-        if path == "global":
-            return self._batched_encoder_forward(mm_kwargs["pixel_values"])
-        else:
-            return self._batched_encoder_forward(mm_kwargs["patch_pixel_values"])
-
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
         ``output`` contains global-image features and ``local_output``
         contains local-patch features (or ``None`` when there are no patches).
         """
+        output = outputs["global"]
+        local_output = outputs.get("local")
         num_patches = batch_mm_kwargs["num_patches"]
         hidden = output.shape[-1]
         bsz = len(indices)
@@ -900,6 +857,7 @@ class Step3VLForConditionalGeneration(
 
         global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
         if total_patches > 0:
+            assert local_output is not None
             patch_part = local_output[:patch_tokens].reshape(
                 -1, self.patch_output_tokens, hidden
             )
@@ -924,21 +882,18 @@ class Step3VLForConditionalGeneration(
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphReplayBuffers,
-        )
-
         assert path in ("global", "local")
         if path == "global":
             values = {"pixel_values": mm_kwargs["pixel_values"]}
         else:
             values = {"patch_pixel_values": mm_kwargs["patch_pixel_values"]}
 
-        return EncoderCudaGraphReplayBuffers(values=values)
+        return values
 
     def forward(
         self,

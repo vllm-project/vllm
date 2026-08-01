@@ -844,15 +844,8 @@ class Llama4ForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=["pixel_values"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
-
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -868,6 +861,7 @@ class Llama4ForConditionalGeneration(
     def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
@@ -880,34 +874,6 @@ class Llama4ForConditionalGeneration(
             for num_chunks in mm_kwargs["patches_per_image"].tolist()
         ]
 
-    def select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-    ) -> dict[str, Any]:
-        pixel_values = mm_kwargs["pixel_values"]
-        patches_per_image = mm_kwargs["patches_per_image"]
-
-        if len(indices) == 0:
-            return {
-                "pixel_values": pixel_values[:0],
-                "patches_per_image": patches_per_image[:0],
-            }
-
-        cum_chunks = [0]
-        for num_chunks in patches_per_image.tolist():
-            cum_chunks.append(cum_chunks[-1] + num_chunks)
-
-        selected_pixel_values = torch.cat(
-            [pixel_values[cum_chunks[i] : cum_chunks[i + 1]] for i in indices],
-            dim=0,
-        )
-
-        return {
-            "pixel_values": selected_pixel_values,
-            "patches_per_image": patches_per_image[indices],
-        }
-
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -917,10 +883,6 @@ class Llama4ForConditionalGeneration(
         dtype: torch.dtype,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphCaptureInputs,
-        )
-
         vision_config = self.config.vision_config
         patches_per_chunk = self.get_image_patches_per_chunk()
         chunks_per_capture = max(
@@ -935,24 +897,17 @@ class Llama4ForConditionalGeneration(
             dtype=dtype,
         )
 
-        return EncoderCudaGraphCaptureInputs(
-            values={"pixel_values": dummy_pixel_values},
-        )
+        return {"pixel_values": dummy_pixel_values}
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
+        modality: str,
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphReplayBuffers,
-        )
-
-        return EncoderCudaGraphReplayBuffers(
-            values={"pixel_values": mm_kwargs["pixel_values"]},
-        )
+        return {"pixel_values": mm_kwargs["pixel_values"]}
 
     def encoder_cudagraph_forward(
         self,
@@ -961,16 +916,6 @@ class Llama4ForConditionalGeneration(
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             inputs["pixel_values"],
-            use_data_parallel=False,
-        ).flatten(0, 1)
-
-    def encoder_eager_forward(
-        self,
-        mm_kwargs: dict[str, Any],
-        path: str = "default",
-    ) -> torch.Tensor:
-        return self.encode_image_chunks(
-            mm_kwargs["pixel_values"],
             use_data_parallel=False,
         ).flatten(0, 1)
 
