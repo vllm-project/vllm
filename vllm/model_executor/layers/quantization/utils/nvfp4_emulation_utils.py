@@ -117,19 +117,6 @@ def _dequantize_nvfp4_kernel(
 
 
 @triton.jit
-def _e2m1_lookup(magnitude):
-    """Lookup E2M1 float value from 3-bit magnitude."""
-    result = tl.where(magnitude == 1, 0.5, 0.0)
-    result = tl.where(magnitude == 2, 1.0, result)
-    result = tl.where(magnitude == 3, 1.5, result)
-    result = tl.where(magnitude == 4, 2.0, result)
-    result = tl.where(magnitude == 5, 3.0, result)
-    result = tl.where(magnitude == 6, 4.0, result)
-    result = tl.where(magnitude == 7, 6.0, result)
-    return result
-
-
-@triton.jit
 def _round_to_fp4(x):
     """Round float values to the nearest E2M1 representable value.
 

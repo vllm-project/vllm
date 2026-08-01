@@ -3,11 +3,11 @@
 import pytest
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
@@ -31,7 +31,7 @@ def run_intern_vit_test(
     *,
     dtype: str,
 ):
-    model = snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
+    model = hf_api().snapshot_download(model_id, allow_patterns=DOWNLOAD_PATTERN)
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
     img_processor = CLIPImageProcessor.from_pretrained(model)
