@@ -49,11 +49,50 @@ use crate::utils::{resolve_request_context, unix_timestamp};
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
+
+    // Resolve multimodal media URLs before lowering to text request.
+    let mm_features = if let Some(media_urls) = body.media_urls.take() {
+        let tokenizer = state.chat.text().tokenizer();
+        let mut token_ids = match &body.prompt {
+            vllm_text::Prompt::Text(text) => {
+                match tokenizer.encode(text, body.add_special_tokens) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        return ApiError::invalid_request(
+                            format!("failed to tokenize prompt for media resolution: {e}"),
+                            Some("prompt"),
+                        )
+                        .into_response();
+                    }
+                }
+            }
+            vllm_text::Prompt::TokenIds(ids) => ids.clone(),
+        };
+        match state
+            .chat
+            .resolve_completion_media(&media_urls, &mut token_ids)
+            .await
+        {
+            Ok(features) => {
+                body.prompt = vllm_text::Prompt::TokenIds(token_ids);
+                Some(features)
+            }
+            Err(e) => {
+                return ApiError::invalid_request(
+                    format!("failed to resolve media_urls: {}", e.as_report()),
+                    Some("media_urls"),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
 
     let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
@@ -61,6 +100,7 @@ pub async fn completions(
         &lora_resolution,
         request_context,
         tokenizer.as_ref(),
+        mm_features,
     ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),

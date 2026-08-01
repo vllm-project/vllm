@@ -630,6 +630,39 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
     Ok(all_parts)
 }
 
+/// Convert a `media_urls` map (keyed by modality) into [`MediaContentPart`]s.
+pub(crate) fn media_urls_to_parts(
+    media_urls: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<Vec<MediaContentPart>> {
+    let mut parts = Vec::new();
+    for (modality, urls) in media_urls {
+        for url in urls {
+            match modality.as_str() {
+                "image" => parts.push(MediaContentPart::ImageUrl {
+                    url: url.clone(),
+                    detail: None,
+                    uuid: None,
+                }),
+                "video" => parts.push(MediaContentPart::VideoUrl {
+                    url: url.clone(),
+                    uuid: None,
+                }),
+                "audio" => parts.push(MediaContentPart::AudioUrl {
+                    url: url.clone(),
+                    uuid: None,
+                }),
+                other => {
+                    bail_multimodal!(
+                        "unsupported modality in media_urls: {other}; \
+                         supported: image, video, audio"
+                    );
+                }
+            }
+        }
+    }
+    Ok(parts)
+}
+
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
 fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     let mime_type = match format {
@@ -696,7 +729,7 @@ impl MultimodalModelInfo {
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
-    async fn prepare_multimodal(
+    pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,

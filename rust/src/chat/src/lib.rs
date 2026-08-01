@@ -261,6 +261,32 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Resolve multimodal media URLs for a completions request.
+    ///
+    /// Converts a `media_urls` map (keyed by modality) into
+    /// [`MediaContentPart`]s, runs the full multimodal pipeline (fetch,
+    /// preprocess, placeholder expansion), and returns the resulting
+    /// [`MmFeatures`]. `prompt_token_ids` is mutated in place to expand
+    /// placeholder tokens.
+    pub async fn resolve_completion_media(
+        &self,
+        media_urls: &std::collections::HashMap<String, Vec<String>>,
+        prompt_token_ids: &mut Vec<u32>,
+    ) -> Result<MmFeatures> {
+        let info = self
+            .processor
+            .backend
+            .multimodal_model_info()
+            .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let model_dtype = self
+            .processor
+            .model_dtype
+            .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let media_parts = multimodal::media_urls_to_parts(media_urls)?;
+        info.prepare_multimodal(media_parts, prompt_token_ids, model_dtype)
+            .await
+    }
+
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
         match &self.tool_call_parser {

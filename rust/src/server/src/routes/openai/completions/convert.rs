@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
@@ -58,6 +59,7 @@ pub(super) fn prepare_completion_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
     tokenizer: &dyn Tokenizer,
+    mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -107,7 +109,7 @@ pub(super) fn prepare_completion_request(
     let text_request = TextRequest {
         request_id: request_id.clone(),
         prompt: request.prompt,
-        mm_features: None,
+        mm_features,
         sampling_params: SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p,
@@ -304,6 +306,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -347,6 +350,7 @@ mod tests {
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
                 &test_tokenizer(),
+                None,
             )
             .expect("prepare")
             .text_request
@@ -381,6 +385,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -406,6 +411,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -429,6 +435,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -453,6 +460,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -478,6 +486,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -505,6 +514,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -530,6 +540,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
 
@@ -556,6 +567,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
@@ -581,6 +593,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
@@ -600,6 +613,7 @@ mod tests {
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
             &test_tokenizer(),
+        None,
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);
