@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_grouped_topk,
 )
-from vllm.model_executor.layers.fused_moe.runner.latent_moe_runner import (
+from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
