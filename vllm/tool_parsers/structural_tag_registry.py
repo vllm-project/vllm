@@ -65,7 +65,6 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "qwen_3_5",
         "qwen_3_coder",
         "qwen_3",
-        "harmony",
         "deepseek_v3_2",
         "glm_4_7",
         "deepseek_v4",
@@ -209,7 +208,7 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
     return tool_ref
 
 
-def _get_function_parameters(function) -> dict[str, Any] | bool:
+def get_function_parameters(function) -> dict[str, Any] | bool:
     if getattr(function, "strict", None) is False:
         return True
     return function.parameters if function.parameters is not None else True
@@ -230,7 +229,7 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=begin + tool.function.name + arguments_field_prefix,
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function)
+                json_schema=get_function_parameters(tool.function)
             ),
             end=end,
         )
@@ -279,7 +278,7 @@ def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=f'<invoke name="{tool.function.name}">\n',
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function),
+                json_schema=get_function_parameters(tool.function),
                 style="minimax_xml",
             ),
             end="</invoke>\n",
@@ -537,7 +536,7 @@ def _k3_arguments_block(parameters: dict[str, Any] | bool) -> Any:
 def _k3_call_tag(tool: FunctionToolParam) -> TagFormat:
     """One ``call`` tag: ``<|open|>call tool="N" index="<digits>"<|sep|> args``."""
     function = tool.function
-    parameters = _get_function_parameters(function)
+    parameters = get_function_parameters(function)
     begin = f'{_K3_OPEN}call tool="{_k3_escape_attr(function.name)}" index="'
     return TagFormat(
         begin=begin,
