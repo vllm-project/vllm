@@ -108,7 +108,11 @@ class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
+        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
+        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
+        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
+        # that vLLM works regardless of which transformers version is installed.
+        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
