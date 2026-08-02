@@ -22,6 +22,7 @@ from vllm.model_executor.models.interfaces import LocalArgmaxMixin
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5Model,
+    Qwen3_5ProcessingInfo,
     Qwen3_5RMSNorm,
 )
 from vllm.model_executor.models.qwen3_next import (
@@ -29,6 +30,11 @@ from vllm.model_executor.models.qwen3_next import (
     _all_gather_hidden_and_residual,
     _is_shared_expert_fse_compatible,
 )
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3VLDummyInputsBuilder,
+    Qwen3VLMultiModalProcessor,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
@@ -198,6 +204,11 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor,
+    info=Qwen3_5ProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
