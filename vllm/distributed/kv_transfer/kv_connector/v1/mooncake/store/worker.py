@@ -104,11 +104,8 @@ def _replicate_config_supports_group_ids(
 def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
-    return (
-        "vllm-mooncake-store:"
-        f"{metadata.model_name}"
-        f"@{chunk_hash}"
-    )
+    prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.

@@ -1106,6 +1106,18 @@ def test_mooncake_group_id_uses_logical_chunk_and_excludes_physical_ranks():
     assert "group:" not in group_id
 
 
+def test_mooncake_group_id_uses_cache_prefix_namespace():
+    metadata_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="deployment-a")
+    metadata_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="deployment-b")
+
+    group_id_a = worker._make_mooncake_group_id(metadata_a, "abcdef")
+    group_id_b = worker._make_mooncake_group_id(metadata_b, "abcdef")
+
+    assert group_id_a == "vllm-mooncake-store:deployment-a@test-model@abcdef"
+    assert group_id_b == "vllm-mooncake-store:deployment-b@test-model@abcdef"
+    assert group_id_a != group_id_b
+
+
 def test_store_sending_thread_group_id_excludes_physical_sharding():
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0]
