@@ -554,23 +554,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
 # ===========================================================================
 
 
-def prepare_int8_moe_layer_for_cpu(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Prepack INT8 MoE weights for the current CPU architecture."""
-    # SMMLA packing for AArch64
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-        return (
-            cpu_prepack_moe_weight_int8(w13, "neon"),
-            cpu_prepack_moe_weight_int8(w2, "neon"),
-        )
-    # VNNI packing for x86
-    packed_w13 = torch.ops._C.convert_weight_packed(w13)
-    packed_w2 = torch.ops._C.convert_weight_packed(w2)
-    return packed_w13, packed_w2
-
-
 class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
     monolithic MoE experts."""
@@ -650,7 +633,8 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         """VNNI-prepack INT8 MoE weights for CPU kernel."""
         from vllm.model_executor.utils import replace_parameter
 
-        w13, w2 = prepare_int8_moe_layer_for_cpu(layer.w13_weight, layer.w2_weight)
+        w13 = torch.ops._C.convert_weight_packed(layer.w13_weight)
+        w2 = torch.ops._C.convert_weight_packed(layer.w2_weight)
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 
@@ -814,7 +798,8 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.utils import replace_parameter
 
-        w13, w2 = prepare_int8_moe_layer_for_cpu(layer.w13_weight, layer.w2_weight)
+        w13 = cpu_prepack_moe_weight_int8(layer.w13_weight, "neon")
+        w2 = cpu_prepack_moe_weight_int8(layer.w2_weight, "neon")
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 

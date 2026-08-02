@@ -277,6 +277,29 @@ class TestHybridAttentionIndices:
         assert _get_full_attention_layer_indices(mc) == []
 
 
+class TestTurboQuantKVCacheSpec:
+    @pytest.mark.parametrize("preset", ALL_PRESETS)
+    def test_kv_cache_spec_sets_kv_quant_mode(self, preset):
+        from vllm.model_executor.layers.attention.attention import Attention
+        from vllm.v1.kv_cache_interface import KVQuantMode, TQFullAttentionSpec
+
+        layer = SimpleNamespace(
+            attn_type="decoder",
+            kv_cache_dtype=preset,
+            kv_cache_torch_dtype=torch.uint8,
+            head_size=128,
+            head_size_v=128,
+            num_kv_heads=4,
+            sliding_window=None,
+        )
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
+
+        spec = Attention.get_kv_cache_spec(layer, vllm_config)
+
+        assert isinstance(spec, TQFullAttentionSpec)
+        assert spec.kv_quant_mode == KVQuantMode.TURBOQUANT
+
+
 class TestTurboQuantWorkspaceReservation:
     @staticmethod
     def _fake_vllm_config(
