@@ -371,10 +371,19 @@ class ECCPUScheduler:
             entry = self._cache.get(mm_hash)
             if entry is not None and not entry.ready:
                 self._cache.mark_ready(mm_hash)
+                logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
+            elif entry is None:
+                logger.debug(
+                    "EC producer: worker reported completed save for unknown "
+                    "mm_hash=%s (already discarded/evicted?)",
+                    mm_hash,
+                )
+
         for mm_hash in meta.completed_loads:
             entry = self._cache.get(mm_hash)
             if entry is not None and not entry.evictable:
                 self._cache.unpin(mm_hash)
+                logger.debug("EC consumer: mm_hash=%s unpinned after load", mm_hash)
 
     def has_pending_push_work(self) -> bool:
         """True while any dispatched save or load has not been confirmed done.
