@@ -332,6 +332,29 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK);
 
+// Grouped (packed) sparse prefill attention for DSA models (SM100): union +
+// query-major membership builder (overwrite-write, fused logical->physical
+// conversion) and the fp8 masked head128 attention forward. The Python
+// helper in vllm/model_executor/layers/litedsa.py orchestrates,
+// allocates and version-caches.
+void litedsa_union_qm(const torch::stable::Tensor& topk_indices,
+                      torch::stable::Tensor& u_phys,
+                      torch::stable::Tensor& counts,
+                      torch::stable::Tensor& memb_qm,
+                      const torch::stable::Tensor& req_pg,
+                      const torch::stable::Tensor& block_table,
+                      int64_t block_size, int64_t seq_space);
+
+void litedsa_masked_mla_fp8(const torch::stable::Tensor& q,
+                            const torch::stable::Tensor& kv,
+                            const torch::stable::Tensor& indices,
+                            double sm_scale, double out_scale,
+                            const torch::stable::Tensor& topk_length,
+                            const torch::stable::Tensor& memb_qm,
+                            int64_t h_per_q, torch::stable::Tensor& out,
+                            torch::stable::Tensor& max_logits,
+                            torch::stable::Tensor& lse);
+
 void persistent_topk(const torch::stable::Tensor& logits,
                      const torch::stable::Tensor& lengths,
                      torch::stable::Tensor& output,
@@ -527,9 +550,9 @@ void cp_gather_and_upconvert_fp8_kv_cache(
                                                     // 656]
     torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
-    torch::stable::Tensor const& seq_lens,          // [BATCH]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size);
+    int64_t batch_size,
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(

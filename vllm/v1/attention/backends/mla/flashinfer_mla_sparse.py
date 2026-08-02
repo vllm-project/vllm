@@ -392,6 +392,56 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
+        # Grouped (packed) sparse prefill attention (SM100 opt-in): pack G
+        # adjacent tokens' heads into one 128-row call over the group's
+        # top-k UNION with an exact per-query membership mask (LSE-equal to
+        # the per-token path). Union/membership are version-cached across
+        # shared-indexer layers. See vllm/model_executor/layers/
+        # litedsa.py for the orchestration and reproduction notes.
+        # G auto-derived so G * num_local_heads == 128 (e.g. 16 at TP8).
+        pack_g = 128 // self.num_heads if self.num_heads > 0 else 0
+        if (
+            envs.VLLM_DSA_MODE == "litedsa"
+            and pack_g > 1
+            and self.dcp_world_size == 1
+            and num_actual_toks % pack_g == 0
+            and self.num_heads * pack_g == 128
+            and q.dtype == torch.float8_e4m3fn
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from vllm.model_executor.layers.litedsa import (
+                litedsa_available,
+                litedsa_masked_mqa,
+            )
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                _SPARSE_IDX_VERSION,
+            )
+
+            if litedsa_available():
+                if self.bmm1_scale is None:
+                    self.bmm1_scale = self.scale
+                    if is_quantized_kv_cache(self.kv_cache_dtype):
+                        self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+                if self.bmm2_scale is None:
+                    self.bmm2_scale = 1.0
+                    if is_quantized_kv_cache(self.kv_cache_dtype):
+                        self.bmm2_scale *= layer._k_scale_float
+                out = litedsa_masked_mqa(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    topk_indices,
+                    attn_metadata.req_id_per_token,
+                    attn_metadata.block_table,
+                    attn_metadata.block_size,
+                    self.num_heads,
+                    self.bmm1_scale,
+                    self.bmm2_scale,
+                    pack_g,
+                    _SPARSE_IDX_VERSION[0],
+                    attn_metadata.max_seq_len,
+                )
+                return out, None
+
         if self.dcp_world_size > 1:
             topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],

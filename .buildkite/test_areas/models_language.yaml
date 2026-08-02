@@ -103,10 +103,10 @@ steps:
   commands:
     - pytest -v -s models/language/generation_ppl_test
 
-- label: Language Models Test (Extended Pooling)  # 36min
+- label: Language Models Test (Extended Pooling)
   device: h200_35gb
   key: language-models-test-extended-pooling
-  timeout_in_minutes: 70
+  timeout_in_minutes: 120
   optional: true
   source_file_dependencies:
   - vllm/
@@ -116,7 +116,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 100
+      timeout_in_minutes: 120
       depends_on:
       - image-build-amd
 

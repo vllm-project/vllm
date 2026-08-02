@@ -20,10 +20,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.longcat_flash import FlashConfig
+from vllm.model_executor.models.longcat_flash import (
+    FlashConfig,
+    maybe_replace_indexer_k_norm,
+)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer
+from .deepseek_v2 import DeepseekV2DecoderLayer, _try_load_fp8_indexer_wk
 from .utils import maybe_prefix
 
 
@@ -34,6 +38,7 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
         prefix: str,
         vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -45,7 +50,10 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
             quant_config=quant_config,
             prefix="eh_proj",
         )
-        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix)
+        self.mtp_block = DeepseekV2DecoderLayer(
+            vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
+        )
+        maybe_replace_indexer_k_norm(self.mtp_block.self_attn, config)
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -84,6 +92,15 @@ class LongCatMultiTokenPredictor(nn.Module):
         vllm_config.model_config.hf_config.intermediate_size = config.intermediate_size
         self.mtp_start_layer_idx = config.num_hidden_layers * 2
         self.num_mtp_layers = 1
+        if hasattr(config, "index_topk"):
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                config.index_topk,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+        else:
+            topk_indices_buffer = None
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): LongCatMultiTokenPredictorLayer(
@@ -91,6 +108,7 @@ class LongCatMultiTokenPredictor(nn.Module):
                     prefix=f"{prefix}.layers.{idx}",
                     vllm_config=vllm_config,
                     quant_config=quant_config,
+                    topk_indices_buffer=topk_indices_buffer,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -178,6 +196,9 @@ class LongCatFlashMTP(nn.Module):
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            # Fused indexer wk + weights_proj (shard 0 = wk, 1 = weights_proj)
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
         ]
 
         new_to_old_names_mapping = {
@@ -188,6 +209,13 @@ class LongCatFlashMTP(nn.Module):
             "model.mtp.layers.0.hnorm.m.weight": "hnorm.weight",
             "model.mtp.layers.0.input_layernorm.weight": "model.layers.0.input_layernorm.weight",  # noqa: E501
             "model.mtp.layers.0.post_attention_layernorm.weight": "model.layers.0.post_attention_layernorm.weight",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.k_norm.weight": "model.layers.0.self_attn.indexer.k_norm.weight",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.wq_b.weight": "model.layers.0.self_attn.indexer.wq_b.weight",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.wq_b.weight_scale_inv": "model.layers.0.self_attn.indexer.wq_b.weight_scale_inv",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.wk.weight": "model.layers.0.self_attn.indexer.wk.weight",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.wk.weight_scale_inv": "model.layers.0.self_attn.indexer.wk.weight_scale_inv",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.weights_proj.weight": "model.layers.0.self_attn.indexer.weights_proj.weight",  # noqa: E501
+            "model.mtp.layers.0.self_attn.indexer.weights_proj.weight_scale_inv": "model.layers.0.self_attn.indexer.weights_proj.weight_scale_inv",  # noqa: E501
             "model.mtp.layers.0.self_attn.kv_a_layernorm.weight": "model.layers.0.self_attn.kv_a_layernorm.weight",  # noqa: E501
             "model.mtp.layers.0.self_attn.kv_a_proj_with_mqa.weight": "model.layers.0.self_attn.kv_a_proj_with_mqa.weight",  # noqa: E501
             "model.mtp.layers.0.self_attn.kv_a_proj_with_mqa.weight_scale_inv": "model.layers.0.self_attn.kv_a_proj_with_mqa.weight_scale_inv",  # noqa: E501
@@ -211,8 +239,13 @@ class LongCatFlashMTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # MTP embeds plain tokens (mtp_disable_over_tokenizer); its
+            # checkpoint n-gram tables are unused.
+            if "ngram_embeddings" in name:
                 continue
             spec_layer = self.get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
@@ -220,6 +253,15 @@ class LongCatFlashMTP(nn.Module):
             name = self._rewrite_spec_layer_name(
                 spec_layer, name, new_to_old_names_mapping
             )
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                [],
+            ):
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -260,6 +302,21 @@ class LongCatFlashMTP(nn.Module):
                 ):
                     continue
 
+                # Fold the MLA LoRA scaling at load time (see
+                # FlashModel.load_weights).
+                if name.endswith(".q_a_layernorm.weight") and getattr(
+                    self.config, "mla_scale_q_lora", False
+                ):
+                    loaded_weight = loaded_weight.float() * (
+                        (self.config.hidden_size / self.config.q_lora_rank) ** 0.5
+                    )
+                elif name.endswith(".kv_a_layernorm.weight") and getattr(
+                    self.config, "mla_scale_kv_lora", False
+                ):
+                    loaded_weight = loaded_weight.float() * (
+                        (self.config.hidden_size / self.config.kv_lora_rank) ** 0.5
+                    )
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -289,22 +346,6 @@ class LongCatFlashMTP(nn.Module):
         ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
         self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
         self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-        # Guard against compounding on incremental load_weights calls (the
-        # in-place *= would otherwise double-apply the LoRA scaling).
-        if self.config.mla_scale_q_lora and not getattr(
-            self_attn, "_mla_q_lora_scaled", False
-        ):
-            self_attn.q_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.q_lora_rank
-            ) ** 0.5
-            self_attn._mla_q_lora_scaled = True
-        if self.config.mla_scale_kv_lora and not getattr(
-            self_attn, "_mla_kv_lora_scaled", False
-        ):
-            self_attn.kv_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.kv_lora_rank
-            ) ** 0.5
-            self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
     def _rewrite_spec_layer_name(

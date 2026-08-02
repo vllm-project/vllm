@@ -52,6 +52,7 @@ from .interfaces import HasInnerState, IsHybrid, MixtureOfExperts, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -643,16 +644,3 @@ class KimiLinearForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: KimiLinearConfig, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (
-        config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None

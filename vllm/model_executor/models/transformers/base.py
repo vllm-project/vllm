@@ -587,22 +587,23 @@ class Base(
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
+        dtype = dtype or self.model_config.dtype
+        device = self.device_config.device
 
-        def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
+        def _init_parameters(module: nn.Module):
             for name, param in module.named_parameters(recurse=False):
-                if param.device == torch.device("meta"):
-                    new_param = nn.Parameter(
-                        torch.empty_like(
-                            param.data,
-                            dtype=dtype or self.model_config.dtype,
-                            device=self.device_config.device,
-                        )
-                    )
-                    setattr(module, name, new_param)
+                # Already on device, nothing to do
+                if param.device != torch.device("meta"):
+                    continue
+                # Already a vLLM parameter, nothing to do
+                if hasattr(param, "weight_loader"):
+                    continue
+                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                setattr(module, name, nn.Parameter(data=data))
             for child in module.children():
-                _init_parameters(child, dtype)
+                _init_parameters(child)
 
-        _init_parameters(module, dtype)
+        _init_parameters(module)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)

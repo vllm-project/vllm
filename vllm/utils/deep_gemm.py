@@ -27,6 +27,11 @@ from vllm.utils.math_utils import cdiv
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_text",
     "qwen3_5_moe_text",
+    # LongCat FP8 checkpoints ship non-ue8m0 block scales; steer clear of the
+    # E8M0 requantization (see sgl-project/sglang#30275).
+    "longcat_flash",
+    "longcat_flash_ngram",
+    "longcat_flash_mtp",
 }
 
 

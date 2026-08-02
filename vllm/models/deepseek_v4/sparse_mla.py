@@ -209,7 +209,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
                 cm.num_actual_tokens,
                 cm.query_start_loc,
                 cm.seq_lens,
-                cm.block_table_tensor.clamp(min=0),
+                cm.block_table_tensor.clamp_(min=0),
                 int(self.kv_cache_spec.storage_block_size),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,

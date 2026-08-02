@@ -487,7 +487,7 @@ class TestPushWriterStartLoadKv:
         # path here.
         w._send_heartbeats = lambda metadata: None
         # Stub logical-to-kernel mapping used by reqs_to_recv.
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         meta.push_registrations = {
@@ -775,7 +775,7 @@ class TestPushWriterNegative:
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
         w._send_heartbeats = lambda metadata: None
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         w.start_load_kv(meta)
@@ -944,7 +944,7 @@ class TestPushWriterMlaReplication:
                 rank_offset_factor=0,
             )
         }
-        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}

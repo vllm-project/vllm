@@ -84,6 +84,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
     ),
+    "longcat": (
+        "longcat_reasoning_parser",
+        "LongcatReasoningParser",
+    ),
     "mimo": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
@@ -127,6 +131,10 @@ _REASONING_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
+    ),
+    "inkling": (
+        "inkling_reasoning_parser",
+        "InklingParserReasoningAdapter",
     ),
 }
 

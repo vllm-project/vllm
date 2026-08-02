@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 import ray
 import torch
@@ -750,7 +751,10 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-        worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
+        worker.src_blocks_data = np.array(
+            [(0, worker.block_len_per_layer[0], worker.tp_rank)],
+            dtype=np.uint64,
+        )
         worker.num_descs = len(worker.src_blocks_data)
 
         def check_handshake(remote_tp_size: int):
@@ -1124,8 +1128,8 @@ class TestNixlHandshake:
             == worker._mamba_ssm_size[1]
         )
 
-        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
-            (0x1000 + local_block_len, local_block_len, 0)
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
+            [0x1000 + local_block_len, local_block_len, 0]
         ]
 
     @patch(
@@ -1158,10 +1162,13 @@ class TestNixlHandshake:
             worker._region_is_mla = [False, True]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-            worker.src_blocks_data = [
-                (0, fa_len, worker.tp_rank),
-                (0, idx_len, worker.tp_rank),
-            ]
+            worker.src_blocks_data = np.array(
+                [
+                    (0, fa_len, worker.tp_rank),
+                    (0, idx_len, worker.tp_rank),
+                ],
+                dtype=np.uint64,
+            )
             worker.num_descs = len(worker.src_blocks_data)
 
             # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region scales by tp_ratio;

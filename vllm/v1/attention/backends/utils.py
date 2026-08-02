@@ -612,7 +612,9 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
-        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+        if treat_short_extends_as_decodes and torch.all(
+            (query_lens == query_lens[0]) | (query_lens == 0)
+        ):
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
@@ -950,10 +952,8 @@ def mamba_get_block_table_tensor(
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
+        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+        start_indices.clamp_(min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(

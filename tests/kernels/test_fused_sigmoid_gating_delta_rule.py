@@ -5,11 +5,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops import (
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type

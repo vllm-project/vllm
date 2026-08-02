@@ -88,6 +88,11 @@ def _discover_pairings() -> list[_PairingInfo]:
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{engine_cls.__name__} (config.name={cfg.name!r})")
             continue
+        if cfg.name == "inkling":
+            # Inkling uses typed structural blocks and opts out of token-id
+            # terminal matching; combined-parser replay coverage lives in
+            # test_inkling.py.
+            continue
 
         parser_cls = type(
             f"_Delegating{engine_cls.__name__}",

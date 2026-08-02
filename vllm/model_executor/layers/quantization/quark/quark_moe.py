@@ -1063,12 +1063,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # In case quantization emulation backend is used, there is no need to apply
-        # MXFP4-specific padding logic as the compute happens in higher precision.
-        if (
-            self.mxfp4_backend is not None
-            and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
-        ):
+        # Round per-partition sizes up to each backend's requirement. Emulation is
+        # handled inside the helper too (OCP MX block alignment), so no special-case.
+        if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition

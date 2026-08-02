@@ -350,7 +350,9 @@ class DeepseekV32Attention(MLAAttention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        run_indexer = self.indexer is not None and not self.skip_topk
+        if run_indexer:
+            assert self.indexer is not None
             kw = self.indexer.wk_weights_proj(hidden_states)[0]
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
@@ -365,7 +367,14 @@ class DeepseekV32Attention(MLAAttention):
             device=hidden_states.device,
         )
         self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
+            positions,
+            q_c,
+            kv_c,
+            k_pe,
+            index_k,
+            index_weights,
+            output,
+            run_indexer,
         )
         return self.o_proj(output)[0]
 
@@ -379,6 +388,7 @@ class DeepseekV32Attention(MLAAttention):
         index_k: torch.Tensor | None,
         index_weights: torch.Tensor | None,
         output: torch.Tensor,
+        run_indexer: bool,
     ) -> None:
         # One eager break for the whole attention. In FULL cudagraph mode (pure
         # decode) this decorator is a no-op, so everything here is captured; in
@@ -398,8 +408,10 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None:
-            has_indexer = True
+        if run_indexer:
+            assert self.indexer is not None
+            assert index_k is not None
+            assert index_weights is not None
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
@@ -408,7 +420,6 @@ class DeepseekV32Attention(MLAAttention):
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
-            has_indexer = False
             indexer_k_norm_w = None
             indexer_k_norm_bias = None
             indexer_k_norm_eps = 1e-6
@@ -447,7 +458,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
-            has_indexer=has_indexer,
+            has_indexer=run_indexer,
             index_rope_interleave=self._index_rope_interleave,
         )
 
@@ -456,7 +467,8 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None:
+        if run_indexer:
+            assert self.indexer is not None
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -467,18 +479,19 @@ class DeepseekV32Attention(MLAAttention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if run_indexer else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=run_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None:
+        if run_indexer:
+            assert self.indexer is not None
             sparse_attn_indexer(
                 q_c,
                 self.indexer.k_cache.prefix,

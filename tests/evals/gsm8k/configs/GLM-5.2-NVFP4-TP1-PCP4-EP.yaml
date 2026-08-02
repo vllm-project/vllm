@@ -1,0 +1,16 @@
+model_name: "nvidia/GLM-5.2-NVFP4"
+accuracy_threshold: 0.90
+num_questions: 1319
+num_fewshot: 5
+max_concurrency: 100
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --safetensors-load-strategy prefetch
+  --moe-backend flashinfer_cutlass
+  --prefill-context-parallel-size 4
+  --enable-expert-parallel
+  --kv-cache-dtype fp8
+env:
+  VLLM_LOGGING_LEVEL: "DEBUG"
+  VLLM_USE_V2_MODEL_RUNNER: "1"

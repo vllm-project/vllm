@@ -32,10 +32,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -49,14 +46,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -74,45 +70,17 @@ def _zero_mean_tensor(t: torch.Tensor) -> torch.Tensor:
     return t - t.mean()
 
 
-def _rename_and_normalize_weights(
+def _normalize_expert_bias(
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """
-    Translate HuggingFace Param2MoE weight names to vLLM internal names
-    and zero-mean the expert-bias tensor so the router stays balanced.
+    """Zero-mean the MoE router's per-expert score bias for load balance.
 
-    Mapping table (HF → vLLM):
-      model.word_embeddings.*              → model.embed_tokens.*
-      *.attention.query_key_value.*        → *.self_attn.qkv_proj.*
-      *.attention.dense.*                  → *.self_attn.o_proj.*
-      *.attention.query_layernorm.*        → *.self_attn.q_layernorm.*
-      *.attention.key_layernorm.*          → *.self_attn.k_layernorm.*
-      *.mlp.gate.expert_bias               → *.mlp.gate.e_score_correction_bias
-        (also zero-meant for load balance)
+    The rename to ``e_score_correction_bias`` is done by the mapper; only the
+    tensor adjustment lives here, since a WeightsMapper cannot transform data.
     """
     for name, w in weights:
-        # Embedding table
-        name = name.replace("model.word_embeddings.", "model.embed_tokens.")
-        # Fused QKV projection  (HF: query_key_value → vLLM: qkv_proj)
-        name = name.replace(".attention.query_key_value.", ".self_attn.qkv_proj.")
-        # Output projection  (HF: dense → vLLM: o_proj)
-        name = name.replace(".attention.dense.", ".self_attn.o_proj.")
-        # Per-head query norm
-        name = name.replace(".attention.query_layernorm.", ".self_attn.q_layernorm.")
-        # Per-head key norm
-        name = name.replace(".attention.key_layernorm.", ".self_attn.k_layernorm.")
-        # Catch any remaining .attention. → .self_attn. prefixes
-        # (e.g. future bias params on the projection layers)
-        name = name.replace(".attention.", ".self_attn.")
-
-        # Expert-score bias: rename + zero-mean
-        if name.endswith(".mlp.gate.expert_bias"):
-            name = name.replace(
-                ".mlp.gate.expert_bias",
-                ".mlp.gate.e_score_correction_bias",
-            )
+        if _is_expert_bias_name(name):
             w = _zero_mean_tensor(w)
-
         yield name, w
 
 
@@ -123,7 +91,8 @@ class Param2MoEAttention(nn.Module):
     Notable differences from a vanilla GQA layer:
       * The checkpoint fuses Q, K, V into a single ``query_key_value`` weight.
         vLLM receives it already renamed to ``qkv_proj`` by the weight-name
-        translator and splits it during ``load_weights``.
+        translator and loads it directly; ``QKVParallelLinear`` splits the
+        fused ``[Q|K|V]`` tensor internally.
       * Optional per-head RMS norms on Q and K (``use_qk_norm=True``).
     """
 
@@ -472,6 +441,28 @@ class Param2MoEDecoderLayer(nn.Module):
 
 
 class Param2MoEModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "word_embeddings.": "embed_tokens.",
+            # Fused query_key_value is renamed to qkv_proj and loaded directly;
+            # QKVParallelLinear splits the fused [Q|K|V] tensor internally.
+            ".attention.query_key_value.": ".self_attn.qkv_proj.",
+            ".attention.dense.": ".self_attn.o_proj.",
+            ".attention.query_layernorm.": ".self_attn.q_layernorm.",
+            ".attention.key_layernorm.": ".self_attn.k_layernorm.",
+            # Catch-all for any remaining .attention. names (must come last).
+            ".attention.": ".self_attn.",
+            ".mlp.gate.expert_bias": ".mlp.gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        },
+    )
+
     def __init__(
         self,
         *,
@@ -558,147 +549,9 @@ class Param2MoEModel(nn.Module):
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        """
-        Custom weight loader for the inner Param2MoEModel.
-
-        Receives weights that have already been renamed/normalised by the
-        outer model and whose ``model.`` prefix has been stripped by
-        ``AutoWeightsLoader``.  Handles:
-          1. Fused QKV split (query_key_value → qkv_proj q/k/v shards).
-          2. gate_proj + up_proj → gate_up_proj stacking (dense + shared-exp).
-          3. Routed-expert weights via the fused-MoE mapping.
-          4. All remaining weights via their default loader.
-        """
-        config = self.config
-        num_heads: int = config.num_attention_heads
-        num_kv_heads: int = config.num_key_value_heads
-        head_dim: int = config.head_dim or (config.hidden_size // num_heads)
-        q_split = num_heads * head_dim
-        kv_split = num_kv_heads * head_dim
-
-        stacked_params_mapping = [
-            # (vllm_param_name, ckpt_weight_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-
-        for name, loaded_weight in weights:
-            # ------------------------------------------------------------------
-            # 1. Fused QKV: split into q / k / v shards for QKVParallelLinear
-            # ------------------------------------------------------------------
-            if name.endswith(".self_attn.qkv_proj.weight"):
-                if name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                q_w = loaded_weight[:q_split, :]
-                k_w = loaded_weight[q_split : q_split + kv_split, :]
-                v_w = loaded_weight[q_split + kv_split :, :]
-                weight_loader(param, q_w, "q")
-                weight_loader(param, k_w, "k")
-                weight_loader(param, v_w, "v")
-                loaded_params.add(name)
-                continue
-
-            # ------------------------------------------------------------------
-            # 2. gate_proj / up_proj → gate_up_proj (dense MLP + shared-exp.)
-            # ------------------------------------------------------------------
-            matched_stacked = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:  # routed experts handled below
-                    continue
-                new_name = name.replace(weight_name, param_name)
-                if new_name.endswith(".bias") and new_name not in params_dict:
-                    continue
-                if new_name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(new_name, self):
-                    continue
-
-                param = params_dict[new_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(new_name)
-                matched_stacked = True
-                break
-
-            if matched_stacked:
-                continue
-
-            # ------------------------------------------------------------------
-            # 3. Routed expert weights → fused-MoE kernel layout
-            # ------------------------------------------------------------------
-            matched_expert = False
-            for (
-                param_name,
-                weight_name,
-                expert_id,
-                shard_id,
-            ) in expert_params_mapping:
-                if weight_name not in name:
-                    continue
-                new_name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(new_name, self):
-                    continue
-                if new_name not in params_dict:
-                    continue
-
-                param = params_dict[new_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(
-                    param,
-                    loaded_weight,
-                    name,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
-                )
-                loaded_params.add(new_name)
-                matched_expert = True
-                break
-
-            if matched_expert:
-                continue
-
-            # ------------------------------------------------------------------
-            # 4. All other weights: direct load (layernorms, embed_tokens, …)
-            # ------------------------------------------------------------------
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            try:
-                weight_loader(param, loaded_weight)
-            except Exception as e:
-                raise RuntimeError(
-                    f"[param2moe] Failed to load weight '{name}' "
-                    f"with shape {tuple(loaded_weight.shape)} "
-                    f"into param type {type(param).__name__}: {e}"
-                ) from e
-            loaded_params.add(name)
-
-        return loaded_params
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            _normalize_expert_bias(weights), mapper=self.hf_to_vllm_mapper
         )
 
 
@@ -859,4 +712,4 @@ class Param2MoEForCausalLM(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(_rename_and_normalize_weights(weights))
+        return loader.load_weights(weights)

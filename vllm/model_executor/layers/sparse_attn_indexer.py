@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import functools
+
 import torch
 
 import vllm.envs as envs
@@ -9,10 +11,17 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
+from vllm.model_executor.layers.dsa_litetopk import (
+    dsa_litetopk_latest_available,
+    dsa_litetopk_latest_dense_topk,
+    dsa_litetopk_latest_stash_dense,
+    dsa_litetopk_latest_streaming_indexer,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -30,9 +39,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -250,6 +257,40 @@ def fused_indexer_q_rope_quant(
     return q_fp8, weights_out
 
 
+def _mask_init_and_local_tokens(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor | None,
+    row_ends: torch.Tensor,
+    num_init_tokens: int,
+    num_local_tokens: int,
+) -> None:
+    """Force streaming tokens into the top-k set (streaming-aware indexing):
+    scatter +inf into the first ``num_init_tokens`` and last
+    ``num_local_tokens`` columns of each row's valid range
+    ``[row_starts, row_ends)``. Out-of-range writes are clamped into
+    ``[row_starts, row_ends)`` so they never leak into other rows' ranges.
+    """
+    device = logits.device
+    ends = row_ends.to(device=device, dtype=torch.int64).reshape(-1)
+    if row_starts is None:
+        starts = torch.zeros_like(ends)
+    else:
+        starts = row_starts.to(device=device, dtype=torch.int64).reshape(-1)
+    last = (ends - 1).clamp_max_(logits.shape[1] - 1).clamp_min_(starts)
+    if num_init_tokens > 0:
+        init_idx = starts[:, None] + torch.arange(
+            num_init_tokens, dtype=torch.int64, device=device
+        )
+        init_idx = torch.minimum(init_idx, last[:, None])
+        logits.scatter_(1, init_idx, float("inf"))
+    if num_local_tokens > 0:
+        local_idx = last[:, None] - torch.arange(
+            num_local_tokens, dtype=torch.int64, device=device
+        )
+        local_idx = torch.maximum(local_idx, starts[:, None])
+        logits.scatter_(1, local_idx, float("inf"))
+
+
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -291,6 +332,18 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+# Bumped whenever topk_indices_buffer is (re)written (see the note at the
+# bump site inside sparse_attn_indexer).
+_SPARSE_IDX_VERSION = [0]
+
+
+@functools.cache
+def _cooperative_topk_available() -> bool:
+    """The cooperative_topk op is only compiled on CUDA 12.9+ (its cuda::ptx
+    sem_relaxed TMA path); fall back to persistent_topk when it is absent."""
+    return hasattr(torch.ops._C, "cooperative_topk")
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -308,11 +361,14 @@ def sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    num_init_tokens: int = 0,
+    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -354,6 +410,7 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
             skip_k_cache_insert,
+            use_pcp,
             use_fp4_cache,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
@@ -373,22 +430,37 @@ def sparse_attn_indexer(
     # During speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens. Truncate k to avoid
     # out-of-bounds reads in the kernel.
+    # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
+    if use_pcp:
+        num_tokens //= get_pcp_group().world_size
     if k is not None:
         k = k[:num_tokens]
 
     if not skip_k_cache_insert:
+        assert k is not None
+        k, slot_mapping_for_cache = maybe_gather_indexer_k(
+            k,
+            slot_mapping,
+            num_decode_tokens,
+            use_pcp,
+        )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         ops.indexer_k_quant_and_cache(
             k,
             kv_cache,
-            slot_mapping,
+            slot_mapping_for_cache,
             quant_block_size,
             scale_fmt,
         )
 
+    # Monotonic version of topk_indices_buffer contents: 'shared'-indexer
+    # layers (e.g. GLM indexer_types) reuse the previous full layer's indices
+    # without re-entering this function, so downstream consumers (the grouped
+    # sparse attention in litedsa.py) can cache per-version work.
+    _SPARSE_IDX_VERSION[0] += 1
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
@@ -451,7 +523,63 @@ def sparse_attn_indexer(
                     q_slice_cast = q_slice
                     k_quant_cast = k_quant
                     k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-                if current_platform.is_xpu():
+                # The metadata flag is the source of truth: it records that
+                # the planner deliberately left this whole [Q, S] chunk
+                # unsplit because LiteTopK was expected to materialize no
+                # logits. Runtime requirements are checked separately so a
+                # planner/runtime mismatch fails clearly instead of trying an
+                # unsafe multi-GiB dense fallback.
+                fused_indexer_planned = chunk.fused_indexer_planned
+                fused_indexer_runtime_eligible = (
+                    fused_indexer_planned
+                    and envs.VLLM_LITETOPK
+                    and envs.VLLM_DSA_MODE in ("litetopk", "litedsa")
+                    and not use_fp4_cache
+                    and dcp_world_size == 1
+                    and not current_platform.is_xpu()
+                    and q_slice_cast.dim() == 3
+                    and q_slice_cast.shape[1] == 32
+                    and q_slice_cast.shape[2] == 128
+                    and dsa_litetopk_latest_available()
+                )
+                if fused_indexer_planned and not fused_indexer_runtime_eligible:
+                    raise RuntimeError(
+                        "LiteTopK was planned for an unsplit prefill chunk, "
+                        "but its runtime requirements are not satisfied; "
+                        "dense fallback is unsafe"
+                    )
+                if fused_indexer_runtime_eligible and (
+                    dsa_litetopk_latest_streaming_indexer(
+                        q_slice_cast,
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        topk_tokens,
+                        topk_indices,
+                        num_init_tokens,
+                        num_local_tokens,
+                        num_reqs=chunk.num_reqs,
+                        ke_min_hint=chunk.total_seq_lens
+                        - (chunk.token_end - chunk.token_start)
+                        + 1,
+                        hot_key=k_cache_prefix,
+                    )
+                ):
+                    logits = None
+                elif fused_indexer_runtime_eligible:
+                    # The metadata builder deliberately skipped dense-logits
+                    # sub-chunking for this fused-eligible single-request
+                    # chunk. Falling back here would materialize the whole
+                    # [Q, S] matrix (about 32 GiB at Q=8192, S=1M), so fail
+                    # closed with the original eligibility problem instead
+                    # of turning it into an unrelated OOM.
+                    raise RuntimeError(
+                        "LiteTopK was selected for an unsplit prefill chunk "
+                        "but declined at runtime; dense fallback is unsafe"
+                    )
+                elif current_platform.is_xpu():
                     if q_scale_slice is not None:
                         raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
                     logits = torch.ops.vllm.xpu_fp8_mqa_logits(
@@ -471,34 +599,78 @@ def sparse_attn_indexer(
                         cu_seqlen_ke,
                         clean_logits=False,
                     )
-                num_rows = logits.shape[0]
-                ops.top_k_per_row_prefill(
-                    logits,
-                    cu_seqlen_ks,
-                    cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                # The fused indexer already wrote topk_indices and set
+                # logits=None; only the dense paths need the top-k selection.
+                if logits is not None:
+                    num_rows = logits.shape[0]
+                    if not dsa_litetopk_latest_dense_topk(
+                        logits,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        topk_indices,
+                        topk_tokens,
+                        seq_len_hint=chunk.max_local_total_seq_lens,
+                        num_init_tokens=num_init_tokens,
+                        num_local_tokens=num_local_tokens,
+                    ):
+                        # Streaming-aware indexing (LongCat): the LiteTopK
+                        # selector appends sink/local indices itself. Native
+                        # top-k still receives the historical +inf mask.
+                        if num_init_tokens > 0 or num_local_tokens > 0:
+                            _mask_init_and_local_tokens(
+                                logits,
+                                cu_seqlen_ks,
+                                cu_seqlen_ke,
+                                num_init_tokens,
+                                num_local_tokens,
+                            )
+                        ops.top_k_per_row_prefill(
+                            logits,
+                            cu_seqlen_ks,
+                            cu_seqlen_ke,
+                            topk_indices,
+                            num_rows,
+                            logits.stride(0),
+                            logits.stride(1),
+                            topk_tokens,
+                        )
+                    dsa_litetopk_latest_stash_dense(
+                        topk_indices,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        seq_len=chunk.total_seq_lens,
+                        num_init_tokens=num_init_tokens,
+                        num_local_tokens=num_local_tokens,
+                        hot_key=k_cache_prefix,
+                    )
 
-            _merge_dcp_topk_global(
-                logits,
-                topk_indices,
-                topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
-                row_starts=chunk.cu_seqlen_ks,
-            )
+            # The fused indexer path writes topk_indices directly and produces no
+            # logits tensor; it is gated to dcp_world_size == 1, so the DCP merge
+            # (a no-op without context parallelism) is skipped.
+            if logits is not None:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                    row_starts=chunk.cu_seqlen_ks,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
-        if decode_metadata.requires_padding:
+        if num_decode_tokens == 0:
+            padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
+            padded_q_scale = (
+                q_scale[:1].reshape(1, 1, *q_scale.shape[1:])
+                if q_scale is not None
+                else None
+            )
+        elif decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
@@ -572,8 +744,20 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
+        if num_init_tokens > 0 or num_local_tokens > 0:
+            # seq_lens is (B, next_n) whenever next_n > 1, so flattening
+            # yields the per-row context length.
+            _mask_init_and_local_tokens(
+                logits,
+                None,
+                seq_lens.reshape(-1)[:num_rows],
+                num_init_tokens,
+                num_local_tokens,
+            )
+
         use_cooperative_topk = (
             current_platform.is_cuda()
+            and _cooperative_topk_available()
             and topk_tokens in (512, 1024, 2048)
             and num_rows <= 32
             and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
@@ -663,11 +847,14 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    num_init_tokens: int = 0,
+    num_local_tokens: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -706,6 +893,8 @@ class SparseAttnIndexer(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
+        num_init_tokens: int = 0,
+        num_local_tokens: int = 0,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -718,6 +907,8 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.num_init_tokens = num_init_tokens
+        self.num_local_tokens = num_local_tokens
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -725,6 +916,7 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -777,10 +969,13 @@ class SparseAttnIndexer(CustomOp):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
+            self.use_pcp,
             self.use_fp4_cache,
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            num_init_tokens=self.num_init_tokens,
+            num_local_tokens=self.num_local_tokens,
         )
 
     def forward_xpu(
@@ -802,6 +997,10 @@ class SparseAttnIndexer(CustomOp):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
+        )
+        assert self.num_init_tokens == 0 and self.num_local_tokens == 0, (
+            "Streaming-aware indexing (index_init_tokens/index_local_tokens) is "
+            "not supported on the ROCm sparse_attn_indexer path yet"
         )
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(

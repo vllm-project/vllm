@@ -72,6 +72,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "KimiK25Config": "vllm.transformers_utils.configs.kimi_k25",
+    "LongcatFlashNgramConfig": "vllm.transformers_utils.configs.longcat_flash",
     "NemotronConfig": "vllm.transformers_utils.configs.nemotron",
     "NemotronHConfig": "vllm.transformers_utils.configs.nemotron_h",
     "OlmoHybridConfig": "vllm.transformers_utils.configs.olmo_hybrid",
@@ -94,6 +95,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Qwen3_5TextConfig": "vllm.transformers_utils.configs.qwen3_5",
     "Qwen3_5MoeConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
     "Qwen3_5MoeTextConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
+    "InklingModelConfig": "vllm.models.inkling.configs",
+    "InklingAudioConfig": "vllm.models.inkling.configs",
+    "InklingVisionConfig": "vllm.models.inkling.configs",
+    "InklingMMConfig": "vllm.models.inkling.configs",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
 }
@@ -152,6 +157,7 @@ __all__ = [
     "KimiLinearConfig",
     "KimiVLConfig",
     "KimiK25Config",
+    "LongcatFlashNgramConfig",
     "NemotronConfig",
     "NemotronHConfig",
     "OlmoHybridConfig",
@@ -174,6 +180,10 @@ __all__ = [
     "Qwen3_5TextConfig",
     "Qwen3_5MoeConfig",
     "Qwen3_5MoeTextConfig",
+    "InklingModelConfig",
+    "InklingAudioConfig",
+    "InklingVisionConfig",
+    "InklingMMConfig",
 ]
 
 

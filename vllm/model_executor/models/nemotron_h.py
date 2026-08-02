@@ -18,8 +18,7 @@
 # limitations under the License.
 """Inference-only NemotronH model."""
 
-import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from itertools import islice
 
 import torch
@@ -59,10 +58,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
@@ -78,7 +73,6 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -222,6 +216,7 @@ class NemotronHMoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
+            ckpt_names=("up_proj", "down_proj", ""),
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -680,9 +675,12 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         return max_experts
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Consumed by `get_moe_expert_mapping` (bitsandbytes / LoRA); the main
+        # weight load is self-served by each `RoutedExperts` layer. Sized to the
+        # MAX expert count so heterogeneous puzzle models load every expert.
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
+            return fused_moe_make_expert_params_mapping(
                 # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
@@ -694,101 +692,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
-            return expert_params_mapping
 
         return []
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        expert_params_mapping = self.get_expert_mapping()
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "scale" in name or "zero_point" in name:
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-            # Skip MTP/spec decode layers early (before stacked params mapping)
-            if name.startswith("mtp."):
-                continue
-
-            # load stacked params
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-
-            # load other params
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
-                    is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-
-            loaded_params.add(name)
-        return loaded_params
 
 
 class NemotronHForCausalLM(
@@ -809,6 +714,11 @@ class NemotronHForCausalLM(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
     )
 
     packed_modules_mapping = {

@@ -17,16 +17,16 @@ if not (
         allow_module_level=True,
     )
 
-from vllm.model_executor.layers.fla.ops import (  # noqa: E402
-    chunk_gated_delta_rule,
-)
-from vllm.model_executor.layers.fla.ops.index import (  # noqa: E402
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-)
 from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (  # noqa: E402
     chunk_gated_delta_rule_cutedsl,
     prepare_metadata_cutedsl,
+)
+from vllm.third_party.flash_linear_attention.ops import (  # noqa: E402
+    chunk_gated_delta_rule,
+)
+from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
 )
 
 

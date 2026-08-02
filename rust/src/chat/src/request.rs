@@ -44,6 +44,17 @@ pub enum ChatContentPart {
         video_url: String,
         uuid: Option<String>,
     },
+    /// One `input_audio` content block carrying base64-encoded audio bytes.
+    InputAudio {
+        data: String,
+        format: Option<String>,
+        uuid: Option<String>,
+    },
+    /// One audio URL/data URL content block.
+    AudioUrl {
+        audio_url: String,
+        uuid: Option<String>,
+    },
     // ImageData...
     // VideoData...
     // ImageEmbeds...
@@ -72,6 +83,23 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one base64-encoded input-audio content part.
+    pub fn input_audio(data: impl Into<String>, format: Option<String>) -> Self {
+        Self::InputAudio {
+            data: data.into(),
+            format,
+            uuid: None,
+        }
+    }
+
+    /// Construct one audio URL content part with the given URL string.
+    pub fn audio_url(audio_url: impl Into<String>) -> Self {
+        Self::AudioUrl {
+            audio_url: audio_url.into(),
+            uuid: None,
+        }
+    }
+
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
@@ -79,6 +107,8 @@ impl ChatContentPart {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
+            Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
+            Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
         }
     }
 
@@ -91,7 +121,10 @@ impl ChatContentPart {
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
             Self::Text { .. } => false,
-            Self::ImageUrl { .. } | Self::VideoUrl { .. } => true,
+            Self::ImageUrl { .. }
+            | Self::VideoUrl { .. }
+            | Self::InputAudio { .. }
+            | Self::AudioUrl { .. } => true,
         }
     }
 }

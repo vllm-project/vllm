@@ -282,7 +282,11 @@ class ServerRole:
             results.extend(self._pending_store_results)
             self._pending_store_results.clear()
 
-        poll_result = self._transport.poll()
+        # Scope the poll to this peer: the transport is shared across all peer
+        # sessions of the engine, and poll() drains completed handles. An
+        # unscoped poll here would consume sibling sessions' completions and
+        # report them as "unknown transfer_id", starving those sessions.
+        poll_result = self._transport.poll(self._peer_id)
 
         for tid in poll_result.done:
             xfer = self._inflight_pop(tid)

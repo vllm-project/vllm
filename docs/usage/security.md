@@ -155,8 +155,10 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
 - `/v1/chat/completions/render` - Render chat completion requests
+- `/v1/chat/completions/derender` - Derender chat completion requests
 - `/v1/completions` - Text completions
 - `/v1/completions/render` - Render completion requests
+- `/v1/completions/derender` - Derender completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation

@@ -128,10 +128,6 @@ dill==0.4.1
     #   evaluate
     #   lm-eval
     #   multiprocess
-diskcache==5.6.3
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 distro==1.9.0
     # via
     #   anthropic

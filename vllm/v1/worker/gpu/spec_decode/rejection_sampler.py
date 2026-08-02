@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.input_batch import (
     get_num_sampled_and_rejected,
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
@@ -91,11 +91,13 @@ class RejectionSampler:
             num_warps=1,
         )
         expanded_logits = num_logits != input_batch.idx_mapping.shape[0]
-        return compute_topk_logprobs(
+        return compute_topk_scores(
             logits,
             max_num_logprobs,
             flat_sampled,
             input_batch.cu_num_logits_np.tolist() if expanded_logits else None,
+            logits_mode=self.sampler.logprobs_mode
+            in ("raw_logits", "processed_logits"),
         )
 
     def __call__(
@@ -139,7 +141,7 @@ class RejectionSampler:
             sampled,
             num_sampled,
             processed_logits
-            if self.sampler.logprobs_mode == "processed_logprobs"
+            if self.sampler.logprobs_mode in ("processed_logprobs", "processed_logits")
             else logits,
         )
 

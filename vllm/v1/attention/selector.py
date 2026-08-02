@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cache
-from typing import NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
 import torch
 
@@ -14,6 +14,9 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
     MambaAttentionBackendEnum,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
 logger = init_logger(__name__)
 
@@ -33,6 +36,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
+    use_pcp: bool = False
 
     def __repr__(self):
         return (
@@ -49,8 +53,49 @@ class AttentionSelectorConfig(NamedTuple):
             f"has_sliding_window={self.has_sliding_window}, "
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
-            f"use_kv_connector={self.use_kv_connector})"
+            f"use_kv_connector={self.use_kv_connector}, "
+            f"use_pcp={self.use_pcp})"
         )
+
+
+def get_attn_spec_kind(
+    use_mla: bool,
+    has_sliding_window: bool,
+    attn_type: str,
+) -> "KVCacheSpecKind":
+    """Derive the KV-cache group kind a layer belongs to from its signals.
+
+    Mirrors ``get_kv_cache_spec_kind`` (which derives the kind from the
+    produced ``KVCacheSpec``) so users can target groups by kind when
+    setting ``AttentionConfig.backend_per_kind``.
+
+    ``SINK_FULL_ATTENTION`` is intentionally not derived here: it is produced
+    only by the ``StaticSinkAttention`` layer, whereas a plain ``Attention``
+    layer with attention sinks (e.g. gpt-oss) still yields a
+    ``FullAttentionSpec``/``SlidingWindowSpec``. Sinks therefore do not change
+    the kind.
+
+    Args:
+        use_mla: Whether the layer uses multi-head latent attention.
+        has_sliding_window: Whether the layer applies a sliding window.
+        attn_type: The layer's ``AttentionType``.
+
+    Returns:
+        The ``KVCacheSpecKind`` the layer maps to.
+    """
+    from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+    if attn_type == AttentionType.ENCODER_ONLY:
+        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+    if attn_type == AttentionType.ENCODER_DECODER:
+        return KVCacheSpecKind.CROSS_ATTENTION
+    if use_mla:
+        if has_sliding_window:
+            return KVCacheSpecKind.SLIDING_WINDOW_MLA
+        return KVCacheSpecKind.MLA_ATTENTION
+    if has_sliding_window:
+        return KVCacheSpecKind.SLIDING_WINDOW
+    return KVCacheSpecKind.FULL_ATTENTION
 
 
 def get_attn_backend(
@@ -91,6 +136,7 @@ def get_attn_backend(
         kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
     )
 
+    attn_type = attn_type or AttentionType.DECODER
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
@@ -101,15 +147,28 @@ def get_attn_backend(
         use_sparse=use_sparse,
         use_mm_prefix=use_mm_prefix,
         use_per_head_quant_scales=use_per_head_quant_scales,
-        attn_type=attn_type or AttentionType.DECODER,
+        attn_type=attn_type,
         has_sliding_window=has_sliding_window,
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
+        use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
     )
 
+    # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
+    # the global backend; kinds not present in the map fall back to it.
+    attention_config = vllm_config.attention_config
+    backend = attention_config.backend
+    if attention_config.backend_per_kind:
+        kind = get_attn_spec_kind(
+            use_mla=use_mla,
+            has_sliding_window=has_sliding_window,
+            attn_type=attn_type,
+        )
+        backend = attention_config.backend_per_kind.get(kind.value, backend)
+
     return _cached_get_attn_backend(
-        backend=vllm_config.attention_config.backend,
+        backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )

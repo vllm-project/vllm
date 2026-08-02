@@ -205,7 +205,7 @@ hardware and configuration.
 
 | Backend | Description | Dtypes | Compute Cap. | Notes |
 | ------- | ----------- | ------ | ------------ | ----- |
-| `FLASH_ATTN`‡ | FlashAttention varlen (FA2/FA3/FA4) | fp16, bf16 | Any | (qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128) (FA2/FA3/FA4) or (qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=256) (FA2/FA3 only) |
+| `FLASH_ATTN`‡ | FlashAttention varlen (FA2/FA3/FA4) | fp16, bf16 | Any | (qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128) (FA2/FA3/FA4) or (qk_nope_head_dim=64, qk_rope_head_dim=64, v_head_dim=128) (FA2/FA3/FA4) or (qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=256) (FA2/FA3 only) |
 | `TRTLLM_RAGGED` | TensorRT-LLM ragged attention | fp16, bf16 | 10.x | (qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128) or (qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=256) only |
 | `FLASHINFER` | FlashInfer CUTLASS backend | fp16, bf16 | 10.x | (qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128) only |
 | `TOKENSPEED_MLA` | | fp16, bf16 | 10.x | (qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128) only |

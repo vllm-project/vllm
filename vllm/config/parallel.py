@@ -122,10 +122,11 @@ class ParallelConfig:
     tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
     prefill_context_parallel_size: int = Field(default=1, ge=1)
-    """Number of prefill context parallel groups."""
+    """Number of ranks that split prefill sequence computation. PCP expands
+    the process world size but does not increase the KV-cache shard count."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
-    the product of the tensor parallel size and data parallel size."""
+    the product of the tensor, prefill-context, and data parallel sizes."""
     data_parallel_size_local: int = Field(default=1, ge=0)
     """Number of local data parallel groups. A value of 0 is a sentinel used by
     the engine-args layer to signal that data parallelism was specified
@@ -337,9 +338,9 @@ class ParallelConfig:
     connect as clients to exchange self-picked group ports at runtime."""
 
     decode_context_parallel_size: int = Field(default=1, ge=1)
-    """Number of decode context parallel groups, because the world size does
-    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
-    needs to be divisible by dcp_size."""
+    """Number of ranks that shard the decode KV cache. DCP does not expand
+    the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
+    either spans the PCP axis or the full TP x PCP block."""
 
     dcp_kv_cache_interleave_size: int = 1
     """
@@ -357,13 +358,11 @@ class ParallelConfig:
     """
 
     cp_kv_cache_interleave_size: int = 1
-    """Interleave size of kv_cache storage while using DCP or PCP.
-    For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `total_cp_world_size = pcp_world_size * dcp_world_size`.
-    store interleave_size tokens on total_cp_rank i,
-    then store next interleave_size tokens on total_cp_rank i+1.
+    """Interleave size of kv_cache storage while using DCP.
+    Store interleave_size tokens on dcp_rank i, then store next
+    interleave_size tokens on dcp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
-        total_cp_rank `i % total_cp_world_size`.
+        dcp_rank `i % dcp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
         first populated to the preceding ranks. Tokens are then stored
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
@@ -480,11 +479,19 @@ class ParallelConfig:
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
-            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+            # The EP group spans the TP x PCP x DP ranks. EPLB therefore needs
+            # TP, PCP, or DP > 1.
+            if (
+                self.tensor_parallel_size
+                * self.prefill_context_parallel_size
+                * self.data_parallel_size
+                <= 1
+            ):
                 raise ValueError(
-                    "EPLB requires tensor_parallel_size or data_parallel_size "
-                    f"to be greater than 1, but got "
-                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                    "EPLB requires tensor, prefill-context, or data parallelism, "
+                    f"but got TP={self.tensor_parallel_size}, "
+                    f"PCP={self.prefill_context_parallel_size}, "
+                    f"DP={self.data_parallel_size}."
                 )
         else:
             if self.eplb_config.num_redundant_experts != 0:
@@ -495,15 +502,21 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+        tp = self.tensor_parallel_size
+        pcp = self.prefill_context_parallel_size
+        dcp = self.decode_context_parallel_size
+        if pcp > 1 and self.data_parallel_size > 1:
+            raise ValueError("PCP does not support data parallelism yet.")
+        if pcp == 1:
+            # DCP reuses the TP ranks when PCP is disabled.
+            if tp % dcp != 0:
+                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
+        elif dcp not in (1, pcp, tp * pcp):
             raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
+                "When PCP is enabled, DCP must be disabled, span the PCP "
+                "axis, or span the full TP x PCP axis. "
+                f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
+                f"{sorted({1, pcp, tp * pcp})}."
             )
 
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
@@ -515,8 +528,7 @@ class ParallelConfig:
 
     @property
     def world_size_across_dp(self) -> int:
-        """world_size_across_dp is TPxPPxDP, it is the size of the world
-        including data parallelism."""
+        """Process world size across TP, PCP, PP, and DP."""
         return self.world_size * self.data_parallel_size
 
     @property
@@ -652,6 +664,7 @@ class ParallelConfig:
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
+            and self.data_parallel_size > 1
         )
 
     @property

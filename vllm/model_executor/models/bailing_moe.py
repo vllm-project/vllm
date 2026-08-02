@@ -41,10 +41,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -58,14 +55,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -379,6 +375,16 @@ class BailingMoeBlock(nn.Module):
 
 @support_torch_compile
 class BailingMoeModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -468,89 +474,9 @@ class BailingMoeModel(nn.Module):
                 hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        for name, loaded_weight in weights:
-            if (
-                hasattr(self.config, "norm_head")
-                and self.config.norm_head
-                and "lm_head.weight" in name
-            ):
-                loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if name not in params_dict:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
@@ -622,15 +548,21 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
+    def _normalize_lm_head(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        norm_head = getattr(self.config, "norm_head", False)
+        for name, loaded_weight in weights:
+            if norm_head and "lm_head.weight" in name:
+                loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
+            yield name, loaded_weight
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
+        return loader.load_weights(self._normalize_lm_head(weights))
 
 
 class BailingMoeV2ForCausalLM(BailingMoeForCausalLM):

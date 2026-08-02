@@ -125,8 +125,8 @@ class TestGetMLAPrefillBackend:
 
     @pytest.mark.parametrize(
         ("qk_nope_head_dim", "v_head_dim"),
-        [(128, 128), (192, 256)],
-        ids=["deepseek", "glm"],
+        [(128, 128), (192, 256), (64, 128)],
+        ids=["deepseek", "glm", "mistral_s4"],
     )
     def test_auto_selection_on_hopper(self, qk_nope_head_dim: int, v_head_dim: int):
         try:

@@ -147,8 +147,12 @@ def _fused_norm_rope_kernel(
     TOPK_BLOCK_SIZE: tl.constexpr,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
+    COMPACT_SHARED_GRID: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    if COMPACT_SHARED_GRID:
+        # Shared layers only need logical pids 1 (KV) and 2 (Q).
+        pid += 1
     tok_idx = tl.program_id(1)
     if pid == 3:
         if not HAS_INDEXER:
@@ -388,6 +392,7 @@ def fused_norm_rope(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    compact_shared_grid: bool = False,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -471,7 +476,9 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
-    _fused_norm_rope_kernel[(4, num_tokens)](
+    use_compact_shared_grid = compact_shared_grid and not has_indexer
+    norm_grid = 2 if use_compact_shared_grid else 4
+    _fused_norm_rope_kernel[(norm_grid, num_tokens)](
         positions,
         # Q RMS norm
         q_c,
@@ -529,6 +536,7 @@ def fused_norm_rope(
         TOPK_BLOCK_SIZE=1024,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
+        COMPACT_SHARED_GRID=use_compact_shared_grid,
     )
     return q_c_out
 
@@ -582,8 +590,12 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
+    COMPACT_SHARED_GRID: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    if COMPACT_SHARED_GRID:
+        # Shared layers only need logical pids 0 (q_pe) and 2 (ql_nope).
+        pid *= 2
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
 
@@ -763,6 +775,7 @@ def fused_q(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     quantize_mqa: bool = True,
+    compact_shared_grid: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
@@ -815,7 +828,9 @@ def fused_q(
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-    _fused_q_kernel[(3, num_tokens, grid_heads)](
+    use_compact_shared_grid = compact_shared_grid and not has_indexer
+    q_grid = 2 if use_compact_shared_grid else 3
+    _fused_q_kernel[(q_grid, num_tokens, grid_heads)](
         positions,
         q_pe,
         q_pe.stride(0),
@@ -856,6 +871,7 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
+        COMPACT_SHARED_GRID=use_compact_shared_grid,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).

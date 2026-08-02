@@ -825,6 +825,15 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
         if compilation_config.cudagraph_mode is None:
             compilation_config.cudagraph_mode = CUDAGraphMode.FULL
 
+        # LongCat-2.0 sparse attention (DSA indexer) requires the same
+        # kv-cache dtype normalization as DeepSeek-V3.2.
+        hf_config = vllm_config.model_config.hf_config
+        if hasattr(hf_config, "index_topk"):
+            cache_config = vllm_config.cache_config
+            if cache_config.cache_dtype == "bfloat16":
+                cache_config.cache_dtype = "auto"
+                logger.info("Using bfloat16 kv-cache for LongCat sparse attention")
+
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
@@ -840,6 +849,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
+    "LongcatCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,

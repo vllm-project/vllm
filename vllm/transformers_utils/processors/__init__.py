@@ -44,6 +44,9 @@ __all__ = [
     "Ovis2_5Processor",
     "Qwen3ASRProcessor",
     "Step3VLProcessor",
+    "InklingProcessor",
+    "InklingImageProcessor",
+    "InklingAudioFeatureExtractor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
@@ -80,6 +83,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
     "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
+    "InklingProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingImageProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingAudioFeatureExtractor": "vllm.transformers_utils.processors.inkling",
 }
 
 

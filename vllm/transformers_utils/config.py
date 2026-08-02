@@ -97,6 +97,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
+    longcat_flash_ngram="LongcatFlashNgramConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -127,11 +128,21 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    inkling_mm_model="InklingMMConfig",
+    inkling_model="InklingModelConfig",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
+
+# Model types whose checkpoints declare `layer_types` entries that upstream
+# transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
+# validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
+# `deepseek_sparse_attention`). Extend the allowed set for these model types.
+_PATCH_HF_ALLOWED_LAYER_TYPES: dict[str, tuple[str, ...]] = {
+    "glm_moe_dsa": ("deepseek_sparse_attention",),
+}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -206,6 +217,24 @@ def _patch_hf_transformers_validate_rope():
     PretrainedConfig.validate_rope = patched_validate_rope
 
 
+def _patch_hf_transformers_allowed_layer_types(
+    extra_layer_types: tuple[str, ...],
+) -> None:
+    """Extend transformers' ``ALLOWED_LAYER_TYPES`` so its strict config
+    validation accepts layer types (e.g. ``deepseek_sparse_attention``) that a
+    checkpoint declares but upstream transformers has not registered yet.
+    """
+    import transformers.configuration_utils as hf_configuration_utils
+
+    missing = tuple(
+        layer_type
+        for layer_type in extra_layer_types
+        if layer_type not in hf_configuration_utils.ALLOWED_LAYER_TYPES
+    )
+    if missing:
+        hf_configuration_utils.ALLOWED_LAYER_TYPES += missing
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -232,6 +261,11 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        if model_type is None and "LongcatCausalLM" in (
+            config_dict.get("architectures") or []
+        ):
+            # LongCat-2.0 ships model_type: null without remote code.
+            model_type = "longcat_flash_ngram"
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -247,6 +281,9 @@ class HFConfigParser(ConfigParserBase):
 
         if model_type in _PATCH_HF_VALIDATE_ROPE:
             _patch_hf_transformers_validate_rope()
+
+        if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
+            _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
         if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -275,6 +312,17 @@ class HFConfigParser(ConfigParserBase):
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
+                if config_model_type is None:
+                    # The checkpoint has no model_type (e.g. LongCat-2.0), so
+                    # AutoConfig cannot dispatch on it; use the registry class
+                    # directly.
+                    config = config_class.from_pretrained(
+                        model,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
+                    return config_dict, _maybe_remap_hf_config_attrs(config)
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(

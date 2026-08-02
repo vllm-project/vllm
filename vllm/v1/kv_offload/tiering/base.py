@@ -31,6 +31,13 @@ if TYPE_CHECKING:
 JobId = int
 
 
+class TieringOffloadingMetrics:
+    """Metric names for TieringOffloadingManager."""
+
+    LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
+    LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+
+
 @dataclass
 class JobMetadata:
     """Metadata for an in-flight async transfer job."""

@@ -115,14 +115,15 @@ class LogitsProcessor(PluggableLayer):
             )
         if (
             self.head_dtype == torch.float32
-            and current_platform.is_cuda()
+            and (current_platform.is_cuda() or current_platform.is_rocm())
             and hidden_states.is_cuda
         ):
             # Accumulate the projection directly into fp32. This avoids
             # materializing an fp32 copy of the lm_head weight on every step,
-            # unlike casting both operands. `torch.mm(out_dtype=...)` is
-            # CUDA-only and only supports fp32 output for fp16/bf16 inputs, so
-            # other cases fall back to the cast path below.
+            # unlike casting both operands. `torch.mm(out_dtype=...)` only
+            # supports fp32 output for fp16/bf16 inputs, and is only
+            # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
+            # path); other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:

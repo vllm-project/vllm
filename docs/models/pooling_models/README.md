@@ -279,11 +279,66 @@ the pooler assigned to each task has the following attributes by default:
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
-When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
+#### Resolution precedence
 
-You can further customize this via the `--pooler-config` option,
-which takes priority over both the model's and Sentence Transformers' defaults.
+The pooling method and `use_activation` are resolved per field. An explicitly
+set field in `--pooler-config` takes precedence over Sentence Transformers
+metadata, which in turn takes precedence over the model architecture or task
+default. Fields left unset continue through the chain independently.
+
+The current `PoolerConfig` has no `normalize` or `activation` field.
+`use_activation` controls whether the task's constructed normalization or
+classification activation is applied.
+
+| Field | Source precedence | How to override |
+| ----- | ----------------- | --------------- |
+| Pooling method (`pooling_type`) | `--pooler-config` > boolean `pooling_mode_*` fields in the Pooling module referenced by Sentence Transformers `modules.json` > architecture default (`LAST` for sequence pooling and `ALL` for token pooling unless the architecture overrides it) | Set `{"pooling_type": "CLS"}`, or set `seq_pooling_type` / `tok_pooling_type` explicitly. |
+| Embedding normalization (`use_activation`) | `--pooler-config` > Sentence Transformers modules (`true` when a Normalize module is present, otherwise `false`) > pooling-task default (`true`) when no Sentence Transformers Pooling module is found | Set `{"use_activation": false}` to return unnormalized embeddings. |
+| Classification activation function | Hugging Face `problem_type` > Sentence Transformers activation metadata > sigmoid or softmax selected from the label count | The function cannot be selected through `--pooler-config`; set `{"use_activation": false}` to return logits instead. |
+
+Sentence Transformers configurations using the newer compact `pooling_mode`
+string are not currently parsed; see [issue #45995](https://github.com/vllm-project/vllm/issues/45995).
+
+For converted models and predefined models using the standard DispatchPooler
+adapters, `embed` and `token_embed` construct an L2-normalization head, while
+`classify` and `token_classify` construct the selected classification activation.
+In both cases, `use_activation` controls whether that head is applied. Models with
+custom poolers can implement different behavior.
+
+To inspect the resolved fields without loading model weights:
+
+```python
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.model_executor.layers.pooler.activations import get_act_fn
+
+
+def inspect(requested: PoolerConfig) -> None:
+    model_config = ModelConfig(
+        "intfloat/e5-small",
+        runner="pooling",
+        pooler_config=requested,
+    )
+    resolved = model_config.pooler_config
+    assert resolved is not None
+    print(
+        {
+            "seq_pooling_type": resolved.seq_pooling_type,
+            "tok_pooling_type": resolved.tok_pooling_type,
+            "use_activation": resolved.use_activation,
+            "sequence_classification_activation": type(
+                get_act_fn(model_config.hf_config)
+            ).__name__,
+        }
+    )
+
+
+inspect(PoolerConfig())
+inspect(PoolerConfig(pooling_type="CLS", use_activation=False))
+```
+
+For `intfloat/e5-small`, the first result contains `MEAN`, `ALL`, and `True`.
+The second contains `CLS`, `ALL`, and `False`. Both report the classification
+activation that the standard sequence-classification adapter would construct.
 
 ## Removed Features
 

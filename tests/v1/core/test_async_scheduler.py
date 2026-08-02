@@ -280,6 +280,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None

@@ -421,9 +421,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
         "9.0a;10.0f;10.1f;10.3f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
-    else()
+    elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
         "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
+    else()
+      # cooperative_topk.cu uses the cuda::ptx sem_relaxed mbarrier/cp_async
+      # overloads that only exist in CUDA 12.9+ libcudacxx; disable below that
+      # (decode-only official-path kernel, unused by the LiteTopK prefill path).
+      set(COOPERATIVE_TOPK_ARCHS "")
     endif()
 
     if(COOPERATIVE_TOPK_ARCHS)
@@ -846,6 +851,41 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   #
+  # Blackwell SM100 DSA kernels. The fused indexer top-k itself is no longer
+  # built here: it is JIT-compiled from attention/dsa/latest/ by
+  # vllm/model_executor/layers/litetopk_indexer.py, so the source of truth
+  # tracks the LiteTopK tree instead of a copy vendored into this repo.
+  # What remains under this arch gate is the grouped sparse attention below.
+  cuda_archs_loose_intersection(DSA_LITETOPK_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND DSA_LITETOPK_ARCHS)
+
+    # Grouped sparse prefill attention (union+membership builder + fp8
+    # masked head128 attention, vendored FlashMLA derivative). Same arch
+    # gate; needs the repo cutlass include on top of the vendored trees.
+    set(LITEDSA_SRCS
+      "csrc/libtorch_stable/attention/dsa/litedsa.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LITEDSA_SRCS}"
+      CUDA_ARCHS "${DSA_LITETOPK_ARCHS}")
+    set_source_files_properties(${LITEDSA_SRCS} PROPERTIES INCLUDE_DIRECTORIES
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/include;${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/vendor_fmla;${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/attention/dsa/vendor_fmla/kerutils/include;${CUTLASS_INCLUDE_DIR}")
+    # The attention kernel's online-softmax exp2 chain needs fast-math to hit
+    # its tuned throughput (the reference build used it). Append to the
+    # gencode flags set above rather than replacing them.
+    get_source_file_property(_litedsa_flags ${LITEDSA_SRCS} COMPILE_FLAGS)
+    if(NOT _litedsa_flags)
+      set(_litedsa_flags "")
+    endif()
+    set_source_files_properties(${LITEDSA_SRCS} PROPERTIES COMPILE_FLAGS
+      "${_litedsa_flags} --use_fast_math")
+    list(APPEND VLLM_STABLE_EXT_SRC "${LITEDSA_SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_LITEDSA=1")
+    message(STATUS "Building litedsa for archs: ${DSA_LITETOPK_ARCHS}")
+  else()
+    message(STATUS "Not building litedsa (needs CUDA>=12.8 and an SM100a arch)")
+  endif()
+
+  #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   # (Build 8.9 for FP8)
@@ -1109,6 +1149,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
+    # The LiteDSA op registrations in torch_bindings.cpp are guarded by this
+    # define; it must reach the C++ TU (VLLM_GPU_FLAGS is CUDA-only, so the
+    # ops.def/impl would be compiled out of the host binding and never
+    # registered).
+    if(DSA_LITETOPK_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        ENABLE_LITEDSA=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1408,6 +1456,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
+    include(cmake/external_projects/tml_fa4.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)

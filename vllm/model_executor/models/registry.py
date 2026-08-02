@@ -149,6 +149,11 @@ _TEXT_GENERATION_MODELS = {
         "longcat_flash_ngram",
         "LongcatFlashNgramForCausalLM",
     ),
+    # LongCat-2.0 (LongCat-Flash + n-gram embedding + LongCat Sparse Attention)
+    "LongcatCausalLM": (
+        "longcat_flash_ngram",
+        "LongcatFlashNgramForCausalLM",
+    ),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
@@ -158,6 +163,11 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxM3SparseForCausalLM": (
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForCausalLM",
+    ),
+    "InklingForCausalLM": ("vllm.models.inkling", "InklingForCausalLM"),
+    "InklingForConditionalGeneration": (
+        "vllm.models.inkling",
+        "InklingForConditionalGeneration",
     ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
@@ -296,6 +306,11 @@ _TOKEN_CLASSIFICATION_MODELS = {
     "Qwen3ASRForcedAlignerForTokenClassification": (
         "qwen3_asr_forced_aligner",
         "Qwen3ASRForcedAlignerForTokenClassification",
+    ),
+    "RobertaForTokenClassification": ("roberta", "RobertaForTokenClassification"),
+    "XLMRobertaForTokenClassification": (
+        "roberta",
+        "RobertaForTokenClassification",
     ),
 }
 
@@ -599,6 +614,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
+    "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -620,6 +636,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
+    "InklingMTPModel": ("vllm.models.inkling", "InklingMTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),

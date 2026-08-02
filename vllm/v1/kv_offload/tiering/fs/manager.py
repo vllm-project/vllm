@@ -33,6 +33,7 @@ from typing_extensions import override
 from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingEvent,
     OffloadKey,
@@ -110,11 +111,12 @@ class FileSystemTierManager(SecondaryTierManager):
         n_read_threads: int = 16,
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
+        locality: str | None = None,
     ):
         """
         Args:
-            offloading_spec: contains the vllm_config, kv_cache_config
-                and block_size_factor.
+            offloading_spec: Contains normalized offloading configuration and
+                blocks_per_chunk.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
@@ -123,8 +125,11 @@ class FileSystemTierManager(SecondaryTierManager):
             enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
+            locality: Whether this tier's storage is LOCAL or REMOTE relative
+                to the publishing vLLM instance.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -150,7 +155,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         )
 
@@ -223,7 +228,12 @@ class FileSystemTierManager(SecondaryTierManager):
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
                     self.events.append(
-                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
                     )
             results.append(JobResult(job_id=job_id, success=success))
         return results

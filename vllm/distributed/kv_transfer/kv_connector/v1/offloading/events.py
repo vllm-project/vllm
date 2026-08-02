@@ -101,7 +101,7 @@ class OffloadingEventsTracker:
         self,
         req: Request,
         group_config: "GroupOffloadConfig",
-        offload_block_idx: int,
+        chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
         """Snapshot the KV cache event payload for one offloaded chunk.
@@ -111,9 +111,9 @@ class OffloadingEventsTracker:
         """
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_blocks is not None:
+        if group_config.sliding_window_size_in_chunks is not None:
             return
-        meta = self._build_event_metadata(req, group_config, offload_block_idx)
+        meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
@@ -142,19 +142,19 @@ class OffloadingEventsTracker:
         self,
         req: Request,
         group_config: "GroupOffloadConfig",
-        offload_block_idx: int,
+        chunk_idx: int,
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
         per-block ``block_size``."""
-        hbf = group_config.hash_block_size_factor
+        hbf = group_config.hashes_per_chunk
         assert hbf > 0
-        assert offload_block_idx >= 0
+        assert chunk_idx >= 0
         # per-block token count (= the GPU/hash block size)
-        sub_block_size = group_config.offloaded_block_size // hbf
+        tokens_per_hash = group_config.tokens_per_chunk // hbf
         # chunk c covers hash-blocks [c*hbf, (c+1)*hbf); its tail block's hash
         # is the chunk's OffloadKey.
-        first_hash_idx = offload_block_idx * hbf
+        first_hash_idx = chunk_idx * hbf
         last_hash_idx = first_hash_idx + hbf
         assert first_hash_idx >= 0
         assert last_hash_idx <= len(req.block_hashes)
@@ -164,7 +164,7 @@ class OffloadingEventsTracker:
             chunk_hashes.append(block_hash)
         assert len(chunk_hashes) == hbf
 
-        if group_config.sliding_window_size_in_blocks is not None:
+        if group_config.sliding_window_size_in_chunks is not None:
             # record_store filters these out before calling this helper.
             raise AssertionError("self-describing events only support full attention")
 
@@ -175,8 +175,8 @@ class OffloadingEventsTracker:
             parent_block_hash = req.block_hashes[first_hash_idx - 1]
             assert parent_block_hash is not None
 
-        tok_start = offload_block_idx * group_config.offloaded_block_size
-        tok_end = tok_start + group_config.offloaded_block_size
+        tok_start = chunk_idx * group_config.tokens_per_chunk
+        tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
         token_ids = tuple(req.all_token_ids[tok_start:tok_end])
 
@@ -190,7 +190,7 @@ class OffloadingEventsTracker:
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=sub_block_size,
+            block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
@@ -198,7 +198,12 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
         )
 
-    def _placeholder_stored(self, key: OffloadKey, medium: str) -> BlockStored:
+    def _placeholder_stored(
+        self,
+        key: OffloadKey,
+        medium: str,
+        locality: str | None,
+    ) -> BlockStored:
         return BlockStored(
             block_hashes=[
                 maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
@@ -210,12 +215,14 @@ class OffloadingEventsTracker:
             medium=medium,
             lora_name=None,
             group_idx=get_offload_group_idx(key),
+            locality=locality,
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Metadata is read, NOT popped: the entry must survive until the
         # eviction event so BlockRemoved can fan out to the same hashes.
         # Events are self-contained (own parent), so key order is free.
+        locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
@@ -227,7 +234,7 @@ class OffloadingEventsTracker:
                         "placeholder payload. Expected for non-full-attention "
                         "groups; otherwise indicates a missing populate path."
                     )
-                yield self._placeholder_stored(key, event.medium)
+                yield self._placeholder_stored(key, event.medium, locality)
                 continue
 
             yield BlockStored(
@@ -252,10 +259,12 @@ class OffloadingEventsTracker:
                 kv_cache_spec_sliding_window=(
                     meta.kv_cache_spec.kv_cache_spec_sliding_window
                 ),
+                locality=locality,
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Keep group_idx unambiguous if a manager batch spans groups.
+        locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.pop(key, None)
@@ -283,4 +292,5 @@ class OffloadingEventsTracker:
                 block_hashes=hashes,
                 medium=event.medium,
                 group_idx=group_idx,
+                locality=locality,
             )

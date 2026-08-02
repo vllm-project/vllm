@@ -172,7 +172,7 @@ mkdocs.yaml @hmellor
 # Kernels
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
-/vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
+/vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd

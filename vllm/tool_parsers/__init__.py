@@ -174,6 +174,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3p5_tool_parser",
         "Step3p5ToolParser",
     ),
+    "inkling": (
+        "inkling_tool_parser",
+        "InklingEngineToolParser",
+    ),
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",

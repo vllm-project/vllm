@@ -18,15 +18,22 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
 
     from vllm.compilation.backends import set_model_tag
+    from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
 
-    # DSpark uses non-causal attention.
-    causal = False
     draft_vllm_config = replace(
         vllm_config,
         attention_config=replace(
             vllm_config.attention_config,
-            use_non_causal=not causal,
+            use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
+        ),
+        cache_config=(
+            replace(
+                vllm_config.cache_config,
+                cache_dtype=speculative_config.kv_cache_dtype,
+            )
+            if speculative_config.kv_cache_dtype is not None
+            else vllm_config.cache_config
         ),
     )
 

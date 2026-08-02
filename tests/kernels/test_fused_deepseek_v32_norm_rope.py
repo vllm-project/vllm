@@ -250,46 +250,60 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
     mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
 
-    bs = max_pos
-    mla_cache = torch.zeros(1, bs, KV_LORA + ROPE_DIM, device=dev, dtype=torch.bfloat16)
     slot = torch.arange(num_tokens, device=dev, dtype=torch.int64)
-    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+    outputs = []
+    for compact_shared_grid in (False, True):
+        mla_cache = torch.zeros(
+            1,
+            max_pos,
+            KV_LORA + ROPE_DIM,
+            device=dev,
+            dtype=torch.bfloat16,
+        )
+        topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
 
-    q_out = K.fused_norm_rope(
-        pos,
-        q_c,
-        qw,
-        EPS,
-        kv_c,
-        kvw,
-        EPS,
-        k_pe,
-        mla_cos_sin,
-        None,
-        None,
-        None,
-        EPS,
-        None,
-        topk,
-        slot_mapping=slot,
-        indexer_k_cache=None,
-        mla_kv_cache=mla_cache,
-        mla_kv_cache_dtype="auto",
-        mla_k_scale=None,
-        has_indexer=False,
-        index_rope_interleave=False,
-    )
+        q_out = K.fused_norm_rope(
+            pos,
+            q_c,
+            qw,
+            EPS,
+            kv_c,
+            kvw,
+            EPS,
+            k_pe,
+            mla_cos_sin,
+            None,
+            None,
+            None,
+            EPS,
+            None,
+            topk,
+            slot_mapping=slot,
+            indexer_k_cache=None,
+            mla_kv_cache=mla_cache,
+            mla_kv_cache_dtype="auto",
+            mla_k_scale=None,
+            has_indexer=False,
+            index_rope_interleave=False,
+            compact_shared_grid=compact_shared_grid,
+        )
 
-    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (no-indexer)")
-    cache = mla_cache[0, :num_tokens]
-    assert_bf16(cache[:, :KV_LORA], rms_norm(kv_c, kvw), "MLA kv (no-indexer)")
-    assert_bf16(
-        cache[:, KV_LORA:],
-        rope(k_pe.float(), pos, mla_cos_sin, interleave=True),
-        "MLA k_pe (no-indexer)",
-    )
-    # Shared layers reuse the previous indexer's top-k: buffer must be untouched.
-    assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
+        assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (no-indexer)")
+        cache = mla_cache[0, :num_tokens]
+        assert_bf16(cache[:, :KV_LORA], rms_norm(kv_c, kvw), "MLA kv (no-indexer)")
+        assert_bf16(
+            cache[:, KV_LORA:],
+            rope(k_pe.float(), pos, mla_cos_sin, interleave=True),
+            "MLA k_pe (no-indexer)",
+        )
+        # Shared layers reuse the previous indexer's top-k: it stays untouched.
+        assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
+        outputs.append((q_out, mla_cache, topk))
+
+    regular, compact = outputs
+    assert torch.equal(regular[0], compact[0])
+    assert torch.equal(regular[1], compact[1])
+    assert torch.equal(regular[2], compact[2])
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
@@ -445,29 +459,39 @@ def test_fused_q_no_indexer(num_tokens: int):
     q_scale = torch.tensor([0.5], device=dev, dtype=torch.float32)
     q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
 
-    _, _, mqa = K.fused_q(
-        pos,
-        q_pe,
-        q_cos_sin,
-        None,
-        None,
-        ql_nope,
-        q_scale,
-        None,
-        0.0,
-        0.0,
-        has_indexer=False,
-        index_rope_interleave=False,
-    )
     s = q_scale.item()
-    assert_fp8(mqa[:, :, :KV_LORA], (ql_nope.float() / s).to(FP8), "mqa ql_nope")
     qpe_ref = rope(
         q_pe.float(),
         pos.unsqueeze(-1).expand(num_tokens, NUM_HEADS),
         q_cos_sin,
         interleave=True,
     )
-    assert_fp8(mqa[:, :, KV_LORA:], (qpe_ref / s).to(FP8), "mqa q_pe")
+    outputs = []
+    for compact_shared_grid in (False, True):
+        _, _, mqa = K.fused_q(
+            pos,
+            q_pe,
+            q_cos_sin,
+            None,
+            None,
+            ql_nope,
+            q_scale,
+            None,
+            0.0,
+            0.0,
+            has_indexer=False,
+            index_rope_interleave=False,
+            compact_shared_grid=compact_shared_grid,
+        )
+        assert_fp8(
+            mqa[:, :, :KV_LORA],
+            (ql_nope.float() / s).to(FP8),
+            "mqa ql_nope",
+        )
+        assert_fp8(mqa[:, :, KV_LORA:], (qpe_ref / s).to(FP8), "mqa q_pe")
+        outputs.append(mqa)
+
+    assert torch.equal(outputs[0].view(torch.uint8), outputs[1].view(torch.uint8))
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])

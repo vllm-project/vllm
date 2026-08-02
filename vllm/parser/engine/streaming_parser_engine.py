@@ -269,6 +269,8 @@ class StreamingParserEngine:
                 SemanticEvent(EventType.REASONING_END, tool_index=self.tool_index)
             )
             self.state = ParserState.CONTENT
+        elif self.state == ParserState.MESSAGE_HEADER:
+            self.state = ParserState.CONTENT
 
         return events
 
@@ -314,6 +316,15 @@ class StreamingParserEngine:
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
+            if self.state == ParserState.MESSAGE_HEADER:
+                self.state = ParserState.CONTENT
+                return [
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=value,
+                        tool_index=self.tool_index,
+                    )
+                ]
             if EventType.REASONING_END in transition.events:
                 self.state = ParserState.CONTENT
                 return [

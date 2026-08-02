@@ -7,7 +7,10 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
-from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, MEDIUM_FS, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     OffloadingEventsTracker,
@@ -23,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpecKind,
 )
 from vllm.v1.kv_offload.base import (
+    Locality,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -70,15 +74,15 @@ def _group_config(
     *,
     group_idx: int = 0,
     block_size: int = 4,
-    block_size_factor: int = 1,
-    sliding_window_size_in_blocks: int | None = None,
+    blocks_per_chunk: int = 1,
+    sliding_window_size_in_chunks: int | None = None,
 ) -> GroupOffloadConfig:
     return GroupOffloadConfig(
         group_idx=group_idx,
-        gpu_block_size=block_size,
-        offloaded_block_size=block_size * block_size_factor,
-        hash_block_size_factor=block_size_factor,
-        sliding_window_size_in_blocks=sliding_window_size_in_blocks,
+        tokens_per_block=block_size,
+        tokens_per_chunk=block_size * blocks_per_chunk,
+        hashes_per_chunk=blocks_per_chunk,
+        sliding_window_size_in_chunks=sliding_window_size_in_chunks,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 
@@ -90,7 +94,7 @@ def _record_chunks(
     num_chunks: int,
 ) -> list[OffloadKey]:
     keys: list[OffloadKey] = []
-    hbf = group_config.hash_block_size_factor
+    hbf = group_config.hashes_per_chunk
     for chunk_idx in range(num_chunks):
         tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
         assert tail_hash is not None
@@ -100,12 +104,81 @@ def _record_chunks(
     return keys
 
 
-def _stored_event(keys: list[OffloadKey]) -> OffloadingEvent:
-    return OffloadingEvent(keys=keys, medium=_CPU_MEDIUM, removed=False)
+def _stored_event(
+    keys: list[OffloadKey],
+    locality: Locality | None = None,
+    medium: str = _CPU_MEDIUM,
+) -> OffloadingEvent:
+    return OffloadingEvent(
+        keys=keys,
+        medium=medium,
+        removed=False,
+        locality=locality,
+    )
 
 
-def _removed_event(keys: list[OffloadKey]) -> OffloadingEvent:
-    return OffloadingEvent(keys=keys, medium=_CPU_MEDIUM, removed=True)
+def _removed_event(
+    keys: list[OffloadKey],
+    locality: Locality | None = None,
+    medium: str = _CPU_MEDIUM,
+) -> OffloadingEvent:
+    return OffloadingEvent(
+        keys=keys,
+        medium=medium,
+        removed=True,
+        locality=locality,
+    )
+
+
+def test_take_events_forwards_locality_to_rich_store():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].token_ids == [1, 2, 3, 4]
+    assert events[0].block_size == 4
+    assert events[0].locality == "LOCAL"
+
+
+def test_take_events_forwards_locality_to_placeholder_store():
+    tracker = _tracker(self_describing_kv_events=False)
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_stored_event([key], locality=Locality.REMOTE, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].block_size == 0
+    assert events[0].locality == "REMOTE"
+
+
+def test_take_events_forwards_locality_to_remove():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_chunks(tracker, req, _group_config(), num_chunks=1)[0]
+
+    events = list(
+        tracker.take_events(
+            [_removed_event([key], locality=Locality.LOCAL, medium=MEDIUM_FS)]
+        )
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockRemoved)
+    assert events[0].locality == "LOCAL"
 
 
 def test_take_events_publishes_routable_block_stored():
@@ -149,14 +222,14 @@ def test_take_events_publishes_routable_block_stored():
 
 def test_take_events_factor_gt_1_chunk_store_and_remove():
     block_size = 4
-    block_size_factor = 3
+    blocks_per_chunk = 3
     tracker = _tracker()
     group_config = _group_config(
-        block_size=block_size, block_size_factor=block_size_factor
+        block_size=block_size, blocks_per_chunk=blocks_per_chunk
     )
     req = _request(
         block_hashes=[_hash(i) for i in range(6)],
-        token_count=block_size * block_size_factor * 2,
+        token_count=block_size * blocks_per_chunk * 2,
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
 
@@ -169,17 +242,17 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
         expected_chunk_hashes = [
             _wire_hash(_hash(i))
             for i in range(
-                chunk_idx * block_size_factor,
-                (chunk_idx + 1) * block_size_factor,
+                chunk_idx * blocks_per_chunk,
+                (chunk_idx + 1) * blocks_per_chunk,
             )
         ]
         assert event.block_hashes == expected_chunk_hashes
         assert event.block_size == block_size
-        assert len(event.token_ids) == block_size * block_size_factor
+        assert len(event.token_ids) == block_size * blocks_per_chunk
         if chunk_idx == 0:
             assert event.parent_block_hash is None
         else:
-            assert event.parent_block_hash == _wire_hash(_hash(block_size_factor - 1))
+            assert event.parent_block_hash == _wire_hash(_hash(blocks_per_chunk - 1))
         expected_hashes.extend(expected_chunk_hashes)
 
     assert len(tracker._pending_event_metadata) == 2
@@ -194,12 +267,12 @@ def test_take_events_factor_gt_1_chunk_store_and_remove():
 
 
 def test_take_events_factor_gt_1_store_is_order_independent():
-    block_size_factor = 3
+    blocks_per_chunk = 3
     tracker = _tracker()
-    group_config = _group_config(block_size_factor=block_size_factor)
+    group_config = _group_config(blocks_per_chunk=blocks_per_chunk)
     req = _request(
         block_hashes=[_hash(i) for i in range(6)],
-        token_count=4 * block_size_factor * 2,
+        token_count=4 * blocks_per_chunk * 2,
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
     unknown_key = make_offload_key(_hash(12345), 0)
@@ -244,7 +317,7 @@ def test_take_events_opt_out_keeps_placeholders():
 
 def test_record_store_skips_sliding_window_group():
     tracker = _tracker()
-    group_config = _group_config(sliding_window_size_in_blocks=2)
+    group_config = _group_config(sliding_window_size_in_chunks=2)
     req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
     keys = _record_chunks(tracker, req, group_config, num_chunks=3)
 
@@ -258,8 +331,8 @@ def test_record_store_skips_sliding_window_group():
 
 def test_take_events_groups_removed_hashes_by_kv_group():
     tracker = _tracker()
-    group0_config = _group_config(group_idx=0, block_size_factor=2)
-    group1_config = _group_config(group_idx=1, block_size_factor=2)
+    group0_config = _group_config(group_idx=0, blocks_per_chunk=2)
+    group1_config = _group_config(group_idx=1, blocks_per_chunk=2)
     req0 = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
     req1 = _request(block_hashes=[_hash(10), _hash(11)], token_count=8)
     key0 = _record_chunks(tracker, req0, group0_config, num_chunks=1)[0]
@@ -293,7 +366,7 @@ def test_take_events_supports_restore_after_eviction():
     assert not tracker._pending_event_metadata
 
     req.all_token_ids = [5, 6, 7, 8]
-    tracker.record_store(req, group_config, offload_block_idx=0, offload_key=key)
+    tracker.record_store(req, group_config, chunk_idx=0, offload_key=key)
 
     second_store = list(tracker.take_events([_stored_event([key])]))
     assert len(second_store) == 1
@@ -351,4 +424,4 @@ def test_tiering_rejects_self_describing_kv_events():
     )
 
     with pytest.raises(ValueError, match="TieringOffloadingSpec"):
-        TieringOffloadingSpec(vllm_config, kv_cache_config)
+        TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
