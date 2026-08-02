@@ -64,6 +64,7 @@ LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 # the start of each reload, read after finalize. Verify-only, see
 # LayerReloadingInfo.arena_snapshot.
 _LAYER_ARENA_FINDINGS: list[str] = []
+_LAYER_ARENA_PATHS: WeakKeyDictionary[torch.nn.Module, str] = WeakKeyDictionary()
 
 
 def get_layer_arena_findings() -> list[str]:
@@ -83,15 +84,15 @@ def _verify_layer_arena(layer: torch.nn.Module, info: LayerReloadingInfo) -> Non
     if snap is None:
         return
     arena = peek_reload_arena(layer)
+    layer_name = _LAYER_ARENA_PATHS.get(layer, layer.__class__.__name__)
     if arena is None:
         # The arena vanished with the layer: every snapshotted slot is gone.
         if snap:
             _LAYER_ARENA_FINDINGS.append(
-                f"{layer.__class__.__name__}: arena vanished across reload "
-                f"({len(snap)} slot(s))")
+                f"{layer_name}: arena vanished across reload")
         return
     for violation in arena.verify(snap):
-        _LAYER_ARENA_FINDINGS.append(f"{layer.__class__.__name__}: {violation}")
+        _LAYER_ARENA_FINDINGS.append(f"{layer_name}: {violation}")
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -147,13 +148,16 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     # initialize, which finds no layer already loadable, reaches here first.
     if not any(get_layerwise_info(m).can_load() for m in model.modules()):
         _LAYER_ARENA_FINDINGS.clear()
+        _LAYER_ARENA_PATHS.clear()
 
-    for layer in model.modules():
+    for layer_name, layer in model.named_modules():
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
         if info.can_load():
             continue
+
+        _LAYER_ARENA_PATHS[layer] = layer_name
 
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)

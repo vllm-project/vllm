@@ -57,11 +57,13 @@ def test_fp4_marlin_workspace_is_stable_across_pwal(nvfp4):
     _load_fp4_checkpoint(layer, nvfp4=nvfp4)
     prepare_fp4_layer_for_marlin(layer)
     before = layer.workspace.data_ptr()
+    layer.workspace.fill_(7)
 
     _load_fp4_checkpoint(layer, nvfp4=nvfp4)
     prepare_fp4_layer_for_marlin(layer)
 
     assert layer.workspace.data_ptr() == before
+    assert torch.count_nonzero(layer.workspace) == 0
 
 
 def _load_mxfp8_checkpoint(layer: torch.nn.Module) -> None:
@@ -80,8 +82,10 @@ def test_mxfp8_marlin_workspace_is_stable_across_pwal():
     _load_mxfp8_checkpoint(layer)
     prepare_mxfp8_layer_for_marlin(layer)
     before = layer.workspace.data_ptr()
+    layer.workspace.fill_(7)
 
     _load_mxfp8_checkpoint(layer)
     prepare_mxfp8_layer_for_marlin(layer)
 
     assert layer.workspace.data_ptr() == before
+    assert torch.count_nonzero(layer.workspace) == 0

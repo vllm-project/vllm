@@ -10,7 +10,6 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.model_executor.reload_arena import ReloadArena
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
@@ -37,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -1510,7 +1510,6 @@ class FlashInferImpl(AttentionImpl):
         # reference, the second post-load pass has nothing to recompute
         # from and the runtime copy silently keeps pre-reload values.
         self._sinks_source: torch.Tensor | None = None
-        self._sinks_arena = ReloadArena("FlashInferImpl")
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -1577,8 +1576,13 @@ class FlashInferImpl(AttentionImpl):
         # so a reload never refreshed the runtime copy. The arena keeps the
         # copy's address stable for any capture that read it.
         if self._sinks_source is not None:
-            self.sinks = self._sinks_arena.put(
-                "sinks_f32", self._sinks_source.to(torch.float32))
+            sinks_f32 = self._sinks_source.to(torch.float32)
+            arena = current_arena()
+            self.sinks = (
+                arena.put("flashinfer.sinks_f32", sinks_f32)
+                if arena is not None
+                else sinks_f32
+            )
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale

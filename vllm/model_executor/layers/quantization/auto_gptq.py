@@ -45,7 +45,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -61,7 +61,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -649,9 +648,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             self.experts_cls, FusedMoEExpertsModular
         ):
             device = layer.w13_qweight.device
-            layer.workspace = get_reload_arena(layer).put(
-                "marlin.workspace", marlin_make_workspace_new(device, 4)
-            )
+            layer.workspace = marlin_get_workspace(layer, device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1

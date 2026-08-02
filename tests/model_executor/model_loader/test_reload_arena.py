@@ -147,6 +147,29 @@ class TestPut:
         assert runtime2.data_ptr() == runtime.data_ptr()
         assert torch.equal(runtime, source.to(torch.float32))
 
+    def test_flashinfer_sinks_use_attention_layer_arena(self):
+        from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+
+        layer = nn.Module()
+        first_impl = FlashInferImpl.__new__(FlashInferImpl)
+        first_impl._sinks_source = torch.arange(4, dtype=torch.bfloat16)
+
+        with arena_scope(get_reload_arena(layer)):
+            first_impl.process_weights_after_loading(torch.bfloat16)
+        snap = snapshot_model_arenas(layer)
+        first_ptr = first_impl.sinks.data_ptr()
+
+        rebuilt_impl = FlashInferImpl.__new__(FlashInferImpl)
+        rebuilt_impl._sinks_source = torch.arange(
+            4, dtype=torch.bfloat16) + 10
+        with arena_scope(get_reload_arena(layer)):
+            rebuilt_impl.process_weights_after_loading(torch.bfloat16)
+
+        assert rebuilt_impl.sinks.data_ptr() == first_ptr
+        assert torch.equal(
+            rebuilt_impl.sinks, rebuilt_impl._sinks_source.to(torch.float32))
+        assert verify_model_arenas(layer, snap) == []
+
     def test_put_shape_mismatch_raises(self):
         arena = ReloadArena("layer")
         arena.put("d", torch.ones(3))
@@ -244,6 +267,53 @@ def test_wna8o8_detached_activation_scales_reuse_arena_storage():
     assert after == before
     assert scheme._input_scale.item() == 3.0
     assert scheme._output_scale.item() == 4.0
+
+
+@pytest.mark.parametrize(
+    "backend_name", ["FLASHINFER_CUTLASS", "VLLM_CUTLASS"]
+)
+def test_nvfp4_cutlass_quant_config_scales_reuse_arena_storage(backend_name):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+        make_nvfp4_moe_quant_config,
+    )
+
+    layer = nn.Module()
+
+    def make_config(weight_global_scale, input_scale):
+        return make_nvfp4_moe_quant_config(
+            backend=NvFp4MoeBackend[backend_name],
+            w13_scale=torch.ones(1),
+            w2_scale=torch.ones(1),
+            w13_scale_2=torch.tensor([weight_global_scale]),
+            w2_scale_2=torch.tensor([weight_global_scale + 1]),
+            a13_scale=torch.tensor([input_scale]),
+            a2_scale=torch.tensor([input_scale * 2]),
+            layer=layer,
+        )
+
+    with arena_scope(get_reload_arena(layer)):
+        first = make_config(2.0, 0.25)
+    before = {
+        name: getattr(first, name).data_ptr()
+        for name in ("g1_alphas", "g2_alphas", "a1_gscale", "a2_gscale")
+    }
+
+    # Model the in-place fusion performed by CutlassExpertsFp4. The next
+    # PWAL must refresh the slot from newly derived source values first.
+    layer.w13_weight_scale_2.mul_(0.25)
+    with arena_scope(get_reload_arena(layer)):
+        second = make_config(3.0, 0.5)
+
+    after = {
+        name: getattr(second, name).data_ptr()
+        for name in ("g1_alphas", "g2_alphas", "a1_gscale", "a2_gscale")
+    }
+    assert after == before
+    assert layer.w13_weight_scale_2 is second.g1_alphas
+    assert layer.w2_weight_scale_2 is second.g2_alphas
+    assert second.g1_alphas.item() == 3.0
+    assert second.a1_gscale.item() == 2.0
 
 
 class TestSnapshotVerify:

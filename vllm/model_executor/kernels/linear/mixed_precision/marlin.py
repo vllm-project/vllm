@@ -5,7 +5,6 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
@@ -13,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_is_k_full,
     marlin_make_empty_g_idx,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -26,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -115,10 +115,9 @@ class MarlinLinearKernel(MPLinearKernel):
         # Allocate marlin workspace through the layer's reload arena: the
         # workspace address is baked into captured graphs, and it holds sync
         # counters -- a rebind on reload leaves replay spinning on freed
-        # memory (livelock). put() adopts on first PWAL and copies the fresh
-        # zeros into the SAME storage on re-runs.
-        self.workspace = get_reload_arena(layer).put(
-            "marlin_workspace", marlin_make_workspace_new(device))
+        # memory (livelock). Reacquisition keeps the address and clears the
+        # counters without allocating a throwaway workspace.
+        self.workspace = marlin_get_workspace(layer, device)
 
         # Default names since marlin requires empty parameters for these,
         # TODO: remove this requirement from marlin (allow optional tensors)

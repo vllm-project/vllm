@@ -154,6 +154,90 @@ reload step fails, an arena slot may already contain a newly computed value.
 The arena guarantees storage identity and provides a place to refresh values;
 it does not provide shadow storage or rollback.
 
+### Proposed staged publication for value-bearing slots
+
+The direct-update rule above is the current implementation. A future version
+can provide a stronger publication boundary by separating arena slots into two
+categories, using the acquisition API as the declaration:
+
+- `put()` declares value-bearing derived state whose contents must be
+  refreshed from the newly loaded layer;
+- `get_or_alloc()` declares workspace or scratch whose address matters but
+  whose contents have no checkpoint-like value to commit.
+
+Workspace and scratch should remain direct. Clearing, preserving, or lazily
+initializing them is part of the consumer's runtime protocol, and copying a
+shadow workspace back would add memory traffic without publishing meaningful
+state.
+
+Value-bearing `put()` slots can instead stage their newly derived contents in
+a per-layer shadow:
+
+```text
+replay buffered checkpoint loaders for layer L
+  → run PWAL for layer L
+      → put(slot, value) records value in L's shadow
+      → rebuilt consumers bind the existing live slot
+  → publish processed parameters and buffers for L
+  → copy L's value-bearing shadows into their live arena slots
+  → verify L's arena identities
+  → release L's shadows
+```
+
+The publication point should be the existing layer copy-back boundary, not a
+single model-wide commit. Keeping shadows only for the layer currently being
+processed bounds peak memory to that layer's value-bearing arena state. A
+model-wide shadow would retain derived tensors for every layer until reload
+completion and could require gigabytes for large models.
+
+Staged `put()` has an important return-value constraint. It must still return
+the **live** arena tensor so a rebuilt kernel, expert, or attention object
+binds the address already captured by the accelerator graph:
+
+```python
+live = arena.put("W_UV", newly_derived)  # newly_derived is staged
+kernel.W_UV = live                       # captured address remains stable
+```
+
+Until layer copy-back publishes the shadow, `live` contains the old value.
+PWAL must therefore not use the tensor returned by a staged `put()` as the
+source for another value derived in the same pass. Follow-on values must be
+computed from the fresh local source:
+
+```python
+# Correct under staged put.
+fresh_alpha = derive_alpha(loaded_scale)
+live_alpha = arena.put("alpha", fresh_alpha)
+live_c = arena.put("scale_c", derive_scale_c(fresh_alpha))
+
+# Incorrect: live_alpha remains stale until layer publication.
+live_alpha = arena.put("alpha", derive_alpha(loaded_scale))
+live_c = arena.put("scale_c", derive_scale_c(live_alpha))
+```
+
+The layer transaction would need explicit arena operations analogous to:
+
+```text
+begin_layer_update()
+publish_layer_update()
+discard_layer_update()
+```
+
+`publish_layer_update()` copies staged values into existing live slots; it
+must never rebind those slots. `discard_layer_update()` drops shadows when
+PWAL or parameter copy-back fails before publication. This prevents a failed
+layer from partially publishing value-bearing arena contents, but it is not a
+model-wide rollback: layers published earlier in the reload may already hold
+new parameters and arena values. Full model-level atomicity still requires a
+shadow model or a worker recovery protocol.
+
+Before enabling staged `put()`, every current caller must be audited for
+same-pass data dependencies on the returned tensor. Tests must cover both the
+pre-publication behavior (live value remains old) and the publication behavior
+(pointer unchanged, new value visible), as well as failure before publication.
+Until that audit and transaction API exist, `put()` continues to update the
+live slot immediately as documented above.
+
 ## Lifecycle
 
 ### Initial model load
