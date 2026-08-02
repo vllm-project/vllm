@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -270,8 +271,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         randomize_inputs=True,
     )
 
-    # Read cached autotune results and broadcast to all ranks.
+    # Broadcast cached autotune results then tune.
     cached_results: bytes | None = None
+
+    logger.info_once("Starting FlashInfer autotuning...")
+    autotune_start = time.perf_counter()
     if is_leader and cache_path.exists():
         with open(cache_path, "rb") as f:
             cached_results = f.read()
@@ -291,6 +295,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             runner._dummy_run(**dummy_run_kwargs)
     finally:
         set_autotune_process_group(None)
+
+    autotune_elapsed = time.perf_counter() - autotune_start
+    logger.info_once(
+        "FlashInfer autotuning completed in %.2f seconds",
+        autotune_elapsed,
+    )
 
     if world.world_size > 1:
         world.barrier()
