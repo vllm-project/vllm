@@ -68,6 +68,29 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
+def _usage_prompt_tokens(
+    prompt_token_ids: list[int],
+    *,
+    generation_prefix_len: int | None = None,
+    encoder_prompt_token_ids: list[int] | None = None,
+) -> int:
+    """OpenAI ``usage.prompt_tokens``.
+
+    Engine ``prompt_token_ids`` may include a trailing forced generation prefix
+    (assistant preamble / channel-open stub). Those tokens remain in the engine
+    prompt; only the reported usage count excludes them when
+    ``generation_prefix_len`` is set by the renderer.
+    """
+    n = len(prompt_token_ids)
+    prefix = generation_prefix_len or 0
+    if prefix < 0 or prefix > n:
+        prefix = 0
+    n -= prefix
+    if encoder_prompt_token_ids is not None:
+        n += len(encoder_prompt_token_ids)
+    return n
+
+
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     """Sum per-modality placeholder tokens from ``mm_placeholders``.
 
@@ -488,9 +511,11 @@ class OpenAIServingChat(GenerateBaseServing):
             async for res in result_generator:
                 last_res = res
                 if res.prompt_token_ids is not None:
-                    num_prompt_tokens = len(res.prompt_token_ids)
-                    if res.encoder_prompt_token_ids is not None:
-                        num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    num_prompt_tokens = _usage_prompt_tokens(
+                        res.prompt_token_ids,
+                        generation_prefix_len=res.generation_prefix_len,
+                        encoder_prompt_token_ids=res.encoder_prompt_token_ids,
+                    )
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -1054,9 +1079,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 choice.message.content = full_message
 
         assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        if final_res.encoder_prompt_token_ids is not None:
-            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
+        num_prompt_tokens = _usage_prompt_tokens(
+            final_res.prompt_token_ids,
+            generation_prefix_len=final_res.generation_prefix_len,
+            encoder_prompt_token_ids=final_res.encoder_prompt_token_ids,
+        )
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )

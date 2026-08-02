@@ -27,6 +27,9 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    generation_prefix_len: NotRequired[int]
+    """Trailing forced generation-prefix length; see TokensPrompt."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""
@@ -55,6 +58,7 @@ def tokens_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    generation_prefix_len: int | None = None,
 ) -> TokensInput:
     """
     Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
@@ -66,6 +70,8 @@ def tokens_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if generation_prefix_len is not None:
+        inputs["generation_prefix_len"] = generation_prefix_len
 
     return inputs
 
