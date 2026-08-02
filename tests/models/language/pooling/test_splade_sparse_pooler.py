@@ -192,19 +192,15 @@ def test_encoder_cache_reset_clears_late_interaction_state() -> None:
 
 def test_pooling_runner_rejects_unsupported_selected_task() -> None:
     model = MagicMock()
-    model.pooler.get_supported_tasks.return_value = {
-        "embed",
-        "embed&token_classify",
-        "token_classify",
-    }
+    model.pooler.get_supported_tasks.return_value = {"embed", "plugin"}
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_seqs = 2
     vllm_config.model_config.attn_type = "encoder_only"
-    vllm_config.model_config.get_pooling_task.return_value = "embed&token_classify"
+    vllm_config.model_config.get_pooling_task.return_value = "plugin"
 
     with (
         patch.object(PoolingRunner, "get_supported_tasks", return_value=["embed"]),
-        pytest.raises(ValueError, match="selects 'embed&token_classify'"),
+        pytest.raises(ValueError, match="selects 'plugin'"),
     ):
         PoolingRunner(model, vllm_config)
 
@@ -273,3 +269,23 @@ def test_pooling_runner_filters_decoder_token_embedding() -> None:
     runner = PoolingRunner(model, vllm_config)
 
     assert runner.supported_tasks == {"embed"}
+
+
+def test_pooling_runner_gates_embed_token_classification_to_encoder() -> None:
+    # BGE-M3's combined task emits per-token weights alongside the embedding,
+    # so it is enabled only where prefill is unchunked.
+    model = MagicMock()
+    model.pooler.get_supported_tasks.return_value = {"embed", "embed&token_classify"}
+    vllm_config = MagicMock()
+    vllm_config.scheduler_config.max_num_seqs = 2
+
+    vllm_config.model_config.attn_type = "encoder_only"
+    vllm_config.model_config.get_pooling_task.return_value = "embed&token_classify"
+    assert PoolingRunner(model, vllm_config).supported_tasks == {
+        "embed",
+        "embed&token_classify",
+    }
+
+    vllm_config.model_config.attn_type = "decoder"
+    vllm_config.model_config.get_pooling_task.return_value = "embed"
+    assert PoolingRunner(model, vllm_config).supported_tasks == {"embed"}
