@@ -222,11 +222,14 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            AiterW4A16ExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return [AiterExperts]
+        return [AiterExperts, AiterW4A16ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -334,7 +337,10 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
-        return [Mxfp4MoeBackend.AITER_MXFP4_BF16]
+        return [
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.EMULATION,
+        ]
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
     _AVAILABLE_BACKENDS = [
@@ -502,6 +508,7 @@ def select_mxfp4_moe_backend(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
     )
 
+    unsupported_reasons = []
     for backend in AVAILABLE_BACKENDS:
         # Use requested_activation_key if provided, otherwise use backend default
         act_key = (
@@ -518,6 +525,7 @@ def select_mxfp4_moe_backend(
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason))
+                unsupported_reasons.append((backend, reason))
 
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
@@ -541,26 +549,19 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_rocm():
-        backend = Mxfp4MoeBackend.TRITON_UNFUSED
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
-    if current_platform.is_cuda():
-        raise NotImplementedError(
-            "No MXFP4 MoE backend supports the deployment configuration. "
-            f"weight_key=kMxfp4Static, activation_key={activation_key}. "
-            "Native backends require specific hardware. "
-            "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
-        )
-
-    return Mxfp4MoeBackend.NONE, None
+    unsupported_log = "; ".join(
+        [
+            f"backend: {backend.value}, reason: {reason}"
+            for backend, reason in unsupported_reasons
+        ]
+    )
+    raise NotImplementedError(
+        "No MXFP4 MoE backend supports the deployment configuration. "
+        f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+        f"Candidate backends were: "
+        f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
+        f"Unsupported reasons: {unsupported_log}. "
+    )
 
 
 def select_deepseek_v4_mxfp4_moe_backend(
@@ -653,7 +654,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         else:
             hidden_size = round_up(hidden_size, 256)
     elif backend in TRTLLM_BACKENDS:
-        intermediate_size = round_up(intermediate_size, 256)
+        intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 256)
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -1268,6 +1269,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
     Supports DeepGEMM, TRTLLM MXFP8, Triton and Marlin backends.
     """
+    from vllm.platforms.rocm import on_gfx1250
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
@@ -1440,7 +1442,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and not on_gfx1250():
         # Initially introduced for DeepSeekV4
 
         if w13_bias is not None:
@@ -1497,7 +1499,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend in TRITON_BACKENDS:
+    elif mxfp4_backend in TRITON_BACKENDS or (
+        mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+    ):
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         if mxfp4_backend == Mxfp4MoeBackend.TRITON:
@@ -1554,8 +1558,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
-        # No additional transformation needed for XPU backend
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
+    ):
+        # No additional transformation is needed: XPU consumes the checkpoint
+        # layout directly, while emulation dequantizes that layout at runtime.
         return (
             w13_weight,
             w2_weight,
@@ -1567,7 +1575,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            f"Expected TRTLLM, Triton, AITER, or XPU backend."
+            f"Expected TRTLLM, Triton, AITER, XPU, or emulation backend."
         )
 
 
