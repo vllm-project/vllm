@@ -24,7 +24,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_common_backend, is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -198,6 +198,17 @@ class InputProcessingContext:
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
+        elif is_mistral_common_backend(tokenizer):
+            # `AutoTokenizer` resolves dual-format checkpoints (HF tokenizer
+            # files + tekken.json) to transformers' mistral-common backend,
+            # which never encodes special placeholder tokens (e.g. "[IMG]")
+            # from text. HF processors rely on that encoding, so swap in a
+            # variant that performs it.
+            from vllm.tokenizers.mistral import (
+                mistral_common_backend_with_special_tokens,
+            )
+
+            tokenizer = mistral_common_backend_with_special_tokens(tokenizer)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
