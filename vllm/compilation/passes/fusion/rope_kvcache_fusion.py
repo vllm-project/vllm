@@ -10,6 +10,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     Attention,
@@ -59,6 +60,22 @@ def fused_rope_and_unified_kv_cache_update_impl(
     that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    if layer_name == "from_forward_context":
+        forward_context = get_forward_context()
+        all_kv_layers = forward_context.all_kv_layers
+        assert all_kv_layers is not None, (
+            "all_kv_layers must be set in ForwardContext when using "
+            "'from_forward_context' sentinel"
+        )
+        kv_layer_index = forward_context.kv_layer_index
+        if kv_layer_index >= len(all_kv_layers):
+            raise AssertionError(
+                "Expected the number of KV layers in `all_kv_layers` "
+                "to match the number of "
+                "fused_rope_and_unified_kv_cache_update calls."
+            )
+        layer_name = all_kv_layers[kv_layer_index]
+        forward_context.kv_layer_index += 1
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
@@ -155,8 +172,11 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q_fp8.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
+            _kv_layer_name = (
+                "from_forward_context" if not _USE_LAYERNAME else layer_name
+            )
             kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(
-                k_view, v_view, layer_name
+                k_view, v_view, _kv_layer_name
             )
             return kv_cache_dummy, q_view, k_view, v_view
 
@@ -213,7 +233,10 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q_fp8.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
-            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(k_view, v_view, _ln)
+            _kv_layer_name = "from_forward_context" if not _USE_LAYERNAME else _ln
+            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(
+                k_view, v_view, _kv_layer_name
+            )
             return kv_cache_dummy, q_view, k_view, v_view
 
         def replacement(qkv, positions, cos_sin_cache, q_scale):
@@ -334,7 +357,10 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            return torch.ops.vllm.unified_kv_cache_update(k, v, layer_name), q, k, v
+            _kv_layer_name = (
+                "from_forward_context" if not _USE_LAYERNAME else layer_name
+            )
+            return torch.ops.vllm.unified_kv_cache_update(k, v, _kv_layer_name), q, k, v
 
         def replacement(qkv, positions, cos_sin_cache, layer_name):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
@@ -364,7 +390,8 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            return torch.ops.vllm.unified_kv_cache_update(k, v, _ln), q, k, v
+            _kv_layer_name = "from_forward_context" if not _USE_LAYERNAME else _ln
+            return torch.ops.vllm.unified_kv_cache_update(k, v, _kv_layer_name), q, k, v
 
         def replacement(qkv, positions, cos_sin_cache):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
