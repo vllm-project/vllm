@@ -426,6 +426,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float | None = None,
     score_mode: str | None = None,
+    situ_beta: float | None = None,
+    situ_linear_beta: float | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.platforms.rocm import on_gfx1250
@@ -509,6 +511,9 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU: silu(gate) * up — same kernel, just no "+1" residual in swiglu.
     swiglu_add_residual = activation != MoEActivation.SILU
+    # SiTU has no in-kernel form, so run gemm1 unfused and apply it in between.
+    # Only the activations round-trip through HBM, never the expert weights.
+    fuse_activation = activation != MoEActivation.SITU
 
     intermediate = moe_gemm_a16w4(
         hidden_states,
@@ -522,13 +527,30 @@ def aiter_triton_kernel_w4a16_moe_forward(
         gather_indx=gather_idx,
         gammas=gammas if apply_router_weight_on_input else None,
         swizzle_mx_scale=None,
-        apply_swiglu=True,
+        apply_swiglu=fuse_activation,
         alpha=swiglu_alpha,
         limit=swiglu_limit,
         swiglu_add_residual=swiglu_add_residual,
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
     )
+
+    if not fuse_activation:
+        assert situ_beta is not None, (
+            "SITU requires activation_situ_beta from FusedMoEConfig"
+        )
+        gated = torch.empty(
+            (*intermediate.shape[:-1], intermediate.shape[-1] // 2),
+            dtype=intermediate.dtype,
+            device=intermediate.device,
+        )
+        torch.ops._C.situ_and_mul(
+            gated,
+            intermediate.contiguous(),
+            situ_beta,
+            -1.0 if situ_linear_beta is None else situ_linear_beta,
+        )
+        intermediate = gated
 
     out = moe_gemm_a16w4(
         intermediate,
@@ -562,6 +584,8 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
         )
+        self.situ_beta = moe_config.activation_situ_beta
+        self.situ_linear_beta = moe_config.activation_situ_linear_beta
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -588,7 +612,11 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU,
+            MoEActivation.SITU,
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -667,4 +695,6 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             score_mode=score_mode,
+            situ_beta=self.situ_beta,
+            situ_linear_beta=self.situ_linear_beta,
         )
