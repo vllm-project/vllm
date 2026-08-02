@@ -20,11 +20,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -226,80 +223,9 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
-        """Create separate AttentionGroup objects per KV cache spec
-        so that each head-dim variant gets its own metadata builder."""
-        all_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-
-        layer_to_gid: dict[str, int] = {}
-        layer_to_spec: dict[str, KVCacheSpec] = {}
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
-            for ln in group.layer_names:
-                layer_to_gid[ln] = gid
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    if ln in group_spec.kv_cache_specs:
-                        layer_to_spec[ln] = group_spec.kv_cache_specs[ln]
-                    else:
-                        tgt = getattr(
-                            all_attn_layers.get(ln),
-                            "kv_sharing_target_layer_name",
-                            None,
-                        )
-                        if tgt and tgt in group_spec.kv_cache_specs:
-                            layer_to_spec[ln] = group_spec.kv_cache_specs[tgt]
-                        else:
-                            layer_to_spec[ln] = group_spec
-                else:
-                    layer_to_spec[ln] = group_spec
-
-        attention_groups: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
-        for layer_name in self._draft_attn_layer_names:
-            if layer_name not in layer_to_spec:
-                continue
-            attn_layer = all_attn_layers[layer_name]
-            attn_backend = attn_layer.get_attn_backend()
-            spec = layer_to_spec[layer_name]
-            gid = layer_to_gid[layer_name]
-            group_key = (attn_backend.full_cls_name(), spec)
-
-            if group_key not in attention_groups:
-                kernel_block_size = (
-                    kernel_block_sizes[gid]
-                    if kernel_block_sizes is not None and gid < len(kernel_block_sizes)
-                    else None
-                )
-                attn_group = AttentionGroup(
-                    backend=attn_backend,
-                    layer_names=[layer_name],
-                    kv_cache_spec=spec,
-                    kv_cache_group_id=gid,
-                )
-                attn_group.create_metadata_builders(
-                    self.vllm_config,
-                    self.device,
-                    kernel_block_size=kernel_block_size,
-                )
-                attention_groups[group_key] = attn_group
-            else:
-                attention_groups[group_key].layer_names.append(layer_name)
-
-        self.draft_attn_groups = list(attention_groups.values())
-        if self.draft_attn_groups:
-            self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
-        else:
-            self.kv_cache_gid = 0
-            self.block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
-        logger.debug("Using block size %d for drafting layers", self.block_size)
+        """One AttentionGroup per KV cache spec, so each head-dim
+        variant gets its own metadata builder."""
+        self._initialize_multi_group_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _setup_gemma4_kv_sharing(
         self,

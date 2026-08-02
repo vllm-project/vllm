@@ -5,20 +5,16 @@ from copy import copy
 
 import torch
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
+from vllm.config import VllmConfig, replace
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
-from vllm.v1.worker.utils import AttentionGroup
 
 
 class Step3p5MTPProposer(EagleProposer):
@@ -177,84 +173,9 @@ class Step3p5MTPProposer(EagleProposer):
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
-        all_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-
-        layer_to_gid: dict[str, int] = {}
-        layer_to_spec: dict[str, KVCacheSpec] = {}
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
-                layer_to_gid[layer_name] = gid
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    if layer_name in group_spec.kv_cache_specs:
-                        layer_to_spec[layer_name] = group_spec.kv_cache_specs[
-                            layer_name
-                        ]
-                    else:
-                        target_layer_name = getattr(
-                            all_attn_layers.get(layer_name),
-                            "kv_sharing_target_layer_name",
-                            None,
-                        )
-                        if (
-                            target_layer_name
-                            and target_layer_name in group_spec.kv_cache_specs
-                        ):
-                            layer_to_spec[layer_name] = group_spec.kv_cache_specs[
-                                target_layer_name
-                            ]
-                        else:
-                            layer_to_spec[layer_name] = group_spec
-                else:
-                    layer_to_spec[layer_name] = group_spec
-
-        attention_groups: dict[tuple[tuple[str, str], int], AttentionGroup] = {}
-        for layer_name in sorted(self._draft_attn_layer_names):
-            if layer_name not in layer_to_spec:
-                continue
-            attn_layer = all_attn_layers[layer_name]
-            attn_backend = attn_layer.get_attn_backend()
-            spec = layer_to_spec[layer_name]
-            gid = layer_to_gid[layer_name]
-            group_key = (attn_backend.full_cls_name(), gid)
-
-            if group_key not in attention_groups:
-                kernel_block_size = (
-                    kernel_block_sizes[gid]
-                    if kernel_block_sizes is not None and gid < len(kernel_block_sizes)
-                    else None
-                )
-                attn_group = AttentionGroup(
-                    backend=attn_backend,
-                    layer_names=[layer_name],
-                    kv_cache_spec=spec,
-                    kv_cache_group_id=gid,
-                )
-                attn_group.create_metadata_builders(
-                    self.vllm_config,
-                    self.device,
-                    kernel_block_size=kernel_block_size,
-                )
-                attention_groups[group_key] = attn_group
-            else:
-                attention_groups[group_key].layer_names.append(layer_name)
-
-        self.draft_attn_groups = list(attention_groups.values())
-        if self.draft_attn_groups:
-            self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
-        else:
-            self.kv_cache_gid = 0
-            self.block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
+        """One AttentionGroup per KV cache spec, so each head-dim
+        variant gets its own metadata builder."""
+        self._initialize_multi_group_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _sample_draft_tokens_for_step(
         self,
