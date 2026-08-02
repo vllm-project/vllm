@@ -23,7 +23,9 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload, get_layer_arena_findings,
     initialize_layerwise_reload, record_metadata_for_reloading)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.reload_arena import InitPolicy, get_reload_arena
+from vllm.model_executor.reload_arena import (
+    InitPolicy, get_reload_arena, snapshot_model_arenas,
+    verify_model_arenas)
 
 
 class _ArenaLayer(nn.Module):
@@ -132,7 +134,16 @@ def test_rebinding_arena_is_caught_per_layer():
     findings = get_layer_arena_findings()
     assert findings, "per-layer verify missed a rebinding arena"
     assert any("scratch" in f or "derived" in f for f in findings)
-    assert all("_ArenaLayer" in f for f in findings)
+    assert all(f.startswith("layer:") for f in findings)
+
+
+def test_per_layer_findings_match_model_level_finding_set():
+    model = _Model(drift=True)
+    snaps = snapshot_model_arenas(model)
+    _reload(model)
+
+    assert set(get_layer_arena_findings()) == set(
+        verify_model_arenas(model, snaps))
 
 
 def test_findings_cleared_between_reloads():
