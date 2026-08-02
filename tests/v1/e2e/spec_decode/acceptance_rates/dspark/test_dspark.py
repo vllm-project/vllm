@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
-import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.config import CompilationConfig
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
 
 def test_gemma4_dspark_correctness_and_acceptance_rate(
     monkeypatch: pytest.MonkeyPatch,
+    vllm_runner,
 ):
     """
     E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
@@ -30,8 +31,9 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
     """
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
-    spec_llm = LLM(
-        model="RedHatAI/gemma-4-12B-it-NVFP4",
+    with vllm_runner(
+        "RedHatAI/gemma-4-12B-it-NVFP4",
+        block_size=None,
         trust_remote_code=True,
         speculative_config={
             "method": "dspark",
@@ -43,10 +45,14 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
         max_num_seqs=32,
         gpu_memory_utilization=0.85,
         enforce_eager=True,
+        enable_chunked_prefill=None,
         enable_prefix_caching=False,
+        # GSM8K is text-only; avoid profiling unused multimodal towers.
+        limit_mm_per_prompt={"image": 0, "audio": 0, "video": 0},
         disable_log_stats=False,
-    )
-    try:
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        spec_llm = spec_runner.llm
         results = evaluate_gsm8k_offline(
             spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
         )
@@ -61,13 +67,19 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
             f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
         )
 
-        assert acceptance_rate >= 0.58 * 0.9
-        assert acceptance_len >= 5.0 * 0.9
-        assert gsm8k_accuracy >= 0.92 * 0.9
-    finally:
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
+        context = "Gemma4 DSpark target=RedHatAI/gemma-4-12B-it-NVFP4"
+        metrics_summary = (
+            f"acceptance_rate={acceptance_rate:.3f}, "
+            f"acceptance_len={acceptance_len:.3f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+        assert all(
+            math.isfinite(value)
+            for value in (acceptance_rate, acceptance_len, gsm8k_accuracy)
+        ), f"{context}: non-finite metric; {metrics_summary}"
+        assert acceptance_rate >= 0.58 * 0.9, f"{context}: {metrics_summary}"
+        assert acceptance_len >= 5.0 * 0.9, f"{context}: {metrics_summary}"
+        assert gsm8k_accuracy >= 0.92 * 0.9, f"{context}: {metrics_summary}"
 
 
 @pytest.fixture
@@ -82,7 +94,6 @@ def dspark_config():
             "method": "dspark",
             "model": draft_model,
             "num_speculative_tokens": 7,
-            "attention_backend": "FLASH_ATTN",
             "draft_sample_method": "probabilistic",
         },
         max_model_len=4096,
@@ -90,7 +101,7 @@ def dspark_config():
     )
 
 
-def test_dspark_correctness_and_acceptance_rate(dspark_config):
+def test_dspark_correctness_and_acceptance_rate(dspark_config, vllm_runner):
     """
     E2E test for DSpark speculative decoding: acceptance rate/length
     regression coverage plus GSM8K correctness, at temperature=1.0 to
@@ -105,25 +116,37 @@ def test_dspark_correctness_and_acceptance_rate(dspark_config):
       acceptance_len:  min=3.928 max=4.037 mean=3.994
     Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
     """
-    spec_llm = LLM(**dspark_config)
+    runner_config = dspark_config.copy()
+    model = runner_config.pop("model")
+    runner_config.setdefault("block_size", None)
+    runner_config.setdefault("enable_chunked_prefill", None)
+    runner_config.setdefault("compilation_config", CompilationConfig())
+    with vllm_runner(model, **runner_config) as spec_runner:
+        spec_llm = spec_runner.llm
 
-    results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
-    gsm8k_accuracy = results["accuracy"]
+        results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
+        gsm8k_accuracy = results["accuracy"]
 
-    metrics = spec_llm.get_metrics()
-    acceptance_rate = compute_acceptance_rate(metrics)
-    acceptance_len = compute_acceptance_len(metrics)
+        metrics = spec_llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
 
-    print(
-        f"DSpark acceptance_rate={acceptance_rate:.2f}, "
-        f"acceptance_len={acceptance_len:.2f}, "
-        f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
-    )
+        print(
+            f"DSpark acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
 
-    assert acceptance_rate >= 0.428 * 0.9
-    assert acceptance_len >= 3.994 * 0.9
-    assert gsm8k_accuracy >= 0.801 * 0.9
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        context = f"DSpark target={model}, draft=deepseek-ai/dspark_qwen3_4b_block7"
+        metrics_summary = (
+            f"acceptance_rate={acceptance_rate:.3f}, "
+            f"acceptance_len={acceptance_len:.3f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+        assert all(
+            math.isfinite(value)
+            for value in (acceptance_rate, acceptance_len, gsm8k_accuracy)
+        ), f"{context}: non-finite metric; {metrics_summary}"
+        assert acceptance_rate >= 0.428 * 0.9, f"{context}: {metrics_summary}"
+        assert acceptance_len >= 3.994 * 0.9, f"{context}: {metrics_summary}"
+        assert gsm8k_accuracy >= 0.801 * 0.9, f"{context}: {metrics_summary}"
