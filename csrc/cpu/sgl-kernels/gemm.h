@@ -32,6 +32,20 @@ constexpr bool brgemm_supported() {
 #endif
 }
 
+enum class PackedGemmBackend {
+  TinyGemm,
+  Brgemm,
+};
+
+template <typename scalar_t>
+constexpr PackedGemmBackend select_moe_packed_gemm_backend() {
+  if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+    return brgemm_supported() ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm;
+  } else {
+    return PackedGemmBackend::TinyGemm;
+  }
+}
+
 // define threshold using brgemm (intel AMX)
 template <typename T>
 inline bool can_use_brgemm(int M);
@@ -311,7 +325,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack = true);
 
@@ -348,7 +362,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack = true);
 
@@ -387,6 +401,6 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack = true);

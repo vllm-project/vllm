@@ -562,12 +562,157 @@ struct brgemm {
       int lda,
       int ldb,
       int ldc,
+      int /* block_size_K */,
       bool do_unpack = true) {
     TORCH_CHECK(false, "struct brgemm: primary template not implemented!");
   }
 };
 template <typename scalar_t>
 struct brgemm2 {};
+
+template <bool has_bias, int Rows>
+inline void store_brgemm_rows(
+    at::BFloat16* __restrict__ C,
+    const float* __restrict__ Ctmp,
+    const float* __restrict__ bias,
+    int N,
+    int ldc) {
+  for (int m = 0; m < Rows; ++m) {
+    if constexpr (has_bias) {
+      copy_add_stub(C + m * ldc, Ctmp + m * block_size_n(), bias, N);
+    } else {
+      copy_stub(C + m * ldc, Ctmp + m * block_size_n(), N);
+    }
+  }
+}
+
+template <bool has_bias>
+inline void store_brgemm_output(
+    at::BFloat16* __restrict__ C,
+    const float* __restrict__ Ctmp,
+    const float* __restrict__ bias,
+    int M,
+    int N,
+    int ldc) {
+  switch (M) {
+    case 0:
+      return;
+    case 1:
+      store_brgemm_rows<has_bias, 1>(C, Ctmp, bias, N, ldc);
+      return;
+    case 2:
+      store_brgemm_rows<has_bias, 2>(C, Ctmp, bias, N, ldc);
+      return;
+    case 3:
+      store_brgemm_rows<has_bias, 3>(C, Ctmp, bias, N, ldc);
+      return;
+    case 4:
+      store_brgemm_rows<has_bias, 4>(C, Ctmp, bias, N, ldc);
+      return;
+    default:
+      for (int m = 0; m < M; ++m) {
+        if constexpr (has_bias) {
+          copy_add_stub(C + m * ldc, Ctmp + m * block_size_n(), bias, N);
+        } else {
+          copy_stub(C + m * ldc, Ctmp + m * block_size_n(), N);
+        }
+      }
+  }
+}
+
+template <typename scalar_t, typename packed_t, typename param_t, bool has_bias, int Rows>
+inline void tinygemm_rows(
+    const scalar_t* __restrict__ A,
+    const packed_t* __restrict__ B,
+    scalar_t* __restrict__ C,
+    const float* __restrict__ bias,
+    const param_t* __restrict__ scale,
+    int64_t row_offset,
+    int64_t K,
+    int64_t lda,
+    int64_t ldb,
+    int64_t ldc,
+    int64_t block_size_K) {
+  tinygemm_kernel_nn<scalar_t, packed_t, param_t, has_bias, Rows, 32>::apply(
+      A + row_offset * lda,
+      B,
+      C + row_offset * ldc,
+      bias,
+      scale,
+      K,
+      lda,
+      ldb,
+      ldc,
+      block_size_K);
+}
+
+template <typename scalar_t, typename packed_t, typename param_t, bool has_bias>
+inline bool brgemm_small_m(
+    const scalar_t* __restrict__ A,
+    const packed_t* __restrict__ B,
+    scalar_t* __restrict__ C,
+    const float* __restrict__ bias,
+    const param_t* __restrict__ scale,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t lda,
+    int64_t ldb,
+    int64_t ldc,
+    int64_t block_size_K) {
+  if constexpr (!std::is_same_v<scalar_t, at::BFloat16>) {
+    return false;
+  } else {
+    if (N != block_size_n() || M < 1 || M > 8) {
+      return false;
+    }
+
+    switch (M) {
+      case 1:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 1>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 2:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 2>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 3:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 3>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 4:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 5:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 1>(
+            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 6:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 2>(
+            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 7:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 3>(
+            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
+        return true;
+      case 8:
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
+        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
+            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
+        return true;
+      default:
+        return false;
+    }
+  }
+}
 
 template <bool has_bias>
 struct brgemm<at::BFloat16, at::Float8_e4m3fn, float, has_bias> {
@@ -585,7 +730,13 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, float, has_bias> {
       int lda,
       int ldb,
       int ldc,
+      int block_size_K,
       bool do_unpack = true) {
+    if (brgemm_small_m<at::BFloat16, at::Float8_e4m3fn, float, has_bias>(
+            A, B, C, bias, scale, M, N, K, lda, ldb, ldc, block_size_K)) {
+      return;
+    }
+
     constexpr int BLOCK_N = block_size_n();
 
     // [K, BLOCK_N] -> [K / 2, BLOCK_N * 2]
@@ -602,14 +753,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, float, has_bias> {
 
     at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
-    // copy from Ctmp to C
-    for (int m = 0; m < M; ++m) {
-      if constexpr (has_bias) {
-        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
-      } else {
-        copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
-      }
-    }
+    store_brgemm_output<has_bias>(C, Ctmp, bias, M, N, ldc);
   }
 };
 
@@ -665,7 +809,13 @@ struct brgemm<at::BFloat16, uint8_t, uint8_t, has_bias> {
       int lda,
       int ldb,
       int ldc,
+      int block_size_K,
       bool do_unpack = true) {
+    if (brgemm_small_m<at::BFloat16, uint8_t, uint8_t, has_bias>(
+            A, B, C, bias, scale, M, N, K, lda, ldb, ldc, block_size_K)) {
+      return;
+    }
+
     constexpr int BLOCK_N = block_size_n();
 
     // [K, BLOCK_N] -> [K / 2, BLOCK_N * 2]
@@ -680,14 +830,7 @@ struct brgemm<at::BFloat16, uint8_t, uint8_t, has_bias> {
 
     at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
-    // copy from Ctmp to C
-    for (int m = 0; m < M; ++m) {
-      if constexpr (has_bias) {
-        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
-      } else {
-        copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
-      }
-    }
+    store_brgemm_output<has_bias>(C, Ctmp, bias, M, N, ldc);
   }
 };
 
@@ -706,12 +849,12 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack = true) {
-  if (brg) {
+  if (backend == PackedGemmBackend::Brgemm) {
     brgemm<scalar_t, packed_t, param_t, has_bias>::apply(
-        A, B, C, Btmp, Ctmp, bias, scale, M, N, K, lda, ldb, ldc, do_unpack);
+        A, B, C, Btmp, Ctmp, bias, scale, M, N, K, lda, ldb, ldc, block_size_K, do_unpack);
     return;
   }
 
@@ -910,7 +1053,7 @@ void fp_scaled_mm_kernel_impl(
             /*   lda          */ mat1_strideM,
             /*   ldb          */ nb_size,
             /*   ldc          */ out_strideM,
-            /*   brg          */ use_brgemm,
+            /*   backend      */ use_brgemm ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm,
             /*   block_size_K */ block_size_K,
             /*   do_unpack    */ do_unpack);
       });
@@ -940,16 +1083,16 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack) {
   if (Bbias != nullptr) {
     tinygemm_kernel<scalar_t, at::Float8_e4m3fn, float, true>(
-        A, B, C, Btmp, Ctmp, scale, Bbias, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+        A, B, C, Btmp, Ctmp, scale, Bbias, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
     return;
   }
   tinygemm_kernel<scalar_t, at::Float8_e4m3fn, float, false>(
-      A, B, C, Btmp, Ctmp, scale, nullptr, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+      A, B, C, Btmp, Ctmp, scale, nullptr, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
 }
 
 template <typename scalar_t>
@@ -984,16 +1127,16 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack) {
   if (Bbias != nullptr) {
     tinygemm_kernel<scalar_t, uint8_t, uint8_t, true>(
-        A, B, C, Btmp, Ctmp, scale, Bbias, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+        A, B, C, Btmp, Ctmp, scale, Bbias, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
     return;
   }
   tinygemm_kernel<scalar_t, uint8_t, uint8_t, false>(
-      A, B, C, Btmp, Ctmp, scale, nullptr, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+      A, B, C, Btmp, Ctmp, scale, nullptr, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
 }
 
 // tinygemm interface
@@ -1011,16 +1154,16 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack) {
   if (Bbias != nullptr) {
     tinygemm_kernel<scalar_t, at::Float8_e4m3fn, float, true>(
-        A, B, C, Btmp, scale, Bbias, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+        A, B, C, Btmp, scale, Bbias, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
     return;
   }
   tinygemm_kernel<scalar_t, at::Float8_e4m3fn, float, false>(
-      A, B, C, Btmp, scale, nullptr, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+      A, B, C, Btmp, scale, nullptr, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
 }
 
 template <typename scalar_t>
@@ -1037,16 +1180,16 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    bool brg,
+    PackedGemmBackend backend,
     int64_t block_size_K,
     bool do_unpack) {
   if (Bbias != nullptr) {
     tinygemm_kernel<scalar_t, uint8_t, uint8_t, true>(
-        A, B, C, Btmp, scale, Bbias, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+        A, B, C, Btmp, scale, Bbias, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
     return;
   }
   tinygemm_kernel<scalar_t, uint8_t, uint8_t, false>(
-      A, B, C, Btmp, scale, nullptr, M, N, K, lda, ldb, ldc, brg, block_size_K, do_unpack);
+      A, B, C, Btmp, scale, nullptr, M, N, K, lda, ldb, ldc, backend, block_size_K, do_unpack);
 }
 
 #define INSTANTIATE_TINYGEMM_TEMPLATE(TYPE_A, TYPE_B, TYPE_S) \
@@ -1064,7 +1207,7 @@ void tinygemm_kernel(
       int64_t lda,                                            \
       int64_t ldb,                                            \
       int64_t ldc,                                            \
-      bool brg,                                               \
+      PackedGemmBackend backend,                              \
       int64_t block_size_K,                                   \
       bool do_unpack)
 
