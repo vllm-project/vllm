@@ -78,8 +78,7 @@ class RoutedExpertsCapturer:
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
           worst-case step (``max_num_batched_tokens`` tokens).
-        - :meth:`clear_buffer` is called at the start of every step, so
-          unused slots stay zero.
+        - Every routed layer overwrites the current step's token rows.
         - ``device_buffer.dtype`` is ``torch.int32``.
     """
 
@@ -215,18 +214,10 @@ class RoutedExpertsCapturer:
             start_loc:end_loc, :
         ]
 
-    def clear_buffer(self) -> None:
-        """Zero the device buffer. Called at the start of every step so
-        slots belonging to finished / preempted tokens don't leak into
-        the next step.
-        """
-        self.device_buffer.zero_()
-
     def get_device_buffer(self) -> torch.Tensor:
         """Return the underlying device buffer so the model runner can
         issue the D2H copy. The tensor is shared; callers must either
-        clone or fully drain it before the next forward pass runs
-        :meth:`clear_buffer`.
+        clone or fully drain it before the next forward pass overwrites it.
         """
         return self.device_buffer
 

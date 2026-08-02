@@ -4176,9 +4176,6 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.routed_experts_initialized:
-            self.routed_experts_capturer.clear_buffer()
-
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4800,8 +4797,7 @@ class GPUModelRunner(
             # copy stream can D2H later. Both tensors must be private
             # clones because:
             #   - ``routing_data`` source is the shared capturer buffer,
-            #     which is ``clear_buffer()``-ed at the start of the
-            #     next step on the default stream.
+            #     which the next forward overwrites on the default stream.
             #   - ``slot_mapping`` source is our own
             #     ``routed_experts_slot_mapping_device``, which the
             #     next ``_prepare_inputs`` overwrites on the default

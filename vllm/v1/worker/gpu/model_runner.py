@@ -1234,10 +1234,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        capturer = self.routed_experts_capturer
-        if capturer is not None:
-            capturer.clear_buffer()
-
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1462,10 +1458,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         routed_experts = None
-        if capturer is not None and not dummy_run:
+        if self.routed_experts_capturer is not None and not dummy_run:
             assert slot_mappings is not None
             routed_experts = RoutedExpertsTensors(
-                routing_data=capturer.get_device_buffer()[:num_toks].clone(),
+                routing_data=self.routed_experts_capturer.get_device_buffer()[
+                    :num_toks
+                ].clone(),
                 slot_mapping=slot_mappings[
                     self.routed_experts_attn_gid, :num_toks
                 ].clone(),
