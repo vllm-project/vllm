@@ -89,8 +89,7 @@ void fused_experts_fp_kernel_impl(
       if (m_size == 0) {
         return;
       }
-      used_brgemm |= backend == PackedGemmBackend::Brgemm &&
-          (m_size > MOE_TINY_GEMM_MAX_M || n_size != BLOCK_N);
+      used_brgemm |= moe_uses_brgemm(backend, m_size, n_size);
 
       if (nb_offset == 0) {
         // 1.a load A
@@ -165,8 +164,7 @@ void fused_experts_fp_kernel_impl(
         return;
       }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
-      used_brgemm |= backend == PackedGemmBackend::Brgemm &&
-          (m_size > MOE_TINY_GEMM_MAX_M || n_size != BLOCK_N);
+      used_brgemm |= moe_uses_brgemm(backend, m_size, n_size);
 
       // A ptr from ic1 of [M * topk, N] in sorted order
       // so as to avoid copy A to tmp buffer again

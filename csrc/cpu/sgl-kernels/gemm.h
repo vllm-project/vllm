@@ -48,6 +48,11 @@ constexpr PackedGemmBackend select_moe_packed_gemm_backend() {
   }
 }
 
+constexpr bool moe_uses_brgemm(PackedGemmBackend backend, int64_t M, int64_t N) {
+  return backend == PackedGemmBackend::Brgemm &&
+      (M > MOE_TINY_GEMM_MAX_M || N != block_size_n());
+}
+
 // define threshold using brgemm (intel AMX)
 template <typename T>
 inline bool can_use_brgemm(int M);
