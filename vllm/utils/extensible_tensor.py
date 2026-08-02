@@ -371,6 +371,11 @@ class ExtensibleTensor:
     def granularity(self) -> int:
         return self._buffer.granularity
 
+    @property
+    def num_physical_chunks(self) -> int:
+        """Number of distinct physical allocations backing the mapping."""
+        return len(self._buffer._handles)
+
     def release_physical(self) -> None:
         """Release all physical memory while keeping the VA reservation.
 
@@ -422,11 +427,21 @@ class ExtensibleKVCacheBuffers:
         before real KV data exists (e.g. right after warmup). It is required
         before KV-transfer registration: UCX cannot transfer memory regions
         that span multiple VMM allocation handles.
+
+        A request at or below the committed size returns without touching the
+        mapping, so a non-growing call cannot discard live data -- elastic EP
+        re-runs warmup, and hence `ensure_blocks`, while KV data is live.
+        `defragment=True` is the exception: a fragmented mapping is re-mapped
+        even when not growing (warmup's incremental commits can already cover
+        the final size, and KV-transfer registration still needs one physical
+        allocation per segment).
         """
-        if defragment and self.num_blocks_committed > 0:
-            self.release_physical()
         if num_blocks <= self.num_blocks_committed:
-            return
+            if not defragment or not self._fragmented():
+                return
+            num_blocks = self.num_blocks_committed
+        if defragment and self.num_blocks_committed > 0:
+            self._release()
         for buffer, bytes_per_block_per_segment in self.buffers:
             # Zero only the freshly committed blocks; existing ones are left
             # intact.
@@ -434,6 +449,26 @@ class ExtensibleKVCacheBuffers:
                 num_blocks * bytes_per_block_per_segment, zero_new=True
             )
         self.num_blocks_committed = num_blocks
+
+    def ensure_blocks(self, num_blocks: int) -> None:
+        """Commit at least `num_blocks` blocks, capped at the capacity.
+
+        Warmup paths call this before executing batches that write to a prefix
+        of real block IDs, which may exceed what has been committed so far.
+        """
+        self.commit(min(num_blocks, self.num_blocks_capacity))
+
+    def extend(self, num_blocks: int, defragment: bool = False) -> None:
+        """Grow the KV cache to `num_blocks` blocks once the memory actually
+        available after warmup and CUDA graph capture is known.
+
+        No re-view is needed: the layers already view the full reserved
+        capacity and each block stays at a fixed offset within its layout
+        segment, so captured graphs stay valid as more pages are mapped under
+        the stable base pointer. Newly committed blocks are zeroed.
+        """
+        self.commit(num_blocks, defragment=defragment)
+        logger.info("Extended KV cache to %d blocks.", num_blocks)
 
     @property
     def physical_bytes(self) -> int:
@@ -445,6 +480,17 @@ class ExtensibleKVCacheBuffers:
         return sum(
             buffer.num_segments * buffer.granularity for buffer, _ in self.buffers
         )
+
+    def _fragmented(self) -> bool:
+        return any(
+            buffer.num_physical_chunks > buffer.num_segments
+            for buffer, _ in self.buffers
+        )
+
+    def _release(self) -> None:
+        for buffer, _ in self.buffers:
+            buffer.release_physical()
+        self.num_blocks_committed = 0
 
     def release_physical(self) -> None:
         """Discard all physical memory (sleep), keeping VA and views valid."""
@@ -462,3 +508,47 @@ class ExtensibleKVCacheBuffers:
             buffer.free()
         self.buffers = []
         self.num_blocks_committed = 0
+
+
+class ExtensibleKVCacheBuilder:
+    """Accumulates the VMM-backed buffers backing each KV cache tensor.
+
+    `reserve` stands in for the `torch.zeros(size, dtype=int8)` allocation of
+    a KV cache tensor, returning a flat view over the full reserved capacity
+    that layer views can be built on. `finish` yields the buffers with a
+    single block committed, which is all warmup and CUDA graph capture need.
+    """
+
+    def __init__(
+        self,
+        num_blocks_capacity: int,
+        device: torch.device,
+        shareable: bool = False,
+    ) -> None:
+        self.num_blocks_capacity = num_blocks_capacity
+        self.device = device
+        self.shareable = shareable
+        self.buffers: list[tuple[ExtensibleTensor, int]] = []
+
+    def reserve(self, size: int, num_segments: int) -> torch.Tensor:
+        """Reserve `size` bytes for one KV cache tensor, in `num_segments`
+        equal segments each committed as a prefix of blocks."""
+        bytes_per_block, remainder = divmod(size, self.num_blocks_capacity)
+        assert not remainder, (
+            f"KV cache tensor of {size} bytes does not divide evenly into "
+            f"{self.num_blocks_capacity} blocks"
+        )
+        assert bytes_per_block % num_segments == 0
+        buffer = ExtensibleTensor(
+            max_num_bytes=size,
+            device=self.device,
+            num_segments=num_segments,
+            shareable=self.shareable,
+        )
+        self.buffers.append((buffer, bytes_per_block // num_segments))
+        return buffer.full_view()
+
+    def finish(self) -> ExtensibleKVCacheBuffers:
+        buffers = ExtensibleKVCacheBuffers(self.buffers, self.num_blocks_capacity)
+        buffers.commit(1)
+        return buffers

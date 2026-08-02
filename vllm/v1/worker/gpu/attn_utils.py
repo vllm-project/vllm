@@ -12,7 +12,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.utils.extensible_tensor import (
     ExtensibleKVCacheBuffers,
-    ExtensibleTensor,
+    ExtensibleKVCacheBuilder,
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -201,31 +201,20 @@ def init_kv_cache(
         )
         extensible_buffers = None
     else:
-        # One VMM-backed buffer holds the whole KV cache, committed as a
-        # per-segment prefix of blocks; segmentation follows the physical
-        # layout (each segment is a contiguous run of blocks `block_stride`
-        # apart).
-        buffers: list[tuple[ExtensibleTensor, int]] = []
-        num_blocks = kv_cache_config.num_blocks
         # KV connectors export this memory for cross-process access
         # (CUDA IPC intra-node, GPU-direct RDMA across nodes).
         shareable = vllm_config.kv_transfer_config is not None
-
-        def reserve(size: int, num_segments: int) -> torch.Tensor:
-            buffer = ExtensibleTensor(
-                max_num_bytes=size,
-                device=device,
-                num_segments=num_segments,
-                shareable=shareable,
-            )
-            buffers.append((buffer, size // (num_blocks * num_segments)))
-            return buffer.full_view()
-
-        kv_caches = allocate_kv_cache(
-            kv_cache_config, device, layout, kernel_block_sizes, reserve=reserve
+        builder = ExtensibleKVCacheBuilder(
+            kv_cache_config.num_blocks, device, shareable
         )
-        extensible_buffers = ExtensibleKVCacheBuffers(buffers, num_blocks)
-        extensible_buffers.commit(1)
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            layout,
+            kernel_block_sizes,
+            reserve=builder.reserve,
+        )
+        extensible_buffers = builder.finish()
 
     # Map any KV-sharing layers to their target layer's KV cache.
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
