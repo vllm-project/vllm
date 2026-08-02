@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
@@ -83,7 +83,9 @@ def test_flashinfer_backend_init():
     ],
 )
 def test_flashinfer_forwards_ssu_algorithm(
-    algorithm: str | None, expected: str, monkeypatch
+    algorithm: MambaSSUAlgorithm | None,
+    expected: MambaSSUAlgorithm,
+    monkeypatch,
 ):
     import flashinfer.mamba
 
