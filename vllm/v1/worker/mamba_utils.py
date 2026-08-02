@@ -85,19 +85,37 @@ def _copy_mamba_state_block(
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
-        per_row_bytes = (conv_width - token_bias).to(tl.int64) * state_elem_size
-        bias_bytes = token_bias.to(tl.int64) * state_elem_size
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for d in range(0, dim_rows):
-            row_src = src_block_addr + d * row_stride + bias_bytes
-            row_dst = dst_addr + d * row_stride
-            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < per_row_bytes
-                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
-                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
-                data = tl.load(curr_src, mask=mask)
-                tl.store(curr_dst, data, mask=mask)
+
+        # Copy one logical conv position at a time from low to high while
+        # parallelizing over dimension rows. A row stays on the same lane at
+        # every position, so same-block shifts have memmove ordering without a
+        # barrier. The same layout also avoids serializing rows for copies
+        # between distinct blocks.
+        num_dst_tokens = conv_width - token_bias
+        for token_idx in range(0, num_dst_tokens):
+            for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
+                rows = row_base + offsets
+                mask = rows < dim_rows
+                src_byte_addr = (
+                    src_block_addr
+                    + rows * row_stride
+                    + (token_idx + token_bias) * state_elem_size
+                )
+                dst_byte_addr = (
+                    dst_addr + rows * row_stride + token_idx * state_elem_size
+                )
+                if state_elem_size == 2:
+                    src_u16 = src_byte_addr.to(tl.pointer_type(tl.uint16))
+                    dst_u16 = dst_byte_addr.to(tl.pointer_type(tl.uint16))
+                    data_u16 = tl.load(src_u16, mask=mask)
+                    tl.store(dst_u16, data_u16, mask=mask)
+                else:
+                    src_u32 = src_byte_addr.to(tl.pointer_type(tl.uint32))
+                    dst_u32 = dst_byte_addr.to(tl.pointer_type(tl.uint32))
+                    data_u32 = tl.load(src_u32, mask=mask)
+                    tl.store(dst_u32, data_u32, mask=mask)
         return
 
     if is_conv_state:
@@ -115,6 +133,11 @@ def _copy_mamba_state_block(
             curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
             curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
             data = tl.load(curr_src, mask=mask)
+            # Same-block conv shifts are overlapping left copies. Without a
+            # workgroup barrier, one wave can overwrite bytes before another
+            # wave has loaded them.
+            if src_block_id == dest_block_id and token_bias > 0:
+                tl.debug_barrier()
             tl.store(curr_dst, data, mask=mask)
         return
 
@@ -421,6 +444,13 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
+        # Mamba conv-state postprocessing can shift a window left within the
+        # same allocation. Synchronize the load before the overlapping store
+        # so this fallback/reference path has memmove rather than memcpy
+        # semantics. The branch is uniform within each Triton program.
+        is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
+        if is_left_overlap:
+            tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
 
 
@@ -667,8 +697,16 @@ class MambaSpecDecodeGPUContext:
                         block_stride_elems * state.element_size()
                     )
 
-                    # Element size
-                    self.state_elem_sizes[idx] = state.element_size()
+                    # The public Mamba/model dtype contracts permit fp16,
+                    # bf16, and fp32. Validate that invariant here so the DS
+                    # device copy only needs an efficient two-way typed branch.
+                    state_elem_size = state.element_size()
+                    if state_elem_size not in (2, 4):
+                        raise ValueError(
+                            "Mamba state copies support only 2-byte and 4-byte "
+                            f"elements, got dtype={state.dtype}"
+                        )
+                    self.state_elem_sizes[idx] = state_elem_size
 
                     copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (

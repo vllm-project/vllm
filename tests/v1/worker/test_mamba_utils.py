@@ -418,6 +418,23 @@ class TestPostprocessMambaFusedKernel:
     def test_config(self):
         return _TestConfig()
 
+    def test_rejects_unsupported_state_element_size(self, device, test_config):
+        cfg = test_config
+        cfg.dtype = torch.float64
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+        _, _, _, _, _, forward_context = _make_dual_states(cfg, layer_names, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        block_table = torch.zeros(1, 8, dtype=torch.int32, device=device)
+
+        with pytest.raises(ValueError, match="only 2-byte and 4-byte"):
+            gpu_ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                (get_conv_copy_spec, get_temporal_copy_spec),
+                [block_table],
+            )
+
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """
         Golden test: GPU kernel produces identical results to Python impl.
@@ -1072,12 +1089,23 @@ class TestPostprocessMambaFusedKernel:
         # --- Verify Python behavior (ground truth) ---
         dest_block_id = block_ids_per_req[0][1]  # dest_block_idx = 1
 
-        # Conv state should be modified (shifted copy within block)
-        conv_changed = not torch.allclose(
-            conv_state_py[dest_block_id], conv_state_orig[dest_block_id]
+        # This is an overlapping in-place left shift, so comparing only the
+        # Python and fused paths can hide the same memcpy race in both. Build
+        # the memmove result from the untouched snapshot and check each path
+        # independently.
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-1].copy_(
+            conv_state_orig[dest_block_id, 1:]
         )
-        assert conv_changed, (
-            "Python: Conv state should be modified when accept_token_bias > 0"
+        torch.testing.assert_close(
+            conv_state_py,
+            expected_conv_state,
+            msg="Python: overlapping conv copy should have memmove semantics",
+        )
+        torch.testing.assert_close(
+            conv_state_gpu,
+            expected_conv_state,
+            msg="GPU: overlapping conv copy should have memmove semantics",
         )
 
         # Temporal state should be modified (copy from different block)
@@ -2048,6 +2076,7 @@ class TestPostprocessMambaFusedKernel:
             fwd_py,
             fwd_gpu,
         ) = _make_dual_layer_state(cfg, device)
+        conv_state_orig = conv_state_py.clone()
         temporal_state_orig = temporal_state_py.clone()
 
         # --- Python reference ---
@@ -2094,9 +2123,17 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
 
-        # --- Ground truth: Python must have sourced temporal from block 3 ---
+        # --- Ground truth: both overlapping conv paths must shift by two ---
         actual_src_block_id = block_ids_per_req[0][3]  # == 3
         dest_block_id = block_ids_per_req[0][1]  # == 1
+        expected_conv_state = conv_state_orig.clone()
+        expected_conv_state[dest_block_id, :-2].copy_(
+            conv_state_orig[dest_block_id, 2:]
+        )
+        torch.testing.assert_close(conv_state_py, expected_conv_state)
+        torch.testing.assert_close(conv_state_gpu, expected_conv_state)
+
+        # Python must have sourced temporal from block 3.
         torch.testing.assert_close(
             temporal_state_py[dest_block_id],
             temporal_state_orig[actual_src_block_id],
@@ -2133,21 +2170,42 @@ class TestPostprocessMambaFusedKernel:
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
 
+    @pytest.mark.parametrize(
+        "same_physical_block", [True, False], ids=["same", "distinct"]
+    )
+    @pytest.mark.parametrize("accept_token_bias", [1, 2, 3])
+    @pytest.mark.parametrize(
+        "dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"]
+    )
     def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
-        self, device, test_config, monkeypatch
+        self,
+        device,
+        test_config,
+        monkeypatch,
+        accept_token_bias,
+        same_physical_block,
+        dtype,
     ):
-        """DS conv postprocess should match SD when accept_token_bias > 0."""
+        """DS conv postprocess should match SD for same/distinct block copies."""
         from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
 
         cfg = test_config
+        cfg.dtype = dtype
         torch.manual_seed(38898)
 
         req_ids = ["req_0"]
-        num_computed_tokens = [30]
-        num_scheduled_tokens = {"req_0": 1}
+        # Keep new_num_computed on an aligned boundary while varying how far
+        # below it the running state starts. This makes the copy bias exactly
+        # ``accept_token_bias`` for each case. The 32 boundary keeps source and
+        # destination in logical block 1; the 64 boundary copies block 2 -> 3.
+        aligned_boundary = 32 if same_physical_block else 64
+        num_computed_tokens = [aligned_boundary - 2 * accept_token_bias]
+        num_scheduled_tokens = {"req_0": accept_token_bias}
         num_draft_tokens: dict[str, int] = {}
-        num_accepted_tokens = [2]  # Results in accept_token_bias = 1
-        mamba_state_idx = [1]  # src_block_idx = 1 = dest_block_idx
+        num_accepted_tokens = [accept_token_bias + 1]
+        dest_block_idx = aligned_boundary // cfg.block_size - 1
+        src_block_idx = dest_block_idx if same_physical_block else dest_block_idx - 1
+        mamba_state_idx = [src_block_idx]
         block_ids_per_req = [list(range(8))]
 
         layer_names = ["layer_0"]
