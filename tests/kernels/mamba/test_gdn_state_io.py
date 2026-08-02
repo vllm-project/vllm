@@ -51,6 +51,21 @@ def test_scatter_gdn_final_state_matches_pytorch(
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+def test_gdn_state_io_supports_distinct_source_and_destination_indices() -> None:
+    torch.manual_seed(0)
+    cache = torch.randn(6, 4, 8, 16, device="cuda", dtype=torch.bfloat16)
+    source_indices = torch.tensor([1, 4], device="cuda", dtype=torch.int32)
+    destination_indices = torch.tensor([2, 5], device="cuda", dtype=torch.int32)
+    has_initial_state = torch.ones(2, device="cuda", dtype=torch.bool)
+
+    initial_state = gather_gdn_initial_state(cache, source_indices, has_initial_state)
+    expected = cache.clone()
+    expected[destination_indices.long()] = initial_state.to(cache.dtype)
+    scatter_gdn_final_state(cache, destination_indices, initial_state)
+
+    torch.testing.assert_close(cache, expected, atol=0, rtol=0)
+
+
 def test_gdn_state_io_supports_noncontiguous_final_state() -> None:
     torch.manual_seed(0)
     cache = torch.randn(5, 4, 8, 16, device="cuda", dtype=torch.bfloat16)

@@ -97,7 +97,11 @@ def gather_gdn_initial_state(
     indices: torch.Tensor,
     has_initial_state: torch.Tensor,
 ) -> torch.Tensor:
-    """Gather, mask, and cast GDN recurrent states to contiguous FP32."""
+    """Gather, mask, and cast GDN recurrent states to contiguous FP32.
+
+    The state pool must have shape ``[slots, heads, rows, columns]``. ``indices``
+    and ``has_initial_state`` contain one entry for each output batch element.
+    """
     batch = indices.numel()
     output = torch.empty(
         (batch, *state.shape[1:]), dtype=torch.float32, device=state.device
@@ -129,7 +133,12 @@ def scatter_gdn_final_state(
     indices: torch.Tensor,
     final_state: torch.Tensor,
 ) -> None:
-    """Cast and scatter GDN final states into the recurrent-state cache."""
+    """Cast and scatter GDN final states into the recurrent-state cache.
+
+    ``cache`` and ``final_state`` must be four-dimensional with matching head,
+    row, and column dimensions. ``indices`` selects one destination cache slot
+    for each final-state batch element and may differ from gather source indices.
+    """
     elements_per_state = final_state[0].numel()
     total_elements = final_state.numel()
     block = 256
