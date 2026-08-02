@@ -67,7 +67,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
-        del self._routed_experts
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
