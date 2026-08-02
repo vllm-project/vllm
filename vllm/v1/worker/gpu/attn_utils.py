@@ -13,7 +13,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.utils.extensible_tensor import (
     ExtensibleKVCacheBuffers,
-    ExtensibleTensor,
+    ExtensibleKVCacheBuilder,
 )
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -26,8 +26,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
-    num_outer_segments,
     reshape_kv_cache,
+    tensor_num_outer_segments,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -198,36 +198,21 @@ def _allocate_and_reshape_kv_cache(
                 layer_to_spec[layer_name] = spec
 
     kv_caches: dict[str, Any] = {}
-    extensible_buffers: list[tuple[ExtensibleTensor, int]] = []
-    total_num_blocks = kv_cache_config.num_blocks
+    # One VMM-backed buffer per tensor, committed as a per-segment prefix of
+    # blocks; segmentation follows the physical layout (the dims outer to the
+    # block dim, e.g. layer slots under LBHNC).
+    builder = (
+        ExtensibleKVCacheBuilder(kv_cache_config.num_blocks, device, shareable)
+        if extensible
+        else None
+    )
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         num_layer_slots = len(kv_cache_tensor.shared_by)
-        if extensible:
-            # One VMM-backed buffer per tensor, committed as a per-segment
-            # prefix of blocks; segmentation follows the physical layout
-            # (dims outer to the block dim, e.g. layer slots under LBHNC).
-            tensor_layers = {n for slot in kv_cache_tensor.shared_by for n in slot}
-            segment_counts = {
-                num_outer_segments(spec, num_layer_slots, layout)
-                for name, spec in layer_to_spec.items()
-                if name in tensor_layers
-            }
-            assert len(segment_counts) == 1, (
-                "Layers sharing one KV cache tensor disagree on the buffer "
-                f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+        if builder is not None:
+            buf = builder.reserve(
+                kv_cache_tensor.size,
+                tensor_num_outer_segments(kv_cache_tensor, layer_to_spec, layout),
             )
-            num_segments = segment_counts.pop()
-            bytes_per_block = kv_cache_tensor.size // total_num_blocks
-            assert bytes_per_block * total_num_blocks == kv_cache_tensor.size
-            assert bytes_per_block % num_segments == 0
-            buffer = ExtensibleTensor(
-                max_num_bytes=kv_cache_tensor.size,
-                device=device,
-                num_segments=num_segments,
-                shareable=shareable,
-            )
-            extensible_buffers.append((buffer, bytes_per_block // num_segments))
-            buf = buffer.full_view()
         else:
             buf = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
 
@@ -266,11 +251,7 @@ def _allocate_and_reshape_kv_cache(
             for layer_name in layer_names:
                 kv_caches[layer_name] = views[layer_to_slot[layer_name]]
 
-    if not extensible:
-        return kv_caches, None
-    buffers = ExtensibleKVCacheBuffers(extensible_buffers, total_num_blocks)
-    buffers.commit(1)
-    return kv_caches, buffers
+    return kv_caches, builder.finish() if builder is not None else None
 
 
 def init_kv_cache(

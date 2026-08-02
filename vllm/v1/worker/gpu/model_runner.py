@@ -74,7 +74,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
-    narrow_kv_caches_to_num_blocks,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import (
@@ -103,6 +102,7 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
+    get_deferred_kv_connector,
     get_kv_connector,
 )
 from vllm.v1.worker.gpu.lora_utils import (
@@ -572,49 +572,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def init_deferred_kv_connector(self) -> None:
-        """Create and register the KV connector after `extend_kv_cache`.
-
-        With the extensible KV cache, connectors must not register the cache
-        before its final size is physically committed. Registration views are
-        narrowed to the committed block count so connectors only see (and
-        register with e.g. RDMA) backed memory.
-        """
+        """Create and register the KV connector after `extend_kv_cache`."""
         assert self.extensible_kv_buffers is not None
-        kv_caches = narrow_kv_caches_to_num_blocks(
+        self.kv_connector = get_deferred_kv_connector(
+            self.vllm_config,
             self._kv_caches_dict,
-            [g for groups in self.attn_groups for g in groups],
+            self.attn_groups,
             self.kernel_block_sizes,
             self.kv_cache_config.num_blocks,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches)
 
     def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
-        """Commit at least `num_blocks` KV blocks when the extensible KV cache
-        is in use (no-op otherwise). Warmup paths call this before executing
-        batches that write to a prefix of real block IDs.
-        """
+        """Commit at least `num_blocks` KV blocks (no-op without extensible
+        KV). Called from warmup before writing to real block IDs."""
         if self.extensible_kv_buffers is not None:
-            self.extensible_kv_buffers.commit(
-                min(num_blocks, self.extensible_kv_buffers.num_blocks_capacity)
-            )
+            self.extensible_kv_buffers.ensure_blocks(num_blocks)
 
     def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
-        """Commit physical pages so the KV cache holds `num_blocks` blocks.
-
-        Grows the KV cache after warmup and CUDA graph capture, once the
-        actual available memory is known. No re-view is needed: the layers
-        already view the full reserved capacity and each block stays at a
-        fixed offset within its layout segment, so captured graphs stay valid
-        as more pages are mapped under the stable base pointer. Newly
-        committed blocks are zeroed. `defragment` discards the warmup-time
-        commits so each segment is backed by a single physical allocation
-        (required before KV-transfer registration).
-        """
+        """Grow the KV cache to `num_blocks` blocks after warmup."""
         if self.extensible_kv_buffers is None:
             raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
-        self.extensible_kv_buffers.commit(num_blocks, defragment=defragment)
+        self.extensible_kv_buffers.extend(num_blocks, defragment=defragment)
         self.kv_cache_config.num_blocks = num_blocks
-        logger.info("Extended KV cache to %d blocks.", num_blocks)
 
     @property
     def kv_cache_committed_bytes(self) -> int:

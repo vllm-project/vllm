@@ -122,7 +122,7 @@ from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.extensible_tensor import (
     ExtensibleKVCacheBuffers,
-    ExtensibleTensor,
+    ExtensibleKVCacheBuilder,
 )
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -171,8 +171,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
-    num_outer_segments,
     reshape_kv_cache,
+    tensor_num_outer_segments,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
@@ -7329,8 +7329,11 @@ class GPUModelRunner(
         Returns: a dict mapping layer-name -> view of the backing tensor.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        extensible_buffers: list[tuple[ExtensibleTensor, int]] = []
-        total_num_blocks = kv_cache_config.num_blocks
+        builder = (
+            ExtensibleKVCacheBuilder(kv_cache_config.num_blocks, self.device)
+            if extensible
+            else None
+        )
 
         layer_specs: dict[str, KVCacheSpec] = {}
         if extensible:
@@ -7353,28 +7356,11 @@ class GPUModelRunner(
             num_slots = len(kv_cache_tensor.shared_by)
             bytes_per_slot = kv_cache_tensor.size // num_slots
 
-            if extensible:
-                segment_counts = {
-                    num_outer_segments(layer_specs[n], num_slots, layout)
-                    for n in layer_to_slot_idx
-                    if n in layer_specs
-                }
-                assert len(segment_counts) == 1, (
-                    "Layers sharing one KV cache tensor disagree on the "
-                    f"buffer segmentation ({segment_counts}): "
-                    f"{kv_cache_tensor.shared_by}"
+            if builder is not None:
+                buf = builder.reserve(
+                    kv_cache_tensor.size,
+                    tensor_num_outer_segments(kv_cache_tensor, layer_specs, layout),
                 )
-                num_segments = segment_counts.pop()
-                bytes_per_block = kv_cache_tensor.size // total_num_blocks
-                assert bytes_per_block * total_num_blocks == kv_cache_tensor.size
-                assert bytes_per_block % num_segments == 0
-                buffer = ExtensibleTensor(
-                    max_num_bytes=kv_cache_tensor.size,
-                    device=self.device,
-                    num_segments=num_segments,
-                )
-                extensible_buffers.append((buffer, bytes_per_block // num_segments))
-                buf = buffer.full_view()
             else:
                 buf = torch.zeros(
                     kv_cache_tensor.size, dtype=torch.int8, device=self.device
@@ -7406,13 +7392,7 @@ class GPUModelRunner(
                     layer_view = multi_slot_kv_cache[layer_to_slot_idx[layer_name]]
                     kv_caches[layer_name] = layer_view
 
-        if extensible:
-            self.extensible_kv_buffers = ExtensibleKVCacheBuffers(
-                extensible_buffers, total_num_blocks
-            )
-            self.extensible_kv_buffers.commit(1)
-        else:
-            self.extensible_kv_buffers = None
+        self.extensible_kv_buffers = builder.finish() if builder is not None else None
         return kv_caches
 
     def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:

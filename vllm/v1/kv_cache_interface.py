@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
@@ -286,6 +287,27 @@ def num_outer_segments(
             assert dim == _DIM_H
             segments *= spec.num_heads
     raise AssertionError(f"No block dim in stride order {layout.stride_order}")
+
+
+def tensor_num_outer_segments(
+    kv_cache_tensor: KVCacheTensor,
+    layer_specs: Mapping[str, KVCacheSpec],
+    layout: KVCacheLayout,
+) -> int:
+    """`num_outer_segments` for a whole KV cache tensor, checking that the
+    layers sharing it agree on the segmentation."""
+    num_layer_slots = len(kv_cache_tensor.shared_by)
+    segment_counts = {
+        num_outer_segments(spec, num_layer_slots, layout)
+        for slot_layers in kv_cache_tensor.shared_by
+        for layer_name in slot_layers
+        if (spec := layer_specs.get(layer_name)) is not None
+    }
+    assert len(segment_counts) == 1, (
+        "Layers sharing one KV cache tensor disagree on the buffer "
+        f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+    )
+    return segment_counts.pop()
 
 
 def reshape_kv_cache(

@@ -86,6 +86,10 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
 
 logger = init_logger(__name__)
 
+# Headroom left over the measured post-warmup memory when re-deriving the
+# extensible KV cache size.
+_WARMUP_MEMORY_BUFFER_BYTES = 150 * (1 << 20)
+
 # The hash seed for the first block of any prefix block sequence.
 #
 # We use a random value to avoid hash collisions or PYTHONHASHSEED environment
@@ -2129,6 +2133,93 @@ def get_kv_cache_configs(
             tensor.size = tensor.size // num_blocks_old * min_num_blocks
 
     return kv_cache_configs
+
+
+def configure_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+    collective_rpc: Callable[..., list[Any]],
+) -> tuple[list[KVCacheConfig], KVCacheConfig]:
+    """Size the KV cache and apply the result to `vllm_config`.
+
+    Returns the per-worker configs and the merged scheduler-side config.
+    """
+    # Track max_model_len to detect auto-fit changes made by
+    # get_kv_cache_configs().
+    max_model_len_before = vllm_config.model_config.max_model_len
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, kv_cache_specs, available_memory
+    )
+    max_model_len = vllm_config.model_config.max_model_len
+    if max_model_len != max_model_len_before:
+        # Workers were spawned before memory profiling and have the original
+        # (larger) max_model_len cached.
+        collective_rpc("update_max_model_len", args=(max_model_len,))
+
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    cache_config = vllm_config.cache_config
+    cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+    if kv_cache_groups := scheduler_kv_cache_config.kv_cache_groups:
+        cache_config.block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_groups
+        )
+        update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+
+    vllm_config.validate_block_size()
+    return kv_cache_configs, scheduler_kv_cache_config
+
+
+def use_extensible_kv_cache(
+    vllm_config: VllmConfig,
+    collective_rpc: Callable[..., list[Any]],
+) -> bool:
+    """Whether to allocate the KV cache through the extensible (growable) path.
+
+    Raises if the configuration is unsupported; returns False (with a warning)
+    if the workers' drivers lack virtual memory management support.
+    """
+    if not vllm_config.cache_config.enable_extensible_kv_cache:
+        return False
+    if vllm_config.kv_transfer_config is not None and not (
+        vllm_config.use_v2_model_runner
+    ):
+        raise ValueError(
+            "enable_extensible_kv_cache=True with KV connectors requires the "
+            "V2 model runner (which defers connector registration until the "
+            "final KV cache size is committed)."
+        )
+    # e.g. WSL2 and non-GPU platforms have no VMM support; fall back
+    # gracefully rather than failing to start.
+    reasons: list[str | None] = collective_rpc("extensible_kv_cache_unsupported_reason")
+    if reason := next((r for r in reasons if r), None):
+        logger.warning(
+            "Disabling extensible KV cache; falling back to standard KV cache "
+            "allocation: %s",
+            reason,
+        )
+        return False
+    return True
+
+
+def post_warmup_available_memory(
+    vllm_config: VllmConfig,
+    available_memory: list[int],
+    warmup_memory: list[int],
+) -> list[int] | None:
+    """Per-worker KV cache memory re-derived from what warmup actually used.
+
+    Returns None when the first-pass sizing should stand: with an explicit
+    `kv_cache_memory_bytes` the requested size is committed as-is, and when
+    warmup was skipped (VLLM_ELASTIC_EP_SCALE_UP_LAUNCH) there is no
+    measurement to re-derive from.
+    """
+    if vllm_config.cache_config.kv_cache_memory_bytes is not None or not warmup_memory:
+        return None
+    return [
+        max(available - used - _WARMUP_MEMORY_BUFFER_BYTES, 0)
+        for available, used in zip(available_memory, warmup_memory, strict=True)
+    ]
 
 
 class BlockHashListWithBlockSize:
