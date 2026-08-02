@@ -141,6 +141,7 @@ def try_fused_gdn_rmsnorm_gated(
     rows = x.numel() // hidden_size
     eligible = (
         _IS_SM103
+        and x.is_cuda
         and x.dtype == torch.bfloat16
         and z.dtype == x.dtype
         and weight.dtype == x.dtype

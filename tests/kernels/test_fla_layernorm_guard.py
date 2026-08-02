@@ -523,6 +523,32 @@ def test_strided_gdn_rmsnorm_gated_rejects_unsupported_shape(
     assert output is None
 
 
+def test_strided_gdn_rmsnorm_gated_rejects_cpu_input(monkeypatch) -> None:
+    from vllm.model_executor.layers.mamba.ops import gdn_rmsnorm
+
+    monkeypatch.setattr(gdn_rmsnorm, "_IS_SM103", True)
+    monkeypatch.setattr(
+        gdn_rmsnorm,
+        "fused_gdn_rmsnorm_gated_op",
+        lambda *args, **kwargs: torch.empty_like(args[0]),
+    )
+    x = torch.empty(8, 4, 128, dtype=torch.bfloat16)
+    z = torch.empty_like(x)
+    weight = torch.empty(128, dtype=torch.bfloat16)
+
+    output = gdn_rmsnorm.try_fused_gdn_rmsnorm_gated(
+        x,
+        z,
+        weight,
+        1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        activation="silu",
+    )
+
+    assert output is None
+
+
 @pytest.mark.skipif(
     current_platform.get_device_capability() != (10, 3),
     reason="Qwen strided GDN RMSNorm dispatch is SM103-specific",
