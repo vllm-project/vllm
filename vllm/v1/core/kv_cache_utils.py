@@ -2267,9 +2267,7 @@ def _get_sparse_mla_kv_cache_configs(
     ):
         raise ValueError("Sparse MLA offload does not support PP, PCP, or DCP.")
     if cache_config.enable_prefix_caching:
-        raise ValueError("Sparse MLA offload does not support prefix caching.")
-    if scheduler_config.enable_chunked_prefill is not False:
-        raise ValueError("Sparse MLA offload requires chunked prefill to be disabled.")
+        raise ValueError("Sparse MLA Decode offload does not support prefix caching.")
 
     merged_specs: dict[str, KVCacheSpec] = {}
     for worker_specs in kv_cache_specs:
