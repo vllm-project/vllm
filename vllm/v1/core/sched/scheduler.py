@@ -1751,7 +1751,7 @@ class Scheduler(SchedulerInterface):
             if not num_tokens_scheduled:
                 continue
             assert num_tokens_scheduled > 0
-            request = self.requests.get(req_id)
+            request = requests.get(req_id)
             output_is_stale = False
             if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
@@ -1784,16 +1784,19 @@ class Scheduler(SchedulerInterface):
 
                 status_before_stop = request.status
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids
+                    request, new_token_ids, is_stale=output_is_stale
                 )
 
                 finish_reason = None
                 kv_transfer_params = None
+                ec_transfer_params = None
                 if stopped:
                     finish_reason = request.get_finished_reason()
                     finished = self._handle_stopped_request(request)
                     if finished:
-                        kv_transfer_params = self._free_request(request)
+                        kv_transfer_params, ec_transfer_params = self._free_request(
+                            request
+                        )
                     if status_before_stop == RequestStatus.RUNNING:
                         stopped_running_reqs.add(request)
                     else:
@@ -1811,6 +1814,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
+                        ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=None,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -1818,18 +1822,13 @@ class Scheduler(SchedulerInterface):
                 )
                 continue
 
-
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
             scheduled_spec_token_ids = scheduled_spec_decode_tokens.get(req_id)
-            # Skip a stale frame still pending discard (async_tokens_to_discard
-            # > 0): its pre-reset rejection count would underflow the counters.
-            if (
-                scheduled_spec_token_ids
-                and (generated_token_ids or num_sampled_tokens_per_step == 0)
-                and request.async_tokens_to_discard == 0
+            if scheduled_spec_token_ids and (
+                generated_token_ids or num_sampled_tokens_per_step == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = num_sampled_tokens_per_step
@@ -1858,7 +1857,7 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
-            pooler_output = pooler_outputs[req_index] if has_pooler_outputs else None
+            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             ec_transfer_params = None
             prefill_stats = None
@@ -1960,11 +1959,11 @@ class Scheduler(SchedulerInterface):
             if (
                 request.sampling_params is not None
                 and request.sampling_params.num_logprobs is not None
-                and has_logprobs
+                and logprobs is not None
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-            if has_num_nans_in_logits and req_id in num_nans_in_logits:
+            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
