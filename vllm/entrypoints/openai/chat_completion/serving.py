@@ -60,12 +60,10 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers import ChatParams
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -90,15 +88,21 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
 def _make_prompt_tokens_details(
     enable_prompt_tokens_details: bool,
     num_cached_tokens: int | None,
+    num_cache_creation_tokens: int | None,
     mm_token_counts: dict[str, int] | None,
 ) -> PromptTokenUsageInfo | None:
     """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
     if not enable_prompt_tokens_details:
         return None
-    if num_cached_tokens is None and not mm_token_counts:
+    if (
+        num_cached_tokens is None
+        and num_cache_creation_tokens is None
+        and not mm_token_counts
+    ):
         return None
     return PromptTokenUsageInfo(
         cached_tokens=num_cached_tokens,
+        created_cache_tokens=num_cache_creation_tokens,
         multimodal_tokens=mm_token_counts or None,
     )
 
@@ -151,15 +155,6 @@ class OpenAIServingChat(GenerateBaseServing):
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
-        if (
-            self.parser_cls is not None
-            and is_mistral_tool_parser(self.parser_cls.tool_parser_cls)
-            and self.parser_cls.reasoning_parser_cls is not None
-        ):
-            from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-            MistralToolParser.model_can_reason = True
-
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -181,15 +176,6 @@ class OpenAIServingChat(GenerateBaseServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
-
-    def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
-            )
-        )
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
@@ -344,7 +330,7 @@ class OpenAIServingChat(GenerateBaseServing):
             else:
                 if not request.include_reasoning:
                     reasoning_ended = True
-                elif request._grammar_from_tool_parser:
+                elif request._grammar_from_parser:
                     # The Mistral grammar already includes an optional
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
@@ -405,6 +391,34 @@ class OpenAIServingChat(GenerateBaseServing):
             return self.response_role
         return request.messages[-1]["role"]
 
+    def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
+        """Construct the response :class:`ChatMessage` for the non-streaming path.
+
+        The full-generator calls this at every construction site so
+        subclasses can swap in a specialized :class:`ChatMessage`
+        subclass (e.g. :class:`CohereServingChatV2` returning
+        :class:`CohereChatMessage`) without duplicating the branchy
+        tool-choice / auto-tools logic that decides which fields are
+        populated. The default returns a plain :class:`ChatMessage`.
+        """
+        return ChatMessage(*args, **kwargs)
+
+    def _finalize_response_message(
+        self,
+        message: ChatMessage,
+        *,
+        parser: Parser | None,
+    ) -> ChatMessage:
+        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+
+        Default is a no-op. Subclasses that need to surface parser-side
+        extras (e.g. :class:`CohereServingChatV2` reading grounding
+        citations off the reasoning parser and populating
+        :class:`CohereChatMessage.citations`) override this to inspect
+        ``parser`` and mutate/replace ``message``.
+        """
+        return message
+
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
@@ -427,6 +441,7 @@ class OpenAIServingChat(GenerateBaseServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
@@ -479,6 +494,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 # response (by the try...catch).
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
+                    num_cache_creation_tokens = res.num_cache_creation_tokens
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
@@ -756,6 +772,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
                     num_cached_tokens,
+                    num_cache_creation_tokens,
                     mm_token_counts,
                 )
 
@@ -905,13 +922,19 @@ class OpenAIServingChat(GenerateBaseServing):
             )
             is_required_tool_choice = request.tool_choice == "required"
 
+            # All six construction sites route through ``self._create_chat_message``
+            # so subclasses can swap in a specialized :class:`ChatMessage`
+            # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
+            # having to duplicate this branch logic.
             if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not is_named_tool_choice and not is_required_tool_choice
             ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             elif is_named_tool_choice or is_required_tool_choice:
-                message = ChatMessage(
+                message = self._create_chat_message(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
@@ -924,7 +947,9 @@ class OpenAIServingChat(GenerateBaseServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             # handle when there are tools and tool choice is auto
             elif (
@@ -935,7 +960,7 @@ class OpenAIServingChat(GenerateBaseServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -946,7 +971,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                 else:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -959,7 +984,17 @@ class OpenAIServingChat(GenerateBaseServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
+
+            # Subclass hook: enrich the constructed message with any
+            # parser-side extras that don't fit through the plain
+            # ``(reasoning, content, tool_calls)`` tuple. Base is a no-op;
+            # citation-aware handlers use this to surface grounding
+            # metadata cached on the reasoning parser.
+            message = self._finalize_response_message(message, parser=parser)
+
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.
@@ -1030,6 +1065,7 @@ class OpenAIServingChat(GenerateBaseServing):
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
             final_res.num_cached_tokens,
+            final_res.num_cache_creation_tokens,
             mm_token_counts,
         )
 
