@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.v1.worker.utils import KVBlockZeroer
+from vllm.v1.worker.utils import KVBlockZeroer, _zero_kv_blocks_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
