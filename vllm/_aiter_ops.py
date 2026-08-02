@@ -10,10 +10,11 @@ import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -1668,6 +1669,89 @@ def _rocm_aiter_fp8_attn_fake(
     )
 
 
+def _rocm_aiter_indexer_qk_rope_quant_cache_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    positions: torch.Tensor,
+    kv_cache: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    k_norm_weight: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_norm_eps: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Whole sparse indexer prologue in one AITER launch; writes the K cache."""
+    from aiter import indexer_qk_rope_quant_and_cache
+
+    from vllm.utils.torch_utils import _resolve_layer_name
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+
+    q_out = torch.empty(q.shape, dtype=FP8_DTYPE, device=q.device)
+    weights_out = torch.empty(weights.shape, dtype=torch.float32, device=weights.device)
+
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        # Profiling / dummy run: no slot mapping yet.
+        q_out.zero_()
+        weights_out.zero_()
+        return q_out, weights_out
+
+    layer_attn_metadata = attn_metadata[_resolve_layer_name(k_cache_prefix)]
+    assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
+
+    # AITER takes cos and sin separately; vLLM packs both halves in one table.
+    rope_half = cos_sin_cache.shape[-1] // 2
+
+    indexer_qk_rope_quant_and_cache(
+        q,
+        q_out,
+        weights,
+        weights_out,
+        k,
+        kv_cache,
+        layer_attn_metadata.slot_mapping,
+        k_norm_weight,
+        k_norm_bias,
+        positions,
+        cos_sin_cache[:, :rope_half],
+        cos_sin_cache[:, rope_half:],
+        k_norm_eps,
+        quant_block_size,
+        scale_fmt,
+        weights_scale,
+        kv_cache.shape[1] > 1,
+        is_neox,
+    )
+    return q_out, weights_out
+
+
+def _rocm_aiter_indexer_qk_rope_quant_cache_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    positions: torch.Tensor,
+    kv_cache: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    k_norm_weight: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_norm_eps: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(q.shape, dtype=FP8_DTYPE, device=q.device),
+        torch.empty(weights.shape, dtype=torch.float32, device=weights.device),
+    )
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -2282,6 +2366,14 @@ class rocm_aiter_ops:
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_indexer_qk_rope_quant_cache",
+                op_func=_rocm_aiter_indexer_qk_rope_quant_cache_impl,
+                mutates_args=["kv_cache"],
+                fake_impl=_rocm_aiter_indexer_qk_rope_quant_cache_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
