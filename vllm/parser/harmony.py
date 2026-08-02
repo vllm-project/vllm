@@ -293,23 +293,15 @@ class HarmonyParser(DelegatingParser):
             try:
                 self._harmony_parser.process(token_id)
             except HarmonyError:
-                # A malformed model-emitted token stream (e.g. an out-of-order
-                # control token such as ``<|end|>`` where a ``<|start|>`` was
-                # expected) makes the streaming Harmony parser raise. Without
-                # this guard the error escapes the stream generator and the
-                # request fails with an opaque HTTP 500/503 instead of
-                # degrading gracefully. Mirror the recovery already used by
-                # ``flush``/``parse``/``parse_delta``: log once and stop
-                # consuming this chunk, surfacing whatever parsed cleanly so
-                # far instead of crashing the whole response.
+                # An out-of-order control token would otherwise escape the
+                # stream generator as an opaque HTTP 500/503. Skip the bad
+                # token and keep parsing the rest of the chunk.
                 logger.warning(
-                    "Harmony parser could not process token %s; stopping "
-                    "chunk parsing early and returning the content decoded "
-                    "so far. This usually indicates a malformed assistant "
-                    "turn (e.g. an out-of-order control token).",
+                    "Harmony parser could not process token %s; skipping it "
+                    "and continuing to parse the rest of the chunk.",
                     token_id,
                 )
-                break
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
