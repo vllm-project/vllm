@@ -57,5 +57,3 @@ steps:
       device: mi300_4
       source_file_dependencies:
       - vllm/platforms/rocm.py
-      depends_on:
-      - image-build-amd
