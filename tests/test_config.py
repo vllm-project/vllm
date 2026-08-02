@@ -285,13 +285,27 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-Embedding-0.6B",
-                architectures=["Qwen3ForCausalLM"],
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                architectures=["BertModel"],
                 runner_type="pooling",
+                attn_type="encoder_only",
                 is_moe=False,
                 is_quantized=False,
             ),
             True,
+        ),
+        (
+            # Decoder pooling stays on V1: token-wise tasks are unsupported
+            # there, so models like rerankers and reward models would fail.
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                attn_type="decoder",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
         ),
     ],
 )
