@@ -151,4 +151,4 @@ def test_kimi_k3_gate_uses_fused_rocm_kernel(num_tokens: int) -> None:
     output = module(x, gate)
 
     assert output.data_ptr() == x.data_ptr()
-    torch.testing.assert_close(output, reference, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(output, reference, atol=2e-4, rtol=1e-2)
