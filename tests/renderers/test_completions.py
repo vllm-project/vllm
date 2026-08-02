@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
@@ -64,12 +65,14 @@ class DummyTokenizer:
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
+        self._captured_text_len: int = 0
 
     def decode(self, tokens: list[int]):
         return str(tokens)
 
     def encode(self, text: str, **kwargs):
         self._captured_encode_kwargs = kwargs
+        self._captured_text_len = len(text)
 
         in_length = len(text)
         truncation = kwargs.get("truncation")
@@ -78,6 +81,11 @@ class DummyTokenizer:
             return list(range(min(in_length, max_length)))
 
         return list(range(in_length))
+
+    def __call__(self, text: str, **kwargs):
+        # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
+        # unify the output type), so mirror a real tokenizer's BatchEncoding.
+        return {"input_ids": self.encode(text, **kwargs)}
 
 
 def _build_renderer(
@@ -279,7 +287,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -300,7 +308,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -321,7 +329,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -360,6 +368,85 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
+
+    def test_explicit_side_tokenizer_unbounded(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        kwargs = renderer.tokenizer._captured_encode_kwargs
+        assert kwargs["truncation"] is False
+
+    def test_explicit_side_left_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(45, 50))
+
+    def test_explicit_side_right_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="right",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(5))
+
+    def test_explicit_side_text_pretokenization_guard(self):
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        assert renderer.tokenizer._captured_text_len <= 100
 
 
 class TestRenderEmbedPrompt:

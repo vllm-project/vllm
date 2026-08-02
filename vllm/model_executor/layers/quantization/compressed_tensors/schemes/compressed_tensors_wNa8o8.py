@@ -13,6 +13,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -171,7 +172,9 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         scales = (input_size_per_partition if partitioned else input_size) // group_size
         scale_data = torch.empty(out, scales, dtype=params_dtype)
         if partitioned:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             weight_scale = GroupQuantScaleParameter(
                 data=scale_data, output_dim=0, input_dim=1, weight_loader=weight_loader
             )

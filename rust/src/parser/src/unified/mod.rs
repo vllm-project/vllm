@@ -1,15 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod combined;
-
-use thiserror::Error;
-use vllm_tokenizer::DynTokenizer;
+mod gemma4;
+mod inkling;
+mod kimi_k3;
 
 pub use combined::CombinedParser;
+pub use gemma4::Gemma4UnifiedParser;
+pub use inkling::InklingUnifiedParser;
+pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
+use thiserror::Error;
+use thiserror_ext::Macro;
+use vllm_tokenizer::DynTokenizer;
 
 use crate::reasoning::ReasoningError;
 use crate::tool::{
-    StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
 };
 
 /// Result alias for unified parser operations.
@@ -164,8 +173,8 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 
@@ -189,12 +198,24 @@ pub trait UnifiedParser: Send {
 }
 
 /// Errors produced while creating or running unified parsers.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
+#[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
     #[error("combined parser is constructed from split parser instances")]
     CombinedParserConstructor,
+    #[error("tokenizer is missing unified parser token `{token}`")]
+    MissingToken { token: String },
+    #[error("unified parser parsing failed: {message}")]
+    ParsingFailed { message: String },
     #[error(transparent)]
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
     Tool(#[from] ToolParserError),
+}
+
+/// Returns the ID for the given token, or an error if it's not found.
+fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
+    tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
+        token: token.to_string(),
+    })
 }

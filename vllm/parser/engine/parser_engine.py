@@ -108,7 +108,13 @@ class ParserEngine(Parser):
             parser_engine_config, tokenizer, vocab=self.vocab
         )
 
-        self._reasoning_ended: bool = False
+        self._has_reasoning = (
+            "THINK_END" in parser_engine_config.token_id_terminals
+            or "THINK_START" in parser_engine_config.terminals
+            or "THINK_END" in parser_engine_config.terminals
+            or parser_engine_config.initial_state == ParserState.REASONING
+        )
+        self._reasoning_ended: bool = not self._has_reasoning
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
 
@@ -116,6 +122,7 @@ class ParserEngine(Parser):
         self._deferred_content: str = ""
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
+        self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
@@ -187,7 +194,7 @@ class ParserEngine(Parser):
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
-        self._reasoning_ended = False
+        self._reasoning_ended = not self._has_reasoning
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
@@ -254,7 +261,7 @@ class ParserEngine(Parser):
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
-        if coerced != value:
+        if type(coerced) is not type(value) or coerced != value:
             return coerced, True
         return value, False
 
@@ -389,6 +396,9 @@ class ParserEngine(Parser):
             return True
         return find_tool_name(self._tools, name)
 
+    def _accept_tool_name(self, name: str) -> bool:
+        return bool(name) and self._is_valid_tool_name(name)
+
     # ── Private helpers ─────────────────────────────────────────────
 
     def _check_skip_tool_parsing(
@@ -398,10 +408,10 @@ class ParserEngine(Parser):
         tools = getattr(request, "tools", None)
         if tools:
             self._tools = tools
-        if not self.skip_tool_parsing:
+        if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:
-                self.skip_tool_parsing = True
+                self._suppress_tool_calls = True
 
     def _strip_content_whitespace(
         self,
@@ -438,7 +448,15 @@ class ParserEngine(Parser):
         if finished:
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
-        return self._strip_trailing_reasoning(result)
+        result = self._strip_trailing_reasoning(result)
+
+        # Suppress reasoning deltas if not requested
+        if result and not request.include_reasoning:
+            result.reasoning = None
+            if not result.content and not result.tool_calls:
+                result = None
+
+        return result
 
     def _strip_trailing_reasoning(
         self,
@@ -642,7 +660,7 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events)
+        delta = self._events_to_delta(events, finished=True)
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
@@ -701,6 +719,7 @@ class ParserEngine(Parser):
         reasoning_parts: list[str] = []
 
         seen_tool_event = False
+        suppress = self._suppress_tool_calls
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
@@ -713,17 +732,21 @@ class ParserEngine(Parser):
                 case EventType.REASONING_END:
                     self._reasoning_ended = True
                 case EventType.TOOL_CALL_START:
-                    seen_tool_event = True
-                    self._ensure_slot(event.tool_index)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._ensure_slot(event.tool_index)
                 case EventType.TOOL_NAME:
-                    seen_tool_event = True
-                    self._handle_tool_name(event)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_name(event)
                 case EventType.ARG_VALUE_CHUNK:
-                    seen_tool_event = True
-                    self._handle_arg_chunk(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_arg_chunk(event, tool_call_deltas)
                 case EventType.TOOL_CALL_END:
-                    seen_tool_event = True
-                    self._handle_tool_end(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_end(event, tool_call_deltas)
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
 
@@ -787,7 +810,7 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if not name or not self._is_valid_tool_name(name):
+        if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
@@ -846,8 +869,8 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
 
         if not slot.name_sent:
-            name = slot.name or self._try_extract_name(idx)
-            if name and self._is_valid_tool_name(name):
+            name = slot.name or self._try_extract_name(idx) or ""
+            if self._accept_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
@@ -1022,7 +1045,7 @@ class ParserEngine(Parser):
             else:
                 args_json = "{}"
 
-            if name and self._is_valid_tool_name(name):
+            if self._accept_tool_name(name):
                 self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(
