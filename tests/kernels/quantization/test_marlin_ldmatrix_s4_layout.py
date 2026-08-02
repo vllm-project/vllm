@@ -43,7 +43,7 @@ def test_ldmatrix_s4_layout_and_mma_mapping(tmp_path: Path):
             nvcc,
             "-std=c++17",
             "-O3",
-            "-arch=sm_90a",
+            "-gencode=arch=compute_90a,code=sm_90a",
             str(source),
             "-o",
             str(executable),
