@@ -36,7 +36,7 @@ See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
 > For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
 > For Arm® Neoverse™, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
-> For AMD Instinct® Accelerators, use `tests/latency-tests-rocm.json`, `tests/throughput-tests-rocm.json`, `tests/serving-tests-rocm.json` instead (selected automatically when `amd-smi` is detected).
+> For AMD Instinct® Accelerators, use `tests/latency-tests-rocm.json`, `tests/throughput-tests-rocm.json`, `tests/serving-tests-rocm.json` instead.
 
 ### Latency test
 
