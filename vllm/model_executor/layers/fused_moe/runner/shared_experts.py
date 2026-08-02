@@ -164,11 +164,16 @@ class SharedExperts(torch.nn.Module):
 
         assert self._output[self._output_idx] is None
 
-        if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
-            self._output[self._output_idx] = self._run_in_aux_stream(
-                shared_experts_input
-            )
-        else:
-            self._output[self._output_idx] = self._layer(shared_experts_input)
+        try:
+            if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
+                self._output[self._output_idx] = self._run_in_aux_stream(
+                    shared_experts_input
+                )
+            else:
+                self._output[self._output_idx] = self._layer(shared_experts_input)
+        except Exception:
+            # Aborted forwards (e.g. failed AOT compile) must not leave stale output.
+            self._output[self._output_idx] = None
+            raise
 
         assert self._output[self._output_idx] is not None
