@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -277,6 +278,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
     )
 
+    logger.info_once("Starting FlashInfer autotuning...")
+    autotune_start = time.perf_counter()
+
     with torch.inference_mode():
         if is_leader:
             with fi_utils.autotune(
@@ -285,6 +289,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
                 runner._dummy_run(**dummy_run_kwargs)
         else:
             runner._dummy_run(**dummy_run_kwargs)
+
+    autotune_elapsed = time.perf_counter() - autotune_start
+    logger.info_once(
+        "FlashInfer autotuning completed in %.2f seconds",
+        autotune_elapsed,
+    )
 
     # Broadcast autotune cache from rank 0 to all other ranks so every
     # rank loads the same set of chosen tactics.
