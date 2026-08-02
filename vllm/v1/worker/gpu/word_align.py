@@ -23,30 +23,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # A slot holds one request's decoder Q and encoder K, and a request past the pool
-# gets no timestamps. Capture is therefore a per-concurrent-request cost, and the
-# only slot count that is *correct* is one per ``max_num_seqs``: that is what the
-# pool targets. Anything less means some requests silently return words=None.
+# gets no timestamps, so the pool targets one slot per ``max_num_seqs``. Per-slot
+# cost swings an order of magnitude with the model -- (max_source + max_target) *
+# alignment_layers * d_model * itemsize -- so a fixed byte budget is right for one
+# checkpoint and wrong for the next.
 #
-# The fraction below is a safety valve on that target, not the sizing rule.
-# ``init()`` runs inside ``load_model()``, i.e. before ``_initialize_kv_caches()``,
-# so every byte reserved here comes straight out of the KV cache; without a
-# ceiling a large ``max_num_seqs`` on a many-alignment-head model could drive the
-# KV cache negative (seen once as a startup failure reporting "Available KV cache
-# memory: -2.01 GiB"). At the ceiling three quarters of the unspent allowance is
-# still left for KV cache and activations. When the valve binds the pool cannot
-# cover ``max_num_seqs``, so ``_log_pool_size`` says so at WARNING -- a partially
-# covered pool must never be something an operator discovers from traffic.
-#
-# Why a target rather than another fixed number: per-slot cost swings 10x with the
-# model (a slot is (max_source + max_target) * alignment_layers * d_model *
-# itemsize), so any constant is right for one model and wrong for the next. The
-# fixed 2 GiB this replaces was ~215 slots for a 2-alignment-layer model (turbo,
-# and Whisper fine-tunes derived from it) but only ~21 for a 20-layer one. A flat
-# 5% of the unspent allowance inverts the same mistake: measured on an H200, it
-# gives a 2-layer model just 50 slots at --gpu-memory-utilization=0.1 (39% coverage
-# at max_num_seqs=128) and still only 130 slots at 0.9 for a 10-layer model
-# (51% at max_num_seqs=256). 0.25 covers max_num_seqs in every one of those cases
-# except a 10-layer model below ~0.3 utilization, which warns instead.
+# The fraction is a ceiling on that target, not the sizing rule. ``init()`` runs
+# inside ``load_model()``, before ``_initialize_kv_caches()``, so every byte
+# reserved here comes out of the KV cache; without a ceiling a large
+# ``max_num_seqs`` on a many-alignment-layer model can drive the KV cache
+# negative. When the ceiling binds, the pool cannot cover ``max_num_seqs`` and
+# ``_log_pool_size`` warns.
 CAPTURE_MEMORY_FRACTION = 0.25
 
 
@@ -60,11 +47,9 @@ class WordAlignCapturer:
         # req_id -> capture slot, held for the request's lifetime.
         self.slot_of: dict[str, int] = {}
         self._free: list[int] = []
-        # Requests that actually asked for word timestamps. The server flag only
-        # arms the machinery; without this set every request would pay the
-        # readout (cross-attention recompute + device->host copy + DTW) and have
-        # it discarded by the response formatter, and would also consume a
-        # capture slot that a request wanting words then could not get.
+        # Requests that asked for word timestamps. The server flag only arms the
+        # machinery: without this set every request would pay the readout and
+        # occupy a slot that a request actually wanting words could not get.
         self.wants: set[str] = set()
         self._parked = False
         # req_id -> the last decoder position it can reach, so a request that
@@ -133,13 +118,10 @@ class WordAlignCapturer:
     ) -> None:
         """Report the pool, at WARNING if it cannot cover ``max_num_seqs``.
 
-        A pool short of ``max_num_seqs`` is a correctness limit, not a tuning
-        detail: past it requests come back ``200 OK`` with ``words: null``, which
-        is indistinguishable from audio that had no speech. It is knowable before
-        the server accepts a single request, so it is said here rather than left
-        for the runtime exhaustion counter to reveal once data is already lost.
+        Past the pool a request returns ``words: null``, which a client cannot
+        tell apart from silence, so a partially covered pool is said at startup
+        rather than left to show up as missing data under load.
         """
-        wanted = (max_num_reqs + 1) * slot_bytes
         if num_slots >= max_num_reqs:
             logger.info(
                 "Whisper word-timestamp cross-attention capture enabled: %d slot(s) "
@@ -152,21 +134,17 @@ class WordAlignCapturer:
             return
         logger.warning(
             "Whisper word-timestamp capture pool holds %d slot(s) but max_num_seqs "
-            "is %d: with that many requests in flight only ~%.0f%% of them will get "
-            "word timestamps and the rest return words=None (a 200 response with an "
-            "empty `words`, indistinguishable from silence). Full coverage needs "
-            "%.2f GiB of capture buffers (%d x %.1f MiB) but only %.2f GiB is "
-            "available (%.0f%% of the unspent memory allowance). Raise "
-            "--gpu-memory-utilization to enlarge the allowance, or lower "
-            "--max-num-seqs so fewer slots are needed.",
+            "is %d, so under full load only ~%.0f%% of requests get word timestamps "
+            "and the rest return words=None. Full coverage needs %.2f GiB (%d x "
+            "%.1f MiB) but only %.2f GiB is available. Raise "
+            "--gpu-memory-utilization or lower --max-num-seqs to widen coverage.",
             num_slots,
             max_num_reqs,
             100.0 * num_slots / max_num_reqs,
-            wanted / 1024**3,
+            (max_num_reqs + 1) * slot_bytes / 1024**3,
             max_num_reqs + 1,
             slot_bytes / 1024**2,
             budget_bytes / 1024**3,
-            CAPTURE_MEMORY_FRACTION * 100,
         )
 
     def init(self, runner: "GPUModelRunner") -> None:
@@ -234,12 +212,10 @@ class WordAlignCapturer:
         if not (extra and extra.get("word_timestamps")):
             return
         self.wants.add(req_id)
-        # The readout has to happen on the request's last decode step, and eos is
-        # not the only way to get there: a request that stops on its token budget
-        # (a repetition loop, typically) used to fall out of the readout entirely
-        # and return words=None with nothing logged. Capped at the capture
-        # buffer's own position limit, which is also Whisper's max_model_len --
-        # past it there is nothing captured left to align anyway.
+        # The readout runs on the last decode step, and eos is not the only way
+        # to reach it: a request stopping on its token budget must be read out
+        # too. Capped at the capture buffer's position limit, past which nothing
+        # was captured to align.
         max_tokens = getattr(sampling_params, "max_tokens", None)
         if max_tokens:
             self._final_npos[req_id] = (
@@ -251,9 +227,9 @@ class WordAlignCapturer:
         if not self.enabled:
             return
         if not self.wants:
-            # Nothing in flight wants word timestamps. Park every capture row on
-            # the scratch slot once and skip the per-step index build entirely,
-            # so an armed server costs nothing while no request is asking.
+            # Park every capture row on the scratch slot once and skip the
+            # per-step index build, so an armed server costs nothing while no
+            # request is asking for words.
             if not self._parked:
                 self.qidx.fill_(self.scratch * self.max_tgt)
                 self.kidx.fill_(self.scratch * self.max_frames)
@@ -305,13 +281,11 @@ class WordAlignCapturer:
             self.kidx[:num_k].copy_(torch.from_numpy(rows.ravel()), non_blocking=True)
 
     def _report_pool_exhausted(self, req_id: str) -> None:
-        """Say out loud that this request will get no word timestamps.
+        """Report that this request will get no word timestamps.
 
-        Returning ``words=None`` is indistinguishable from audio that had no
-        speech, so an exhausted pool used to show up only as coverage quietly
-        falling off under load. Logged on a power-of-two schedule: bounded to a
-        handful of lines however long the overload lasts, while every line still
-        carries the running total.
+        ``words=None`` is indistinguishable from silence to a client, so an
+        exhausted pool is otherwise invisible. Logged on a power-of-two schedule
+        to bound the lines however long the overload lasts.
         """
         if req_id in self._denied:
             return

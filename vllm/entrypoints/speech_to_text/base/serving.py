@@ -28,7 +28,7 @@ from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInput, EngineInput
+from vllm.inputs import EncoderDecoderInput, EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
@@ -422,7 +422,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
-    def _wants_word_timestamps(self, request) -> bool:
+    def _wants_word_timestamps(self, request: SpeechToTextRequest) -> bool:
         """Whether this request asked for word-level timestamps.
 
         Decided once and used twice: to opt the request into cross-attention
@@ -436,20 +436,17 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             and getattr(self.model_cls, "supports_word_timestamp", False)
         )
 
-    def _needs_segments(self, request) -> bool:
+    def _needs_segments(self, request: SpeechToTextRequest) -> bool:
         """Whether this response has to carry segment-level detail.
 
-        Segments are what make ``verbose_json`` expensive: they need
-        ``logprobs=1`` for ``avg_logprob``, and they are cut on timestamp tokens,
-        which the decoder prompt has to ask the model for
-        (``_preprocess_verbose_prompt``). Word onsets need neither -- they come
-        from the cross-attention DTW -- so a request that only asks for ``word``
-        should skip all of it.
+        Segments need ``logprobs=1`` for ``avg_logprob`` and are cut on timestamp
+        tokens, which the decoder prompt has to ask the model for
+        (``_preprocess_verbose_prompt``). Word onsets need neither, so a
+        word-only request can skip all of it.
 
         Note the default: ``timestamp_granularities`` is ``[]``, *not*
-        ``["segment"]``, yet a plain ``verbose_json`` request is still expected to
-        come back with segments. Gating on ``"segment" in granularities`` would
-        silently drop them.
+        ``["segment"]``, and a plain ``verbose_json`` request must still return
+        segments -- gating on ``"segment" in granularities`` would drop them.
         """
         if request.response_format != "verbose_json":
             return False
@@ -461,7 +458,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # rather than answer with nothing at all.
         return not self._wants_word_timestamps(request)
 
-    def _apply_verbose_params(self, request, sampling_params) -> None:
+    def _apply_verbose_params(
+        self, request: SpeechToTextRequest, sampling_params: SamplingParams
+    ) -> None:
         """Turn on only the sampling machinery this response format consumes."""
         if self._needs_segments(request):
             # Segment ``avg_logprob`` is the only consumer of logprobs.
@@ -470,23 +469,23 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if self._wants_word_timestamps(request) and not isinstance(
             sampling_params, BeamSearchParams
         ):
-            # Word timestamps are opt-in per *request*, not just per server: the
-            # worker only captures cross-attention and runs the DTW for requests
-            # carrying this flag. Without it, --enable-word-timestamps made every
-            # request pay the readout and the response formatter discard it.
+            # Opt in per *request*, not just per server: the worker captures
+            # cross-attention and runs the DTW only for requests carrying this
+            # flag, so the rest never pay the readout.
             extra_args = dict(sampling_params.extra_args or {})
             extra_args["word_timestamps"] = True
             sampling_params.extra_args = extra_args
 
-    def _parse_generation_prompt(self, request, prompt) -> DictPrompt:
+    def _parse_generation_prompt(
+        self, request: SpeechToTextRequest, prompt: PromptType
+    ) -> DictPrompt:
         """Parse the model's prompt, asking for timestamp tokens only if needed.
 
         ``_preprocess_verbose_prompt`` swaps ``<|notimestamps|>`` for
-        ``<|0.00|>``, i.e. it asks the model to emit timestamp tokens. Only
-        segment cutting reads those. A word-only request therefore keeps the
-        prompt the model built, byte for byte the same one the ``json`` format
-        uses -- which also keeps models that were never trained to emit timestamp
-        tokens inside their normal decoding regime.
+        ``<|0.00|>``, asking the model to emit timestamp tokens, and only segment
+        cutting reads those. A word-only request therefore keeps the prompt the
+        model built -- byte for byte the one ``json`` uses -- which also keeps
+        models never trained on timestamp tokens in their normal decode regime.
         """
         if self._needs_segments(request):
             return self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))
@@ -583,26 +582,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         return segments, text_parts, words
 
     def _collect_words(self, output, start_time: float) -> "list[TranscriptionWord]":
-        """Group one output's onsets into words, reporting when none come out.
+        """Group one output's onsets into words, warning when none come out.
 
-        Words asked for and not delivered is the failure mode worth being loud
-        about: the response is a valid-looking ``verbose_json`` with
-        ``words: null``, which nothing downstream can tell apart from audio that
-        genuinely had no speech. That is how coverage was found sitting at ~81%
-        with not one line in the logs.
-
-        Two things keep this from becoming noise. It only fires when the output
-        actually contains word tokens, so a silent chunk (a timestamp token and
-        eos, nothing else) stays quiet. And it is logged on a power-of-two
-        schedule, so a systematic failure costs a handful of lines rather than one
-        per request, while every line still carries the running total.
+        ``words: null`` is indistinguishable from audio that had no speech, so
+        the miss is only visible in the log. Outputs holding no word tokens are
+        silence, not a failure, and the warning is logged on a power-of-two
+        schedule to bound a systematic failure to a few lines.
         """
         words = (
             []
             if output.word_align is None
             else self._group_words(output.token_ids, output.word_align, start_time)
         )
-        if words or not self._count_word_tokens(output.token_ids):
+        num_word_tokens = self._count_word_tokens(output.token_ids)
+        if words or not num_word_tokens:
             return words
 
         self._words_missing += 1
@@ -617,7 +610,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             logger.warning(
                 "Word timestamps were requested but not produced for an output "
                 "holding %d word token(s): %s. %d output(s) affected so far.",
-                self._count_word_tokens(output.token_ids),
+                num_word_tokens,
                 reason,
                 self._words_missing,
             )

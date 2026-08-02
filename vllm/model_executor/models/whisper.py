@@ -195,9 +195,8 @@ def _word_align_fetch(weights: list[torch.Tensor]) -> list[np.ndarray]:
 
     The per-request matrices differ in shape (decoder positions x real encoder
     frames), so they are flattened into one transfer and viewed back out. Copying
-    them one at a time turned every request's ~20-kernel recompute into its own
-    blocking wait, which serialized the device work of the whole step; one copy
-    lets the recomputes queue up and pays a single synchronization.
+    them one at a time would make each request's recompute a separate blocking
+    wait; one copy lets them queue and pays a single synchronization.
     """
     if len(weights) == 1:
         return [weights[0].cpu().numpy()]
@@ -224,10 +223,8 @@ def _word_align_finishing(
     The readout runs in the worker, where finish reasons are not known yet -- the
     scheduler decides those a step later, by which time the capture slot may have
     been handed to another request. So "is this the last decode step?" is inferred
-    here from what the worker does know: the request emitted eos, or it just used
-    the last decoder position its token budget allows. Recognising only eos meant
-    a request that stopped on ``max_tokens`` returned no word timestamps at all,
-    with nothing logged.
+    from what the worker does know: the request emitted eos, or it just used the
+    last decoder position its token budget allows.
     """
     finishing: list[tuple[str, int, int]] = []
     for i, req_id in enumerate(req_ids):
@@ -321,9 +318,9 @@ def _word_align_dtw_core(neg_weights: np.ndarray, time_precision: float) -> np.n
 
 def _word_align_dtw_numpy(neg_weights: np.ndarray, time_precision: float) -> np.ndarray:
     """Fallback for builds without numba: same DTW, vectorized over
-    anti-diagonals. ~23x slower than the compiled kernel (measured at n=448,
-    m=750: 33.4 ms vs 1.46 ms), so it is a portability path, not the intended
-    one. Also the bit-exact reference the compiled kernel is tested against."""
+    anti-diagonals. An order of magnitude slower than the compiled kernel, so it
+    is a portability path; it is also the bit-exact reference that kernel is
+    tested against."""
     n, m = neg_weights.shape
     cost = np.full((n + 1, m + 1), np.inf, dtype=np.float32)
     cost[0, 0] = 0.0
@@ -364,20 +361,14 @@ _WORD_ALIGN_DTW_KERNEL: Callable[[np.ndarray, float], np.ndarray] | None = None
 def _word_align_dtw_kernel() -> Callable[[np.ndarray, float], np.ndarray]:
     """Resolve (once) the DTW kernel: numba-compiled if numba is installed.
 
-    The DTW is the host-side bottleneck of word timestamps -- an n x m cost
-    matrix (m = 750 encoder frames for a 30s window, n up to
-    max_target_positions), so up to ~336k strictly sequential cells that cannot
-    be vectorized away because each cell depends on its three predecessors.
-    The anti-diagonal numpy form still pays ~13 numpy dispatches per diagonal
-    (~15.5k per request), and that dispatch overhead dominates -- the arrays are
-    tiny: 33.4 ms/request at n=448 versus 1.46 ms for the same loop compiled.
-    A torch version of the same loop is worse still (43-63 ms at n=40-120),
-    which is also why moving the DTW to the GPU does not help: it needs n+m-1
-    (~1200) strictly sequential launches for ~336k cells of work.
-    numba is already a vLLM requirement
-    (requirements/{cuda,rocm,xpu,cpu}.txt) and is already used this way in
+    The DTW is the host-side bottleneck: an n x m cost matrix (m = 750 encoder
+    frames for a 30s window) whose cells are strictly sequential, since each
+    depends on its three predecessors. That defeats vectorization -- the numpy
+    form is dispatch-bound on tiny arrays, and a GPU version needs n+m-1
+    sequential launches -- so a compiled scalar loop wins by an order of
+    magnitude. numba is already a vLLM requirement and is used the same way in
     ``ngram_proposer``, so this adds no dependency; ``_word_align_dtw_numpy``
-    keeps numba-less builds (e.g. s390x) working.
+    keeps numba-less builds working.
     """
     global _WORD_ALIGN_DTW_KERNEL
     if _WORD_ALIGN_DTW_KERNEL is None:
@@ -1214,6 +1205,8 @@ class WhisperForConditionalGeneration(
 
         Reads each finishing request's own capture slot (``req_slots``) over its
         ``req_npos`` decoder positions, so concurrent requests don't collide.
+        ``req_final_npos`` gives the last position a request's token budget
+        allows, so one stopping there rather than on eos is still read out.
         """
         finishing = _word_align_finishing(
             req_ids,
@@ -1226,18 +1219,17 @@ class WhisperForConditionalGeneration(
         if not finishing:
             return None
         # Crop each DTW to the request's real audio length (not the 30s pad).
-        # One batched copy: reading _WORD_ALIGN_NFRAMES[slot] per request cost a
-        # separate hard host sync (aten::item) each, on the engine's critical path.
+        # Read in one batched copy: indexing per request costs a host sync each,
+        # on the engine's critical path.
         slots_t = torch.tensor(
             [s for _, s, _ in finishing],
             device=_WORD_ALIGN_NFRAMES.device,
             dtype=torch.long,
         )
         nframes_np = _WORD_ALIGN_NFRAMES[slots_t].cpu().numpy()
-        # Phase 1 (GPU): queue every finishing request's recompute first, then
-        # fetch them all in one transfer. Fetching inside the loop instead made
-        # each request's ~20-kernel chain a separate blocking wait, so the device
-        # ran them one at a time with a host round-trip between each.
+        # Phase 1 (GPU): queue every finishing request's recompute, then fetch
+        # them in one transfer. Fetching inside the loop would make each
+        # request's kernel chain a separate blocking wait.
         weights = [
             _word_align_neg_weights(
                 _WORD_ALIGN_QBUF[:, slot],
@@ -1255,11 +1247,7 @@ class WhisperForConditionalGeneration(
             zip((r for r, _, _ in finishing), _word_align_fetch(weights))
         )
         # Phase 2 (CPU): the compiled DTW holds no GIL, so a batch of finishing
-        # requests really does run in parallel here (measured at n=300, m=750, 8
-        # requests: 6.7 ms serial -> 1.25 ms across 8 threads). The numpy
-        # fallback does not scale this way -- it is dispatch-bound, so the pool
-        # made it *slower* than serial (188 ms vs 62 ms) -- but it is also not
-        # the path any supported build takes.
+        # requests runs in parallel across the pool.
         if len(jobs) == 1 or _WORD_ALIGN_POOL is None:
             return {r: _word_align_dtw(w) for r, w in jobs}
         times = _WORD_ALIGN_POOL.map(_word_align_dtw, [w for _, w in jobs])
