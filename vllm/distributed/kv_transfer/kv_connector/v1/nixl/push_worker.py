@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    PUSH_FAIL_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -73,6 +74,9 @@ logger = init_logger(__name__)
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
+# Notifs are decoded to str before dispatch; keep a str twin of the prefix.
+_PUSH_FAIL_PREFIX_STR = PUSH_FAIL_NOTIF_PREFIX.decode()
+
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
@@ -96,6 +100,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._sending_transfers_lock = threading.Lock()
+
+        # D-side: requests where P reported a WRITE it could not post. Failed
+        # only once the count completes, by when posted WRITEs have landed.
+        self._failed_write_reqs: set[ReqId] = set()
 
         # Writer-thread owned matching state.
         # P-side: finished request blocks received from scheduler metadata
@@ -499,95 +507,167 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Issue WRITE transfers to one or more remote TP ranks."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
-
-        # Expand D's logical IDs using the ratio learned during the
-        # NIXL handshake. ``meta`` is freshly built by
-        # ``_do_start_push_kv`` so mutating it here is safe.
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
-        remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
-
-        # MLA latent is replicated across D's TP ranks: the tp-mapping
-        # collapses it to one rank (fine for reads), but push must WRITE every
-        # D rank or the rest decode stale KV. For hybrid MLA+SSM the sharded
-        # SSM state already targets every covered D rank, so only the
-        # attention groups need widening; pure MLA writes to all handshaked
-        # ranks (only the dst differs per rank).
-        replicate_attn = self.use_mla and tp_ratio < 0
-        if replicate_attn and not self._has_mamba:
-            assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
-        else:
-            write_ranks = list(plan.all_source_ranks)
-
-        def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
-            return [
-                list(block_ids[g])
-                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
-                or rank in plan.source_ranks_per_group[g]
-                else []
-                for g in range(num_groups)
-            ]
-
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=group_ids(local_block_ids, rank),
-                remote_block_ids=group_ids(remote_block_ids, rank),
-            )
-            for rank in write_ranks
-        ]
 
         handles: list[int] = []
-        for i, spec in enumerate(read_specs):
-            remote_block_size = remote_info.remote_block_size
-            logger.debug(
-                "Remote agent %s available, calling _xfer_blocks"
-                " on remote rank %s with remote block size %s for req %s",
-                meta.remote.engine_id,
-                spec.remote_rank,
-                remote_block_size,
-                req_id,
-            )
-            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
-                # Multiple targets: write each rank its chunk of local memory.
-                # Hybrid MLA+SSM also lands here: its split handles replicate
-                # the attention descriptors and chunk only the SSM state.
-                split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
+        # One notif per (producer rank -> consumer rank) edge, riding on the
+        # WRITE: unposted ranks must be reported, unresolvable ones must not
+        # (a spurious notif finishes D's count while siblings are in flight).
+        write_ranks: list[int] = []
+        posted_ranks: set[int] = set()
+        try:
+            plan = self.tp_mappings[engine_id]
+            remote_info = self.transfer_topo.get_engine_info(engine_id)
+            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+
+            # Resolved before anything that can raise, so the ``finally`` still
+            # knows which edges it owes a report.
+            # MLA latent is replicated across D's TP ranks: the tp-mapping
+            # collapses it to one rank (fine for reads), but push must WRITE
+            # every D rank or the rest decode stale KV. For hybrid MLA+SSM the
+            # sharded SSM state already targets every covered D rank, so only
+            # the attention groups need widening; pure MLA writes to all
+            # handshaked ranks (only the dst differs per rank).
+            replicate_attn = self.use_mla and tp_ratio < 0
+            if replicate_attn and not self._has_mamba:
+                write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+                assert len(plan.all_source_ranks) == 1
             else:
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
+                write_ranks = list(plan.all_source_ranks)
+
+            if not write_ranks:
+                # ``dst_xfer_side_handles`` is a defaultdict, so an engine with
+                # no handshaked ranks yields an empty set rather than raising.
+                logger.error(
+                    "No remote ranks to push request %s to on engine %s; its "
+                    "consumer will hold its blocks until it is aborted",
+                    req_id,
+                    engine_id,
+                )
+
+            # Expand D's logical IDs using the ratio learned during the
+            # NIXL handshake. ``meta`` is freshly built by
+            # ``_do_start_push_kv`` so mutating it here is safe.
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            remote_block_ids = meta.remote.block_ids
+            local_block_ids = meta.local_physical_block_ids
+            num_groups = len(local_block_ids)
+
+            def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
+                return [
+                    list(block_ids[g])
+                    if (
+                        replicate_attn and _is_attention_spec(self._group_spec_types[g])
+                    )
+                    or rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
                 ]
 
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=group_ids(local_block_ids, rank),
+                    remote_block_ids=group_ids(remote_block_ids, rank),
+                )
+                for rank in write_ranks
             ]
 
-            handle = self._xfer_blocks(
-                read_spec=spec,
-                request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_xfer_side_handle=local_xfer_side_handle,
-                remote_xfer_side_handle=remote_xfer_side_handle,
-            )
-            if handle is not None:
-                handles.append(handle)
+            for i, spec in enumerate(read_specs):
+                remote_block_size = remote_info.remote_block_size
+                logger.debug(
+                    "Remote agent %s available, calling _xfer_blocks"
+                    " on remote rank %s with remote block size %s for req %s",
+                    engine_id,
+                    spec.remote_rank,
+                    remote_block_size,
+                    req_id,
+                )
+                if tp_ratio < 0 and (
+                    not self.use_mla or len(plan.all_source_ranks) > 1
+                ):
+                    # Multiple targets: write each rank its chunk of local memory.
+                    # Hybrid MLA+SSM also lands here: its split handles replicate
+                    # the attention descriptors and chunk only the SSM state.
+                    split_key = (tp_ratio, remote_block_size)
+                    local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[
+                        split_key
+                    ][i]
+                else:
+                    local_xfer_side_handle = self.src_xfer_handles_by_block_size[
+                        remote_block_size
+                    ]
 
-        # Publish all the request's WRITE handles in one locked update: a
-        # partial set would let ``_pop_done_transfers`` finish the request
-        # early, then double-report it as the remaining writes land.
-        if handles:
-            with self._sending_transfers_lock:
-                self._sending_transfers[req_id].extend(handles)
+                remote_xfer_side_handle = self.dst_xfer_side_handles[engine_id][
+                    spec.remote_rank
+                ]
+
+                handle = self._xfer_blocks(
+                    read_spec=spec,
+                    request_id=req_id,
+                    dst_engine_id=engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    local_xfer_side_handle=local_xfer_side_handle,
+                    remote_xfer_side_handle=remote_xfer_side_handle,
+                )
+                if handle is not None:
+                    handles.append(handle)
+                    posted_ranks.add(spec.remote_rank)
+        finally:
+            # Publish all the request's WRITE handles in one locked update: a
+            # partial set would let ``_pop_done_transfers`` finish the request
+            # early, then double-report it as the remaining writes land.
+            if handles:
+                with self._sending_transfers_lock:
+                    self._sending_transfers[req_id].extend(handles)
+
+            failed_ranks = [r for r in write_ranks if r not in posted_ranks]
+            if failed_ranks:
+                self._notify_push_failure(
+                    req_id, engine_id, meta.remote.request_id, failed_ranks
+                )
+
+    def _notify_push_failure(
+        self,
+        req_id: str,
+        engine_id: str,
+        remote_request_id: str,
+        failed_ranks: list[int],
+    ) -> None:
+        """Tell D that some of this request's WRITEs were never posted.
+
+        Stands in for the completion notifs those WRITEs would have carried,
+        so D's count still completes. Best-effort: a report that cannot be
+        sent leaves D waiting, as it does today.
+        """
+        notif_msg = (
+            PUSH_FAIL_NOTIF_PREFIX + f"{remote_request_id}:{self.world_size}".encode()
+        )
+        for rank in failed_ranks:
+            with self._handshake_lock:
+                # Push targets always handshake with pp_size=1.
+                agent_name = (self._remote_agents.get(engine_id) or {}).get((0, rank))
+            if agent_name is None:
+                logger.error(
+                    "No agent for rank %d of engine %s; cannot report the failed "
+                    "WRITE for request %s, which will hold its blocks until it "
+                    "is aborted",
+                    rank,
+                    engine_id,
+                    req_id,
+                )
+                continue
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="push_fail_notif_failed",
+                    req_id=req_id,
+                    error=e,
+                    remote_rank=rank,
+                )
 
     def _xfer_blocks(
         self,
@@ -718,32 +798,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._handle_heartbeat(msg[3:])
                 continue
 
+            failed_write = msg.startswith(_PUSH_FAIL_PREFIX_STR)
+            if failed_write:
+                msg = msg[len(_PUSH_FAIL_PREFIX_STR) :]
+
             req_id, tp_size = msg.rsplit(":", 1)
 
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                if (meta := self._recving_metadata.get(req_id)) is not None:
-                    # Consumer waits for one notif per producer rank writing
-                    # here: pp_size stages * producers-per-consumer (>1 when
-                    # producer TP > consumer TP; tp_size is the producer TP).
-                    producers_per_consumer = max(1, int(tp_size) // self.world_size)
-                    expected_notifs = meta.pp_size * producers_per_consumer
-                    self.consumer_notification_counts_by_req[req_id] += 1
-                    notifs = self.consumer_notification_counts_by_req[req_id]
-                    if notifs < expected_notifs:
-                        continue
-                    del self.consumer_notification_counts_by_req[req_id]
-                    # P drove the transfer (we own no NIXL handle), so
-                    # materialise an empty ``_recving_transfers`` entry for
-                    # ``_pop_done_transfers`` to report done.
-                    self._recving_transfers.setdefault(req_id, [])
-                else:
-                    # Not tracked on either side (lease may have expired
-                    # before the notif arrived). Log and skip.
-                    logger.error(
-                        "Unrecognized request %s notif (may have expired).",
-                        req_id,
-                    )
+                self._count_consumer_notif(req_id, int(tp_size), failed_write)
+                continue
+
+            if failed_write:
+                # Counting it here would retire our own lease.
+                logger.error(
+                    "Ignoring failed-WRITE report for %s, which this worker is "
+                    "itself producing",
+                    req_id,
+                )
                 continue
 
             n_consumers = int(tp_size)
@@ -760,6 +832,70 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
+    def _count_consumer_notif(
+        self, req_id: str, producer_tp_size: int, failed_write: bool
+    ) -> None:
+        """Count one notif for a request this node is receiving.
+
+        One notif is expected per producer rank writing here: pp_size stages
+        * producers-per-consumer, derived from ``producer_tp_size`` as carried
+        in the notif body. A failed WRITE reports in place of its completion,
+        so a failure never short-circuits the count and every posted WRITE has
+        landed by the time it finishes.
+        """
+        meta = self._recving_metadata.get(req_id)
+        if meta is None:
+            # Not tracked on either side (lease may have expired before the
+            # notif arrived). Log and skip.
+            logger.error("Unrecognized request %s notif (may have expired).", req_id)
+            return
+
+        if failed_write:
+            self._failed_write_reqs.add(req_id)
+
+        producers_per_consumer = max(1, producer_tp_size // self.world_size)
+        expected_notifs = meta.pp_size * producers_per_consumer
+        self.consumer_notification_counts_by_req[req_id] += 1
+        if self.consumer_notification_counts_by_req[req_id] < expected_notifs:
+            return
+
+        del self.consumer_notification_counts_by_req[req_id]
+        if req_id not in self._failed_write_reqs:
+            # P drove the transfer (we own no NIXL handle), so materialise an
+            # empty ``_recving_transfers`` entry for ``_pop_done_transfers``
+            # to report done.
+            self._recving_transfers.setdefault(req_id, [])
+            return
+
+        self._failed_write_reqs.discard(req_id)
+        self._fail_incomplete_push(req_id, meta)
+
+    def _fail_incomplete_push(self, req_id: str, meta: ReqMeta) -> None:
+        """Fail a request whose producer could not post every WRITE."""
+        # ``_handle_failed_transfer`` invalidates one group only. With no
+        # blocks recorded the scheduler promotes the request as a successful
+        # load over a cache that was never written, so leave it to its lease.
+        if self._is_hma_required or len(self.kv_cache_config.kv_cache_groups) > 1:
+            reason = "recovery is unsupported for hybrid or multi-group models"
+        elif not any(meta.local_block_ids):
+            reason = "it has no local blocks to invalidate"
+        else:
+            reason = None
+
+        if reason is not None:
+            logger.error(
+                "Producer could not write all KV for request %s and %s; it will "
+                "hold its blocks until it is aborted",
+                req_id,
+                reason,
+            )
+            return
+
+        logger.warning(
+            "Producer could not write all KV for request %s; failing it.", req_id
+        )
+        self._handle_failed_transfer(req_id, None)
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
@@ -767,6 +903,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_wake.set()
 
         done_sending, done_recving = super().get_finished()
+
+        # A request retired before its count completed would leak its flag.
+        self._failed_write_reqs.difference_update(done_recving)
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
