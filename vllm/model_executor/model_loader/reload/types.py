@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.model_executor.reload_arena import SlotIdentity
+    from vllm.model_executor.reload_arena import ArenaIdentity
 
 __all__ = ["LayerTensors", "LayerReloadingInfo"]
 
@@ -45,7 +45,7 @@ class LayerReloadingInfo:
     # can prove none drifted. reset() clearing it each reload is correct -- the
     # arena, not this field, owns the storage, and a fresh snapshot is taken at
     # the next reload's initialize.
-    arena_snapshot: "dict[str, SlotIdentity] | None" = None
+    arena_snapshot: "dict[str, ArenaIdentity] | None" = None
 
     def reset(self):
         self.__init__(  # type: ignore[misc]

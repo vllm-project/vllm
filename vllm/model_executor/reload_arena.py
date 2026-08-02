@@ -15,7 +15,7 @@ arena for the same slot returns the same storage, so every address a graph
 captured stays valid, and every derived value lands back in the storage the
 graph reads.
 
-Two acquisition idioms cover the reproduced failure shapes:
+Three acquisition idioms cover the reproduced failure shapes:
 
 ``get_or_alloc``
     For workspaces and scratch (Marlin ``workspace``, CUTLASS
@@ -35,6 +35,10 @@ Two acquisition idioms cover the reproduced failure shapes:
     from one call, because PWAL re-runs recompute the value and ``put``
     lands it in place.
 
+``get_or_create_object``
+    For runtime wrappers that own graph-visible storage internally: the first
+    call constructs the object and later PWAL rebuilds borrow the same object.
+
 The arena is also the declaration registry: ``snapshot``/``verify`` give the
 reload commit gate an exact inventory of graph-visible runtime storage, with
 no reflective walking (closures, lazy allocations, and config-embedded
@@ -42,10 +46,11 @@ tensors all evade walks -- each escape was reproduced live on H200).
 """
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
+from typing import TypeVar, cast
 
 import torch
 from torch import nn
@@ -53,6 +58,8 @@ from torch import nn
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+T = TypeVar("T")
 
 __all__ = [
     "InitPolicy",
@@ -82,6 +89,14 @@ class SlotIdentity:
     stride: tuple[int, ...]
     dtype: torch.dtype
     device: str
+
+
+@dataclass(frozen=True)
+class ObjectIdentity:
+    value: object
+
+
+ArenaIdentity = SlotIdentity | ObjectIdentity
 
 
 @dataclass(frozen=True)
@@ -150,7 +165,7 @@ def _canonical_device(device) -> torch.device:
 
 
 class ReloadArena:
-    """Stable storage slots owned by one layer.
+    """Stable tensor storage and runtime object slots owned by one layer.
 
     Not an ``nn.Module``: slot tensors must not appear as parameters or
     buffers (they are not checkpoint state and must not be touched by
@@ -160,15 +175,19 @@ class ReloadArena:
     def __init__(self, owner_name: str = "") -> None:
         self._owner_name = owner_name
         self._slots: dict[str, torch.Tensor] = {}
+        self._object_slots: dict[str, object] = {}
 
     def __contains__(self, slot: str) -> bool:
-        return slot in self._slots
+        return slot in self._slots or slot in self._object_slots
 
     def __len__(self) -> int:
-        return len(self._slots)
+        return len(self._slots) + len(self._object_slots)
 
     def slots(self) -> dict[str, torch.Tensor]:
         return dict(self._slots)
+
+    def objects(self) -> dict[str, object]:
+        return dict(self._object_slots)
 
     def _check_spec(self, slot: str, existing: torch.Tensor,
                     shape: tuple[int, ...], dtype: torch.dtype,
@@ -202,6 +221,11 @@ class ReloadArena:
         """
         shape = tuple(shape)
         device = _canonical_device(device)
+        if slot in self._object_slots:
+            raise ValueError(
+                f"ReloadArena[{self._owner_name}] slot '{slot}' is already "
+                "used by a persistent object"
+            )
         existing = self._slots.get(slot)
         if existing is not None:
             self._check_spec(slot, existing, shape, dtype, device)
@@ -224,6 +248,11 @@ class ReloadArena:
         Callers must rebind their attribute to the RETURNED tensor, not to
         ``value``.
         """
+        if slot in self._object_slots:
+            raise ValueError(
+                f"ReloadArena[{self._owner_name}] slot '{slot}' is already "
+                "used by a persistent object"
+            )
         existing = self._slots.get(slot)
         if existing is None:
             stable = value.detach().contiguous().clone()
@@ -235,10 +264,37 @@ class ReloadArena:
         existing.copy_(value.detach())
         return existing
 
-    def snapshot(self) -> dict[str, SlotIdentity]:
-        return {name: _identity(t) for name, t in self._slots.items()}
+    def get_or_create_object(
+        self,
+        slot: str,
+        factory: Callable[[], T],
+    ) -> T:
+        """Return a layer-owned runtime object, creating it once."""
+        if slot in self._slots:
+            raise ValueError(
+                f"ReloadArena[{self._owner_name}] slot '{slot}' is already "
+                "used by a tensor"
+            )
+        if slot in self._object_slots:
+            return cast(T, self._object_slots[slot])
 
-    def verify(self, snap: dict[str, SlotIdentity]) -> list[SlotViolation]:
+        value = factory()
+        self._object_slots[slot] = value
+        return value
+
+    def snapshot(self) -> dict[str, ArenaIdentity]:
+        snapshot: dict[str, ArenaIdentity] = {
+            name: _identity(t) for name, t in self._slots.items()
+        }
+        snapshot.update(
+            {
+                name: ObjectIdentity(value)
+                for name, value in self._object_slots.items()
+            }
+        )
+        return snapshot
+
+    def verify(self, snap: dict[str, ArenaIdentity]) -> list[SlotViolation]:
         """Compare current slots against a snapshot.
 
         New slots since the snapshot are fine (first forward after a cold
@@ -248,6 +304,21 @@ class ReloadArena:
         """
         out: list[SlotViolation] = []
         for name, ident in snap.items():
+            if isinstance(ident, ObjectIdentity):
+                if name not in self._object_slots:
+                    out.append(
+                        SlotViolation(name, "gone", "persistent object vanished")
+                    )
+                elif self._object_slots[name] is not ident.value:
+                    out.append(
+                        SlotViolation(
+                            name,
+                            "moved",
+                            "persistent object identity changed",
+                        )
+                    )
+                continue
+
             cur = self._slots.get(name)
             if cur is None:
                 out.append(
@@ -324,8 +395,8 @@ def current_arena() -> "ReloadArena | None":
 
 
 def snapshot_model_arenas(
-        model: nn.Module) -> dict[str, dict[str, SlotIdentity]]:
-    out: dict[str, dict[str, SlotIdentity]] = {}
+        model: nn.Module) -> dict[str, dict[str, ArenaIdentity]]:
+    out: dict[str, dict[str, ArenaIdentity]] = {}
     for name, module in model.named_modules():
         arena = peek_reload_arena(module)
         if arena is not None and len(arena):
@@ -335,7 +406,7 @@ def snapshot_model_arenas(
 
 def verify_model_arenas(
         model: nn.Module,
-        snaps: dict[str, dict[str, SlotIdentity]]) -> list[str]:
+        snaps: dict[str, dict[str, ArenaIdentity]]) -> list[str]:
     """Flat, human-readable violation list across the whole model."""
     problems: list[str] = []
     modules = dict(model.named_modules())

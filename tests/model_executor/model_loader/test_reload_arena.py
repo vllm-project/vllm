@@ -269,6 +269,46 @@ def test_wna8o8_detached_activation_scales_reuse_arena_storage():
     assert scheme._output_scale.item() == 4.0
 
 
+def test_b12x_experts_rebuild_reuses_arena_object_slot(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
+        FlashInferB12xExperts,
+    )
+
+    arena = ReloadArena("routed_experts")
+    build_calls = []
+
+    def make_experts():
+        experts = FlashInferB12xExperts.__new__(FlashInferB12xExperts)
+        experts._wrapper = None
+        monkeypatch.setattr(
+            experts,
+            "_build_wrapper",
+            lambda: build_calls.append(1) or object(),
+        )
+        return experts
+
+    first = make_experts()
+    first._bind_arena_wrapper(arena)
+    snap = arena.snapshot()
+    rebuilt = make_experts()
+    rebuilt._bind_arena_wrapper(arena)
+
+    assert rebuilt._wrapper is first._wrapper
+    assert rebuilt._wrapper is arena.objects()["flashinfer_b12x.wrapper"]
+    assert len(build_calls) == 1
+    assert arena.verify(snap) == []
+
+    arena._object_slots["flashinfer_b12x.wrapper"] = object()
+    violations = arena.verify(snap)
+    assert len(violations) == 1
+    assert violations[0].kind == "moved"
+
+    del arena._object_slots["flashinfer_b12x.wrapper"]
+    violations = arena.verify(snap)
+    assert len(violations) == 1
+    assert violations[0].kind == "gone"
+
+
 @pytest.mark.parametrize(
     "backend_name", ["FLASHINFER_CUTLASS", "VLLM_CUTLASS"]
 )
@@ -419,6 +459,18 @@ class TestModelHelpers:
         arena._slots["ws"] = torch.empty(4)  # simulate rebind bug
         problems = verify_model_arenas(model, snaps)
         assert len(problems) == 1 and "moved" in problems[0]
+
+    def test_snapshot_verify_object_slot_across_model(self):
+        model = self._model()
+        arena = get_reload_arena(model.layer)
+        arena.get_or_create_object("wrapper", object)
+        snaps = snapshot_model_arenas(model)
+        arena._object_slots["wrapper"] = object()
+
+        problems = verify_model_arenas(model, snaps)
+        assert len(problems) == 1
+        assert "layer" in problems[0] and "wrapper" in problems[0]
+        assert "moved" in problems[0]
 
     def test_peek_does_not_create(self):
         model = self._model()

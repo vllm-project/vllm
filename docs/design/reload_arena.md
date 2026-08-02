@@ -55,6 +55,7 @@ Examples include:
 - quantization scales or transformed values derived from loaded weights;
 - tensors stored in transient kernel, expert, or quantization objects;
 - buffers allocated lazily on the first forward and reused by later forwards.
+- runtime wrappers that own private graph-visible storage internally.
 
 The arena does not make an arbitrary tensor safe merely by retaining it. The
 consumer must use the tensor returned by the arena, and every rebuild path
@@ -481,6 +482,67 @@ opened during construction/PWAL and is normally absent during inference.
 `arena_scope` uses a `ContextVar`, so nested construction restores the prior
 scope and concurrent contexts do not share a process-global mutable pointer.
 
+### Third-party wrappers with private graph storage
+
+Some runtime objects allocate graph-visible workspaces internally and do not
+expose those tensors for `put()` or `get_or_alloc()`. For these narrowly scoped
+runtime owners, the arena provides an object slot:
+
+```python
+rebuilt_backend._wrapper = arena.get_or_create_object(
+    "backend.wrapper", build_wrapper
+)
+```
+
+The first acquisition calls the factory and stores the result. Later
+acquisitions return the same object without calling the factory again. Because
+the arena belongs to the persistent layer, transient kernels or experts can be
+rebuilt while continuing to borrow the original wrapper. Any private workspace
+whose lifetime matches the wrapper's lifetime remains stable.
+
+`FlashInferB12xExperts` uses this pattern for `B12xMoEWrapper`. The flow follows
+the ownership fix demonstrated and validated on SM120 in
+[vLLM PR #50538](https://github.com/vllm-project/vllm/pull/50538): create the
+wrapper during the first PWAL, retain it on the persistent layer side, and bind
+every rebuilt experts object to the retained wrapper. This implementation
+stores it in the routed-experts arena as `flashinfer_b12x.wrapper`. Later PWAL
+passes reacquire the same wrapper, preserving its private routing workspaces
+and output buffer. The wrapper's tensor arguments are protected separately by
+parameter copy-back or arena tensor slots.
+
+Object slots deliberately do not accept a device or construction spec. They
+follow the same in-place reload boundary as the owning layer: architecture,
+backend, dtype, and device cannot change during a legal reload. For B12x, the
+wrapper factory follows FlashInfer's default `device="cuda"`, which resolves to
+the current device already selected for the worker/rank running PWAL.
+
+This pattern is valid only when:
+
+- the wrapper construction spec cannot change during a legal in-place reload;
+- the wrapper does not retain the transient experts object;
+- weight and scale addresses retained by the wrapper are independently stable;
+- the third-party wrapper does not reallocate captured internal storage while
+  the object remains alive.
+
+Object slots participate in the same snapshot and verification gate as tensor
+slots. A snapshot retains the original Python object, and verification reports:
+
+| Violation | Object-slot meaning |
+|---|---|
+| `moved` | the slot now refers to a different Python object |
+| `gone` | the object slot disappeared |
+
+Holding the original object in the snapshot prevents Python identity reuse
+from hiding a replacement during the reload window. New object slots created
+after a snapshot remain legal, matching the existing rule for lazy tensor
+slots. Verification proves the outer wrapper identity, not that third-party
+code avoided reallocating storage internally while keeping the same wrapper.
+
+Object slots are not a general cache for arbitrary modules or PWAL objects. If
+any construction input can change, the backend must use a separate explicit
+check and require a cold rebuild rather than silently reusing an incompatible
+object.
+
 ## Slot contract
 
 A slot name identifies one stable storage specification for the lifetime of
@@ -603,8 +665,9 @@ the returned arena tensor into the rebuilt object.
 ### Opaque external allocations
 
 Storage allocated internally by a third-party extension cannot be stabilized
-unless its allocation path accepts or reuses arena-owned tensors. Reflective
-walking can detect only some such state and cannot transfer ownership.
+unless its allocation path accepts arena-owned tensors or the object owning
+that storage can itself persist on the layer. Reflective walking can detect
+only some such state and cannot transfer ownership.
 
 ### Value correctness
 
