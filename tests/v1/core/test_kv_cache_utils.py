@@ -234,12 +234,43 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
     worker_ceilings = [2 << 20, 3 << 20]
 
     configs = get_kv_cache_configs(
-        _make_sparse_mla_config(), worker_specs, worker_ceilings
+        _make_sparse_mla_config(chunked_prefill=False),
+        worker_specs,
+        worker_ceilings,
+    )
+    chunked_configs = get_kv_cache_configs(
+        _make_sparse_mla_config(chunked_prefill=True),
+        worker_specs,
+        worker_ceilings,
     )
 
     plan0 = configs[0].sparse_mla_offload_plan
     plan1 = configs[1].sparse_mla_offload_plan
+    chunked_plan0 = chunked_configs[0].sparse_mla_offload_plan
+    chunked_plan1 = chunked_configs[1].sparse_mla_offload_plan
     assert plan0 is not None and plan1 is not None
+    assert chunked_plan0 is not None and chunked_plan1 is not None
+    assert [config.num_blocks for config in configs] == [
+        config.num_blocks for config in chunked_configs
+    ]
+    assert plan0 == chunked_plan0
+    assert plan1 == chunked_plan1
+    assert plan0.host_bytes_total == chunked_plan0.host_bytes_total
+    assert plan0.fixed_offload_hbm_bytes_per_tp_rank == (
+        chunked_plan0.fixed_offload_hbm_bytes_per_tp_rank
+    )
+    assert plan0.effective_available_hbm_bytes_per_tp_rank == (
+        chunked_plan0.effective_available_hbm_bytes_per_tp_rank
+    )
+    assert [
+        (tensor.size, tensor.shared_by, tensor.offset, tensor.block_stride)
+        for tensor in configs[0].kv_cache_tensors
+        if tensor.shared_by == ["indexer.0"]
+    ] == [
+        (tensor.size, tensor.shared_by, tensor.offset, tensor.block_stride)
+        for tensor in chunked_configs[0].kv_cache_tensors
+        if tensor.shared_by == ["indexer.0"]
+    ]
     assert configs[0].num_blocks == configs[1].num_blocks == 4096
     assert plan0.main_layer_names == ("main.0", "main.1")
     assert plan0.indexer_layer_names == ("indexer.0",)
@@ -382,7 +413,6 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
         ),
         (_make_sparse_mla_config(use_v2_model_runner=False), "Model Runner V2"),
         (_make_sparse_mla_config(prefix_caching=True), "prefix caching"),
-        (_make_sparse_mla_config(chunked_prefill=True), "chunked prefill"),
         (_make_sparse_mla_config(pipeline_parallel_size=2), "PP, PCP, or DCP"),
         (_make_sparse_mla_config(prefill_context_parallel_size=2), "PP, PCP, or DCP"),
         (_make_sparse_mla_config(decode_context_parallel_size=2), "PP, PCP, or DCP"),
