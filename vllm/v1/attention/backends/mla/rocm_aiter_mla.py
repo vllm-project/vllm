@@ -808,26 +808,53 @@ class AiterMLAHelper:
         return max(num_heads, AiterMLAHelper._AITER_MIN_MLA_HEADS)
 
     @staticmethod
+    def _whole_head_repeats(num_heads: int) -> int | None:
+        """Repeat factor that expands ``num_heads`` to exactly 16, else None."""
+        min_heads = AiterMLAHelper._AITER_MIN_MLA_HEADS
+        repeats = min_heads // num_heads
+        return repeats if repeats * num_heads == min_heads else None
+
+    @staticmethod
     def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        return (
-            q
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else q.repeat_interleave(
-                AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, dim=1
-            )
+        if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return q
+        repeats = AiterMLAHelper._whole_head_repeats(num_heads)
+        if repeats is not None:
+            return q.repeat_interleave(repeats, dim=1)
+        # Head counts that do not divide 16 (e.g. 12 with TP=8) cannot be
+        # expanded by whole repeats. Pad the head dim with zero queries and
+        # drop the filler heads from the output instead.
+        return torch.nn.functional.pad(
+            q, (0, 0, 0, AiterMLAHelper._AITER_MIN_MLA_HEADS - num_heads)
         )
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        return (
-            o
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
-        )
+        if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return o
+        repeats = AiterMLAHelper._whole_head_repeats(num_heads)
+        if repeats is not None:
+            return o[:, ::repeats, :]
+        return o[:, :num_heads, :]
+
+    @staticmethod
+    def gluon_decode_available() -> bool:
+        """Whether AITER's small-head Gluon MLA kernels run on this device.
+
+        ``mla_gluon`` asserts CDNA4. Elsewhere small-head decode pads to 16
+        heads and uses the regular AITER decode kernel instead.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
 
     @staticmethod
     def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
-        return num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS and max_qo_len == 1
+        return (
+            num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
+            and max_qo_len == 1
+            and AiterMLAHelper.gluon_decode_available()
+        )
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -1116,6 +1143,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if (
             self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
             and int(decode.max_qo_len) > 1
+            and AiterMLAHelper.gluon_decode_available()
         ):
             qlen = int(decode.max_qo_len)
             if type(q) is tuple:
