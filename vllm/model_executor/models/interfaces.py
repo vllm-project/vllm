@@ -11,6 +11,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -69,6 +70,16 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class DiarizedTranscriptionSegment:
+    """A timestamped, speaker-attributed segment produced by an ASR model."""
+
+    start: float
+    end: float
+    speaker: str
+    text: str
 
 
 class StreamingTranscriptionPostProcessor:
@@ -1133,6 +1144,9 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
+    supports_diarized_transcription: ClassVar[bool] = False
+    """Enables the ``diarized_json`` response format for the model."""
+
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step
@@ -1237,6 +1251,15 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
+
+    @classmethod
+    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+        """Parse the model-specific diarized transcript format.
+
+        Only models that set ``supports_diarized_transcription`` must override
+        this method.
+        """
+        raise NotImplementedError
 
     @classmethod
     def get_streaming_post_processor_cls(
@@ -1384,7 +1407,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1673,13 +1696,12 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1691,7 +1713,9 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+        scatter_output_slices(
+            outputs["default"], indices, per_item_out_tokens, dest, clone
+        )
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

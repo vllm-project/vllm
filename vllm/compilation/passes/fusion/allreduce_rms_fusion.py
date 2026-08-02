@@ -119,6 +119,11 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
         8: 2,  # 2MB
         16: 64,  # 64MB (mnnvl multi-node)
     },
+    107: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 2,  # 2MB
+    },
 }
 
 # Max size of the input tensor per world size per device capability
@@ -136,6 +141,11 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
         8: 1,  # 1MB
     },
     103: {
+        2: 32,  # 32MB
+        4: 4,  # 4MB
+        8: 2,  # 2MB
+    },
+    107: {
         2: 32,  # 32MB
         4: 4,  # 4MB
         8: 2,  # 2MB
@@ -1416,8 +1426,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     The trailing FP8 group-quant is matched via ``MatcherQuantFP8`` (consistent
     with the sibling patterns above), which traces both ``QuantFP8.forward_hip``
     and ``forward_native`` paths and so matches whichever op the call site
-    lowers to (``vllm.triton_per_token_group_quant_fp8`` or
-    ``vllm.rocm_aiter_group_fp8_quant``).
+    lowers to (``vllm.rocm_aiter_group_fp8_quant``).
     """
 
     def __init__(
