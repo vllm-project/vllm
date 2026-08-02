@@ -158,7 +158,15 @@ def test_dspark_triton_attention_matches_reference(batch_size):
         scale,
     )
 
-    torch.testing.assert_close(actual, expected, atol=5e-3, rtol=5e-3)
+    # atol must exceed one bf16 ULP at the output magnitude, or the assertion
+    # demands that two different reduction orders round identically. Outputs
+    # here peak at |2.94|, where the bf16 spacing is 2**-6 = 0.015625 -- three
+    # times the old atol=5e-3, so the test could only ever pass by luck. It did
+    # not: exactly one element out of 983,040 differed, by exactly 1.00 ULP.
+    # Measured across the whole tensor, ZERO elements exceed 1 ULP, i.e. the
+    # Triton kernel matches the reference as closely as bf16 permits. 2e-2
+    # leaves 1.28 ULP of headroom, so a genuine 2-ULP error still fails.
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=5e-3)
 
 
 def test_dspark_markov_sampling_chains_sampled_tokens():
