@@ -775,5 +775,8 @@ def test_placeholder_underflow_graceful_stop():
 
     scheduler.update_from_output(output, model_runner_output)
 
-    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.status == RequestStatus.FINISHED_ERROR
     assert request.num_output_placeholders == 0
+    assert request.resumable is False
+    assert request.request_id in scheduler.finished_req_ids
+    assert request.request_id not in scheduler.requests
