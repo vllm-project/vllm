@@ -91,7 +91,7 @@ def verify_uva_coherence() -> None:
     probe = torch.zeros(8, dtype=torch.int32, device="cpu", pin_memory=True)
     gpu_view = get_accelerator_view_from_cpu_tensor(probe)
 
-    pattern = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32)
+    pattern = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32, device="cpu")
     probe[:] = pattern
 
     readback = gpu_view.cpu()

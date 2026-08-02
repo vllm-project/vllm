@@ -70,7 +70,9 @@ class AsyncScheduler(Scheduler):
                     len(new_token_ids),
                 )
                 request.num_output_placeholders = 0
-                request.status = RequestStatus.FINISHED_STOPPED
+                request.status = RequestStatus.FINISHED_ERROR
+                request.resumable = False
+                stopped = True
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:

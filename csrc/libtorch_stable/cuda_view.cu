@@ -1,4 +1,5 @@
 #include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/csrc/stable/device.h>
@@ -34,6 +35,12 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
         device_ptr, cpu_tensor.sizes(), cpu_tensor.strides(), cuda_dev, dtype,
         [base = cpu_tensor](void*) {});  // keep cpu tensor alive
   }
+
+  // Only cudaErrorInvalidValue indicates the pointer is not host-registered.
+  // Any other error is an unexpected runtime failure that should not be masked.
+  STD_TORCH_CHECK(err == cudaErrorInvalidValue,
+                  "cudaHostGetDevicePointer failed with unexpected error: ",
+                  cudaGetErrorString(err));
 
   // Zero-copy failed -- the memory is truly not pinned/registered.
   // Allocate a new pinned+mapped buffer and copy the data once.

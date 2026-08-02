@@ -71,7 +71,9 @@ def test_write_after_map_coherence(device):
     cpu_tensor = torch.zeros(8, dtype=torch.int32, device="cpu", pin_memory=True)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
 
-    pattern = torch.tensor([10, 20, 30, 40, 50, 60, 70, 80], dtype=torch.int32)
+    pattern = torch.tensor(
+        [10, 20, 30, 40, 50, 60, 70, 80], dtype=torch.int32, device="cpu"
+    )
     cpu_tensor[:] = pattern
 
     readback = gpu_view.cpu()
