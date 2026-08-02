@@ -505,130 +505,144 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return block_ids
 
     def _xfer_blocks_for_req(self, req_id: str, meta: ReqMeta):
-        """Issue WRITE transfers to one or more remote TP ranks."""
+        """Issue WRITE transfers to one or more remote TP ranks.
+
+        Every rank resolved here owes D exactly one notif. The completion rides
+        along with the WRITE, so a rank whose WRITE never got posted is reported
+        instead -- otherwise D counts toward a total it can never reach.
+        """
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        write_ranks = self._resolve_write_ranks(req_id, engine_id)
 
-        handles: list[int] = []
-        # One notif per (producer rank -> consumer rank) edge, riding on the
-        # WRITE: unposted ranks must be reported, unresolvable ones must not
-        # (a spurious notif finishes D's count while siblings are in flight).
-        write_ranks: list[int] = []
-        posted_ranks: set[int] = set()
+        posted: dict[int, TransferHandle] = {}
         try:
-            plan = self.tp_mappings[engine_id]
-            remote_info = self.transfer_topo.get_engine_info(engine_id)
-            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
-
-            # Resolved before anything that can raise, so the ``finally`` still
-            # knows which edges it owes a report.
-            # MLA latent is replicated across D's TP ranks: the tp-mapping
-            # collapses it to one rank (fine for reads), but push must WRITE
-            # every D rank or the rest decode stale KV. For hybrid MLA+SSM the
-            # sharded SSM state already targets every covered D rank, so only
-            # the attention groups need widening; pure MLA writes to all
-            # handshaked ranks (only the dst differs per rank).
-            replicate_attn = self.use_mla and tp_ratio < 0
-            if replicate_attn and not self._has_mamba:
-                write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
-                assert len(plan.all_source_ranks) == 1
-            else:
-                write_ranks = list(plan.all_source_ranks)
-
-            if not write_ranks:
-                # ``dst_xfer_side_handles`` is a defaultdict, so an engine with
-                # no handshaked ranks yields an empty set rather than raising.
-                logger.error(
-                    "No remote ranks to push request %s to on engine %s; its "
-                    "consumer will hold its blocks until it is aborted",
-                    req_id,
-                    engine_id,
-                )
-
-            # Expand D's logical IDs using the ratio learned during the
-            # NIXL handshake. ``meta`` is freshly built by
-            # ``_do_start_push_kv`` so mutating it here is safe.
-            meta.remote.block_ids = self._logical_to_kernel_block_ids(
-                meta.remote.block_ids,
-                remote_info.remote_physical_blocks_per_logical,
-            )
-            remote_block_ids = meta.remote.block_ids
-            local_block_ids = meta.local_physical_block_ids
-            num_groups = len(local_block_ids)
-
-            def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
-                return [
-                    list(block_ids[g])
-                    if (
-                        replicate_attn and _is_attention_spec(self._group_spec_types[g])
-                    )
-                    or rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ]
-
-            read_specs = [
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=group_ids(local_block_ids, rank),
-                    remote_block_ids=group_ids(remote_block_ids, rank),
-                )
-                for rank in write_ranks
-            ]
-
-            for i, spec in enumerate(read_specs):
-                remote_block_size = remote_info.remote_block_size
-                logger.debug(
-                    "Remote agent %s available, calling _xfer_blocks"
-                    " on remote rank %s with remote block size %s for req %s",
-                    engine_id,
-                    spec.remote_rank,
-                    remote_block_size,
-                    req_id,
-                )
-                if tp_ratio < 0 and (
-                    not self.use_mla or len(plan.all_source_ranks) > 1
-                ):
-                    # Multiple targets: write each rank its chunk of local memory.
-                    # Hybrid MLA+SSM also lands here: its split handles replicate
-                    # the attention descriptors and chunk only the SSM state.
-                    split_key = (tp_ratio, remote_block_size)
-                    local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[
-                        split_key
-                    ][i]
-                else:
-                    local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                        remote_block_size
-                    ]
-
-                remote_xfer_side_handle = self.dst_xfer_side_handles[engine_id][
-                    spec.remote_rank
-                ]
-
-                handle = self._xfer_blocks(
-                    read_spec=spec,
-                    request_id=req_id,
-                    dst_engine_id=engine_id,
-                    remote_request_id=meta.remote.request_id,
-                    local_xfer_side_handle=local_xfer_side_handle,
-                    remote_xfer_side_handle=remote_xfer_side_handle,
-                )
-                if handle is not None:
-                    handles.append(handle)
-                    posted_ranks.add(spec.remote_rank)
+            self._post_writes(req_id, meta, write_ranks, posted)
         finally:
             # Publish all the request's WRITE handles in one locked update: a
             # partial set would let ``_pop_done_transfers`` finish the request
             # early, then double-report it as the remaining writes land.
-            if handles:
+            if posted:
                 with self._sending_transfers_lock:
-                    self._sending_transfers[req_id].extend(handles)
+                    self._sending_transfers[req_id].extend(posted.values())
 
-            failed_ranks = [r for r in write_ranks if r not in posted_ranks]
+            failed_ranks = [rank for rank in write_ranks if rank not in posted]
             if failed_ranks:
                 self._notify_push_failure(
                     req_id, engine_id, meta.remote.request_id, failed_ranks
                 )
+
+    def _resolve_write_ranks(self, req_id: str, engine_id: str) -> list[int]:
+        """The remote TP ranks this rank must WRITE *req_id* to."""
+        assert self.transfer_topo is not None
+        plan = self.tp_mappings[engine_id]
+        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+
+        # MLA latent is replicated across D's TP ranks: the tp-mapping
+        # collapses it to one rank (fine for reads), but push must WRITE every
+        # D rank or the rest decode stale KV. For hybrid MLA+SSM the sharded
+        # SSM state already targets every covered D rank, so only the attention
+        # groups need widening; pure MLA writes to all handshaked ranks (only
+        # the dst differs per rank).
+        replicate_attn = self.use_mla and tp_ratio < 0
+        if replicate_attn and not self._has_mamba:
+            assert len(plan.all_source_ranks) == 1
+            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+        else:
+            write_ranks = list(plan.all_source_ranks)
+
+        if not write_ranks:
+            # ``dst_xfer_side_handles`` is a defaultdict, so an engine with no
+            # handshaked ranks yields an empty set rather than raising. There
+            # is nothing to report to either, so D falls back to its lease.
+            logger.error(
+                "No remote ranks to push request %s to on engine %s; its "
+                "consumer will hold its blocks until it is aborted",
+                req_id,
+                engine_id,
+            )
+        return write_ranks
+
+    def _post_writes(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+        write_ranks: list[int],
+        posted: dict[int, TransferHandle],
+    ) -> None:
+        """Submit one WRITE per rank in *write_ranks*, recording those posted."""
+        assert meta.remote is not None and self.transfer_topo is not None
+        engine_id = meta.remote.engine_id
+        plan = self.tp_mappings[engine_id]
+        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        replicate_attn = self.use_mla and tp_ratio < 0
+
+        # Expand D's logical IDs using the ratio learned during the
+        # NIXL handshake. ``meta`` is freshly built by
+        # ``_do_start_push_kv`` so mutating it here is safe.
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
+            meta.remote.block_ids,
+            remote_info.remote_physical_blocks_per_logical,
+        )
+        remote_block_ids = meta.remote.block_ids
+        local_block_ids = meta.local_physical_block_ids
+        num_groups = len(local_block_ids)
+
+        def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
+            return [
+                list(block_ids[g])
+                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                or rank in plan.source_ranks_per_group[g]
+                else []
+                for g in range(num_groups)
+            ]
+
+        read_specs = [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=group_ids(local_block_ids, rank),
+                remote_block_ids=group_ids(remote_block_ids, rank),
+            )
+            for rank in write_ranks
+        ]
+
+        for i, spec in enumerate(read_specs):
+            remote_block_size = remote_info.remote_block_size
+            logger.debug(
+                "Remote agent %s available, calling _xfer_blocks"
+                " on remote rank %s with remote block size %s for req %s",
+                engine_id,
+                spec.remote_rank,
+                remote_block_size,
+                req_id,
+            )
+            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+                # Multiple targets: write each rank its chunk of local memory.
+                # Hybrid MLA+SSM also lands here: its split handles replicate
+                # the attention descriptors and chunk only the SSM state.
+                split_key = (tp_ratio, remote_block_size)
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
+            else:
+                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
+                    remote_block_size
+                ]
+
+            remote_xfer_side_handle = self.dst_xfer_side_handles[engine_id][
+                spec.remote_rank
+            ]
+
+            handle = self._xfer_blocks(
+                read_spec=spec,
+                request_id=req_id,
+                dst_engine_id=engine_id,
+                remote_request_id=meta.remote.request_id,
+                local_xfer_side_handle=local_xfer_side_handle,
+                remote_xfer_side_handle=remote_xfer_side_handle,
+            )
+            if handle is not None:
+                posted[spec.remote_rank] = handle
 
     def _notify_push_failure(
         self,
@@ -646,10 +660,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         notif_msg = (
             PUSH_FAIL_NOTIF_PREFIX + f"{remote_request_id}:{self.world_size}".encode()
         )
+        with self._handshake_lock:
+            agents = dict(self._remote_agents.get(engine_id) or {})
         for rank in failed_ranks:
-            with self._handshake_lock:
-                # Push targets always handshake with pp_size=1.
-                agent_name = (self._remote_agents.get(engine_id) or {}).get((0, rank))
+            # Push targets always handshake with pp_size=1.
+            agent_name = agents.get((0, rank))
             if agent_name is None:
                 logger.error(
                     "No agent for rank %d of engine %s; cannot report the failed "
