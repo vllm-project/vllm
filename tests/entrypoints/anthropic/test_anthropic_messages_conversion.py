@@ -16,6 +16,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
@@ -1408,3 +1409,14 @@ class TestCacheSalt:
         request = _make_request([{"role": "user", "content": "Hello"}])
         result = _convert(request)
         assert result.cache_salt is None
+
+    def test_empty_cache_salt_rejected_at_request_validation(self):
+        """An empty cache_salt must fail validation, not reach conversion.
+
+        ChatCompletionRequest rejects empty salts, but that check runs during
+        conversion and surfaces as a 500. Constraining the field here rejects
+        the request up front (422) and publishes minLength in the OpenAPI
+        schema, so schema-driven clients never generate an empty salt.
+        """
+        with pytest.raises(ValidationError):
+            _make_request([{"role": "user", "content": "Hello"}], cache_salt="")
