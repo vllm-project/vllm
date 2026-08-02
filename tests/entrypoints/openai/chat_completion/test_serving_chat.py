@@ -27,6 +27,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
+    _engine_bound_chat_template_kwargs,
     _get_mm_token_counts,
     _make_prompt_tokens_details,
 )
@@ -848,6 +849,89 @@ def test_mm_prompt_tokens_details():
     assert details.cached_tokens == 3
     assert details.created_cache_tokens == 0
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+class TestEngineBoundChatTemplateKwargs:
+    """Regression tests for the frontend→engine-core msgpack boundary.
+
+    ``EngineCoreRequest.reasoning_parser_kwargs`` is a
+    :class:`msgspec.Struct` field, so its ``chat_template_kwargs`` payload
+    is walked by :class:`vllm.v1.serial_utils.MsgpackEncoder` on its way to
+    the engine core over ZMQ. Frontends stash request-scoped, in-process-
+    only state in ``chat_template_kwargs`` under leading-underscore keys
+    (see :data:`vllm.renderers.cohere.POSITION_TO_SOURCE_KEY` /
+    :data:`vllm.renderers.cohere.MESSAGES_CITATIONS_KEY`, which carry
+    Pydantic values that msgpack can't encode).
+    ``_engine_bound_chat_template_kwargs`` drops those keys so the shipped
+    dict is msgpack-safe; the API-server-side parser instance built up-
+    stream still receives the full, unfiltered dict.
+    """
+
+    def test_public_keys_pass_through(self):
+        kwargs = {
+            "documents": [{"id": "d1", "text": "hi"}],
+            "citation_options": {"mode": "ACCURATE"},
+            "strict_tools": True,
+        }
+        assert _engine_bound_chat_template_kwargs(kwargs) == kwargs
+
+    def test_leading_underscore_keys_dropped(self):
+        """Convention: any key starting with ``_`` is API-server-local."""
+        kwargs = {
+            "documents": [{"id": "d1"}],
+            "_position_to_source": {(0, 0): object()},
+            "_messages_citations": {0: [{}]},
+        }
+        assert _engine_bound_chat_template_kwargs(kwargs) == {
+            "documents": [{"id": "d1"}]
+        }
+
+    def test_original_dict_not_mutated(self):
+        """The frontend still needs the full dict for the in-process parser
+        instance already constructed with it; filter must not mutate."""
+        kwargs: dict[str, Any] = {"public": 1, "_secret": object()}
+        _engine_bound_chat_template_kwargs(kwargs)
+        assert set(kwargs) == {"public", "_secret"}
+
+    def test_empty_dict(self):
+        assert _engine_bound_chat_template_kwargs({}) == {}
+
+    def test_filtered_dict_is_msgpack_encodable(self):
+        """End-to-end check: the shipped dict must survive vLLM's msgpack
+        encoder even when the input carries a Pydantic value under an
+        internal key. Encodes only the filtered dict (not the raw one) —
+        the raw dict is expected to raise; that's why the helper exists.
+        """
+        from pydantic import BaseModel
+
+        from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+        class _NotMsgpackNative(BaseModel):
+            id: str
+            payload: dict[str, Any]
+
+        raw = {
+            "documents": [{"id": "d1"}],
+            "_position_to_source": {
+                (0, 0): _NotMsgpackNative(id="d1", payload={"text": "hi"}),
+            },
+        }
+        filtered = _engine_bound_chat_template_kwargs(raw)
+        # Sanity: filtering actually removed the offending key.
+        assert "_position_to_source" not in filtered
+
+        encoder = MsgpackEncoder()
+        decoder = MsgpackDecoder(dict[str, Any])
+        bufs = encoder.encode(filtered)
+        round_tripped = decoder.decode(bufs[0])
+        assert round_tripped == filtered
+
+        # Guard against silent regression on the raw side: if the msgpack
+        # encoder ever grows native Pydantic support this assertion will
+        # start failing and we should re-evaluate whether the helper is
+        # still needed.
+        with pytest.raises(TypeError, match="is not serializable"):
+            encoder.encode(raw)
 
 
 @pytest.mark.asyncio

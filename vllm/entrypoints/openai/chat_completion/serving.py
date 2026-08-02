@@ -85,6 +85,27 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     }
 
 
+def _engine_bound_chat_template_kwargs(
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Filter ``chat_template_kwargs`` to entries safe to msgpack-encode.
+
+    ``reasoning_parser_kwargs`` on :class:`EngineCoreRequest` is a
+    :class:`msgspec.Struct` field, so everything under it crosses the
+    frontend→engine-core ZMQ boundary through msgpack. Frontends may
+    stash request-scoped, in-process-only state in
+    ``chat_template_kwargs`` under leading-underscore keys (e.g.
+    :data:`vllm.renderers.cohere.POSITION_TO_SOURCE_KEY` and
+    :data:`vllm.renderers.cohere.MESSAGES_CITATIONS_KEY`, which carry
+    Pydantic ``CitationSource`` values that msgpack can't natively
+    encode). Those keys exist only to hand data to the API-server-side
+    parser instance already constructed above with the full dict; the
+    engine-core-side parser (used for structured-output reasoning-end
+    gating) doesn't consult them, so filter them out.
+    """
+    return {k: v for k, v in chat_template_kwargs.items() if not k.startswith("_")}
+
+
 def _make_prompt_tokens_details(
     enable_prompt_tokens_details: bool,
     num_cached_tokens: int | None,
@@ -353,7 +374,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
-                        "chat_template_kwargs": chat_template_kwargs,
+                        "chat_template_kwargs": _engine_bound_chat_template_kwargs(
+                            chat_template_kwargs
+                        ),
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
