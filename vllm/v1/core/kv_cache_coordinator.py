@@ -302,18 +302,23 @@ class KVCacheCoordinator(ABC):
         Pop the request's bookkeeping from all single-type managers and
         return its blocks without returning them to the block pool. The
         caller must eventually pass the returned blocks to
-        `block_pool.free_blocks`, freeing them in reverse order (so that
-        tail blocks are evicted first).
+        `block_pool.free_blocks` as-is: they are already ordered so that
+        tail blocks are evicted first, within each KV cache group.
 
         Args:
             request_id: The request ID.
 
         Returns:
-            The request's blocks in allocation order.
+            The request's blocks in eviction order (each group's blocks
+            reversed, then concatenated group by group).
         """
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
-            blocks.extend(manager.pop_blocks_for_free(request_id))
+            # Reverse within each group so the concatenation is already in
+            # eviction order, matching `free()`, which frees each group in its
+            # own reversed `free_blocks()` call. Reversing the flat list
+            # instead would emit whole groups in the wrong order.
+            blocks.extend(reversed(manager.pop_blocks_for_free(request_id)))
         return blocks
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
