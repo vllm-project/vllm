@@ -51,3 +51,11 @@ steps:
     - pytest -v -s -x lora/test_gptoss_tp.py
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
     - pytest -v -s -x lora/test_mixtral.py
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
