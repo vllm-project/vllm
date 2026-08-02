@@ -162,9 +162,8 @@ def rocm_unquantized_gemm_impl(
     )
 
     if use_skinny_reduce_counting:
-        # Skinny GEMMs index operands linearly and do not accept strides.
-        if not x.is_contiguous():
-            x = x.contiguous()
+        if x.stride() != (x.size(1), 1):
+            x = x.clone(memory_format=torch.contiguous_format)
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
     # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
@@ -187,9 +186,9 @@ def rocm_unquantized_gemm_impl(
 
     if use_skinny:
         x_view = x.reshape(-1, x.size(-1))
-        if not x_view.is_contiguous():
-            x_view = x_view.contiguous()
         if m > 8 and 0 < n <= 5:
+            if x_view.stride() != (x_view.size(1), 1):
+                x_view = x_view.clone(memory_format=torch.contiguous_format)
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])

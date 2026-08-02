@@ -17,10 +17,13 @@ if current_platform.is_cuda():
 from vllm.model_executor.layers import utils
 
 
-def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
-    x = torch.randn(2, 128, dtype=torch.float16)[:, ::2]
-    assert not x.is_contiguous()
-    weight = torch.randn(128, 64, dtype=torch.float16)
+@pytest.mark.parametrize("num_tokens", [1, 2])
+def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, num_tokens):
+    x = torch.randn(num_tokens, 256, dtype=torch.float16)[:, 128:]
+    assert x.stride() == (256, 1)
+    if num_tokens == 1:
+        assert x.is_contiguous()
+    weight = torch.randn(128, 128, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
@@ -39,7 +42,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     ref = torch.nn.functional.linear(x, weight, None)
 
     wvsplitk_mock.assert_called_once()
-    assert wvsplitk_mock.call_args.args[1].is_contiguous()
+    assert wvsplitk_mock.call_args.args[1].stride() == (128, 1)
     llmm1_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
