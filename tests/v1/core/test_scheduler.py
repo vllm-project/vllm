@@ -5921,6 +5921,15 @@ def _snapshot_engine_outputs(
                 output.pooling_output,
                 output.routed_experts,
                 output.num_nans_in_logits,
+                output.kv_transfer_params,
+                output.ec_transfer_params,
+                None
+                if output.prefill_stats is None
+                else (
+                    output.prefill_stats.num_prompt_tokens,
+                    output.prefill_stats.num_cached_tokens,
+                    output.prefill_stats.num_cache_creation_tokens,
+                ),
             )
     return snapshots
 

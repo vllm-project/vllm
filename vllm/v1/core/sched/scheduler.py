@@ -1732,7 +1732,9 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         has_pooler_outputs = bool(pooler_outputs)
         has_logprobs = logprobs is not None
-        has_num_nans_in_logits = num_nans_in_logits is not None
+        # The legacy runner always emits a dict, empty when nothing was
+        # computed, so test emptiness rather than None.
+        has_num_nans_in_logits = bool(num_nans_in_logits)
         use_simple_update_global = self._can_use_simple_update_path_global(
             scheduler_output,
             model_runner_output,
@@ -1746,9 +1748,20 @@ class Scheduler(SchedulerInterface):
         num_sampled_tokens_per_step = getattr(self, "num_sampled_tokens_per_step", 1)
         structured_output_manager = self.structured_output_manager
         enable_return_routed_experts = self.enable_return_routed_experts
+        # Every scheduled request must come back in req_ids: the v2 runner
+        # builds req_ids as a permutation of num_scheduled_tokens, and the
+        # legacy runner hard-indexes num_scheduled_tokens by every req_id it
+        # emits. The reverse (a stale req_id no longer scheduled) is expected
+        # and handled by the .get() below. Skipping a scheduled request here
+        # would leak num_in_flight_tokens, which nothing else ever resets, so
+        # keep this cheap check outside the loop rather than trusting it.
+        assert len(model_runner_output.req_ids) >= len(num_scheduled_tokens), (
+            f"model runner returned {len(model_runner_output.req_ids)} requests "
+            f"but {len(num_scheduled_tokens)} were scheduled"
+        )
         for req_index, req_id in enumerate(model_runner_output.req_ids):
             num_tokens_scheduled = num_scheduled_tokens.get(req_id)
-            if not num_tokens_scheduled:
+            if num_tokens_scheduled is None:
                 continue
             assert num_tokens_scheduled > 0
             request = requests.get(req_id)
@@ -1787,6 +1800,14 @@ class Scheduler(SchedulerInterface):
                     request, new_token_ids, is_stale=output_is_stale
                 )
 
+                # Must precede the stop handling below: _free_request drops the
+                # blocks that estimate_cached_tokens reads.
+                prefill_stats = request.take_prefill_stats()
+                if prefill_stats is not None:
+                    prefill_stats.finalize(
+                        self.kv_cache_manager.estimate_cached_tokens(request)
+                    )
+
                 finish_reason = None
                 kv_transfer_params = None
                 ec_transfer_params = None
@@ -1812,7 +1833,7 @@ class Scheduler(SchedulerInterface):
                         pooling_output=None,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
-                        prefill_stats=request.take_prefill_stats(),
+                        prefill_stats=prefill_stats,
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
