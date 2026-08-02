@@ -284,6 +284,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    MLAKVCacheRole,
     get_kv_quant_mode,
 )
 
@@ -1123,6 +1124,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
+            offload_role=(
+                MLAKVCacheRole.MAIN_HOST
+                if vllm_config.attention_config.sparse_mla_kv_offload is not None
+                else MLAKVCacheRole.DEVICE
+            ),
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):

@@ -12,6 +12,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
+import torch
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -28,10 +30,16 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
+    MLAKVCacheRole,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseMLAAllocationManifestEntry,
+    SparseMLAAllocationOwner,
+    SparseMLAAllocationTier,
+    SparseMLAOffloadMemoryPlan,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -2092,6 +2100,386 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _sparse_mla_manifest(
+    *,
+    num_blocks: int,
+    block_size: int,
+    main_layer_count: int,
+    indexer_layer_count: int,
+    main_width: int,
+    indexer_width: int,
+    main_dtype: torch.dtype,
+    indexer_dtype: torch.dtype,
+    max_num_seqs: int,
+    resident_rows: int,
+    topk: int,
+    newest_width: int,
+    request_block_width: int,
+    local_query_heads: int,
+    value_head_dim: int,
+) -> tuple[SparseMLAAllocationManifestEntry, ...]:
+    manager = SparseMLAAllocationOwner.OFFLOAD_MANAGER
+    generic = SparseMLAAllocationOwner.GENERIC_KV_ALLOCATOR
+    host = SparseMLAAllocationTier.HOST_SHARED
+    hbm = SparseMLAAllocationTier.HBM_LOCAL
+
+    def entry(
+        name: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        alignment_bytes: int = 256,
+        allocation_count: int = 1,
+        owner: SparseMLAAllocationOwner = manager,
+        tier: SparseMLAAllocationTier = hbm,
+    ) -> SparseMLAAllocationManifestEntry:
+        return SparseMLAAllocationManifestEntry(
+            name=name,
+            shape=shape,
+            dtype=dtype,
+            alignment_bytes=alignment_bytes,
+            allocation_count=allocation_count,
+            owner=owner,
+            tier=tier,
+        )
+
+    lm = main_layer_count
+    r = max_num_seqs
+    h = resident_rows
+    w = newest_width
+    return (
+        entry(
+            "main_host_kv",
+            (num_blocks, block_size, main_width),
+            main_dtype,
+            alignment_bytes=4096,
+            allocation_count=lm,
+            tier=host,
+        ),
+        entry(
+            "indexer_kv",
+            (num_blocks, block_size, indexer_width),
+            indexer_dtype,
+            allocation_count=indexer_layer_count,
+            owner=generic,
+        ),
+        entry("resident_main_kv", (lm, r, h, main_width), main_dtype),
+        entry("resident_logical_ids", (lm, r, h), torch.int64),
+        entry("resident_last_access", (lm, r, h), torch.int64),
+        entry("resident_generation", (lm, r, h), torch.int64),
+        entry("newest_main_kv", (lm, r, w, main_width), main_dtype),
+        entry("newest_logical_ids", (lm, r, w), torch.int64),
+        entry("newest_generation", (lm, r, w), torch.int64),
+        entry("request_block_ids", (r, request_block_width), torch.int32),
+        entry("request_num_blocks", (r,), torch.int32),
+        entry("request_num_tokens", (r,), torch.int32),
+        entry("request_generation", (r,), torch.int64),
+        entry("request_active", (r,), torch.bool),
+        entry("topk_logical_ids", (r, w, topk), torch.int64),
+        entry("topk_physical_ids", (r, w, topk), torch.int32),
+        entry("topk_hit_mask", (r, w, topk), torch.bool),
+        entry("miss_logical_ids", (r, w, topk), torch.int64),
+        entry("miss_victim_slots", (r, w, topk), torch.int32),
+        entry("miss_counts", (r, w), torch.int32),
+        entry("provisional_slots", (lm, r, w, topk), torch.int32),
+        entry("accepted_counts", (r,), torch.int32),
+        entry("hit_output", (r, w, local_query_heads, value_head_dim), main_dtype),
+        entry("hit_lse", (r, w, local_query_heads), torch.float32),
+        entry("miss_output", (r, w, local_query_heads, value_head_dim), main_dtype),
+        entry("miss_lse", (r, w, local_query_heads), torch.float32),
+        entry("tp_fence_token", (1,), torch.int32),
+    )
+
+
+def _sparse_mla_fixed_hbm_bytes(
+    manifest: tuple[SparseMLAAllocationManifestEntry, ...],
+) -> int:
+    return sum(
+        item.allocation_count
+        * round_up(
+            math.prod(item.shape) * get_dtype_size(item.dtype), item.alignment_bytes
+        )
+        for item in manifest
+        if item.owner is SparseMLAAllocationOwner.OFFLOAD_MANAGER
+        and item.tier is SparseMLAAllocationTier.HBM_LOCAL
+    )
+
+
+def _sparse_mla_host_capacity(
+    host_pool_bytes: int,
+    main_layer_count: int,
+    block_size: int,
+    main_bytes_per_token: int,
+) -> int:
+    upper = host_pool_bytes // (main_layer_count * block_size * main_bytes_per_token)
+    lower = 0
+    while lower < upper:
+        candidate = (lower + upper + 1) // 2
+        required = main_layer_count * round_up(
+            candidate * block_size * main_bytes_per_token, 4096
+        )
+        if required <= host_pool_bytes:
+            lower = candidate
+        else:
+            upper = candidate - 1
+    return lower
+
+
+def _get_sparse_mla_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    if len(kv_cache_specs) != len(available_memory) or not kv_cache_specs:
+        raise ValueError(
+            "Sparse MLA offload requires one HBM ceiling for every worker spec."
+        )
+
+    model_config = vllm_config.model_config
+    hf_config = model_config.hf_text_config
+    parallel_config = vllm_config.parallel_config
+    scheduler_config = vllm_config.scheduler_config
+    cache_config = vllm_config.cache_config
+    offload_config = vllm_config.attention_config.sparse_mla_kv_offload
+    assert offload_config is not None
+
+    if getattr(
+        hf_config, "model_type", None
+    ) != "glm_moe_dsa" or model_config.architectures != ["GlmMoeDsaForCausalLM"]:
+        raise ValueError(
+            "Sparse MLA offload supports only GlmMoeDsaForCausalLM with "
+            "model_type='glm_moe_dsa'."
+        )
+    if not vllm_config.use_v2_model_runner:
+        raise ValueError("Sparse MLA offload requires Model Runner V2.")
+    if (
+        parallel_config.data_parallel_size < 1
+        or parallel_config.tensor_parallel_size < 1
+    ):
+        raise ValueError("Sparse MLA offload requires DP and TP sizes of at least one.")
+    if len(kv_cache_specs) != parallel_config.tensor_parallel_size:
+        raise ValueError(
+            "Sparse MLA offload planning requires exactly one TP group's workers."
+        )
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+    ):
+        raise ValueError("Sparse MLA offload does not support PP, PCP, or DCP.")
+    if cache_config.enable_prefix_caching:
+        raise ValueError("Sparse MLA offload does not support prefix caching.")
+    if scheduler_config.enable_chunked_prefill is not False:
+        raise ValueError("Sparse MLA offload requires chunked prefill to be disabled.")
+
+    merged_specs: dict[str, KVCacheSpec] = {}
+    for worker_specs in kv_cache_specs:
+        for layer_name, spec in worker_specs.items():
+            previous = merged_specs.setdefault(layer_name, spec)
+            if previous != spec:
+                raise ValueError(
+                    f"Sparse MLA layer {layer_name!r} differs across TP ranks."
+                )
+    if any(set(worker_specs) != set(merged_specs) for worker_specs in kv_cache_specs):
+        raise ValueError("Sparse MLA layers must be identical across TP ranks.")
+    if not all(isinstance(spec, MLAAttentionSpec) for spec in merged_specs.values()):
+        raise ValueError("Sparse MLA offload requires only MLA KV cache specs.")
+
+    mla_specs = {
+        name: spec
+        for name, spec in merged_specs.items()
+        if isinstance(spec, MLAAttentionSpec)
+    }
+    main_specs = {
+        name: spec
+        for name, spec in mla_specs.items()
+        if spec.offload_role is MLAKVCacheRole.MAIN_HOST
+    }
+    indexer_specs = {
+        name: spec
+        for name, spec in mla_specs.items()
+        if spec.offload_role is MLAKVCacheRole.INDEXER_DEVICE
+    }
+    if len(main_specs) + len(indexer_specs) != len(mla_specs) or not (
+        main_specs and indexer_specs
+    ):
+        raise ValueError(
+            "Sparse MLA offload requires real Main Host and Indexer Device roles."
+        )
+
+    block_sizes = {spec.block_size for spec in mla_specs.values()}
+    main_layouts = {
+        (spec.head_size, spec.dtype, spec.num_kv_heads) for spec in main_specs.values()
+    }
+    indexer_layouts = {
+        (spec.head_size, spec.dtype, spec.num_kv_heads)
+        for spec in indexer_specs.values()
+    }
+    if len(block_sizes) != 1 or len(main_layouts) != 1 or len(indexer_layouts) != 1:
+        raise ValueError(
+            "Sparse MLA offload requires uniform Main and Indexer layouts."
+        )
+    block_size = next(iter(block_sizes))
+    main_width, main_dtype, main_heads = next(iter(main_layouts))
+    indexer_width, indexer_dtype, indexer_heads = next(iter(indexer_layouts))
+    if main_dtype is not torch.bfloat16:
+        raise ValueError("Sparse MLA offload requires a bfloat16 Main layout.")
+    for spec in mla_specs.values():
+        expected_page_size = block_size * spec.head_size * get_dtype_size(spec.dtype)
+        if (
+            spec.kv_quant_mode is not KVQuantMode.NONE
+            or spec.num_kv_heads != 1
+            or spec.real_page_size_bytes != expected_page_size
+        ):
+            raise ValueError(
+                "Sparse MLA offload does not support quantized or non-ordinary layouts."
+            )
+    assert main_heads == indexer_heads == 1
+
+    topk = hf_config.index_topk
+    resident_rows = offload_config.device_buffer_size or 2 * topk
+    if resident_rows < topk:
+        raise ValueError(
+            "device_buffer_size must be greater than or equal to index_topk."
+        )
+    newest_width = 1 + (vllm_config.num_speculative_tokens or 0)
+    local_query_heads = (
+        hf_config.num_attention_heads // parallel_config.tensor_parallel_size
+    )
+    if local_query_heads < 1:
+        raise ValueError("Sparse MLA offload requires at least one local query head.")
+
+    host_pool_bytes = math.floor(offload_config.host_pool_gib * (1 << 30))
+    host_pool_bytes -= host_pool_bytes % 4096
+    if host_pool_bytes == 0:
+        raise ValueError("Sparse MLA Host pool rounds down to zero bytes.")
+    main_bytes_per_token = main_width * get_dtype_size(main_dtype)
+    indexer_bytes_per_block = (
+        len(indexer_specs) * block_size * indexer_width * get_dtype_size(indexer_dtype)
+    )
+    host_capacity = _sparse_mla_host_capacity(
+        host_pool_bytes,
+        len(main_specs),
+        block_size,
+        main_bytes_per_token,
+    )
+
+    def planning_state(
+        max_model_len: int,
+    ) -> tuple[tuple[SparseMLAAllocationManifestEntry, ...], int, int]:
+        request_block_width = cdiv(max_model_len, block_size)
+        manifest = _sparse_mla_manifest(
+            num_blocks=0,
+            block_size=block_size,
+            main_layer_count=len(main_specs),
+            indexer_layer_count=len(indexer_specs),
+            main_width=main_width,
+            indexer_width=indexer_width,
+            main_dtype=main_dtype,
+            indexer_dtype=indexer_dtype,
+            max_num_seqs=scheduler_config.max_num_seqs,
+            resident_rows=resident_rows,
+            topk=topk,
+            newest_width=newest_width,
+            request_block_width=request_block_width,
+            local_query_heads=local_query_heads,
+            value_head_dim=hf_config.v_head_dim,
+        )
+        fixed_bytes = _sparse_mla_fixed_hbm_bytes(manifest)
+        indexer_capacities = [
+            max(0, ceiling - fixed_bytes) // indexer_bytes_per_block
+            for ceiling in available_memory
+        ]
+        return manifest, fixed_bytes, min(host_capacity, *indexer_capacities)
+
+    if model_config.original_max_model_len == -1:
+        lower = 0
+        upper = model_config.max_model_len
+        while lower < upper:
+            candidate = (lower + upper + 1) // 2
+            _, _, candidate_capacity = planning_state(candidate)
+            if candidate <= candidate_capacity * block_size:
+                lower = candidate
+            else:
+                upper = candidate - 1
+        if lower == 0:
+            raise ValueError("Sparse MLA offload cannot fit one model token.")
+        model_config.max_model_len = lower
+
+    _, fixed_bytes, feasible_num_blocks = planning_state(model_config.max_model_len)
+    if any(ceiling < fixed_bytes for ceiling in available_memory):
+        raise ValueError(
+            "Sparse MLA fixed offload HBM reserve exceeds a Worker ceiling."
+        )
+    override = cache_config.num_gpu_blocks_override
+    if override is not None and override > feasible_num_blocks:
+        raise ValueError(
+            "num_gpu_blocks_override exceeds the Sparse MLA feasible block capacity."
+        )
+    num_blocks = feasible_num_blocks if override is None else override
+    if model_config.max_model_len > num_blocks * block_size:
+        raise ValueError(
+            "The model's max seq len exceeds the Sparse MLA split-memory capacity."
+        )
+
+    final_manifest = _sparse_mla_manifest(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        main_layer_count=len(main_specs),
+        indexer_layer_count=len(indexer_specs),
+        main_width=main_width,
+        indexer_width=indexer_width,
+        main_dtype=main_dtype,
+        indexer_dtype=indexer_dtype,
+        max_num_seqs=scheduler_config.max_num_seqs,
+        resident_rows=resident_rows,
+        topk=topk,
+        newest_width=newest_width,
+        request_block_width=cdiv(model_config.max_model_len, block_size),
+        local_query_heads=local_query_heads,
+        value_head_dim=hf_config.v_head_dim,
+    )
+    device_bytes = fixed_bytes + num_blocks * indexer_bytes_per_block
+    main_names = tuple(main_specs)
+    indexer_names = tuple(indexer_specs)
+    configs: list[KVCacheConfig] = []
+    for worker_specs, ceiling in zip(kv_cache_specs, available_memory):
+        logical_group = UniformTypeKVCacheSpecs(
+            block_size=block_size, kv_cache_specs=worker_specs
+        )
+        tensors = [
+            KVCacheTensor(
+                size=spec.real_page_size_bytes * num_blocks,
+                shared_by=[name],
+            )
+            for name, spec in worker_specs.items()
+            if isinstance(spec, MLAAttentionSpec)
+            and spec.offload_role is MLAKVCacheRole.INDEXER_DEVICE
+        ]
+        plan = SparseMLAOffloadMemoryPlan(
+            num_blocks=num_blocks,
+            feasible_num_blocks=feasible_num_blocks,
+            main_layer_names=main_names,
+            indexer_layer_names=indexer_names,
+            host_pool_bytes_per_dp_replica=host_pool_bytes,
+            worker_available_hbm_bytes_per_tp_rank=ceiling,
+            fixed_offload_hbm_bytes_per_tp_rank=fixed_bytes,
+            effective_available_hbm_bytes_per_tp_rank=ceiling - fixed_bytes,
+            device_bytes_per_tp_rank=device_bytes,
+            num_dp_replicas=parallel_config.data_parallel_size,
+            tensor_parallel_size=parallel_config.tensor_parallel_size,
+            manifest=final_manifest,
+        )
+        configs.append(
+            KVCacheConfig(
+                num_blocks=num_blocks,
+                kv_cache_tensors=tensors,
+                kv_cache_groups=[KVCacheGroupSpec(list(worker_specs), logical_group)],
+                sparse_mla_offload_plan=plan,
+            )
+        )
+    return configs
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2126,6 +2514,11 @@ def get_kv_cache_configs(
     Returns:
         The generated KVCacheConfigs for each worker.
     """
+
+    if vllm_config.attention_config.sparse_mla_kv_offload is not None:
+        return _get_sparse_mla_kv_cache_configs(
+            vllm_config, kv_cache_specs, available_memory
+        )
 
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
