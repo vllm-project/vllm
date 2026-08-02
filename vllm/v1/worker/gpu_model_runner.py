@@ -3488,7 +3488,6 @@ class GPUModelRunner(
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
         assert self._moe_model is not None
 
@@ -3498,7 +3497,6 @@ class GPUModelRunner(
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
         )
 
     def _pool(

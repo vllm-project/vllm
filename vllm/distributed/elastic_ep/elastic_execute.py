@@ -454,7 +454,6 @@ class ElasticEPScalingExecutor:
             )
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
-            eplb_state.num_valid_physical_experts = old_num_physical_experts
         else:
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[
@@ -463,7 +462,6 @@ class ElasticEPScalingExecutor:
             eplb_model_state.expert_load_window = eplb_model_state.expert_load_window[
                 :, :, :num_physical_experts
             ]
-            eplb_state.num_valid_physical_experts = num_physical_experts
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
@@ -515,7 +513,9 @@ class ElasticEPScalingExecutor:
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
     def _perform_eplb_reshuffle(
-        self, rank_mapping: dict[int, int] | None = None
+        self,
+        rank_mapping: dict[int, int] | None = None,
+        async_op: bool = False,
     ) -> None:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
@@ -523,21 +523,19 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
 
-        model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
-        eplb_state.is_async = False
+        run_async = async_op and is_async_enabled
+        eplb_state.is_async = run_async
         if rank_mapping is None:
             eplb_state.rearrange()
         else:
             eplb_state.rearrange(rank_mapping=rank_mapping)
-        # NOTE(yongji): check whether we need to synchronize here
-        torch.accelerator.synchronize()
+        if not run_async:
+            # Wait for non-blocking expert resharding copies before continuing
+            # the Elastic EP reconfiguration.
+            torch.accelerator.synchronize()
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
-        eplb_state.num_valid_physical_experts = (
-            eplb_model_state.physical_to_logical_map.shape[1]
-        )
         eplb_state.is_async = is_async_enabled
         # Start the async worker thread if it doesn't exist yet (idempotent).
         # This is needed for new workers after scale-up: they create EplbState
@@ -545,17 +543,20 @@ class ElasticEPScalingExecutor:
         # groups aren't ready yet.
         eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
-            logger.info("[Elastic EP] Expert resharding completed")
+            logger.info(
+                "[Elastic EP] Expert resharding %s",
+                "scheduled" if run_async else "completed",
+            )
 
     def commit_scale_up(self, is_existing_worker: bool) -> None:
         if is_existing_worker:
             self.broadcast_expert_mapping()
             self.switch_and_prepare()
         else:
-            mapping, _, num_valid_experts = self.receive_expert_mapping()
-            self.worker.model_runner.setup_eplb_from_mapping(mapping, num_valid_experts)
-        self._perform_eplb_reshuffle()
+            mapping = self.receive_expert_mapping()
+            self.worker.model_runner.setup_eplb_from_mapping(mapping)
         self.warm_and_capture()
+        self._perform_eplb_reshuffle(async_op=True)
 
     def commit_scale_down(self, new_dp_size: int, removing: bool) -> None:
         self.perform_scale_down_eplb_reshuffle(new_dp_size)
@@ -620,18 +621,16 @@ class ElasticEPScalingExecutor:
         )
         torch.accelerator.synchronize()
 
-    def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
+    def receive_expert_mapping(self) -> torch.Tensor:
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
-        physical_to_logical, num_local_physical_experts, num_logical_experts = (
-            broadcast_expert_mapping(
-                physical_to_logical=None,
-                num_local_physical_experts=None,
-                num_logical_experts=None,
-                dp_group=dp_group,
-                src_rank=0,
-                device=self.worker.device,
-            )
+        physical_to_logical, num_local_physical_experts, _ = broadcast_expert_mapping(
+            physical_to_logical=None,
+            num_local_physical_experts=None,
+            num_logical_experts=None,
+            dp_group=dp_group,
+            src_rank=0,
+            device=self.worker.device,
         )
         num_moe_layers = physical_to_logical.shape[0]
         new_dp_size = get_dp_group().world_size
@@ -643,13 +642,10 @@ class ElasticEPScalingExecutor:
             dtype=physical_to_logical.dtype,
             device=physical_to_logical.device,
         )
-        old_num_physical_experts = physical_to_logical.shape[1]
-        expanded_physical_to_logical[:, :old_num_physical_experts] = physical_to_logical
-        return (
-            expanded_physical_to_logical,
-            num_logical_experts,
-            old_num_physical_experts,
+        expanded_physical_to_logical[:, : physical_to_logical.shape[1]] = (
+            physical_to_logical
         )
+        return expanded_physical_to_logical
 
     def warmup_local_kernels(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
