@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import regex as re
 
 from vllm.entrypoints.openai.engine.protocol import DeltaFunctionCall, DeltaToolCall
+from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -45,6 +46,8 @@ TOOL_SECTION_END = "<|tool_calls_section_end|>"
 TOOL_CALL_START = "<|tool_call_begin|>"
 TOOL_CALL_END = "<|tool_call_end|>"
 TOOL_ARG_START = "<|tool_call_argument_begin|>"
+
+logger = init_logger(__name__)
 
 _TOOL_ID_RE = re.compile(r"(?P<id>.+:\d+)")
 
@@ -195,6 +198,16 @@ class KimiK2Parser(ParserEngine):
     ) -> None:
         tool_id, tool_name = self._extract_tool_id_and_name(name)
         if not tool_name:
+            if name and name.strip():
+                # The function name only exists inside the native id, so a
+                # header we cannot parse means the call is dropped entirely.
+                logger.warning_once(
+                    "Dropping Kimi tool call: header %r is not in the native "
+                    "`functions.{name}:{idx}` format. This usually means "
+                    "earlier-turn tool call IDs were rewritten before being "
+                    "rendered back into the prompt.",
+                    name.strip(),
+                )
             if 0 <= idx < len(self._tool_slots):
                 self._tool_slots[idx].name = ""
             return
