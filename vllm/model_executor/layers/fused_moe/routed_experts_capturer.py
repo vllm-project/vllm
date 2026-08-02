@@ -205,10 +205,11 @@ class RoutedExpertsCapturer:
                     f"tp_size={self.tp_size})"
                 )
 
-        # Defensive: model may expose more layers than the capture buffer
-        # was sized for (unusual, but guards against miss-config).
         if layer_id >= self.device_buffer.shape[1]:
-            return
+            raise IndexError(
+                f"routed-experts layer {layer_id} exceeds capture buffer "
+                f"layer count {self.device_buffer.shape[1]}"
+            )
 
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :
@@ -228,6 +229,58 @@ class RoutedExpertsCapturer:
         :meth:`clear_buffer`.
         """
         return self.device_buffer
+
+
+def bind_routed_experts_capturer(
+    model: torch.nn.Module,
+    capturer: RoutedExpertsCapturer,
+) -> None:
+    """Attach capture callbacks to the target model's MoE routers."""
+    from vllm.model_executor.layers.fused_moe.layer import MoERunner
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+
+    num_bound = 0
+    for module in model.modules():
+        if not isinstance(module, MoERunner):
+            continue
+        layer_id = module.layer_id
+
+        def capture_fn(
+            topk_ids: torch.Tensor,
+            layer_id: int = layer_id,
+            capturer: RoutedExpertsCapturer = capturer,
+        ) -> None:
+            capturer.capture(layer_id, topk_ids)
+
+        quant_method = module._quant_method
+        moe_kernel = getattr(quant_method, "moe_kernel", None)
+        impl = getattr(moe_kernel, "impl", None)
+        fused_experts = getattr(impl, "fused_experts", None)
+        if quant_method.is_monolithic:
+            if not (
+                isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                and fused_experts.supports_routing_replay_capture()
+            ):
+                raise ValueError(
+                    "Routed-experts capture is not supported with monolithic "
+                    f"MoE kernel {type(fused_experts).__name__}."
+                )
+            fused_experts.set_capture_fn(capture_fn)
+            num_bound += 1
+        elif isinstance(module.router, BaseRouter):
+            module.router.set_capture_fn(capture_fn)
+            num_bound += 1
+        else:
+            raise ValueError(
+                "Routed-experts capture is not supported with router "
+                f"{type(module.router).__name__}."
+            )
+
+    if num_bound == 0:
+        raise ValueError("No supported MoE router found for routed-experts capture.")
 
 
 class RoutedExpertsManager:

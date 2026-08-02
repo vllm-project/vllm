@@ -63,6 +63,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -7696,7 +7697,7 @@ class GPUModelRunner(
             vllm_config=self.vllm_config,
         )
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        self._bind_routed_experts_capturer(self.routed_experts_capturer)
+        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
         # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on
         # the sync scheduling path. Shape / dtype mirror the device
@@ -7727,41 +7728,6 @@ class GPUModelRunner(
             device=self.device,
         )
         self.routed_experts_initialized = True
-
-    def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import MoERunner
-        from vllm.model_executor.layers.fused_moe.modular_kernel import (
-            FusedMoEExpertsMonolithic,
-        )
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
-
-        for module in self.model.modules():
-            if not isinstance(module, MoERunner):
-                continue
-            layer_id = module.layer_id
-
-            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                _capturer.capture(_layer_id, topk_ids)
-
-            quant_method = module._quant_method
-            moe_kernel = getattr(quant_method, "moe_kernel", None)
-            impl = getattr(moe_kernel, "impl", None)
-            fused_experts = getattr(impl, "fused_experts", None)
-            if quant_method.is_monolithic:
-                if not (
-                    isinstance(fused_experts, FusedMoEExpertsMonolithic)
-                    and fused_experts.supports_routing_replay_capture()
-                ):
-                    raise ValueError(
-                        "--enable-return-routed-experts is not supported with "
-                        f"monolithic MoE kernel {type(fused_experts).__name__}; "
-                        "routed expert IDs would be silently all-zero."
-                    )
-                fused_experts.set_capture_fn(_capture_fn)
-            elif isinstance(module.router, BaseRouter):
-                module.router.set_capture_fn(_capture_fn)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
