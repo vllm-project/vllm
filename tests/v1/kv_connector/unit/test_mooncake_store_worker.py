@@ -614,7 +614,13 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
-def _make_partial_tail_send_thread(store):
+def _make_partial_tail_send_thread(
+    store,
+    *,
+    replicate_config=None,
+    enable_group_semantics=False,
+    supports_group_ids=False,
+):
     coord = SimpleNamespace(
         enable_partial_hash_hits=True,
         hash_block_size=4,
@@ -631,6 +637,9 @@ def _make_partial_tail_send_thread(store):
         store,
         coord=coord,
         token_databases=[db],
+        replicate_config=replicate_config,
+        enable_group_semantics=enable_group_semantics,
+        supports_group_ids=supports_group_ids,
     )
 
 
@@ -661,6 +670,32 @@ def test_partial_tail_offload_skips_null_source_blocks():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
     assert addrs == [[0x1000 + 2 * 256], [0x1000 + 3 * 256]]
+
+
+def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    replicate_config = SimpleNamespace(group_ids=["stale"])
+    thread = _make_partial_tail_send_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    assert thread._maybe_offload_partial_tail(_make_partial_tail_req([1, 2, 3]))
+
+    keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
+    ]
+    assert config is replicate_config
+    assert config.group_ids == [
+        "vllm-mooncake-store:test-model@6131",
+        "vllm-mooncake-store:test-model@6132",
+    ]
 
 
 def test_partial_tail_offload_honors_active_pressure_gate():

@@ -590,6 +590,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys: list[str] = []
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
+        group_ids: list[str] | None = (
+            [] if self.enable_group_semantics and self.supports_group_ids else None
+        )
         saved = self._saved_offset.get(req_meta.req_id, 0)
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
@@ -626,9 +629,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     continue
                 addr, size = db.prepare_value_for_block(block_id)
-                keys.append(db.key_for(key_hash))
+                key = db.key_for(key_hash)
+                keys.append(key)
                 addrs.append(addr)
                 sizes.append(size)
+                if group_ids is not None:
+                    group_ids.append(
+                        _make_mooncake_group_id(
+                            db.metadata,
+                            key.rsplit("@", 1)[-1],
+                        )
+                    )
 
         if not keys:
             return True
@@ -656,9 +667,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = [keys[i] for i in missing]
         addrs = [addrs[i] for i in missing]
         sizes = [sizes[i] for i in missing]
+        if group_ids is not None:
+            group_ids = [group_ids[i] for i in missing]
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
+        if group_ids is not None:
+            assert len(group_ids) == len(keys)
+            self.replicate_config.group_ids = group_ids
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
