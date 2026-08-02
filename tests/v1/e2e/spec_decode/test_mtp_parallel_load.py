@@ -128,10 +128,9 @@ def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
 
 
 def _enable_batch_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ROCm uses upstream FlashAttention for MLA prefill, whose varlen API does
-    # not support the num_splits argument used by batch-invariant execution.
-    # Batch invariance is documented as an NVIDIA-only feature; explicitly
-    # override any ambient setting on other platforms.
+    # This test exercises DeepSeek MLA prefill. ROCm's upstream FlashAttention
+    # varlen API lacks the num_splits argument used by batch invariance, so
+    # explicitly override any ambient setting on that path.
     if current_platform.is_cuda():
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     else:

@@ -58,6 +58,7 @@ def run_acceptance_length_eval(
     runner_config.setdefault("compilation_config", CompilationConfig())
     with vllm_runner(model, **runner_config) as spec_runner:
         spec_llm = spec_runner.llm
+        # MT-Bench has 80 prompts and HumanEval has 164; truncate GSM8K.
         max_prompts_per_dataset = 200
 
         tokenizer = spec_llm.get_tokenizer()

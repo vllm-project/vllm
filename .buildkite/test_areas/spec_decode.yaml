@@ -192,23 +192,18 @@ steps:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
-- label: Spec Decode DeepSeek MTP Parallel Load
-  key: spec-decode-deepseek-mtp-parallel-load
+- label: Spec Decode DeepSeek MTP Parallel Load (2xB200-2xMI300)
+  key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/
-    - vllm/model_executor/model_loader/
-    - vllm/model_executor/layers/
+    - vllm/v1/spec_decode/llm_base_proposer.py
+    - vllm/v1/spec_decode/eagle.py
+    - vllm/v1/worker/gpu/spec_decode/eagle/
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
-    - vllm/v1/attention/
-    - vllm/v1/engine/
-    - vllm/v1/spec_decode/
-    - vllm/v1/worker/gpu/spec_decode/
-    - vllm/v1/worker/gpu_model_runner.py
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
@@ -241,19 +236,11 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
-    - vllm/v1/attention/
-    - vllm/v1/sample/
-    - vllm/model_executor/model_loader/
-    - vllm/model_executor/layers/
-    - vllm/model_executor/models/qwen2.py
-    - vllm/model_executor/models/qwen3.py
     - vllm/model_executor/models/qwen3_dflash.py
-    - vllm/model_executor/models/laguna.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
-  # Includes Laguna NVFP4 through the automatic MI300 emulation fallback.
   mirror:
     amd:
       dind: false
@@ -284,23 +271,11 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
-    - vllm/v1/attention/
-    - vllm/v1/sample/
-    - vllm/model_executor/model_loader/
-    - vllm/model_executor/layers/
-    - vllm/model_executor/models/qwen2.py
-    - vllm/model_executor/models/qwen3.py
-    - vllm/model_executor/models/qwen3_dflash.py
     - vllm/model_executor/models/qwen3_dspark.py
-    - vllm/model_executor/models/gemma4.py
-    - vllm/model_executor/models/gemma4_mm.py
-    - vllm/model_executor/models/gemma4_unified.py
-    - vllm/model_executor/models/gemma4_mtp.py
     - vllm/model_executor/models/gemma4_dspark.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
-  # Includes Gemma NVFP4 through the automatic MI300 emulation fallback.
   mirror:
     amd:
       dind: false

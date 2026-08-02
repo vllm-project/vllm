@@ -45,6 +45,7 @@ class ArgsTest:
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.5
     dataset: str = "test_prompts"
+    # Doubling 100 to 200 reduces sampling standard error by about 29%.
     num_prompts: int = 200
 
 
@@ -244,18 +245,20 @@ def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     return vllm_config
 
 
-def _platform_moe_backend(cuda_backend: MoEBackend) -> MoEBackend:
-    if current_platform.is_cuda():
-        return cuda_backend
+def _platform_moe_backend(monkeypatch: pytest.MonkeyPatch) -> MoEBackend:
     if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
         return "aiter"
+    if current_platform.is_cuda():
+        return "flashinfer_trtllm"
     return "auto"
 
 
-def test_draft_model_moe_backend_override():
+def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is set in speculative_config, the draft VllmConfig
     should use it while the target keeps its own setting."""
-    target_moe_backend = _platform_moe_backend("flashinfer_trtllm")
+    target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
@@ -277,10 +280,10 @@ def test_draft_model_moe_backend_override():
     assert tgt_config.kernel_config.moe_backend == target_moe_backend
 
 
-def test_draft_model_moe_backend_inherits_target():
+def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is not set in speculative_config, the draft should
     inherit the target's moe_backend."""
-    target_moe_backend = _platform_moe_backend("flashinfer_cutlass")
+    target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,

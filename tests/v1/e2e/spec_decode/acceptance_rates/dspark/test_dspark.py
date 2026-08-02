@@ -5,6 +5,7 @@ import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from vllm.config import CompilationConfig
+from vllm.platforms import current_platform
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
@@ -80,16 +81,19 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
 def dspark_config():
     target_model = "Qwen/Qwen3-4B-FP8"
     draft_model = "deepseek-ai/dspark_qwen3_4b_block7"
+    speculative_config = {
+        "method": "dspark",
+        "model": draft_model,
+        "num_speculative_tokens": 7,
+        "draft_sample_method": "probabilistic",
+    }
+    if current_platform.is_cuda():
+        speculative_config["attention_backend"] = "FLASH_ATTN"
 
     return dict(
         model=target_model,
         trust_remote_code=True,
-        speculative_config={
-            "method": "dspark",
-            "model": draft_model,
-            "num_speculative_tokens": 7,
-            "draft_sample_method": "probabilistic",
-        },
+        speculative_config=speculative_config,
         max_model_len=4096,
         disable_log_stats=False,
     )
