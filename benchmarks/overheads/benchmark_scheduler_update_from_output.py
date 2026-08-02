@@ -6,6 +6,10 @@ Measures per-step scheduler post-processing time for decode-only workloads
 at various batch sizes. Useful for validating optimizations to the hot loop
 in vllm/v1/core/sched/scheduler.py.
 
+Requests are sized to outlive the measurement, so every timed step has a full
+batch to process. Without that, requests hit max_tokens partway through and the
+remaining steps time an empty scheduler, which drags the median toward zero.
+
 Example:
     .venv/bin/python benchmarks/overheads/benchmark_scheduler_update_from_output.py
     .venv/bin/python benchmarks/overheads/benchmark_scheduler_update_from_output.py \
@@ -43,7 +47,7 @@ def _make_decode_model_runner_output(
     )
 
 
-def _setup_decode_batch(num_requests: int, prompt_tokens: int):
+def _setup_decode_batch(num_requests: int, prompt_tokens: int, max_tokens: int):
     scheduler = create_scheduler(
         max_num_seqs=num_requests,
         max_num_batched_tokens=max(num_requests * prompt_tokens, 8192),
@@ -52,7 +56,7 @@ def _setup_decode_batch(num_requests: int, prompt_tokens: int):
     requests = create_requests(
         num_requests=num_requests,
         num_tokens=prompt_tokens,
-        max_tokens=64,
+        max_tokens=max_tokens,
         ignore_eos=True,
     )
     for request in requests:
@@ -76,7 +80,11 @@ def _bench_update_from_output(
     warmup: int,
     iters: int,
 ) -> list[float]:
-    scheduler, _ = _setup_decode_batch(num_requests, prompt_tokens)
+    # One token is consumed by the prefill step in setup, the rest by the
+    # warmup and timed loops; the margin keeps every request alive throughout.
+    scheduler, _ = _setup_decode_batch(
+        num_requests, prompt_tokens, max_tokens=warmup + iters + 2
+    )
 
     for _ in range(warmup):
         sched_out = scheduler.schedule()
@@ -86,6 +94,12 @@ def _bench_update_from_output(
     timings_ms: list[float] = []
     for _ in range(iters):
         sched_out = scheduler.schedule()
+        if len(sched_out.num_scheduled_tokens) != num_requests:
+            raise RuntimeError(
+                f"expected {num_requests} requests scheduled, got "
+                f"{len(sched_out.num_scheduled_tokens)}; timing an incomplete "
+                "batch would understate the per-step cost"
+            )
         mro = _make_decode_model_runner_output(sched_out)
         start = time.perf_counter()
         scheduler.update_from_output(sched_out, mro)
