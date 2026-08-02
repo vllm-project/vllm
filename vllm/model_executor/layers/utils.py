@@ -184,11 +184,10 @@ def rocm_unquantized_gemm_impl(
 
     if use_skinny:
         x_view = x.reshape(-1, x.size(-1))
-        # wvSplitK has no cost model, and two shape regimes measured on gfx950
-        # lose to the fallback GEMM: n == 5 at large m (0.27x at m=20480
-        # k=7168) and tall-skinny m from n >= 2 (0.07x at m=163840 k=256).
-        wvsplitk_regresses = on_gfx950() and ((n >= 5 and m >= 8192) or (m >= 100000))
-        if m > 8 and 0 < n <= 5 and not wvsplitk_regresses:
+        wvsplitk_profitable = not on_gfx950() or _use_wvsplitk_gfx950(
+            m, n, k, has_bias=bias is not None
+        )
+        if m > 8 and 0 < n <= 5 and wvsplitk_profitable:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
@@ -202,6 +201,14 @@ def rocm_unquantized_gemm_impl(
         return tgemm.mm(x, weight, bias)
 
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def _use_wvsplitk_gfx950(m: int, n: int, k: int, *, has_bias: bool) -> bool:
+    # Boundaries measured by benchmark_rocm_wvsplitk.py on gfx950.
+    n5_cliff = n == 5 and m > 8192
+    llmm1_wins = n == 1 and k == 256 and m >= 98304 and m % 4 == 0 and not has_bias
+    tall_skinny = k == 256 and ((n >= 3 and m >= 98304) or (n == 2 and m >= 131072))
+    return not (n5_cliff or llmm1_wins or tall_skinny)
 
 
 def rocm_unquantized_gemm_fake(
