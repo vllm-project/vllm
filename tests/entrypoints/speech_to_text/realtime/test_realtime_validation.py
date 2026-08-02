@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import warnings
 
 import numpy as np
 import pybase64 as base64
@@ -70,6 +69,138 @@ def mary_had_lamb_audio_chunks() -> list[str]:
     return chunks
 
 
+async def _start_session(
+    ws, model_name: str, timestamp_granularities: list[str] | None = None
+) -> dict:
+    """Open a session and return the session.updated acknowledgement."""
+    event = await receive_event(ws, timeout=30.0)
+    assert event["type"] == "session.created"
+
+    update: dict = {"type": "session.update", "model": model_name}
+    if timestamp_granularities is not None:
+        update["timestamp_granularities"] = timestamp_granularities
+    await send_event(ws, update)
+
+    event = await receive_event(ws, timeout=10.0)
+    assert event["type"] == "session.updated"
+    return event
+
+
+async def _stream_utterance(ws, chunks: list[str], timeout: float = 60.0) -> list[dict]:
+    """Stream one utterance and return every event up to transcription.done."""
+    await send_event(ws, {"type": "input_audio_buffer.commit"})
+    for chunk in chunks:
+        await send_event(ws, {"type": "input_audio_buffer.append", "audio": chunk})
+    await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
+
+    events = []
+    while True:
+        event = await receive_event(ws, timeout=timeout)
+        if event["type"] == "error":
+            pytest.fail(f"Received error: {event}")
+        events.append(event)
+        if event["type"] == "transcription.done":
+            return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_segment_timestamps(
+    model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
+):
+    """Segment timestamps are opt-in, aligned, and invisible when not asked for.
+
+    The alignment bound is the point of this test: the token index of a
+    generated token leads the audio it describes by the streaming prefix
+    minus the left pad minus the transcription delay. Subtracting only the
+    delay - as https://github.com/vllm-project/vllm/issues/39735 proposes -
+    leaves the 32-frame left pad in and puts every timestamp 2.56 s late,
+    which the upper bound catches.
+    """
+    server_args = ["--enforce-eager", "--max-model-len", "2048"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
+    chunk_duration_s = 1600 / 16000
+    duration_s = len(mary_had_lamb_audio_chunks) * chunk_duration_s
+
+    with RemoteOpenAIServer(
+        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
+    ) as remote_server:
+        ws_url = _get_websocket_url(remote_server)
+
+        # --- Not opted in: the wire must be byte-identical to before ------
+        async with websockets.connect(ws_url) as ws:
+            ack = await _start_session(ws, model_name)
+            assert ack["timestamp_granularities"] == []
+
+            # (ROCm) generous timeout: first use triggers aiter JIT.
+            events = await _stream_utterance(
+                ws, mary_had_lamb_audio_chunks, timeout=600.0
+            )
+            done = events[-1]
+            assert set(done) == {"type", "text", "usage"}
+            assert all("segments" not in event for event in events)
+            baseline_text = done["text"]
+
+        # --- Opted in: same text, plus timestamps -------------------------
+        async with websockets.connect(ws_url) as ws:
+            ack = await _start_session(ws, model_name, ["segment"])
+            assert ack["timestamp_granularities"] == ["segment"]
+
+            events = await _stream_utterance(ws, mary_had_lamb_audio_chunks)
+            done = events[-1]
+            segments = done["segments"]
+
+            # Opting in must not change what was transcribed.
+            assert done["text"] == baseline_text
+            assert segments
+
+            # done repeats the deltas' segments, plus the trailing segment
+            # that generation ended before any delta could carry.
+            streamed = [
+                segment
+                for event in events
+                if event["type"] == "transcription.delta"
+                for segment in event["segments"]
+            ]
+            assert segments[: len(streamed)] == streamed
+            assert 0 <= len(segments) - len(streamed) <= 1
+
+            ends = [segment["end"] for segment in segments]
+            assert ends == sorted(ends)
+            assert all(end >= 0.08 for end in ends)
+            assert all(abs(end / 0.08 - round(end / 0.08)) < 1e-6 for end in ends)
+
+            # Bounded on both sides: +32 frames of left pad would overshoot,
+            # a negative offset would undershoot.
+            assert 0.5 * duration_s <= ends[-1] <= duration_s + 0.5
+
+            # Entries are emission groups, so there are at most as many as
+            # there are words, and together they reconstruct the transcript.
+            assert len(segments) <= len(baseline_text.split())
+            reconstructed = "".join(segment["text"] for segment in segments)
+            assert baseline_text.endswith(reconstructed)
+            assert len(reconstructed) >= 0.9 * len(baseline_text)
+
+        # --- The clock restarts on every utterance ------------------------
+        async with websockets.connect(ws_url) as ws:
+            await _start_session(ws, model_name, ["segment"])
+            short_chunks = mary_had_lamb_audio_chunks[:40]
+
+            first = await _stream_utterance(ws, short_chunks)
+            second = await _stream_utterance(ws, short_chunks)
+
+            assert first[-1]["segments"]
+            assert second[-1]["segments"]
+            # Not "greater than the first utterance's last end": each commit
+            # is a new engine request with a fresh prompt and left pad.
+            assert second[-1]["segments"][0]["end"] < 1.0
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_multi_chunk_streaming(
@@ -95,17 +226,8 @@ async def test_multi_chunk_streaming(
             await send_event(ws, {"type": "session.update", "model": model_name})
 
             # Wait for the server to acknowledge the session update.
-            try:
-                while True:
-                    event = await receive_event(ws, timeout=5.0)
-                    if event["type"] == "session.updated":
-                        break
-            except TimeoutError:
-                warnings.warn(
-                    f"session.updated not received within {5.0}s after "
-                    "session.update. The server may not implement this event.",
-                    stacklevel=2,
-                )
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "session.updated"
 
             # (ROCm) Warm-up: send a non-final commit (required to start
             # transcription) with a small audio chunk to trigger aiter
@@ -203,17 +325,8 @@ async def test_empty_commit_does_not_crash_engine(
 
             await send_event(ws, {"type": "session.update", "model": model_name})
 
-            try:
-                while True:
-                    event = await receive_event(ws, timeout=5.0)
-                    if event["type"] == "session.updated":
-                        break
-            except TimeoutError:
-                warnings.warn(
-                    f"session.updated not received within {5.0}s after "
-                    "session.update. The server may not implement this event.",
-                    stacklevel=2,
-                )
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "session.updated"
 
             # Start generation without sending any audio
             await send_event(ws, {"type": "input_audio_buffer.commit"})
@@ -239,17 +352,8 @@ async def test_empty_commit_does_not_crash_engine(
 
             await send_event(ws, {"type": "session.update", "model": model_name})
 
-            try:
-                while True:
-                    event = await receive_event(ws, timeout=5.0)
-                    if event["type"] == "session.updated":
-                        break
-            except TimeoutError:
-                warnings.warn(
-                    f"session.updated not received within {5.0}s after "
-                    "session.update. The server may not implement this event.",
-                    stacklevel=2,
-                )
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "session.updated"
 
             # Start transcription
             await send_event(ws, {"type": "input_audio_buffer.commit"})
