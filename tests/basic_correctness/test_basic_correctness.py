@@ -32,8 +32,13 @@ MODELS = [
 TARGET_TEST_SUITE_ENV = "VLLM_TARGET_TEST_SUITE"
 LEGACY_TARGET_TEST_SUITE_ENV = "TARGET_TEST_SUITE"
 
-GENERIC_DISTRIBUTED_TEST_SUITES = ("L4", "MI250", "MI300", "MI325", "MI355")
-ALL_DISTRIBUTED_TEST_SUITES = (*GENERIC_DISTRIBUTED_TEST_SUITES, "A100")
+# meta-llama/Llama-3.2-1B-Instruct is excluded from A100 pending
+# re-validation of https://github.com/vllm-project/vllm/pull/5689, which
+# reported HF/vLLM output divergence on A100 for a different model
+# (Llama-2-7b-hf) under 2024-era transformers. TODO: re-test on A100 under
+# current transformers and drop this exclusion if it no longer reproduces.
+NON_A100_DISTRIBUTED_TEST_SUITES = ("L4", "MI250", "MI300", "MI325", "MI355")
+ALL_DISTRIBUTED_TEST_SUITES = (*NON_A100_DISTRIBUTED_TEST_SUITES, "A100")
 
 
 def _default_target_test_suite() -> str:
@@ -197,14 +202,14 @@ def test_models(
             "meta-llama/Llama-3.2-1B-Instruct",
             "ray",
             "",
-            GENERIC_DISTRIBUTED_TEST_SUITES,
+            NON_A100_DISTRIBUTED_TEST_SUITES,
             {},
         ),
         (
             "meta-llama/Llama-3.2-1B-Instruct",
             "mp",
             "",
-            GENERIC_DISTRIBUTED_TEST_SUITES,
+            NON_A100_DISTRIBUTED_TEST_SUITES,
             {},
         ),
     ],
