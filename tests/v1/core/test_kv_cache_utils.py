@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import AttentionConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -65,6 +65,351 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _make_sparse_mla_config(
+    *,
+    host_pool_bytes: int = 1 << 20,
+    device_buffer_size: int | None = None,
+    override: int | None = None,
+    original_max_model_len: int | None = None,
+    model_type: str = "glm_moe_dsa",
+    architecture: str = "GlmMoeDsaForCausalLM",
+    prefix_caching: bool = False,
+    chunked_prefill: bool = False,
+    pipeline_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+    decode_context_parallel_size: int = 1,
+    use_v2_model_runner: bool = True,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        attention_config=AttentionConfig(
+            sparse_mla_kv_offload={
+                "host_pool_gib": host_pool_bytes / (1 << 30),
+                "device_buffer_size": device_buffer_size,
+            }
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=64,
+            original_max_model_len=original_max_model_len,
+            architectures=[architecture],
+            hf_text_config=SimpleNamespace(
+                model_type=model_type,
+                index_topk=4,
+                v_head_dim=8,
+                num_attention_heads=8,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=override,
+            enable_prefix_caching=prefix_caching,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            enable_chunked_prefill=chunked_prefill,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=2,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=pipeline_parallel_size,
+            prefill_context_parallel_size=prefill_context_parallel_size,
+            decode_context_parallel_size=decode_context_parallel_size,
+        ),
+        speculative_config=None,
+        kv_transfer_config=None,
+        use_v2_model_runner=use_v2_model_runner,
+        num_speculative_tokens=0,
+    )
+
+
+def _make_sparse_mla_worker_specs(
+    main_role: kv_cache_utils.MLAKVCacheRole,
+    indexer_role: kv_cache_utils.MLAKVCacheRole,
+) -> list[dict[str, KVCacheSpec]]:
+    main_spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=16,
+        dtype=torch.bfloat16,
+        offload_role=main_role,
+    )
+    indexer_spec = MLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        offload_role=indexer_role,
+    )
+    worker_spec = {
+        "main.0": main_spec,
+        "main.1": main_spec,
+        "indexer.0": indexer_spec,
+    }
+    return [worker_spec, copy.deepcopy(worker_spec)]
+
+
+def test_sparse_mla_offload_config_contract():
+    disabled_config = AttentionConfig()
+
+    assert disabled_config.compute_hash() == (
+        "139f6e00df9d193dd0083fb92d740a856e3084be2e1cf2c5faa0b95923e7f8bf"
+    )
+
+    enabled_config = AttentionConfig(sparse_mla_kv_offload={"host_pool_gib": 1.5})
+    explicit_buffer_config = AttentionConfig(
+        sparse_mla_kv_offload={
+            "host_pool_gib": 1.5,
+            "device_buffer_size": 64,
+        }
+    )
+    assert enabled_config.sparse_mla_kv_offload is not None
+    assert enabled_config.sparse_mla_kv_offload.host_pool_gib == 1.5
+    assert enabled_config.sparse_mla_kv_offload.device_buffer_size is None
+    assert explicit_buffer_config.sparse_mla_kv_offload is not None
+    assert explicit_buffer_config.sparse_mla_kv_offload.device_buffer_size == 64
+    assert enabled_config.compute_hash() != disabled_config.compute_hash()
+    assert explicit_buffer_config.compute_hash() != enabled_config.compute_hash()
+
+    for invalid_pool_size in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            AttentionConfig(sparse_mla_kv_offload={"host_pool_gib": invalid_pool_size})
+    for invalid_buffer_size in (0, -1):
+        with pytest.raises(ValueError):
+            AttentionConfig(
+                sparse_mla_kv_offload={
+                    "host_pool_gib": 1,
+                    "device_buffer_size": invalid_buffer_size,
+                }
+            )
+
+
+def test_glm_dsa_kv_specs_assign_sparse_offload_roles():
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+
+    main_layer = SimpleNamespace(kv_cache_dtype="bfloat16", head_size=16)
+    indexer_layer = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=4),
+        head_dim=8,
+        dtype=torch.bfloat16,
+    )
+
+    def producer_config(enabled: bool):
+        offload = {"host_pool_gib": 1} if enabled else None
+        return SimpleNamespace(
+            attention_config=AttentionConfig(sparse_mla_kv_offload=offload),
+            cache_config=SimpleNamespace(block_size=4),
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
+        )
+
+    disabled_config = producer_config(False)
+    enabled_config = producer_config(True)
+    disabled_main = MLAAttention.get_kv_cache_spec(main_layer, disabled_config)
+    disabled_indexer = DeepseekV32IndexerCache.get_kv_cache_spec(
+        indexer_layer, disabled_config
+    )
+    enabled_main = MLAAttention.get_kv_cache_spec(main_layer, enabled_config)
+    enabled_indexer = DeepseekV32IndexerCache.get_kv_cache_spec(
+        indexer_layer, enabled_config
+    )
+
+    role = kv_cache_utils.MLAKVCacheRole
+    assert disabled_main.offload_role is role.DEVICE
+    assert disabled_indexer.offload_role is role.DEVICE
+    assert enabled_main.offload_role is role.MAIN_HOST
+    assert enabled_indexer.offload_role is role.INDEXER_DEVICE
+    assert copy.deepcopy(enabled_main).offload_role is role.MAIN_HOST
+    assert (
+        MLAAttentionSpec.merge([enabled_main, copy.deepcopy(enabled_main)]).offload_role
+        is role.MAIN_HOST
+    )
+    with pytest.raises(AssertionError):
+        MLAAttentionSpec.merge([enabled_main, enabled_indexer])
+
+
+def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
+    role = kv_cache_utils.MLAKVCacheRole
+    worker_specs = _make_sparse_mla_worker_specs(role.MAIN_HOST, role.INDEXER_DEVICE)
+    worker_ceilings = [2 << 20, 3 << 20]
+
+    configs = get_kv_cache_configs(
+        _make_sparse_mla_config(), worker_specs, worker_ceilings
+    )
+
+    plan0 = configs[0].sparse_mla_offload_plan
+    plan1 = configs[1].sparse_mla_offload_plan
+    assert plan0 is not None and plan1 is not None
+    assert configs[0].num_blocks == configs[1].num_blocks == 4096
+    assert plan0.main_layer_names == ("main.0", "main.1")
+    assert plan0.indexer_layer_names == ("indexer.0",)
+    assert (plan0.num_dp_replicas, plan0.tensor_parallel_size) == (2, 2)
+    assert plan0.host_pool_bytes_per_dp_replica == 1 << 20
+    assert plan0.host_bytes_total == 2 << 20
+    assert plan0.fixed_offload_hbm_bytes_per_tp_rank == 7168
+    assert plan0.effective_available_hbm_bytes_per_tp_rank == (2 << 20) - 7168
+    assert plan1.effective_available_hbm_bytes_per_tp_rank == (3 << 20) - 7168
+    assert plan0.device_bytes_per_tp_rank == 7168 + (256 << 10)
+    assert plan0.device_bytes_total == (7168 + (256 << 10)) * 4
+
+    manager = "offload_manager"
+    generic = "generic_kv_allocator"
+    hbm = "hbm_local"
+    host = "host_shared"
+    expected_manifest = (
+        ("main_host_kv", (4096, 4, 16), torch.bfloat16, 4096, 2, manager, host),
+        ("indexer_kv", (4096, 4, 8), torch.bfloat16, 256, 1, generic, hbm),
+        ("resident_main_kv", (2, 2, 8, 16), torch.bfloat16, 256, 1, manager, hbm),
+        ("resident_logical_ids", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
+        ("resident_last_access", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
+        ("resident_generation", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
+        ("newest_main_kv", (2, 2, 1, 16), torch.bfloat16, 256, 1, manager, hbm),
+        ("newest_logical_ids", (2, 2, 1), torch.int64, 256, 1, manager, hbm),
+        ("newest_generation", (2, 2, 1), torch.int64, 256, 1, manager, hbm),
+        ("request_block_ids", (2, 16), torch.int32, 256, 1, manager, hbm),
+        ("request_num_blocks", (2,), torch.int32, 256, 1, manager, hbm),
+        ("request_num_tokens", (2,), torch.int32, 256, 1, manager, hbm),
+        ("request_generation", (2,), torch.int64, 256, 1, manager, hbm),
+        ("request_active", (2,), torch.bool, 256, 1, manager, hbm),
+        ("topk_logical_ids", (2, 1, 4), torch.int64, 256, 1, manager, hbm),
+        ("topk_physical_ids", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
+        ("topk_hit_mask", (2, 1, 4), torch.bool, 256, 1, manager, hbm),
+        ("miss_logical_ids", (2, 1, 4), torch.int64, 256, 1, manager, hbm),
+        ("miss_victim_slots", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
+        ("miss_counts", (2, 1), torch.int32, 256, 1, manager, hbm),
+        ("provisional_slots", (2, 2, 1, 4), torch.int32, 256, 1, manager, hbm),
+        ("accepted_counts", (2,), torch.int32, 256, 1, manager, hbm),
+        ("hit_output", (2, 1, 4, 8), torch.bfloat16, 256, 1, manager, hbm),
+        ("hit_lse", (2, 1, 4), torch.float32, 256, 1, manager, hbm),
+        ("miss_output", (2, 1, 4, 8), torch.bfloat16, 256, 1, manager, hbm),
+        ("miss_lse", (2, 1, 4), torch.float32, 256, 1, manager, hbm),
+        ("tp_fence_token", (1,), torch.int32, 256, 1, manager, hbm),
+    )
+    actual_manifest = tuple(
+        (
+            entry.name,
+            entry.shape,
+            entry.dtype,
+            entry.alignment_bytes,
+            entry.allocation_count,
+            entry.owner.value,
+            entry.tier.value,
+        )
+        for entry in plan0.manifest
+    )
+    assert actual_manifest == expected_manifest
+
+    assert [tensor.shared_by for tensor in configs[0].kv_cache_tensors] == [
+        ["indexer.0"]
+    ]
+    group_spec = configs[0].kv_cache_groups[0].kv_cache_spec
+    assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+    assert set(group_spec.kv_cache_specs) == {"main.0", "main.1", "indexer.0"}
+    assert group_spec.kv_cache_specs["main.0"].offload_role is role.MAIN_HOST
+    assert group_spec.kv_cache_specs["indexer.0"].offload_role is role.INDEXER_DEVICE
+
+    explicit_buffer = get_kv_cache_configs(
+        _make_sparse_mla_config(device_buffer_size=4),
+        worker_specs,
+        worker_ceilings,
+    )[0].sparse_mla_offload_plan
+    assert explicit_buffer is not None
+    assert explicit_buffer.manifest[2].shape == (2, 2, 4, 16)
+    with pytest.raises(ValueError, match="device_buffer_size"):
+        get_kv_cache_configs(
+            _make_sparse_mla_config(device_buffer_size=3),
+            worker_specs,
+            worker_ceilings,
+        )
+
+    overridden = get_kv_cache_configs(
+        _make_sparse_mla_config(override=32), worker_specs, worker_ceilings
+    )
+    assert overridden[0].num_blocks == 32
+    with pytest.raises(ValueError, match="num_gpu_blocks_override"):
+        get_kv_cache_configs(
+            _make_sparse_mla_config(override=4097),
+            worker_specs,
+            worker_ceilings,
+        )
+
+    auto_fit_config = _make_sparse_mla_config(original_max_model_len=-1)
+    auto_fit = get_kv_cache_configs(auto_fit_config, worker_specs, [7168 + 512] * 2)[0]
+    auto_fit_plan = auto_fit.sparse_mla_offload_plan
+    assert auto_fit_plan is not None
+    assert auto_fit_config.model_config.max_model_len == 32
+    assert (auto_fit.num_blocks, auto_fit_plan.manifest[9].shape) == (8, (2, 8))
+
+    exact_reserve = get_kv_cache_configs(
+        _make_sparse_mla_config(), worker_specs, [7168 + 1024] * 2
+    )[0]
+    assert exact_reserve.num_blocks == 16
+    assert exact_reserve.sparse_mla_offload_plan is not None
+    assert exact_reserve.sparse_mla_offload_plan.device_bytes_per_tp_rank == 8192
+    with pytest.raises(ValueError, match="fixed offload HBM reserve"):
+        get_kv_cache_configs(_make_sparse_mla_config(), worker_specs, [7167] * 2)
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(_make_sparse_mla_config(), worker_specs, [7168] * 2)
+
+    host_boundary = get_kv_cache_configs(
+        _make_sparse_mla_config(host_pool_bytes=8192),
+        worker_specs,
+        worker_ceilings,
+    )
+    assert host_boundary[0].num_blocks == 32
+    with pytest.raises(ValueError, match="rounds down to zero"):
+        get_kv_cache_configs(
+            _make_sparse_mla_config(host_pool_bytes=4095),
+            worker_specs,
+            worker_ceilings,
+        )
+
+    quantized_main = copy.deepcopy(worker_specs[0]["main.0"])
+    object.__setattr__(quantized_main, "kv_quant_mode", KVQuantMode.FP8_PER_TENSOR)
+    quantized_specs = [
+        {**worker_spec, "main.0": quantized_main} for worker_spec in worker_specs
+    ]
+    with pytest.raises(ValueError, match="quantized"):
+        get_kv_cache_configs(
+            _make_sparse_mla_config(), quantized_specs, worker_ceilings
+        )
+
+    unsupported_cases = (
+        (_make_sparse_mla_config(model_type="deepseek_v3"), "supports only"),
+        (
+            _make_sparse_mla_config(architecture="DeepseekV3ForCausalLM"),
+            "supports only",
+        ),
+        (_make_sparse_mla_config(use_v2_model_runner=False), "Model Runner V2"),
+        (_make_sparse_mla_config(prefix_caching=True), "prefix caching"),
+        (_make_sparse_mla_config(chunked_prefill=True), "chunked prefill"),
+        (_make_sparse_mla_config(pipeline_parallel_size=2), "PP, PCP, or DCP"),
+        (_make_sparse_mla_config(prefill_context_parallel_size=2), "PP, PCP, or DCP"),
+        (_make_sparse_mla_config(decode_context_parallel_size=2), "PP, PCP, or DCP"),
+    )
+    for unsupported_config, error_match in unsupported_cases:
+        with pytest.raises(ValueError, match=error_match):
+            get_kv_cache_configs(unsupported_config, worker_specs, worker_ceilings)
+
+    incomplete_specs = copy.deepcopy(worker_specs)
+    incomplete_specs[1].pop("indexer.0")
+    with pytest.raises(ValueError, match="identical across TP ranks"):
+        get_kv_cache_configs(
+            _make_sparse_mla_config(), incomplete_specs, worker_ceilings
+        )
+
+    disabled_config = _make_sparse_mla_config()
+    disabled_config.attention_config = AttentionConfig()
+    disabled_specs = _make_sparse_mla_worker_specs(role.DEVICE, role.DEVICE)
+    generic_configs = get_kv_cache_configs(
+        disabled_config, disabled_specs, worker_ceilings
+    )
+    assert all(config.sparse_mla_offload_plan is None for config in generic_configs)
+    assert {
+        layer_name
+        for tensor in generic_configs[0].kv_cache_tensors
+        for layer_name in tensor.shared_by
+    } == set(disabled_specs[0])
 
 
 @pytest.fixture(autouse=True)
