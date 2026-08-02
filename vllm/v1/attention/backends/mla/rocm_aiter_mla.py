@@ -583,6 +583,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.num_heads, int(max_qo_len)
         )
 
+        # Gluon sizes its split count from this hint: it must not split a request
+        # into more pieces than it has blocks, so it needs the shortest row the
+        # kernel will actually see. That is seq_lens_for_kernel rather than
+        # seq_lens_device, because the uniform-MTP padding above rewrites the
+        # empty rows. Left at the field default of 1 the kernel computes
+        # cdiv(1, BLOCK_N) == 1 split and launches a single workgroup per
+        # request, which badly underfills the GPU at long context.
+        #
+        # This is a device-to-host sync, so only the Gluon path pays it; the ASM
+        # decode path does not read the field.
+        min_kv_seq_len = 1
+        if use_gluon_decode and num_kernel_reqs:
+            min_kv_seq_len = int(seq_lens_for_kernel.min())
+
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indices.fill_(-1)
 
@@ -697,6 +711,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             max_qo_len=max_qo_len,
+            min_kv_seq_len=min_kv_seq_len,
             use_gluon_decode=use_gluon_decode,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
