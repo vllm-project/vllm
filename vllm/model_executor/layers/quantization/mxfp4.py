@@ -36,6 +36,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    use_aiter_mxfp4_triton_moe,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -354,7 +357,11 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
+        )
+        if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -365,8 +372,11 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        # AITER's CK kernel requires weights to be marked as shuffled.
+        if (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and not uses_triton_weight_format
+        ):
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
 
@@ -407,7 +417,10 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
@@ -484,7 +497,8 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     """Whether Kimi-K3's SiTU MXFP4 MoE should use the AITER A16W4 kernel.
 
     K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
-    MXFP4 backend selector does not cover; route it to AITER on gfx950.
+    MXFP4 backend selector does not cover; route it to AITER on gfx950. gfx942
+    cannot use this path: its Triton a16w4 fallback has no SiTU support.
     """
     from vllm.platforms import current_platform
 
@@ -732,10 +746,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        from vllm.platforms.rocm import on_gfx1250
-
         uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
@@ -846,10 +859,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        from vllm.platforms.rocm import on_gfx1250
-
         if self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
         ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.

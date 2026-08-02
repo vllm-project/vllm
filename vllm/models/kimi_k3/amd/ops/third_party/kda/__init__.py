@@ -15,10 +15,18 @@
 #   - AMD autotune configs: present (is_amd num_warps/num_stages branches),
 #   - OOB-mask correctness fix: present (all tl.load use mask=..., other=0).
 # Validated on gfx950: no core-dump, gsm8k 94.1%.
+# Validated on gfx942 (MI325X): tests/models/kimi_k3/test_kda.py and
+# test_kda_metadata.py pass (45 passed, 6 skipped).
 #
-# AMD-specific deltas vs the NVIDIA copy: NONE yet (byte-identical). Keep in sync
-# with the NVIDIA copy on FLA updates; any divergence should be an intentional,
-# documented gfx950-specific change (a #869-style AMD-only fix).
+# Deltas vs the NVIDIA copy, which has since diverged forward:
+#   - no PDL: the NVIDIA fused_recurrent kernels gate on
+#     `current_platform.is_arch_support_pdl()` and issue gdc_wait /
+#     gdc_launch_dependents, which have no ROCm equivalent,
+#   - fused_recurrent decode launch config is a flat `BV = 32 if
+#     use_gate_in_kernel else 8` rather than the NVIDIA GB300-tuned
+#     BV/num_stages ladder; it has not been retuned for CDNA.
+# Keep in sync with the NVIDIA copy on FLA updates; any further divergence
+# should be an intentional, documented AMD-only change (a #869-style fix).
 
 from .chunk import (
     chunk_kda,

@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    use_aiter_mxfp4_triton_moe,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -568,9 +571,9 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_current_device() -> bool:
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
+        from vllm.platforms.rocm import on_gfx950
 
-        return on_gfx950() or on_gfx1250()
+        return on_gfx950() or use_aiter_mxfp4_triton_moe()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

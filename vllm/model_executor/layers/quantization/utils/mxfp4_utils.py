@@ -33,6 +33,21 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
     return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
 
 
+def use_aiter_mxfp4_triton_moe() -> bool:
+    """Whether AITER MXFP4 MoE runs the Triton a16w4 kernel, not the CK kernel.
+
+    AITER's CK MXFP4 MoE kernel requires CDNA4 (gfx950) native FP4 MFMA. On
+    gfx942 and gfx1250 the Triton ``moe_gemm_a16w4`` kernel is used instead,
+    which consumes the plain (unswizzled) weight layout produced by
+    `_swizzle_mxfp4` and therefore needs `triton_kernels`. Weight preparation
+    and kernel selection must agree on this predicate; when it is False the
+    backend selector falls through to the next candidate.
+    """
+    from vllm.platforms.rocm import on_gfx942, on_gfx1250
+
+    return (on_gfx942() or on_gfx1250()) and has_triton_kernels()
+
+
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
