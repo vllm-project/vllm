@@ -18,8 +18,14 @@ import torch
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
-from vllm.models.inkling.nvidia.logits_processor import InklingLogitsProcessor
-from vllm.models.inkling.nvidia.mtp import InklingMTP
+from vllm.models.inkling.amd.logits_processor import (
+    InklingLogitsProcessor as AmdInklingLogitsProcessor,
+)
+from vllm.models.inkling.amd.mtp import InklingMTP as AmdInklingMTP
+from vllm.models.inkling.nvidia.logits_processor import (
+    InklingLogitsProcessor as NvidiaInklingLogitsProcessor,
+)
+from vllm.models.inkling.nvidia.mtp import InklingMTP as NvidiaInklingMTP
 
 MUP = 8.0
 VOCAB = 64
@@ -31,6 +37,7 @@ class _FakeLmHead:
     def __init__(self, weight: torch.Tensor):
         self.weight = weight
         self.quant_method = UnquantizedEmbeddingMethod()
+        self.tp_size = 1
 
 
 def _inputs():
@@ -44,8 +51,12 @@ def _expected_fp32(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.linear(hidden.float(), weight.float()) * (1.0 / MUP)
 
 
-def test_target_logits_processor_fp32_head(default_vllm_config):
-    lp = InklingLogitsProcessor(VOCAB, logits_mup_width_multiplier=MUP)
+@pytest.mark.parametrize(
+    "logits_processor_cls",
+    [NvidiaInklingLogitsProcessor, AmdInklingLogitsProcessor],
+)
+def test_target_logits_processor_fp32_head(default_vllm_config, logits_processor_cls):
+    lp = logits_processor_cls(VOCAB, logits_mup_width_multiplier=MUP)
     lp.head_dtype = torch.float32
     lp._gather_logits = lambda logits: logits
 
@@ -56,9 +67,15 @@ def test_target_logits_processor_fp32_head(default_vllm_config):
     torch.testing.assert_close(logits, _expected_fp32(hidden, weight))
 
 
-def test_target_logits_processor_default_head_stays_bf16(default_vllm_config):
+@pytest.mark.parametrize(
+    "logits_processor_cls",
+    [NvidiaInklingLogitsProcessor, AmdInklingLogitsProcessor],
+)
+def test_target_logits_processor_default_head_stays_bf16(
+    default_vllm_config, logits_processor_cls
+):
     # head_dtype unset -> the muP addmm fast path is preserved (bf16 out).
-    lp = InklingLogitsProcessor(VOCAB, logits_mup_width_multiplier=MUP)
+    lp = logits_processor_cls(VOCAB, logits_mup_width_multiplier=MUP)
     assert lp.head_dtype is None
     lp._gather_logits = lambda logits: logits
 
@@ -71,11 +88,11 @@ def test_target_logits_processor_default_head_stays_bf16(default_vllm_config):
     )
 
 
-def _fake_mtp(head_dtype: torch.dtype | None) -> InklingMTP:
-    mtp = InklingMTP.__new__(InklingMTP)
+def _fake_mtp(head_dtype, mtp_cls, logits_processor_cls):
+    mtp = mtp_cls.__new__(mtp_cls)
     torch.nn.Module.__init__(mtp)
     mtp.config = types.SimpleNamespace(logits_mup_width_multiplier=MUP)
-    lp = InklingLogitsProcessor(VOCAB)
+    lp = logits_processor_cls(VOCAB)
     lp.head_dtype = head_dtype
     lp._gather_logits = lambda logits: logits
     mtp.logits_processor = lp
@@ -83,9 +100,18 @@ def _fake_mtp(head_dtype: torch.dtype | None) -> InklingMTP:
     return mtp
 
 
-def test_mtp_draft_compute_logits_fp32_head(default_vllm_config):
+@pytest.mark.parametrize(
+    "mtp_cls,logits_processor_cls",
+    [
+        (NvidiaInklingMTP, NvidiaInklingLogitsProcessor),
+        (AmdInklingMTP, AmdInklingLogitsProcessor),
+    ],
+)
+def test_mtp_draft_compute_logits_fp32_head(
+    default_vllm_config, mtp_cls, logits_processor_cls
+):
     hidden, weight = _inputs()
-    mtp = _fake_mtp(torch.float32)
+    mtp = _fake_mtp(torch.float32, mtp_cls, logits_processor_cls)
     mtp.lm_head = _FakeLmHead(weight)
 
     logits = mtp.compute_logits(hidden)
@@ -94,9 +120,18 @@ def test_mtp_draft_compute_logits_fp32_head(default_vllm_config):
     torch.testing.assert_close(logits, _expected_fp32(hidden, weight))
 
 
-def test_mtp_draft_compute_logits_default_head_stays_bf16(default_vllm_config):
+@pytest.mark.parametrize(
+    "mtp_cls,logits_processor_cls",
+    [
+        (NvidiaInklingMTP, NvidiaInklingLogitsProcessor),
+        (AmdInklingMTP, AmdInklingLogitsProcessor),
+    ],
+)
+def test_mtp_draft_compute_logits_default_head_stays_bf16(
+    default_vllm_config, mtp_cls, logits_processor_cls
+):
     hidden, weight = _inputs()
-    mtp = _fake_mtp(None)
+    mtp = _fake_mtp(None, mtp_cls, logits_processor_cls)
     mtp.lm_head = _FakeLmHead(weight)
 
     logits = mtp.compute_logits(hidden)
@@ -108,7 +143,7 @@ def test_mtp_draft_compute_logits_default_head_stays_bf16(default_vllm_config):
 def test_target_fp32_fold_matches_unfused_projection(default_vllm_config):
     # On CUDA the fp32 head folds muP into ``addmm(out_dtype=fp32)``; it must be
     # bit-for-bit identical to the dtype-aware projection + elementwise multiply.
-    lp = InklingLogitsProcessor(VOCAB, logits_mup_width_multiplier=MUP)
+    lp = NvidiaInklingLogitsProcessor(VOCAB, logits_mup_width_multiplier=MUP)
     lp.head_dtype = torch.float32
     lp._gather_logits = lambda logits: logits
 
