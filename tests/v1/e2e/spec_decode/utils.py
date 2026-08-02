@@ -131,6 +131,7 @@ def assert_request_outputs_match(
     max_mismatches: int = 3,
 ) -> None:
     """Assert a thresholded exact-text match with bounded failure diagnostics."""
+    assert ref_outputs, f"{context}: no reference outputs"
     assert len(ref_outputs) == len(spec_outputs), (
         f"{context}: output count differs: "
         f"reference={len(ref_outputs)}, speculative={len(spec_outputs)}"
@@ -142,9 +143,7 @@ def assert_request_outputs_match(
 
     mismatches: list[str] = []
     matches = 0
-    for index, (ref_output, spec_output) in enumerate(
-        zip(ref_outputs, spec_outputs, strict=True)
-    ):
+    for index, (ref_output, spec_output) in enumerate(zip(ref_outputs, spec_outputs)):
         assert ref_output.outputs, (
             f"{context}: reference output {index} has no candidate"
         )

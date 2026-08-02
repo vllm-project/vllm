@@ -111,7 +111,11 @@ def _generate_token_ids_inline(llm: LLM) -> tuple[int, ...]:
         SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS, ignore_eos=True),
     )
     assert outputs and outputs[0].outputs, "expected one completion"
-    return tuple(outputs[0].outputs[0].token_ids)
+    token_ids = tuple(outputs[0].outputs[0].token_ids)
+    assert len(token_ids) == MAX_TOKENS, (
+        f"expected {MAX_TOKENS} generated tokens, got {len(token_ids)}: {token_ids}"
+    )
+    return token_ids
 
 
 def _spec_decode_num_drafts(metrics: list[Metric]) -> int:

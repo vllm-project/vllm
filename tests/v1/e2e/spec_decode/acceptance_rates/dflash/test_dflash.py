@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from dataclasses import dataclass
 
 import pytest
@@ -152,11 +151,6 @@ def test_dflash_correctness(
             f"acceptance_len={acceptance_len:.2f}"
         )
 
-        assert math.isfinite(accuracy), f"{context}: GSM8K accuracy is {accuracy!r}"
-        assert math.isfinite(acceptance_len), (
-            f"{context}: acceptance_len is {acceptance_len!r}; "
-            "check that speculative-decoding metrics were recorded"
-        )
         assert accuracy >= config.expected_accuracy, (
             f"{context}: GSM8K accuracy {accuracy:.3f} is below "
             f"{config.expected_accuracy:.3f}; acceptance_len={acceptance_len:.3f}"

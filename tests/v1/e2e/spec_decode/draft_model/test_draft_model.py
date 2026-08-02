@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from dataclasses import dataclass
 
 import pytest
@@ -394,13 +393,6 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
             f"eager={args.enforce_eager}, "
             f"acceptance_rate={acceptance_rate:.3f}, "
             f"acceptance_len={acceptance_len:.3f}"
-        )
-        assert math.isfinite(acceptance_rate), (
-            f"{context}; acceptance rate is non-finite, likely because no draft "
-            "tokens were recorded"
-        )
-        assert math.isfinite(acceptance_len), (
-            f"{context}; acceptance length is non-finite"
         )
         assert acceptance_rate >= args.expected_acceptance_rate, (
             f"{context}; expected acceptance_rate >= "

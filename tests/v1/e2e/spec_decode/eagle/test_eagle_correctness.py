@@ -119,6 +119,7 @@ def test_eagle_correctness_light(
             False,
             "auto",
             0.7,
+            # TODO: Re-measure the reference threshold when re-enabling this case.
             # Text-only mode starts but loses target correctness with ROCm/TRITON;
             # full multimodal profiling currently fails during engine startup.
             marks=pytest.mark.skip(

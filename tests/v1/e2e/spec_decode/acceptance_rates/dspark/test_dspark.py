@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
-
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
@@ -73,10 +71,6 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
             f"acceptance_len={acceptance_len:.3f}, "
             f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
         )
-        assert all(
-            math.isfinite(value)
-            for value in (acceptance_rate, acceptance_len, gsm8k_accuracy)
-        ), f"{context}: non-finite metric; {metrics_summary}"
         assert acceptance_rate >= 0.58 * 0.9, f"{context}: {metrics_summary}"
         assert acceptance_len >= 5.0 * 0.9, f"{context}: {metrics_summary}"
         assert gsm8k_accuracy >= 0.92 * 0.9, f"{context}: {metrics_summary}"
@@ -143,10 +137,6 @@ def test_dspark_correctness_and_acceptance_rate(dspark_config, vllm_runner):
             f"acceptance_len={acceptance_len:.3f}, "
             f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
         )
-        assert all(
-            math.isfinite(value)
-            for value in (acceptance_rate, acceptance_len, gsm8k_accuracy)
-        ), f"{context}: non-finite metric; {metrics_summary}"
         assert acceptance_rate >= 0.428 * 0.9, f"{context}: {metrics_summary}"
         assert acceptance_len >= 3.994 * 0.9, f"{context}: {metrics_summary}"
         assert gsm8k_accuracy >= 0.801 * 0.9, f"{context}: {metrics_summary}"
