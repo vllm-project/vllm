@@ -57,6 +57,7 @@ from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
     QwenGatedDeltaNetAttention,
+    _gdn_overlap_supported_for_cache_mode,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
@@ -97,6 +98,16 @@ def _make_vllm_config(gdn_backend: str):
     )
     cfg.additional_config = {"gdn_prefill_backend": gdn_backend}
     return cfg
+
+
+@pytest.mark.parametrize(
+    ("cache_mode", "expected"),
+    [("none", True), ("align", False), ("all", False)],
+)
+def test_gdn_overlap_requires_unshared_state_slots(
+    cache_mode: str, expected: bool
+) -> None:
+    assert _gdn_overlap_supported_for_cache_mode(cache_mode) is expected
 
 
 def _build_layer(
@@ -328,8 +339,27 @@ def test_forward_core_split_matches_unified(
                 a=a,
                 core_attn_out=captured_out,
             )
+        reference_layer = _build_layer(
+            vllm_config,
+            layer_overlap.kv_cache[0].clone(),
+            layer_overlap.kv_cache[1].clone(),
+            A_log,
+            dt_bias,
+            conv_weight,
+            conv_bias,
+        )
         graph.replay()
+        expected_replay = _run_forward_core(
+            reference_layer, meta_split, mixed_qkv, b, a, num_tokens
+        )
         torch.accelerator.synchronize()
+        torch.testing.assert_close(captured_out, expected_replay, atol=0, rtol=0)
+        torch.testing.assert_close(
+            layer_overlap.kv_cache[0], reference_layer.kv_cache[0], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            layer_overlap.kv_cache[1], reference_layer.kv_cache[1], atol=0, rtol=0
+        )
 
     # ---- Unified path (real _forward_core, meta_unified) ----
     conv_state_unified = conv_state0.clone()

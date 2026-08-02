@@ -86,6 +86,12 @@ _GDN_DECODE_PREFILL_OVERLAP_MIN_PREFILL_TOKENS = 4096
 _gdn_overlap_stream: torch.cuda.Stream | None = None
 
 
+def _gdn_overlap_supported_for_cache_mode(cache_mode: str) -> bool:
+    # Prefix-cache modes may read shared state slots. Keep concurrent state
+    # updates restricted to the one-private-slot-per-request cache contract.
+    return cache_mode == "none"
+
+
 def _get_gdn_overlap_stream() -> torch.cuda.Stream:
     global _gdn_overlap_stream
     if _gdn_overlap_stream is None:
@@ -545,6 +551,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_GDN_DECODE_PREFILL_OVERLAP
             and current_platform.is_cuda_alike()
             and self.gdn_prefill_backend == "flashinfer"
+            and _gdn_overlap_supported_for_cache_mode(
+                vllm_config.cache_config.mamba_cache_mode
+            )
         )
         self.gdn_overlap_stream = (
             _get_gdn_overlap_stream() if self.gdn_decode_prefill_overlap else None
