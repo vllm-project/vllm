@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.reload_arena import get_reload_arena
+from vllm.model_executor.reload_arena import ReloadArena, get_reload_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
@@ -167,6 +167,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             ),
         )
 
+        # The wrapper owns private CUDA-graph workspaces that the arena cannot
+        # adopt individually. Persist the wrapper in an object slot so a
+        # rebuilt experts object borrows the same wrapper.
+        self._bind_arena_wrapper(arena)
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -238,14 +243,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # from pre-quantizing activations.
         return True
 
-    def _ensure_wrapper(self) -> None:
-        """Lazily create B12xMoEWrapper on first use."""
-        if self._wrapper is not None:
-            return
-
+    def _build_wrapper(self) -> Any:
         from flashinfer.fused_moe import B12xMoEWrapper
 
-        self._wrapper = B12xMoEWrapper(
+        return B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
             hidden_size=self.hidden_dim,
@@ -255,6 +256,16 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
         )
+
+    def _bind_arena_wrapper(self, arena: ReloadArena) -> None:
+        self._wrapper = arena.get_or_create_object(
+            "flashinfer_b12x.wrapper", self._build_wrapper
+        )
+
+    def _ensure_wrapper(self) -> None:
+        """Build a wrapper for direct use without layer PWAL."""
+        if self._wrapper is None:
+            self._wrapper = self._build_wrapper()
 
     def apply(
         self,
