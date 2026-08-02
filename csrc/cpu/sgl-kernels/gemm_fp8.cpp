@@ -663,7 +663,7 @@ inline bool brgemm_small_m(
   if constexpr (!std::is_same_v<scalar_t, at::BFloat16>) {
     return false;
   } else {
-    if (N != block_size_n() || M < 1 || M > 8) {
+    if (N != block_size_n() || M < 1 || M > MOE_TINY_GEMM_MAX_M) {
       return false;
     }
 

@@ -24,6 +24,8 @@ constexpr int block_size_n() {
   return 2 * TILE_N;
 }
 
+constexpr int MOE_TINY_GEMM_MAX_M = 4;
+
 constexpr bool brgemm_supported() {
 #if defined(CPU_CAPABILITY_AVX512)
   return true;
