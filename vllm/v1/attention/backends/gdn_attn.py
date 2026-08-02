@@ -38,6 +38,26 @@ class GDNAttentionBackend(AttentionBackend):
         return True
 
 
+class QwenGDNAttentionBackend(GDNAttentionBackend):
+    """GDN backend for the batch-invariant Qwen CUDA execution path."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN_GDN_ATTN"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        from vllm.platforms import current_platform
+
+        return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+    @classmethod
+    def get_batch_invariant_prefill_chunk_size(cls) -> int:
+        from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+        return FLA_CHUNK_SIZE
+
+
 @dataclass
 class GDNAttentionMetadata:
     num_prefills: int

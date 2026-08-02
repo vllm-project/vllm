@@ -13,6 +13,8 @@ Environment variables:
 import os
 import random
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import openai
@@ -166,3 +168,60 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
             client=client,
             model_name=TEST_MODEL,
         )
+
+
+@skip_if_not_cuda
+def test_qwen_gdn_chunked_prefill_is_batch_invariant() -> None:
+    if TEST_MODEL != "Qwen/Qwen3.5-0.8B":
+        pytest.skip("This regression requires a public Qwen GDN model.")
+
+    server_args = [
+        "--max-model-len=512",
+        "--max-num-batched-tokens=128",
+        "--max-num-seqs=8",
+        "--enforce-eager",
+    ]
+    target_prompt = [100] * 193
+    target_sampling: dict[str, Any] = {
+        "temperature": 0.0,
+        "max_tokens": 8,
+        "logprobs": 5,
+    }
+
+    with RemoteOpenAIServer(TEST_MODEL, server_args) as server:
+        client = server.get_client()
+        baseline = _request_completion(
+            client, TEST_MODEL, target_prompt, target_sampling
+        )
+        assert baseline is not None
+
+        decode_started = threading.Event()
+        load_client = server.get_client()
+
+        def run_decode_load() -> None:
+            stream = load_client.completions.create(
+                model=TEST_MODEL,
+                prompt=[101] * 73,
+                temperature=0.0,
+                max_tokens=128,
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices:
+                    decode_started.set()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            load = executor.submit(run_decode_load)
+            assert decode_started.wait(timeout=30), "Decode load did not start."
+            mixed = _request_completion(
+                client, TEST_MODEL, target_prompt, target_sampling
+            )
+            load.result(timeout=30)
+
+        assert mixed is not None
+        baseline_tokens, baseline_logprobs = _extract_tokens_and_logprobs(
+            baseline["choices"][0]
+        )
+        mixed_tokens, mixed_logprobs = _extract_tokens_and_logprobs(mixed["choices"][0])
+        assert baseline_tokens == mixed_tokens
+        assert baseline_logprobs == mixed_logprobs

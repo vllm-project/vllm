@@ -126,6 +126,7 @@ def derive_mamba_conv_split(
         MambaAttentionBackendEnum.MAMBA1,
         MambaAttentionBackendEnum.MAMBA2,
         MambaAttentionBackendEnum.GDN_ATTN,
+        MambaAttentionBackendEnum.QWEN_GDN_ATTN,
     )
     if mamba_spec.mamba_type not in _supported:
         raise NotImplementedError(
@@ -187,7 +188,10 @@ def derive_mamba_conv_split(
         x_local = intermediate_size // local_tp
         b_local = groups_ss // local_tp
         local_proj_dims = (x_local, b_local, b_local)
-    elif mamba_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+    elif mamba_spec.mamba_type in (
+        MambaAttentionBackendEnum.GDN_ATTN,
+        MambaAttentionBackendEnum.QWEN_GDN_ATTN,
+    ):
         # GDN: conv = [Q, K, V] where dim(Q) == dim(K) == key_dim.
         # conv_dim = key_dim*2 + value_dim (all global, divided by TP).
         # Temporal state shape is (num_v_heads/TP, head_v_dim, head_k_dim).

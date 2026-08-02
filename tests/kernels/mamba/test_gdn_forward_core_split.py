@@ -22,9 +22,9 @@ Both paths are exercised through the REAL ``_forward_core``:
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
-The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
-must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
-portable check of the split wiring).
+The device's supported chunk backend is forced so the prefill-only
+``chunk_indices`` must stay consistent with the rebased ``cu_seqlens`` (a
+stringent, backend-portable check of the split wiring).
 """
 
 from __future__ import annotations
@@ -38,12 +38,9 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-):
+if not (current_platform.is_cuda() and current_platform.has_device_capability(90)):
     pytest.skip(
-        reason="GDN _forward_core split test uses the CuteDSL prefill backend "
-        "(requires CUDA SM10x).",
+        reason="GDN _forward_core split tests require CUDA SM90+.",
         allow_module_level=True,
     )
 
@@ -69,6 +66,7 @@ from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
@@ -88,27 +86,34 @@ PREFIX = "model.layers.0.linear_attn"
 
 def _make_vllm_config():
     # A small, ungated GDN model whose config is cached locally; only the config
-    # (scheduler/cache/compilation/hf) is used here, never the weights. Inject
-    # linear_key_head_dim=128 and request the CuteDSL prefill backend -- the
-    # supported GDN chunk kernel on Blackwell (the Triton/FLA chunk kernel is
-    # unsupported on SM10x). CuteDSL consumes chunk_indices/chunk_offsets, so
-    # this also exercises the prefill-only chunk-metadata wiring.
+    # (scheduler/cache/compilation/hf) is used here, never the weights. Use
+    # Triton on Hopper and CuteDSL on Blackwell.
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    backend = (
+        "cutedsl" if current_platform.is_device_capability_family(100) else "triton"
+    )
+    cfg.additional_config = {"gdn_prefill_backend": backend}
     return cfg
 
 
 def _build_layer(
-    vllm_config, conv_state, ssm_state, A_log, dt_bias, conv_weight, conv_bias
+    vllm_config,
+    conv_state,
+    ssm_state,
+    A_log,
+    dt_bias,
+    conv_weight,
+    conv_bias,
+    enable_packed_recurrent_decode=False,
 ):
     """A minimal object that runs the real ``_forward_core`` bound to it."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
-    layer.enable_packed_recurrent_decode = False
+    layer.enable_packed_recurrent_decode = enable_packed_recurrent_decode
     layer.tp_size = 1
     layer.num_k_heads = H
     layer.num_v_heads = HV
@@ -126,11 +131,16 @@ def _build_layer(
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
+        "_forward_core_decode_non_spec",
     ):
         setattr(
             layer,
             name,
             types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
+        )
+    if hasattr(QwenGatedDeltaNetAttention, "_forward_packed_recurrent_decode"):
+        layer._forward_packed_recurrent_decode = types.MethodType(
+            QwenGatedDeltaNetAttention._forward_packed_recurrent_decode, layer
         )
     return layer
 
@@ -193,7 +203,10 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    assert builder.gdn_prefill_backend == "cutedsl"
+    expected_backend = (
+        "cutedsl" if current_platform.is_device_capability_family(100) else "triton"
+    )
+    assert builder.gdn_prefill_backend == expected_backend
 
     num_tokens = sum(query_lens)
 
@@ -300,3 +313,279 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
+
+
+def test_packed_decode_is_bitwise_invariant_in_mixed_batch() -> None:
+    """A decode row must not change recurrent kernels when prefills arrive."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    num_decodes = 2
+    num_prefill_tokens = 3
+    num_tokens = num_decodes + num_prefill_tokens
+
+    conv_state_shape, temporal_state_shape = (
+        MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1, H, HV, K, V, CONV_KERNEL, num_spec=0
+        )
+    )
+    conv_state = torch.zeros(3, *conv_state_shape, dtype=dtype, device=device)
+    ssm_state = (
+        torch.randn(3, *temporal_state_shape, dtype=torch.float32, device=device) * 0.05
+    )
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+    conv_weight = (
+        torch.randn(CONV_DIM, 1, CONV_KERNEL, dtype=dtype, device=device) * 0.1
+    )
+    conv_bias = torch.randn(CONV_DIM, dtype=dtype, device=device) * 0.1
+    mixed_qkv = torch.randn(num_tokens, CONV_DIM, dtype=dtype, device=device) * 0.1
+    a = torch.randn(num_tokens, HV, dtype=dtype, device=device) * 0.1
+    b = torch.randn(num_tokens, HV, dtype=dtype, device=device) * 0.1
+    state_indices = torch.arange(3, dtype=torch.int32, device=device)
+
+    decode_metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=num_decodes,
+        non_spec_query_start_loc=torch.arange(
+            num_decodes + 1, dtype=torch.int32, device=device
+        ),
+        non_spec_state_indices_tensor=state_indices[:num_decodes],
+    )
+    mixed_metadata = GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=num_prefill_tokens,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=num_tokens,
+        has_initial_state=torch.tensor(
+            [True, True, False], dtype=torch.bool, device=device
+        ),
+        non_spec_query_start_loc=torch.tensor(
+            [0, 1, 2, num_tokens], dtype=torch.int32, device=device
+        ),
+        non_spec_state_indices_tensor=state_indices,
+        prefill_query_start_loc=torch.tensor(
+            [0, num_prefill_tokens], dtype=torch.int32, device=device
+        ),
+        prefill_state_indices=state_indices[num_decodes:],
+        prefill_has_initial_state=torch.tensor(
+            [False], dtype=torch.bool, device=device
+        ),
+    )
+
+    def passthrough_conv(x, *args, **kwargs):
+        return x
+
+    def prefill_stub(
+        *,
+        v: torch.Tensor,
+        initial_state: torch.Tensor,
+        **kwargs,
+    ):
+        return torch.zeros_like(v), initial_state.clone()
+
+    def run(metadata, initial_ssm_state):
+        layer = _build_layer(
+            _make_vllm_config(),
+            conv_state.clone(),
+            initial_ssm_state,
+            A_log,
+            dt_bias,
+            conv_weight,
+            conv_bias,
+            enable_packed_recurrent_decode=True,
+        )
+        layer.chunk_gated_delta_rule = prefill_stub
+        with (
+            patch.object(
+                qwen_gdn_linear_attn,
+                "causal_conv1d_update",
+                side_effect=passthrough_conv,
+            ),
+            patch.object(
+                qwen_gdn_linear_attn,
+                "causal_conv1d_fn",
+                side_effect=passthrough_conv,
+            ),
+        ):
+            output = _run_forward_core(
+                layer, metadata, mixed_qkv, b, a, metadata.num_actual_tokens
+            )
+        return output, layer.kv_cache[1]
+
+    decode_output, decode_state = run(decode_metadata, ssm_state.clone())
+    mixed_output, mixed_state = run(mixed_metadata, ssm_state.clone())
+
+    torch.testing.assert_close(
+        mixed_output[:num_decodes],
+        decode_output,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        mixed_state[:num_decodes],
+        decode_state[:num_decodes],
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="FlashInfer context-parallel GDN prefill is specific to SM90.",
+)
+def test_flashinfer_prefill_is_bitwise_invariant_across_batch_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BIC must not let FlashInfer choose a prefill kernel from batch size."""
+    torch.manual_seed(7)
+    monkeypatch.setattr(
+        qwen_gdn_linear_attn.envs,
+        "VLLM_BATCH_INVARIANT",
+        True,
+    )
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    seq_len = 64
+    num_heads = 16
+    head_dim = 128
+    batch_size = 8
+
+    q = torch.randn(1, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = -torch.rand(1, seq_len, num_heads, device=device, dtype=dtype)
+    beta = torch.rand(1, seq_len, num_heads, device=device, dtype=dtype)
+    initial_state = (
+        torch.randn(
+            1,
+            num_heads,
+            head_dim,
+            head_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.01
+    )
+
+    def run(num_seqs: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cu_seqlens = (
+            torch.arange(num_seqs + 1, device=device, dtype=torch.int32) * seq_len
+        )
+        output, final_state = qwen_gdn_linear_attn.fi_chunk_gated_delta_rule(
+            q=q.repeat(1, num_seqs, 1, 1).contiguous(),
+            k=k.repeat(1, num_seqs, 1, 1).contiguous(),
+            v=v.repeat(1, num_seqs, 1, 1).contiguous(),
+            g=g.repeat(1, num_seqs, 1).contiguous(),
+            beta=beta.repeat(1, num_seqs, 1).contiguous(),
+            initial_state=initial_state.repeat(num_seqs, 1, 1, 1).contiguous(),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
+        return output[0, :seq_len], final_state[0]
+
+    single_output, single_state = run(1)
+    batched_output, batched_state = run(batch_size)
+
+    torch.testing.assert_close(single_output, batched_output, atol=0, rtol=0)
+    torch.testing.assert_close(single_state, batched_state, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    (
+        ["cutedsl"]
+        if current_platform.is_device_capability_family(100)
+        else ["flashinfer", "triton"]
+    ),
+)
+def test_prefill_is_bitwise_invariant_across_canonical_partitions(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot and state-carry prefills must use the same 64-token graph."""
+    torch.manual_seed(11)
+    monkeypatch.setattr(qwen_gdn_linear_attn.envs, "VLLM_BATCH_INVARIANT", True)
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    seq_len = 3 * FLA_CHUNK_SIZE
+    num_heads = 8
+    head_dim = 128
+    q = torch.randn(1, seq_len, num_heads, head_dim, device=device, dtype=dtype) * 0.1
+    k = torch.randn_like(q) * 0.1
+    v = torch.randn_like(q) * 0.1
+    g = -torch.rand(1, seq_len, num_heads, device=device, dtype=torch.float32) * 0.1
+    beta = torch.rand(1, seq_len, num_heads, device=device, dtype=dtype)
+    initial_state = (
+        torch.randn(
+            1,
+            num_heads,
+            head_dim,
+            head_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.01
+    )
+
+    config = _make_vllm_config()
+    config.additional_config = {"gdn_prefill_backend": backend}
+    with set_current_vllm_config(config):
+        op = ChunkGatedDeltaRule()
+
+    def run(start: int, end: int, state: torch.Tensor):
+        length = end - start
+        cu_seqlens_cpu = torch.tensor([0, length], dtype=torch.int32)
+        cu_seqlens = cu_seqlens_cpu.to(device)
+        if backend == "cutedsl":
+            from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                prepare_metadata_cutedsl,
+            )
+
+            chunk_indices, chunk_offsets = prepare_metadata_cutedsl(
+                cu_seqlens, length, FLA_CHUNK_SIZE
+            )
+        else:
+            chunk_indices = prepare_chunk_indices(cu_seqlens_cpu, FLA_CHUNK_SIZE).to(
+                device
+            )
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens_cpu, FLA_CHUNK_SIZE).to(
+                device
+            )
+        return op(
+            q=q[:, start:end].contiguous(),
+            k=k[:, start:end].contiguous(),
+            v=v[:, start:end].contiguous(),
+            g=g[:, start:end].contiguous(),
+            beta=beta[:, start:end].contiguous(),
+            initial_state=state.contiguous(),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            use_qk_l2norm_in_kernel=False,
+        )
+
+    full_output, full_state = run(0, seq_len, initial_state.clone())
+    partitioned_output = []
+    partitioned_state = initial_state.clone()
+    for start in range(0, seq_len, FLA_CHUNK_SIZE):
+        output, partitioned_state = run(
+            start, start + FLA_CHUNK_SIZE, partitioned_state
+        )
+        partitioned_output.append(output)
+
+    torch.testing.assert_close(
+        torch.cat(partitioned_output, dim=1), full_output, atol=0, rtol=0
+    )
+    torch.testing.assert_close(partitioned_state, full_state, atol=0, rtol=0)
