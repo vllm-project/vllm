@@ -21,8 +21,6 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
-      depends_on:
-      - image-build-amd
 
 - label: Basic Correctness (Distributed)
   key: basic-correctness-distributed
