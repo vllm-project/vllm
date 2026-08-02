@@ -423,14 +423,19 @@ class RoutedExperts(PluggableLayer):
 
     @staticmethod
     def _orient_fused_weight(
-        fused_weight: torch.Tensor, shard_id: str, unpadded_hidden: int
+        fused_weight: torch.Tensor,
+        shard_id: str,
+        unpadded_hidden: int,
+        target_shape: torch.Size | None = None,
+        tp_size: int = 1,
     ) -> torch.Tensor:
         """Normalise a fused expert tensor from either checkpoint orientation
         to (intermediate, hidden) for w1/w3 and (hidden, intermediate) for w2.
 
         Only transposes when the hidden dim is definitively on the wrong axis,
-        leaving tensors that have no hidden dim alone (e.g. a fused per-channel
-        scale, (2 * intermediate, 1)).
+        or when the transposed shape exactly matches the target parameter. The
+        latter resolves block scales, whose dimensions are both divided by the
+        block size and therefore do not contain the hidden size directly.
         """
         if shard_id == "w2":
             hidden_axis, intermediate_axis = -2, -1
@@ -441,6 +446,24 @@ class RoutedExperts(PluggableLayer):
             and fused_weight.shape[intermediate_axis] == unpadded_hidden
         ):
             return fused_weight.transpose(-1, -2)
+
+        if target_shape is not None and len(target_shape) >= 2:
+            # The caller only supplies canonical, TP-sharded block-scale
+            # targets. ``param`` is TP-local, whereas a fused checkpoint tensor
+            # contains the global intermediate dimension. Reconstruct that
+            # global shape: w1/w3 shard their first data axis and w2 its second.
+            expected_global_shape = list(target_shape[-2:])
+            tp_shard_axis = 1 if shard_id == "w2" else 0
+            expected_global_shape[tp_shard_axis] *= tp_size
+            checkpoint_shape = list(fused_weight.shape[-2:])
+            # This is only a tie-breaker: require an exact reversed-shape
+            # match so padded, square, or otherwise ambiguous layouts are
+            # never guessed.
+            if (
+                checkpoint_shape != expected_global_shape
+                and checkpoint_shape[::-1] == expected_global_shape
+            ):
+                return fused_weight.transpose(-1, -2)
         return fused_weight
 
     @staticmethod
@@ -938,11 +961,27 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
                 if is_fused:
+                    # PR #50137's hidden-axis heuristic cannot orient block
+                    # scales because both dimensions are divided by the block
+                    # size. Use the exact destination shape only for canonical,
+                    # TP-sharded BLOCK parameters. Other quant formats may use
+                    # transposed storage or replicated/full axes, for which
+                    # shard_id alone does not describe the target layout.
+                    can_match_block_target = (
+                        getattr(param, "quant_method", None)
+                        == FusedMoeWeightScaleSupported.BLOCK.value
+                        and not getattr(param, "is_transposed", False)
+                        and not getattr(param, "load_full_w2", False)
+                    )
                     # w1 and w3 share one fused tensor; use a local copy so the
                     # transpose below doesn't mutate loaded_weight across
                     # iterations (else w3 is transposed twice and wrongly chunked)
                     fused_weight = self._orient_fused_weight(
-                        loaded_weight, shard_id, unpadded_hidden
+                        loaded_weight,
+                        shard_id,
+                        unpadded_hidden,
+                        target_shape=param.shape if can_match_block_target else None,
+                        tp_size=self.moe_config.tp_size,
                     )
                     if shard_id in {"w1", "w3"}:
                         # Repurpose expert_id for deconcatenating w1 and w3
