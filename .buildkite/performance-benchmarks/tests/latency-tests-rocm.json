@@ -1,6 +1,9 @@
 [
     {
         "test_name": "latency_llama8B_tp1",
+        "environment_variables": {
+            "VLLM_ROCM_USE_AITER": 1
+        },
         "parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
@@ -11,6 +14,9 @@
     },
     {
         "test_name": "latency_llama70B_tp4",
+        "environment_variables": {
+            "VLLM_ROCM_USE_AITER": 1
+        },
         "parameters": {
             "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
             "tensor_parallel_size": 4,
@@ -21,6 +27,9 @@
     },
     {
         "test_name": "latency_mixtral8x7B_tp2",
+        "environment_variables": {
+            "VLLM_ROCM_USE_AITER": 1
+        },
         "parameters": {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
             "tensor_parallel_size": 2,
