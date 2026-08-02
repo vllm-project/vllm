@@ -617,13 +617,27 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             return True
 
-        # DSpark runs on BOTH the V1 and V2 GPU model runners. Upstream force-
-        # routes it to V2; we do not. On our SM12x DeepSeek-V4 stack the V1
-        # runner has correct long-context recall while V2 collapses under
-        # concurrency at long context, so DSpark follows the normal runner
-        # selection (V1 by default, since DeepSeek-V4 is not a default-V2
-        # architecture). Opt into the V2 DSpark speculator explicitly with
-        # VLLM_USE_V2_MODEL_RUNNER=1.
+        # DSpark routes to V2, matching upstream. This branch used to pin it to
+        # V1 on the grounds that "V2 collapses under concurrency at long
+        # context"; a paired A/B on 2x GB10 measured that claim and it does not
+        # hold on the current tree. arthur long-context recall is exact on both
+        # runners at c=1 (2/2), and at c=12 they are 23/24 vs 22/24 -- both
+        # inside the 22-24 band this branch has always seen there, which is
+        # batch-dependent reduction order under greedy + spec decode, not a
+        # recall loss. On the axes that were actually in question V2 is ahead:
+        # +4.70 GiB KV headroom (+27.5%, measured twice against a ~1.3 GiB noise
+        # floor) and higher draft acceptance (mean 2.097 vs 1.967, n=24/26,
+        # Mann-Whitney z=-2.45, p<0.05). GSM8K x3, tool-calling over 135 cases,
+        # #19 and engine health are at parity. See
+        # docs/sm120/experiments/2026-08-02-v2-model-runner-ab/.
+        # Force V2 as upstream does: _validate_v2_model_runner raises if V2 is
+        # unsupported for the rest of the config, rather than silently falling
+        # back to V1, which cannot run dspark at all.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        ):
+            return True
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
         # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
