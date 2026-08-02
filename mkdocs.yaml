@@ -143,6 +143,9 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
   # For in page [TOC] (not sidebar)
   - toc:
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
       permalink: true
   # For math rendering
   - pymdownx.arithmatex:
