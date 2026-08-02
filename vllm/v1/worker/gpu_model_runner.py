@@ -64,6 +64,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
+    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -7673,20 +7674,6 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-    def _get_attention_kv_cache_gid(self) -> int:
-        """Find the KV cache group index for attention layers.
-
-        Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler:
-        both pick the first ``FullAttentionSpec`` group so hybrid models
-        (Mamba / linear-attention layers that use other AttentionSpec
-        subclasses) end up indexing the same slot layout on both sides.
-        Falls back to 0 only for legacy single-group configs.
-        """
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                return gid
-        return 0
-
     def init_routed_experts_capturer(self):
         logger.info(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
@@ -7696,7 +7683,7 @@ class GPUModelRunner(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             vllm_config=self.vllm_config,
         )
-        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+        self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
         bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
         # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on

@@ -283,6 +283,14 @@ def bind_routed_experts_capturer(
         raise ValueError("No supported MoE router found for routed-experts capture.")
 
 
+def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
+    """Return the full-attention KV cache group used for routed experts."""
+    for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+        if isinstance(group.kv_cache_spec, FullAttentionSpec):
+            return gid
+    raise ValueError("Routed-experts capture requires a full-attention KV cache group.")
+
+
 class RoutedExpertsManager:
     """Scheduler-side slot-indexed buffer for routed experts.
 
@@ -313,17 +321,8 @@ class RoutedExpertsManager:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        # Pick the attention group for block/slot mapping. We require
-        # a FullAttentionSpec group rather than any AttentionSpec to
-        # stay consistent with the worker-side lookup in
-        # ``GPUModelRunner._get_attention_kv_cache_gid``; hybrid models
-        # (Mamba / linear attention) also have other AttentionSpec
-        # groups whose slot layout differs.
-        self.attn_gid = next(
-            gid
-            for gid, g in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(g.kv_cache_spec, FullAttentionSpec)
-        )
+        # Hybrid models also have KV groups whose slot layout differs.
+        self.attn_gid = get_routed_experts_attn_gid(kv_cache_config)
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
 

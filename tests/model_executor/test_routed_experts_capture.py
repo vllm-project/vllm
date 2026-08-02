@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
+    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
@@ -245,25 +246,21 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
     assert capturer.device_buffer[0, 0, 0].item() == -1
 
 
-def test_mrv2_snapshot_owns_routing_and_slot_mapping(monkeypatch):
-    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
-    import vllm.v1.worker.gpu.model_runner as model_runner
+def test_routed_experts_attention_group_is_shared_and_fail_closed(monkeypatch):
+    class FullAttentionSpec:
+        pass
 
-    routing_data = torch.arange(24, dtype=torch.int32).reshape(3, 4, 2)
-    slot_mappings = torch.tensor([[1, 2, 3], [11, 12, 13]])
-    runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
-    runner.routed_experts_capturer = SimpleNamespace(
-        get_device_buffer=lambda: routing_data
+    monkeypatch.setattr(f"{_REC_MODULE}.FullAttentionSpec", FullAttentionSpec)
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=object()),
+            SimpleNamespace(kv_cache_spec=FullAttentionSpec()),
+        ]
     )
-    runner.routed_experts_attn_gid = 1
+    assert get_routed_experts_attn_gid(config) == 1
 
-    snapshot = runner._snapshot_routed_experts(slot_mappings, 3)
-    routing_data.zero_()
-    slot_mappings.zero_()
-
-    assert snapshot is not None
-    assert snapshot.routing_data[1, 0, 0].item() == 8
-    assert snapshot.slot_mapping.tolist() == [11, 12, 13]
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -306,21 +303,15 @@ def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
     capturer = Mock()
     constructor = Mock(return_value=capturer)
     bind = Mock()
-
-    class FullAttentionSpec:
-        pass
-
-    full_attn_spec = FullAttentionSpec()
+    get_attn_gid = Mock(return_value=0)
     monkeypatch.setattr(model_runner, "RoutedExpertsCapturer", constructor)
     monkeypatch.setattr(model_runner, "bind_routed_experts_capturer", bind)
-    monkeypatch.setattr(model_runner, "FullAttentionSpec", FullAttentionSpec)
+    monkeypatch.setattr(model_runner, "get_routed_experts_attn_gid", get_attn_gid)
 
     runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
     runner.max_num_tokens = 32
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=rank))
-    runner.kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=full_attn_spec)]
-    )
+    runner.kv_cache_config = SimpleNamespace()
     runner.model = Mock()
 
     runner.init_routed_experts_capturer()
@@ -329,6 +320,7 @@ def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
         max_num_batched_tokens=32, vllm_config=runner.vllm_config
     )
     bind.assert_called_once_with(runner.model, capturer)
+    get_attn_gid.assert_called_once_with(runner.kv_cache_config)
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):

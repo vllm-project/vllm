@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
+    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -58,7 +59,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
@@ -301,26 +302,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         bind_routed_experts_capturer(self.model, capturer)
         self.routed_experts_capturer = capturer
-        self.routed_experts_attn_gid = next(
-            gid
-            for gid, group in enumerate(self.kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, FullAttentionSpec)
-        )
-
-    def _snapshot_routed_experts(
-        self,
-        slot_mappings: torch.Tensor,
-        num_tokens: int,
-    ) -> RoutedExpertsTensors | None:
-        capturer = self.routed_experts_capturer
-        if capturer is None:
-            return None
-        return RoutedExpertsTensors(
-            routing_data=capturer.get_device_buffer()[:num_tokens].clone(),
-            slot_mapping=slot_mappings[
-                self.routed_experts_attn_gid, :num_tokens
-            ].clone(),
-        )
+        self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1482,7 +1464,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         routed_experts = None
         if capturer is not None and not dummy_run:
             assert slot_mappings is not None
-            routed_experts = self._snapshot_routed_experts(slot_mappings, num_toks)
+            routed_experts = RoutedExpertsTensors(
+                routing_data=capturer.get_device_buffer()[:num_toks].clone(),
+                slot_mapping=slot_mappings[
+                    self.routed_experts_attn_gid, :num_toks
+                ].clone(),
+            )
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
