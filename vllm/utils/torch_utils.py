@@ -880,9 +880,18 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
+def get_accelerator_view_from_cpu_tensor(
+    cpu_tensor: torch.Tensor,
+    *,
+    require_live_view: bool = False,
+) -> torch.Tensor:
+    """Get an accelerator view of a CPU tensor using Unified Virtual Addressing.
+
+    Args:
+        cpu_tensor: A CPU tensor (typically pinned) to obtain a device view for.
+        require_live_view: If True, raise RuntimeError when the returned view
+            would be a detached copy rather than a live zero-copy alias.  V2 UVA
+            buffers depend on write-through coherence and must set this flag.
     """
     from vllm.platforms import current_platform
 
@@ -890,7 +899,22 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
-        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+        view = torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+        if require_live_view and cpu_tensor.numel() > 0:
+            # Verify the view is a live alias by checking that a CPU-side write
+            # is visible through the device view (single-element probe).
+            sentinel = int(cpu_tensor.flatten()[0].item()) ^ 0x5A5A
+            cpu_tensor.flatten()[0] = sentinel
+            if int(view.flatten()[0].item()) != sentinel:
+                raise RuntimeError(
+                    "get_accelerator_view_from_cpu_tensor returned a "
+                    "detached copy instead of a live zero-copy alias.  "
+                    "This indicates the host memory is not properly "
+                    "registered for UVA.  Under GPU Confidential "
+                    "Computing this may require a driver update."
+                )
+            cpu_tensor.flatten()[0] = sentinel ^ 0x5A5A  # restore
+        return view
     else:
         raise ValueError(
             f"`get_accelerator_view_from_cpu_tensor` is currently "
