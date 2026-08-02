@@ -95,6 +95,10 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         raise ValueError("Cannot find audio_token_id on processor or model config")
 
     def _get_image_token_id(self) -> int:
+        tokenizer = self.get_tokenizer()
+        image_token = getattr(tokenizer, "image_token", None)
+        if image_token is not None:
+            return tokenizer.get_vocab()[image_token]
         processor = self.get_hf_processor()
         if hasattr(processor, "image_token_id"):
             return processor.image_token_id
@@ -103,7 +107,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         if val is not None:
             return val
         if hasattr(processor, "image_token"):
-            tokenizer = self.get_tokenizer()
             vocab = tokenizer.get_vocab()
             if processor.image_token in vocab:
                 return vocab[processor.image_token]
