@@ -23,6 +23,8 @@ class MiniMaxM3SparseAiterPAImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from vllm.models.minimax_m3.amd.ops.sparse_pa import (
             minimax_m3_sparse_attn_decode_aiter,
