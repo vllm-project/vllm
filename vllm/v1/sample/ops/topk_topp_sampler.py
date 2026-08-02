@@ -59,6 +59,26 @@ def flashinfer_sampler_supported() -> bool:
         )
 
     if unsupported_reason is None:
+        # FlashInfer sampling kernels are JIT-compiled on first use. Verify up
+        # front that its JIT can target this GPU, otherwise the first sampling
+        # call raises deep inside engine warmup and takes the engine down with
+        # a misleading error (e.g. a local CUDA toolkit too old for the GPU
+        # architecture; see #50705, and #49497 for the undiscoverable-nvcc
+        # variant).
+        try:
+            from flashinfer.jit.core import check_cuda_arch
+        except ImportError:
+            check_cuda_arch = None
+        if check_cuda_arch is not None:
+            try:
+                check_cuda_arch()
+            except Exception as e:
+                unsupported_reason = (
+                    f"FlashInfer JIT cannot compile for this GPU "
+                    f"({type(e).__name__}: {e})"
+                )
+
+    if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
         return True
     if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
