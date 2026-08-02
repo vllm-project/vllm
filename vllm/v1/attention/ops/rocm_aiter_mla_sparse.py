@@ -131,6 +131,98 @@ def indexer_k_quant_and_cache_triton(
     )
 
 
+@functools.lru_cache
+def aiter_indexer_qk_fused_kernel():
+    """The fused indexer prologue kernel, if this AITER build has it."""
+    if not current_platform.is_rocm() or find_spec("aiter") is None:
+        return None
+    try:
+        from aiter import indexer_qk_rope_quant_and_cache
+    except ImportError:
+        return None
+    return indexer_qk_rope_quant_and_cache
+
+
+def rocm_aiter_indexer_qk_rope_quant_cache_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    positions: torch.Tensor,
+    kv_cache: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    k_norm_weight: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_norm_eps: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty(q.shape, dtype=current_platform.fp8_dtype(), device=q.device),
+        torch.empty(weights.shape, dtype=torch.float32, device=weights.device),
+    )
+
+
+def rocm_aiter_indexer_qk_rope_quant_cache(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    positions: torch.Tensor,
+    kv_cache: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    k_norm_weight: torch.Tensor,
+    k_norm_bias: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_norm_eps: float,
+    quant_block_size: int,
+    scale_fmt: str,
+    weights_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Whole sparse indexer prologue in one AITER launch; writes the K cache."""
+    from vllm.utils.torch_utils import _resolve_layer_name
+
+    q_out = torch.empty(q.shape, dtype=current_platform.fp8_dtype(), device=q.device)
+    weights_out = torch.empty(weights.shape, dtype=torch.float32, device=weights.device)
+
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        # Profiling / dummy run: no slot mapping yet.
+        q_out.zero_()
+        weights_out.zero_()
+        return q_out, weights_out
+
+    layer_attn_metadata = attn_metadata[_resolve_layer_name(k_cache_prefix)]
+    assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
+
+    # AITER takes cos and sin separately; vLLM packs both halves in one table.
+    rope_half = cos_sin_cache.shape[-1] // 2
+
+    aiter_indexer_qk_fused_kernel()(
+        q,
+        q_out,
+        weights,
+        weights_out,
+        k,
+        kv_cache,
+        layer_attn_metadata.slot_mapping,
+        k_norm_weight,
+        k_norm_bias,
+        positions,
+        cos_sin_cache[:, :rope_half],
+        cos_sin_cache[:, rope_half:],
+        k_norm_eps,
+        quant_block_size,
+        scale_fmt,
+        weights_scale,
+        kv_cache.shape[1] > 1,
+        is_neox,
+    )
+    return q_out, weights_out
+
+
 @triton.jit
 def _cp_gather_indexer_quant_cache_kernel(
     kv_cache_ptr,  # [n_blks,blk_size//tile_blk,head_dim//16B,tile_blk,16B]
@@ -597,7 +689,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,
@@ -617,7 +709,7 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
-    k: torch.Tensor,
+    k: torch.Tensor | None,
     weights: torch.Tensor,
     quant_block_size: int,
     scale_fmt: str | None,

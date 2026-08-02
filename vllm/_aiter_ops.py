@@ -11,6 +11,8 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_aiter_indexer_qk_rope_quant_cache,
+    rocm_aiter_indexer_qk_rope_quant_cache_fake,
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
@@ -2121,6 +2123,14 @@ class rocm_aiter_ops:
                 op_func=rocm_aiter_sparse_attn_indexer,
                 mutates_args=["topk_indices_buffer"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_indexer_qk_rope_quant_cache",
+                op_func=rocm_aiter_indexer_qk_rope_quant_cache,
+                mutates_args=["kv_cache"],
+                fake_impl=rocm_aiter_indexer_qk_rope_quant_cache_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
