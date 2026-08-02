@@ -34,10 +34,12 @@ def fast_causal_conv1d(
     eligible = (
         _IS_SM103
         and _HAS_SM103_KERNEL
+        and x.is_cuda
         and x.dtype == torch.bfloat16
         and x.ndim == 2
         and x.stride(0) == 1
         and x.stride(1) >= x.shape[0]
+        and x.stride(1) % 4 == 0
         and x.storage_offset() % 4 == 0
         and x.shape[0] % 4 == 0
         and x.shape[1] >= 3
@@ -155,6 +157,7 @@ def causal_conv1d_fn(
     batch = query_start_loc.numel() - 1
     use_tiled = (
         _IS_SM103
+        and conv_x.is_cuda
         and conv_x.shape[1] >= 1024
         and conv_x.shape[0] <= 4096
         and batch <= 32

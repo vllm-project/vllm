@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import pytest
 import torch
 
@@ -47,7 +49,7 @@ def test_official_operator_matches_contract_reference(case: ContractCase) -> Non
         inputs["query_start_loc"],
         cache_indices=inputs["cache_indices"],
         has_initial_state=inputs["has_initial_state"],
-        activation=inputs["activation"],
+        activation=cast(str | None, inputs["activation"]),
     )
     rtol, atol = tolerances(case.dtype)
     torch.testing.assert_close(
@@ -73,7 +75,7 @@ def test_current_replacement_against_contract(case: ContractCase) -> None:
         inputs["query_start_loc"],
         cache_indices=inputs["cache_indices"],
         has_initial_state=inputs["has_initial_state"],
-        activation=inputs["activation"],
+        activation=cast(str | None, inputs["activation"]),
     )
     rtol, atol = tolerances(case.dtype)
     torch.testing.assert_close(

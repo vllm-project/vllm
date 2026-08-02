@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -48,7 +49,7 @@ def test_short_prefill_uses_official_fallback() -> None:
             inputs["query_start_loc"],
             cache_indices=inputs["cache_indices"],
             has_initial_state=inputs["has_initial_state"],
-            activation=inputs["activation"],
+            activation=cast(str | None, inputs["activation"]),
         )
     fallback.assert_called_once()
 
@@ -69,7 +70,7 @@ def test_replacement_interface_runs_current_fast_variant() -> None:
         inputs["query_start_loc"],
         cache_indices=inputs["cache_indices"],
         has_initial_state=inputs["has_initial_state"],
-        activation=inputs["activation"],
+        activation=cast(str | None, inputs["activation"]),
     )
 
     torch.testing.assert_close(actual, expected_output, rtol=1e-2, atol=5e-2)
@@ -137,6 +138,41 @@ def test_replacement_validate_data_rejects_unsupported_layout() -> None:
         )
 
 
+def test_long_cpu_input_uses_official_fallback(monkeypatch) -> None:
+    dim, tokens = 128, 1024
+    x = torch.empty(tokens, dim, dtype=torch.bfloat16).T
+    weight = torch.empty(dim, 4, dtype=torch.bfloat16)
+    states = torch.empty(2, dim, 3, dtype=torch.bfloat16)
+    query_start = torch.tensor([0, tokens], dtype=torch.int32)
+    indices = torch.tensor([1], dtype=torch.int32)
+    has_initial = torch.tensor([False])
+    expected = torch.empty_like(x)
+
+    monkeypatch.setattr(gdn_causal_conv1d, "_IS_SM103", True)
+    monkeypatch.setattr(
+        gdn_causal_conv1d,
+        "generic_causal_conv1d",
+        lambda *args, **kwargs: pytest.fail("CPU input reached the Triton path"),
+    )
+    with patch.object(
+        gdn_causal_conv1d,
+        "official_causal_conv1d_fn",
+        return_value=expected,
+    ) as fallback:
+        actual = causal_conv1d_fn(
+            x,
+            weight,
+            None,
+            states,
+            query_start,
+            cache_indices=indices,
+            has_initial_state=has_initial,
+        )
+
+    assert actual is expected
+    fallback.assert_called_once()
+
+
 def test_replacement_interface_runs_generic_variant() -> None:
     case = ContractCase(
         "long_activation_none",
@@ -157,7 +193,7 @@ def test_replacement_interface_runs_generic_variant() -> None:
         inputs["query_start_loc"],
         cache_indices=inputs["cache_indices"],
         has_initial_state=inputs["has_initial_state"],
-        activation=inputs["activation"],
+        activation=cast(str | None, inputs["activation"]),
     )
     torch.testing.assert_close(actual, expected_output, rtol=1e-2, atol=5e-2)
     torch.testing.assert_close(actual_states, expected_states, rtol=0, atol=0)

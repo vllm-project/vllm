@@ -80,6 +80,56 @@ def test_fast_causal_conv_preserves_null_state_slot() -> None:
     torch.testing.assert_close(state, expected_state, atol=0, rtol=0)
 
 
+def test_fast_causal_conv_rejects_misaligned_token_stride(monkeypatch) -> None:
+    dim, tokens = 4096, 256
+    backing = torch.empty(tokens, dim + 1, device="cuda", dtype=torch.bfloat16)
+    x = backing[:, :dim].T
+    weight = torch.empty(dim, 4, device="cuda", dtype=torch.bfloat16)
+    state = torch.empty(2, dim, 3, device="cuda", dtype=torch.bfloat16)
+    indices = torch.tensor([1], device="cuda", dtype=torch.int32)
+    has_initial_state = torch.tensor([False], device="cuda")
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return torch.empty_like(x)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.gdn_causal_conv1d.ops."
+        "gdn_causal_conv1d_sm103",
+        fail_if_called,
+    )
+
+    assert x.stride(1) % 4 != 0
+    assert (
+        fast_causal_conv1d(x, weight, None, state, indices, has_initial_state) is None
+    )
+    assert not called
+
+
+def test_fast_causal_conv_rejects_cpu_input(monkeypatch) -> None:
+    from vllm.model_executor.layers.mamba.ops import gdn_causal_conv1d
+
+    monkeypatch.setattr(gdn_causal_conv1d, "_IS_SM103", True)
+    monkeypatch.setattr(gdn_causal_conv1d, "_HAS_SM103_KERNEL", True)
+    monkeypatch.setattr(
+        gdn_causal_conv1d.ops,
+        "gdn_causal_conv1d_sm103",
+        lambda *args, **kwargs: torch.empty_like(args[0]),
+    )
+    dim, tokens = 4096, 256
+    x = torch.empty(tokens, dim, dtype=torch.bfloat16).T
+    weight = torch.empty(dim, 4, dtype=torch.bfloat16)
+    state = torch.empty(2, dim, 3, dtype=torch.bfloat16)
+    indices = torch.tensor([1], dtype=torch.int32)
+    has_initial_state = torch.tensor([False])
+
+    assert (
+        fast_causal_conv1d(x, weight, None, state, indices, has_initial_state) is None
+    )
+
+
 def test_fast_causal_conv_rejects_token_contiguous_input() -> None:
     x = torch.empty(4096, 256, device="cuda", dtype=torch.bfloat16).contiguous()
     weight = torch.empty(4096, 4, device="cuda", dtype=torch.bfloat16)

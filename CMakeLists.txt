@@ -448,10 +448,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-      list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/libtorch_stable/mamba/gdn_causal_conv1d_sm103.cu")
-      list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_GDN_CONV_SM103=1")
-      set(VLLM_ENABLE_GDN_CONV_SM103 ON)
+      cuda_archs_loose_intersection(GDN_CONV_SM103_ARCHS
+        "10.3a" "${CUDA_ARCHS}")
+      if(GDN_CONV_SM103_ARCHS)
+        list(APPEND VLLM_STABLE_EXT_SRC
+          "csrc/libtorch_stable/mamba/gdn_causal_conv1d_sm103.cu")
+        list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_GDN_CONV_SM103=1")
+        set(VLLM_ENABLE_GDN_CONV_SM103 ON)
+      endif()
     endif()
 
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
