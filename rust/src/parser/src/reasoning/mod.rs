@@ -44,6 +44,9 @@ pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
 pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
 /// GLM45 currently shares the standard `<think>...</think>` parser.
 pub type Glm45ReasoningParser = Qwen3ReasoningParser;
+/// Holo2 shares DeepSeek R1's `<think>...</think>` parser and
+/// no-boundary reasoning defaults.
+pub type Holo2ReasoningParser = DeepSeekR1ReasoningParser;
 /// Kimi K2 currently shares the standard `<think>...</think>` parser.
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
