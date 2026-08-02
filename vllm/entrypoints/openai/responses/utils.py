@@ -30,7 +30,11 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.chat_utils import (
+    has_native_tool_call_ids,
+    is_native_tool_call_id,
+    make_tool_call_id,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionToolsParam,
@@ -164,6 +168,7 @@ def construct_input_messages(
     request_input: str | list[ResponseInputOutputItem],
     prev_msg: list[ChatCompletionMessageParam] | None = None,
     prev_response_output: list[ResponseOutputItem] | None = None,
+    tool_call_id_type: str = "random",
 ):
     messages: list[ChatCompletionMessageParam] = []
     if request_instructions:
@@ -198,22 +203,68 @@ def construct_input_messages(
     if isinstance(request_input, str):
         messages.append({"role": "user", "content": request_input})
     else:
-        input_messages = construct_chat_messages_with_tool_call(request_input)
+        input_messages = construct_chat_messages_with_tool_call(
+            request_input, tool_call_id_type=tool_call_id_type
+        )
         messages.extend(input_messages)
     return messages
 
 
+class _NativeToolCallIds:
+    """Restore native tool-call IDs that a Responses round trip replaced.
+
+    The Responses API hands clients OpenAI-style ``call_<uuid>`` IDs, but Kimi's
+    chat template renders the ID verbatim as the ``<|tool_call_begin|>`` header
+    and as the ``## Return of {id}`` tool-result header -- and renders the
+    function name nowhere else. Echoing ``call_<uuid>`` back therefore both
+    hides which function a prior turn called and teaches the model to imitate an
+    ID shape its own parser rejects.
+
+    Numbering follows ``count_response_history_tool_calls``: a single counter
+    over the whole input, which is what the parser uses to number the *next*
+    tool call.
+    """
+
+    def __init__(self, id_type: str) -> None:
+        self.id_type = id_type
+        self.enabled = has_native_tool_call_ids(id_type)
+        self._next_idx = 0
+        self._rewritten: dict[str, str] = {}
+
+    def for_tool_call(self, call_id: str, tool_name: str) -> str:
+        if not self.enabled:
+            return call_id
+        idx = self._next_idx
+        self._next_idx += 1
+        if is_native_tool_call_id(call_id, self.id_type):
+            return call_id
+        native_id = make_tool_call_id(
+            id_type=self.id_type, func_name=tool_name, idx=idx
+        )
+        self._rewritten[call_id] = native_id
+        return native_id
+
+    def for_tool_output(self, call_id: str | None) -> str | None:
+        if not self.enabled or call_id is None:
+            return call_id
+        return self._rewritten.get(call_id, call_id)
+
+
 def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
+    tool_call_id_type: str = "random",
 ) -> list[ChatCompletionMessageParam]:
     """Build chat messages from response items.
 
     Some chat messages span multiple response items (e.g., reasoning + tool calls).
     """
     messages: list[ChatCompletionMessageParam] = []
+    native_ids = _NativeToolCallIds(tool_call_id_type)
     for item in input_messages:
         message = _construct_message_from_response_item(
-            item, prev_msg=messages[-1] if messages else None
+            item,
+            prev_msg=messages[-1] if messages else None,
+            native_ids=native_ids,
         )
         if message is not None:
             messages.append(message)
@@ -224,6 +275,7 @@ def construct_chat_messages_with_tool_call(
 def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
     prev_msg: ChatCompletionMessageParam | None = None,
+    native_ids: _NativeToolCallIds | None = None,
 ) -> ChatCompletionMessageParam | None:
     """
     Returns a new message or None. If `None`, `prev_msg` might be updated.
@@ -232,13 +284,15 @@ def _construct_message_from_response_item(
     prev_assistant_msg = (
         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
+    if native_ids is None:
+        native_ids = _NativeToolCallIds("random")
 
     if isinstance(item, ResponseFunctionToolCall):
         tool_name = item.name
         if item.namespace:
             tool_name = flat_namespace_tool_name(item.namespace, item.name)
         tool_call = ChatCompletionMessageToolCallParam(
-            id=item.call_id,
+            id=native_ids.for_tool_call(item.call_id, tool_name),
             function=FunctionCallTool(
                 name=tool_name,
                 arguments=item.arguments,
@@ -309,14 +363,14 @@ def _construct_message_from_response_item(
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.output,
-            tool_call_id=item.call_id,
+            tool_call_id=native_ids.for_tool_output(item.call_id),
         )
     elif isinstance(item, dict) and item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.get("output"),
-            tool_call_id=item.get("call_id"),
+            tool_call_id=native_ids.for_tool_output(item.get("call_id")),
         )
     elif isinstance(item, dict) and item.get("role") == "assistant":
         content = item.get("content")
