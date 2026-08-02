@@ -362,9 +362,16 @@ class Parser:
         prompt_token_ids: list[int] | None = None,
         *,
         finished: bool,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
+
+        ``finish_reason`` (e.g. ``"stop"``, ``"length"``, ``"abort"``) is
+        only meaningful when ``finished`` is True; it lets a subclass's
+        terminal-delta handling distinguish a natural stop from a
+        length-truncated generation. See :meth:`DelegatingParser.
+        finalize_generation`.
         """
 
 
@@ -765,6 +772,7 @@ class DelegatingParser(Parser):
         delta_message: DeltaMessage | None,
         request: ChatCompletionRequest | ResponsesRequest,
         state: StreamState,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         """Finalize generation for cases where generation was incomplete.
         For example, if streaming terminated before reasoning ended
@@ -773,7 +781,9 @@ class DelegatingParser(Parser):
             self._reasoning_parser, "get_streaming_fallback_content", None
         )
         if fallback_fn is not None and not state.reasoning_ended:
-            promoted = fallback_fn(state.previous_text, request)
+            promoted = fallback_fn(
+                state.previous_text, request, finish_reason=finish_reason
+            )
             if promoted:
                 if delta_message is None:
                     delta_message = DeltaMessage()
@@ -806,6 +816,7 @@ class DelegatingParser(Parser):
         prompt_token_ids: list[int] | None = None,
         *,
         finished: bool,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
         state = self._stream_state
@@ -925,7 +936,9 @@ class DelegatingParser(Parser):
         state.commit(current_text, current_token_ids)
 
         if finished:
-            delta_message = self.finalize_generation(delta_message, request, state)
+            delta_message = self.finalize_generation(
+                delta_message, request, state, finish_reason=finish_reason
+            )
             delta_message = self._flush_engine_parsers(delta_message)
 
         # Suppress reasoning deltas if not requested
