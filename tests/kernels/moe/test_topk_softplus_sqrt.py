@@ -202,16 +202,20 @@ def test_fused_topk_softplus_sqrt_hash(
         (17, 384, torch.int64),
     ],
 )
+@pytest.mark.parametrize("use_padding_mask", [False, True])
 def test_dsv4_fast_topk(
     num_tokens: int,
     num_experts: int,
     indices_type: torch.dtype,
+    use_padding_mask: bool,
 ):
     torch.manual_seed(0)
     gating_output = torch.randn(
         (num_tokens, num_experts), dtype=torch.float32, device="cuda"
     )
     correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[1::2] = use_padding_mask
 
     topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
         gating_output=gating_output,
@@ -221,8 +225,15 @@ def test_dsv4_fast_topk(
         e_score_correction_bias=correction_bias,
     )
     topk_weights, topk_ids = dsv4_topk(
-        gating_output, correction_bias, indices_type, 1.5
+        gating_output,
+        correction_bias,
+        indices_type,
+        1.5,
+        is_padding=is_padding if use_padding_mask else None,
     )
+
+    topk_weights_ref[is_padding] = 0.0
+    topk_ids_ref[is_padding] = -1
 
     assert topk_ids.dtype == indices_type
     torch.testing.assert_close(topk_ids_ref.to(indices_type), topk_ids, atol=0, rtol=0)
