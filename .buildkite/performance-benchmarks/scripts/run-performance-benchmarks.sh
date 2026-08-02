@@ -42,6 +42,7 @@ check_gpus() {
     declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
   elif command -v amd-smi; then
     declare -g gpu_type=$(amd-smi static -g 0 -a | grep 'MARKET_NAME' | awk '{print $2}')
+    arch_suffix='-rocm'
   elif command -v hl-smi; then
     declare -g gpu_type=$(hl-smi -q | grep "Product Name" | head -n 1 | awk -F ':' '{print $2}' | sed 's/^ *//')
     arch_suffix='-hpu'
