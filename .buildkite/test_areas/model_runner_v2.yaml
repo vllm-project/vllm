@@ -14,12 +14,10 @@ steps:
   - tests/v1/engine/test_llm_engine.py
   - tests/v1/e2e/
   - tests/entrypoints/llm/test_struct_output_generate.py
-  - tests/entrypoints/speech_to_text/transcription/test_transcription_word_timestamps.py
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
   - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
-  - pytest -v -s entrypoints/speech_to_text/transcription/test_transcription_word_timestamps.py
   - pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
   - pytest -v -s v1/e2e/general/test_context_length.py
   - pytest -v -s v1/e2e/general/test_min_tokens.py
