@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
@@ -30,12 +31,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
     ReqId,
     ReqMeta,
     TransferId,
     WriteTask,
+    as_attn_mamba,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
     get_port_offset,
@@ -50,12 +53,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWriter,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    kda_conv_ssm,
     LayerTransferGeometry,
+    apply_mamba_offset_template,
     build_layer_to_spec,
+    build_mamba_offset_template,
     compute_block_transfer_offsets,
+    compute_mamba_conv_split_count,
     get_layer_transfer_geometry,
     is_mla_cache_layer,
     iter_layer_registration_regions,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+    compute_physical_blocks_per_logical,
+    derive_mamba_conv_split,
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
@@ -70,6 +82,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -186,7 +199,7 @@ def resolve_moriio_transfer_ack(
     return transfer_id
 
 
-class MoRIIOConnector(KVConnectorBase_V1):
+class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -209,7 +222,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self.mode = get_moriio_mode(self.kv_transfer_config)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MoRIIOConnectorScheduler | None = (
-                MoRIIOConnectorScheduler(vllm_config, self.engine_id)
+                MoRIIOConnectorScheduler(
+                    vllm_config, self.engine_id, kv_cache_config
+                )
             )
             self.connector_worker: MoRIIOConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
@@ -271,6 +286,33 @@ class MoRIIOConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """SupportsHMA hook for hybrid (attention + mamba) models.
+
+        Receives per-KV-cache-group block ids. Splits them into attention
+        blocks and the mamba recurrent-state slot, runs the normal attention
+        completion path, then attaches the mamba slot to the returned
+        kv_transfer_params so the decoder can pull/receive the KDA state.
+        """
+        assert self.connector_scheduler is not None
+        attn_block_ids, mamba_block_ids = (
+            self.connector_scheduler.split_block_groups(block_ids)
+        )
+        # Drive the completion path with the attention blocks, but carry the
+        # mamba/KDA recurrent-state slot in the SAME remote_block_ids channel
+        # (as [attn, mamba]) rather than a separate wire field, so the
+        # proxy/router need no KDA-specific field.
+        delay_free, params = self.connector_scheduler.request_finished(
+            request, attn_block_ids
+        )
+        if params is not None and mamba_block_ids:
+            params["remote_block_ids"] = [attn_block_ids, mamba_block_ids]
+        return delay_free, params
+
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
@@ -330,6 +372,17 @@ class MoRIIOConnector(KVConnectorBase_V1):
         )
         self.connector_worker.wait_for_save(self._connector_metadata)
 
+    def has_pending_push_work(self) -> bool:
+        """True while the WRITE-mode writer still has outstanding transfers.
+
+        KDA conv+ssm writes are scheduled from wait_for_save (not the per-layer
+        save_kv_layer hook), so the engine must keep stepping until every
+        scheduled write is finalized.
+        """
+        if self.connector_worker is not None:
+            return self.connector_worker.has_pending_push_work()
+        return False
+
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
@@ -348,11 +401,41 @@ class MoRIIOConnector(KVConnectorBase_V1):
             return False
 
 
+def _split_kv_cache_group_kinds(
+    kv_cache_config: "KVCacheConfig | None",
+) -> tuple[list[int], list[int]]:
+    """Classify kv_cache_groups into (attention_group_indices,
+    mamba_group_indices) by whether each group's spec is a MambaSpec.
+    Returns empty lists when kv_cache_config is None (e.g. worker side).
+    """
+    attn: list[int] = []
+    mamba: list[int] = []
+    if kv_cache_config is not None:
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        for gi, group in enumerate(kv_cache_config.kv_cache_groups):
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                mamba.append(gi)
+            else:
+                attn.append(gi)
+    return attn, mamba
+
+
 class MoRIIOConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig | None" = None,
+    ):
         self.vllm_config = vllm_config
+        self.kv_cache_config = kv_cache_config
+        self._attn_group_ids, self._mamba_group_ids = (
+            _split_kv_cache_group_kinds(kv_cache_config)
+        )
+        self._has_mamba = bool(self._mamba_group_ids)
 
         assert vllm_config.kv_transfer_config is not None, (
             "kv_transfer_config must be set for MoRIIOConnector"
@@ -378,12 +461,16 @@ class MoRIIOConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
-        self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        # Values carry the request's block ids: a flat list[int] for
+        # attention-only models, or [attn_block_ids, mamba_block_ids] for
+        # hybrid (mamba/KDA) models (unpack with as_attn_mamba). The mamba
+        # recurrent-state slot rides here instead of a parallel dict.
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list]] = {}
+        self._reqs_need_save: dict[ReqId, tuple[Request, list]] = {}
 
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
-        self._reqs_need_pending_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        self._reqs_need_pending_save: dict[ReqId, tuple[Request, list]] = {}
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -448,21 +535,60 @@ class MoRIIOConnectorScheduler:
               asynchronously (between scheduler steps).
         """
         if self.is_producer:
+            # P side: for hybrid models the prefiller must stop at h(N-1) so
+            # the decoder can recompute the final token from the transferred
+            # recurrent state (reconciles with the READ len-1 accounting below).
+            if self._has_mamba:
+                params = request.kv_transfer_params
+                if params is not None and params.get("do_remote_decode"):
+                    self._truncate_mamba_request_for_prefill(request)
             return 0, False
 
         token_ids = request.prompt_token_ids or []
         if self.mode == MoRIIOMode.WRITE:
-            # MoriiO in write mode, no remote prefill
+            # MoriiO in write mode, no remote prefill.
+            num_tokens = len(token_ids)
+            if self._has_mamba and num_tokens > 0:
+                # Hybrid: the decoder recomputes the final token locally from
+                # the pushed KDA state, so only N-1 tokens come from remote.
+                num_tokens -= 1
+            return num_tokens - num_computed_tokens, True
 
-            return len(token_ids) - num_computed_tokens, True
-
+        # READ mode always recomputes the last token locally on the decoder.
         return len(token_ids) - 1 - num_computed_tokens, False
+
+    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the last prompt token so the prefiller computes
+        h(N-1) instead of h(N).
+
+        The decoder recomputes the last token locally to derive h(N) correctly
+        (see the READ len-1 accounting in get_num_new_matched_tokens). Guarded
+        by ``_p_side_truncated`` to avoid repeated truncation across a
+        preemption/reschedule. Mirrors the NIXL scheduler.
+        """
+        params = request.kv_transfer_params
+        if (
+            params is not None
+            and not params.get("_p_side_truncated")
+            and request.num_prompt_tokens > 1
+        ):
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
+            request.max_tokens = 1
+            params["_p_side_truncated"] = True
 
     def send_notify_block(
         self,
         req_id: ReqId,
         transfer_id: TransferId,
-        block_notify_list: list[int],
+        block_notify_list: list,
         host=None,
         port=None,
     ):
@@ -541,8 +667,14 @@ class MoRIIOConnectorScheduler:
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
-            local_block_ids = blocks.get_block_ids()[0]
-            self._reqs_need_save[request.request_id] = (request, local_block_ids)
+            attn_block_ids, mamba_block_ids = self.split_block_groups(
+                blocks.get_block_ids()
+            )
+            # Carry attn + mamba together in the single block-ids channel.
+            self._reqs_need_save[request.request_id] = (
+                request,
+                [attn_block_ids, mamba_block_ids],
+            )
 
         if params is not None and params.get("do_remote_prefill"):
             if self.mode == MoRIIOMode.READ:
@@ -550,19 +682,34 @@ class MoRIIOConnectorScheduler:
                     # remote_engine_id is returned by the prefill's request_finished.
                     # host/ports come from the request_id (parsed in add_new_req).
                     if "remote_engine_id" in params:
+                        # remote_block_ids carries [attn, mamba] (hybrid) or a
+                        # flat attn list; compare/trim on the attention half.
+                        remote_attn, _ = as_attn_mamba(remote_block_ids)
                         if num_external_tokens > 0:
                             # Get unhashed blocks to pull from remote.
-                            local_block_ids = blocks.get_block_ids()[0]
-                            assert len(local_block_ids) <= len(remote_block_ids)
-                            if len(local_block_ids) != len(remote_block_ids):
-                                local_block_ids = remote_block_ids[
-                                    -len(local_block_ids) :
-                                ]
+                            attn_block_ids, mamba_block_ids = self.split_block_groups(
+                                blocks.get_block_ids()
+                            )
+                            local_attn = attn_block_ids
+                            assert len(local_attn) <= len(remote_attn)
+                            if len(local_attn) != len(remote_attn):
+                                local_attn = remote_attn[-len(local_attn) :]
+                            local_block_ids = [local_attn, mamba_block_ids]
                         else:
-                            # If remote_blocks and num_external_tokens = 0, we have
-                            # a full prefix cache hit on the D worker. We need to call
-                            # send_notify in _read_blocks to free the memory on the P.
-                            local_block_ids = []
+                            # Attention needs no pull (full prefix-cache hit, or
+                            # the len-1 READ accounting yields zero external attn
+                            # tokens), but the per-request KDA recurrent (conv+ssm)
+                            # state is NOT prefix-cacheable and must ALWAYS be
+                            # transferred. Carry the mamba slot with an empty
+                            # attention half; only a pure-attention model (no mamba
+                            # group) collapses to []. _read_blocks still notifies P
+                            # to free memory.
+                            _, mamba_block_ids = self.split_block_groups(
+                                blocks.get_block_ids()
+                            )
+                            local_block_ids = (
+                                [[], mamba_block_ids] if mamba_block_ids else []
+                            )
 
                         self._reqs_need_recv[request.request_id] = (
                             request,
@@ -595,11 +742,27 @@ class MoRIIOConnectorScheduler:
                     )
                 remote_notify_port = int(remote_notify_port)
 
-                # num_external_tokens == 0: nothing to push, so don't tell the
-                # producer to write into these blocks.
-                block_notify_list = (
-                    blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                )
+                # Attention may need nothing pushed (cache hit / len-1 accounting),
+                # but the per-request KDA recurrent state is not prefix-cacheable
+                # and must still be pushed. With attn tokens, notify [attn, mamba];
+                # otherwise notify just the mamba slot so the producer still writes
+                # the recurrent state into the decoder's blocks.
+                if num_external_tokens > 0:
+                    attn_notify, mamba_notify = self.split_block_groups(
+                        blocks.get_block_ids()
+                    )
+                    # One block-ids channel: attn + mamba together (or flat attn
+                    # when there is no mamba group).
+                    block_notify_list = (
+                        [attn_notify, mamba_notify] if mamba_notify else attn_notify
+                    )
+                else:
+                    _, mamba_notify = self.split_block_groups(
+                        blocks.get_block_ids()
+                    )
+                    block_notify_list = (
+                        [[], mamba_notify] if mamba_notify else []
+                    )
 
                 for tp_index in range(self.tp_size):
                     target_port = remote_notify_port + get_port_offset(
@@ -634,18 +797,23 @@ class MoRIIOConnectorScheduler:
                 new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
 
                 if new_block_ids is not None:
-                    block_ids = new_block_ids[0]
-                    # TODO : hybrid attn, etc
+                    attn_block_ids, mamba_block_ids = self.split_block_groups(
+                        new_block_ids
+                    )
                     req, existing_blocks = self._reqs_need_pending_save[req_id]
-                    updated_blocks = list(existing_blocks) + (block_ids)
-                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    if (
-                        len(self._reqs_need_pending_save[req_id][1]) * self.block_size
-                        >= req.num_prompt_tokens
-                    ):
+                    # Accumulate attention blocks across chunks; keep the single
+                    # mamba slot. Both ride the one [attn, mamba] value.
+                    ex_attn, ex_mamba = as_attn_mamba(existing_blocks)
+                    updated_attn = list(ex_attn) + attn_block_ids
+                    updated_mamba = mamba_block_ids or ex_mamba
+                    self._reqs_need_pending_save[req_id] = (
+                        req,
+                        [updated_attn, updated_mamba],
+                    )
+                    if len(updated_attn) * self.block_size >= req.num_prompt_tokens:
                         meta.add_new_req(
                             request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
+                            local_block_ids=[updated_attn, updated_mamba],
                             kv_transfer_params=req.kv_transfer_params or {},
                             write_mode=True,
                         )
@@ -662,8 +830,9 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
-            if req.num_prompt_tokens > len(block_ids) * self.block_size:
-                # not last chunk prefill
+            attn_ids, _ = as_attn_mamba(block_ids)
+            if req.num_prompt_tokens > len(attn_ids) * self.block_size:
+                # not last chunk prefill; keep the mamba slot for the final chunk
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
             meta.add_new_req(
@@ -690,6 +859,28 @@ class MoRIIOConnectorScheduler:
             except Exception as e:
                 logger.warning("Error closing ZMQ socket for path %s: %s", path, e)
         self.paths.clear()
+
+    def split_block_groups(
+        self, block_ids: "tuple[list[int], ...]"
+    ) -> tuple[list[int], list[int]]:
+        """Split per-group block ids into (attention_blocks, mamba_slots).
+
+        Attention groups are concatenated into one flat list; mamba groups
+        into the single recurrent-state slot list. For a pure-attention
+        model the mamba list is empty and this reduces to the previous
+        ``block_ids[0]`` behavior.
+        """
+        if not self._has_mamba:
+            first = block_ids[0] if block_ids else []
+            return list(first), []
+        attn: list[int] = []
+        mamba: list[int] = []
+        for gi, group in enumerate(block_ids):
+            if gi in self._mamba_group_ids:
+                mamba.extend(group)
+            else:
+                attn.extend(group)
+        return attn, mamba
 
     def request_finished(
         self,
@@ -732,7 +923,18 @@ class MoRIIOConnectorScheduler:
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
             else:
-                self._reqs_need_recv[request.request_id] = (request, [])
+                # Carry the actually-allocated blocks (incl. the per-request KDA
+                # mamba slot) instead of []: a do_remote_prefill request finishing
+                # before update_state_after_alloc still has blocks, and dropping the
+                # mamba slot here would re-trip the KDA guard in _read_blocks.
+                if block_ids:
+                    h_attn, h_mamba = self.split_block_groups(block_ids)
+                    recv_blocks = (
+                        [h_attn, h_mamba] if h_mamba else ([h_attn] if h_attn else [])
+                    )
+                else:
+                    recv_blocks = []
+                self._reqs_need_recv[request.request_id] = (request, recv_blocks)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -1023,6 +1225,15 @@ class MoRIIOConnectorWorker:
 
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
+        # Hybrid (mamba/KDA) recurrent-state transfer. Populated in
+        # register_kv_caches when the model has a MambaSpec kv_cache group.
+        self._has_mamba = False
+        self._conv_decomp: MambaConvSplitInfo | None = None
+        self._mamba_ssm_size: tuple[int, int] = (0, 0)
+        self._physical_blocks_per_logical = 1
+        # layer_name -> flat session indices (one per registered region:
+        # 1 for attention, 2 (conv, ssm) for a KDA layer). Built once lazily.
+        self._region_session_index: dict[str, list[int]] | None = None
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
         backend = get_attn_backend(
@@ -1098,22 +1309,26 @@ class MoRIIOConnectorWorker:
     def _get_built_session(self, remote_engine_id):
         if remote_engine_id not in self.built_write_session:
             cur_remote_engine_sessions = []
-            for ln, local_meta in self.layer_name_to_local_kv_cache_metadata.items():
-                unpacked_local_memory_meta = (
-                    self.moriio_wrapper.get_unpack_memory_metadata(local_meta[0])
-                )
-                unpacked_remote_memory_meta = (
-                    self.moriio_wrapper.get_unpack_memory_metadata(
-                        self.layer_name_to_remote_kv_cache_metadata[remote_engine_id][
-                            ln
-                        ][0]
+            for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
+                remote_metas = self.layer_name_to_remote_kv_cache_metadata[
+                    remote_engine_id
+                ][ln]
+                # One session per registered region, in registration order:
+                # attention layers have a single region; KDA layers have two
+                # (conv then ssm). This flat layout is indexed via
+                # _region_session_indices(layer_name).
+                for local_meta, remote_meta in zip(local_metas, remote_metas):
+                    unpacked_local_memory_meta = (
+                        self.moriio_wrapper.get_unpack_memory_metadata(local_meta)
                     )
-                )
-                cur_remote_engine_sessions.append(
-                    self.moriio_wrapper.build_session(
-                        unpacked_local_memory_meta, unpacked_remote_memory_meta
+                    unpacked_remote_memory_meta = (
+                        self.moriio_wrapper.get_unpack_memory_metadata(remote_meta)
                     )
-                )
+                    cur_remote_engine_sessions.append(
+                        self.moriio_wrapper.build_session(
+                            unpacked_local_memory_meta, unpacked_remote_memory_meta
+                        )
+                    )
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
             remote_engine_id
@@ -1409,6 +1624,46 @@ class MoRIIOConnectorWorker:
     def _is_mla_cache_layer(self, layer_name: str) -> bool:
         return is_mla_cache_layer(self.layer_to_spec, layer_name)
 
+    def _is_mamba_layer(self, layer_name: str) -> bool:
+        """True for a hybrid/KDA layer whose cache is a (conv, ssm) tuple."""
+        return isinstance(self.layer_to_spec.get(layer_name), MambaSpec)
+
+    @staticmethod
+    def _contiguous_byte_alias(tensor: torch.Tensor) -> torch.Tensor:
+        """Return a contiguous uint8 view over ``tensor``'s full byte extent.
+
+        KDA conv/ssm caches are slot-strided views (``stride(0)`` may exceed the
+        per-slot element count), so they are non-contiguous and cannot be passed
+        to ``register_torch_tensor``. This aliases the same storage (zero-copy,
+        identical ``data_ptr``) as a flat uint8 tensor spanning
+        ``shape[0] * stride(0)`` elements -- the full slot-strided extent that
+        transfer offsets (``slot * stride(0) * elem``) address.
+        """
+        esz = tensor.element_size()
+        storage_nbytes = tensor.untyped_storage().nbytes()
+        offset_bytes = tensor.storage_offset() * esz
+        extent_bytes = tensor.shape[0] * tensor.stride(0) * esz
+        # Clamp to the bytes remaining from the view's storage offset. A shared
+        # conv+ssm page buffer (dev19253 packed layout) places ssm at a
+        # non-zero intra-buffer offset whose slot-strided extent
+        # (shape[0]*stride(0)) would otherwise run past the buffer end; the
+        # clamp still covers every slot (the last slot ends at the buffer end).
+        # For separate buffers (offset 0, full storage) this is a no-op.
+        extent_bytes = min(extent_bytes, storage_nbytes - offset_bytes)
+        assert extent_bytes > 0, (
+            "KDA byte alias empty: storage_offset="
+            f"{tensor.storage_offset()} * esz={esz} >= "
+            f"storage_nbytes={storage_nbytes}"
+        )
+        alias = torch.empty(0, dtype=torch.uint8, device=tensor.device)
+        alias.set_(
+            tensor.untyped_storage(),
+            tensor.storage_offset() * esz,
+            (extent_bytes,),
+            (1,),
+        )
+        return alias
+
     def _get_layer_transfer_geometry(
         self, layer_name: str, remote_num_blocks: int | None = None
     ) -> LayerTransferGeometry:
@@ -1432,21 +1687,32 @@ class MoRIIOConnectorWorker:
         """Register the KV Cache data in moriio."""
 
         self.kv_caches = kv_caches  # layer name to kv cache
+        # KDA layers store a (conv, ssm) tuple which has no `.shape`; only
+        # record shapes for attention tensors.
         self.kv_cache_shapes = {
-            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
+            layer_name: kv_cache.shape
+            for layer_name, kv_cache in kv_caches.items()
+            if not self._is_mamba_layer(layer_name)
         }
 
+        # Geometry selection must pick an attention layer (never a KDA tuple):
+        # prefer a standard 5-D K/V layer, else the first attention layer.
+        attn_items = [
+            (layer_name, kv_cache)
+            for layer_name, kv_cache in kv_caches.items()
+            if not self._is_mamba_layer(layer_name)
+        ]
         first_layer_name, first_kv_cache = next(
             (
                 (layer_name, kv_cache)
-                for layer_name, kv_cache in kv_caches.items()
+                for layer_name, kv_cache in attn_items
                 if (
                     not self._is_mla_cache_layer(layer_name)
                     and len(kv_cache.shape) == 5
                     and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
                 )
             ),
-            next(iter(kv_caches.items())),
+            attn_items[0] if attn_items else next(iter(kv_caches.items())),
         )
         kv_elem_size = first_kv_cache.element_size()
 
@@ -1477,6 +1743,16 @@ class MoRIIOConnectorWorker:
         caches_data = []
 
         for layer_name in kv_caches:
+            if self._is_mamba_layer(layer_name):
+                # KDA layer: two whole-tensor regions (conv, ssm); no block-size
+                # geometry (recurrent state is per-slot, not paged).
+                for cache, region_len in self._iter_layer_registration_regions(
+                    layer_name
+                ):
+                    base_addr = cache.data_ptr()
+                    caches_data.append((base_addr, region_len, cache.device.index, ""))
+                    kv_caches_base_addr.append(base_addr)
+                continue
             geometry = self._get_layer_transfer_geometry(layer_name)
             if geometry.block_size != self.block_size:
                 raise ValueError(
@@ -1493,18 +1769,74 @@ class MoRIIOConnectorWorker:
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
-            self.layer_name_to_local_kv_cache_metadata[layer_name].append(
-                moriio_mem_metadata
-            )
-
-            self.local_kv_cache_size.append(
-                kv_cache.nelement() * kv_cache.element_size()
-            )
+            if self._is_mamba_layer(layer_name):
+                # Register conv and ssm as two whole-tensor regions, appending
+                # both metadata blobs (order: conv then ssm) so the session
+                # layout matches iter_layer_registration_regions. conv/ssm are
+                # slot-strided views and are not contiguous, which
+                # register_torch_tensor rejects; register a contiguous uint8
+                # alias over each tensor's full byte extent instead (zero-copy:
+                # same storage and data_ptr).
+                conv, ssm = kda_conv_ssm(kv_cache, self.layer_to_spec.get(layer_name))
+                logger.debug(
+                    "MoRIIO KDA register %s: conv shape=%s stride=%s contig=%s "
+                    "storage_nbytes=%s ; ssm shape=%s stride=%s contig=%s "
+                    "storage_nbytes=%s",
+                    layer_name,
+                    tuple(conv.shape), tuple(conv.stride()),
+                    conv.is_contiguous(), conv.untyped_storage().nbytes(),
+                    tuple(ssm.shape), tuple(ssm.stride()),
+                    ssm.is_contiguous(), ssm.untyped_storage().nbytes(),
+                )
+                for tensor in (conv, ssm):
+                    alias = self._contiguous_byte_alias(tensor)
+                    meta = self.moriio_wrapper.register_local_tensor(alias)
+                    self.layer_name_to_local_kv_cache_metadata[layer_name].append(meta)
+                    self.local_kv_cache_size.append(alias.numel())
+            else:
+                moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(
+                    kv_cache
+                )
+                self.layer_name_to_local_kv_cache_metadata[layer_name].append(
+                    moriio_mem_metadata
+                )
+                self.local_kv_cache_size.append(
+                    kv_cache.nelement() * kv_cache.element_size()
+                )
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
         self.num_layers = len(self.kv_caches.keys())
+
+        # Derive the KDA conv sub-projection decomposition and ssm sizes once,
+        # shared across all KDA layers (all GDN layers are homogeneous).
+        self._has_mamba = any(
+            self._is_mamba_layer(layer_name) for layer_name in kv_caches
+        )
+        if self._has_mamba:
+            from vllm.model_executor.layers.mamba.mamba_utils import (
+                is_conv_state_dim_first,
+            )
+
+            assert is_conv_state_dim_first(), (
+                "MoRIIO KDA conv transfer requires the DS (dim-first) conv "
+                "state layout; set VLLM_SSM_CONV_STATE_LAYOUT=DS."
+            )
+            mamba_spec = next(
+                spec
+                for spec in self.layer_to_spec.values()
+                if isinstance(spec, MambaSpec)
+            )
+            self._conv_decomp = derive_mamba_conv_split(mamba_spec, self.world_size)
+            self._mamba_ssm_size = self._conv_decomp.ssm_sizes
+            self._physical_blocks_per_logical = compute_physical_blocks_per_logical(
+                self._mamba_ssm_size, self.block_len
+            )
+            logger.info(
+                "MoRIIO registered %d KDA (conv+ssm) layer(s); ssm sizes=%s",
+                sum(1 for ln in kv_caches if self._is_mamba_layer(ln)),
+                self._mamba_ssm_size,
+            )
 
         # Optimization for models with local attention (Llama 4)
         if self.vllm_config.model_config.hf_config.model_type == "llama4":
@@ -1631,6 +1963,10 @@ class MoRIIOConnectorWorker:
             self._unmatched_write_completions -= matched_xfer_ids
 
         return done_sending, done_recving
+
+    def has_pending_push_work(self) -> bool:
+        """True while the WRITE writer has scheduled transfers pending."""
+        return self._writer.has_outstanding_writes()
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -2167,6 +2503,121 @@ class MoRIIOConnectorWorker:
             ),
         )
 
+    def _region_session_indices(self, layer_name: str) -> list[int]:
+        """Flat session indices for a layer's registered regions.
+
+        Sessions are built one per region in registration order (see
+        _get_built_session), so an attention layer maps to a single index and a
+        KDA layer to two indices ([conv, ssm]). Built once and cached.
+        """
+        if self._region_session_index is None:
+            mapping: dict[str, list[int]] = {}
+            idx = 0
+            for ln, metas in self.layer_name_to_local_kv_cache_metadata.items():
+                mapping[ln] = list(range(idx, idx + len(metas)))
+                idx += len(metas)
+            self._region_session_index = mapping
+        return self._region_session_index[layer_name]
+
+    def _mamba_tp_ratio(self, remote_tp_size: int | None) -> int:
+        """Signed conv/ssm TP ratio for KDA recurrent state.
+
+        Mirrors MambaConvSplitInfo.remote_conv_offsets semantics for the READ
+        direction (this decode rank reads from a prefill rank): >= 1 when
+        D_TP >= P_TP (the remote/prefill page is larger and this rank reads its
+        slice), < 0 when P_TP > D_TP. Homogeneous TP yields 1.
+        """
+        remote = remote_tp_size or self.world_size
+        local = self.world_size
+        if local >= remote:
+            return local // remote
+        return -(remote // local)
+
+    def _compute_mamba_transfer_offsets(
+        self,
+        layer_name: str,
+        local_slots: list[int],
+        remote_slots: list[int],
+        remote_tp_size: int | None = None,
+    ) -> tuple[list[int], list[int], list[int], int]:
+        """Compute (local, remote, sizes, n_conv) for a KDA layer.
+
+        Entries [:n_conv] address the conv region/session; entries [n_conv:]
+        address the ssm region/session.
+        """
+        assert self._conv_decomp is not None, "KDA decomposition not derived"
+        conv, ssm = kda_conv_ssm(
+            self.kv_caches[layer_name], self.layer_to_spec.get(layer_name)
+        )
+        tp_ratio = self._mamba_tp_ratio(remote_tp_size)
+        # KDA geometry is homogeneous across the ~69 GDN layers and every
+        # request, so cache the slot-independent offset template per
+        # (layer, tp_ratio) and only apply the per-request slot bases here.
+        # apply_mamba_offset_template is defined so its output is byte-identical
+        # to compute_mamba_conv_ssm_offsets (see the cached==recomputed test).
+        cache = getattr(self, "_mamba_offset_templates", None)
+        if cache is None:
+            cache = {}
+            self._mamba_offset_templates = cache
+        cache_key = (layer_name, tp_ratio)
+        template = cache.get(cache_key)
+        if template is None:
+            template = build_mamba_offset_template(
+                layer_name,
+                conv,
+                ssm,
+                self.layer_to_spec,
+                self._conv_decomp,
+                tp_ratio,
+                self.tp_rank,
+                self.world_size,
+            )
+            cache[cache_key] = template
+        local_offs, remote_offs, sizes = apply_mamba_offset_template(
+            template, local_slots, remote_slots
+        )
+        n_conv = compute_mamba_conv_split_count(local_slots, self._conv_decomp)
+        return local_offs, remote_offs, sizes, n_conv
+
+    def _post_read_with_backoff(
+        self,
+        session,
+        sizes: list[int],
+        local_offsets: list[int],
+        remote_offsets: list[int],
+        request_id: str,
+        layer_name: str,
+        deadline: float,
+    ):
+        """Post one RDMA READ, backing off on transient SQ-full rejection.
+
+        read_remote_data posts synchronously, so a send-queue-full rejection is
+        a Failed() status on return; a separate CQ-poll thread drains
+        completions and frees SQ depth, so we back off and re-post until
+        transfer_timeout, then store the failed status (get_finished notifies
+        prefill and drops the request non-fatally).
+        """
+        _backoff = 0.001
+        while True:
+            transfer_status = self.moriio_wrapper.read_remote_data(
+                sizes, local_offsets, remote_offsets, session
+            )
+            if not self._is_sq_full_status(transfer_status):
+                break
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "MoRIIO READ send queue stayed full past "
+                    "transfer_timeout for req %s layer %s; storing failed "
+                    "status (get_finished notifies prefill and drops the "
+                    "request). Raise qp_per_transfer if frequent.",
+                    request_id,
+                    layer_name,
+                )
+                break
+            time.sleep(_backoff)
+            _backoff = min(_backoff * 2, 0.05)
+        return transfer_status
+
     @staticmethod
     def _is_sq_full_status(status) -> bool:
         """True if a MoRIIO transfer status is a transient RDMA send-queue-full
@@ -2201,6 +2652,10 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE:
             return
 
+        # Both halves ride the one block-ids channel; split at the point of use.
+        local_attn, local_mamba = as_attn_mamba(local_block_ids)
+        remote_attn, remote_mamba = as_attn_mamba(remote_block_ids)
+
         # Read from the prefill rank that actually computed this request's KV
         # (forwarded by the proxy). Hardcoding DP0 reads from a different rank's
         # memory registration; per-rank num_blocks differ, so high block ids can
@@ -2228,49 +2683,80 @@ class MoRIIOConnectorWorker:
 
         # SQ-full backpressure deadline, shared across this request's layers.
         _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
+        # TODO : apply multi-session batch-read when moriio support it
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
-            sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
-                layer_name
-            )
-            offs = self._compute_block_transfer_offsets(
-                layer_name,
-                local_block_ids,
-                remote_block_ids,
-                remote_moriio_meta,
-                remote_tp_size=remote_tp_size,
-            )
-            # TODO : apply multi-session batch-read when moriio support it
-            #
-            # SQ-full backpressure: read_remote_data posts the RDMA READ
-            # SYNCHRONOUSLY, so a send-queue-full rejection (per-QP HW cap) comes
-            # back as a Failed() status right here. A SEPARATE CQ-poll thread
-            # drains completions and frees SQ depth, so back off and RE-POST
-            # rather than let a transient rejection abort the request. No
-            # self-deadlock (the drain is off-thread); the reserve is
-            # all-or-nothing (nothing posted on a rejected attempt). Bounded by
-            # transfer_timeout; on sustained overload store the failed status and
-            # let get_finished handle it non-fatally (notify prefill + drop).
-            _backoff = 0.001
-            while True:
-                transfer_status = self.moriio_wrapper.read_remote_data(
-                    offs[2], offs[0], offs[1], sessions[sess_idx]
+            region_sessions = self._region_session_indices(layer_name)
+            statuses = []
+            if self._is_mamba_layer(layer_name):
+                # KDA layer: pull conv (sub-projection offsets) and ssm at the
+                # request's recurrent-state slot. Two regions -> two sessions.
+                if not local_mamba or not remote_mamba:
+                    if not local_attn and not remote_attn:
+                        # Whole-request no-op (e.g. full prefix cache hit):
+                        # nothing to transfer for any layer.
+                        continue
+                    # A KDA layer must have its recurrent-state slot in the
+                    # block-id tuple; missing it (while attention blocks are
+                    # present) means the mamba KV-cache group is absent -> bug.
+                    raise MoRIIOError(
+                        f"KDA layer {layer_name}: missing mamba recurrent-state "
+                        f"block ids (local={local_mamba}, remote={remote_mamba}) "
+                        f"with attention blocks present for request {request_id}; "
+                        "the mamba KV-cache group is absent from the transfer "
+                        "block-id tuple"
+                    )
+                m_local, m_remote, m_sizes, n_conv = (
+                    self._compute_mamba_transfer_offsets(
+                        layer_name,
+                        local_mamba,
+                        remote_mamba,
+                        remote_tp_size=remote_tp_size,
+                    )
                 )
-                if not self._is_sq_full_status(transfer_status):
-                    break
-                if time.monotonic() > _sq_deadline:
-                    logger.warning(
-                        "MoRIIO READ send queue stayed full past "
-                        "transfer_timeout for req %s layer %s; storing failed "
-                        "status (get_finished notifies prefill and drops the "
-                        "request). Raise qp_per_transfer if frequent.",
+                region_slices = (
+                    (region_sessions[0], slice(0, n_conv)),
+                    (region_sessions[1], slice(n_conv, None)),
+                )
+                for sess_idx, sl in region_slices:
+                    sizes, local_offs, remote_offs = (
+                        m_sizes[sl],
+                        m_local[sl],
+                        m_remote[sl],
+                    )
+                    if not sizes:
+                        continue
+                    statuses.append(
+                        self._post_read_with_backoff(
+                            sessions[sess_idx],
+                            sizes,
+                            local_offs,
+                            remote_offs,
+                            request_id,
+                            layer_name,
+                            _sq_deadline,
+                        )
+                    )
+            else:
+                offs = self._compute_block_transfer_offsets(
+                    layer_name,
+                    local_attn,
+                    remote_attn,
+                    remote_moriio_meta,
+                    remote_tp_size=remote_tp_size,
+                )
+                statuses.append(
+                    self._post_read_with_backoff(
+                        sessions[region_sessions[0]],
+                        offs[2],
+                        offs[0],
+                        offs[1],
                         request_id,
                         layer_name,
+                        _sq_deadline,
                     )
-                    break
-                time.sleep(_backoff)
-                _backoff = min(_backoff * 2, 0.05)
+                )
             with self.moriio_wrapper.lock:
-                self._recving_transfers[request_id].append(transfer_status)
+                self._recving_transfers[request_id].extend(statuses)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(

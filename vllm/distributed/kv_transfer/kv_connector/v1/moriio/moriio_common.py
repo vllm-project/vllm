@@ -48,6 +48,28 @@ class MoRIIOTransferAck(NamedTuple):
     consumer_tp_size: int = 1
 
 
+def as_attn_mamba(
+    block_ids: "list[int] | tuple | list | None",
+) -> "tuple[list[int], list[int]]":
+    """Unpack a carried block-ids value into (attention, mamba) block ids.
+
+    Hybrid (mamba/KDA) requests carry both halves in the SAME block-ids
+    channel as ``[attn_block_ids, mamba_block_ids]`` (a ``tuple[list[int],
+    ...]``), so the mamba recurrent-state slot rides the existing
+    ``remote_block_ids`` / notify / ReqMeta plumbing instead of a separate
+    wire field. A plain ``list[int]`` (attention-only / legacy) unpacks to
+    ``(that_list, [])``. Consumers on the worker/engine side split at the
+    point of use rather than threading a parallel mamba field through.
+    """
+    if not block_ids:
+        return [], []
+    if isinstance(block_ids[0], (list, tuple)):
+        attn = list(block_ids[0])
+        mamba = list(block_ids[1]) if len(block_ids) > 1 else []
+        return attn, mamba
+    return list(block_ids), []
+
+
 @dataclass
 class WriteTask:
     request_id: ReqId
@@ -65,7 +87,13 @@ class WriteTask:
 
 @dataclass
 class LayerTransferPlan:
-    """Plan for transferring a single layer."""
+    """Plan for transferring a single layer.
+
+    For attention layers ``sess_idx`` + ``transfer_*`` describe the one
+    transfer. For KDA layers the conv state uses ``sess_idx`` / ``transfer_*``
+    and the ssm state uses ``ssm_sess_idx`` / ``ssm_*`` (two registered regions
+    per layer, hence two sessions), issued as one scheduled write.
+    """
 
     request_id: ReqId
     transfer_id: TransferId
@@ -75,13 +103,21 @@ class LayerTransferPlan:
     transfer_remote_offsets: list[int]
     transfer_sizes: list[int]
     use_batch: bool = True
+    is_mamba: bool = False
+    ssm_sess_idx: int | None = None
+    ssm_local_offsets: list[int] = field(default_factory=list)
+    ssm_remote_offsets: list[int] = field(default_factory=list)
+    ssm_sizes: list[int] = field(default_factory=list)
 
 
 @dataclass
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    # Carried block ids: attention-only requests hold a flat ``list[int]``;
+    # hybrid requests hold ``[attn_block_ids, mamba_block_ids]`` (unpack with
+    # ``as_attn_mamba``), so the decoder's KDA slot rides this same field.
+    block_ids: list
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -478,9 +514,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
             # Remote peer TP degree (used as remote_tp_size downstream). The
-            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
-            # which is absent on WRITE producer requests -> defaulted to 1 ->
-            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key (#46332) is absent on WRITE producer requests and
+            # defaulted to 1, collapsing every producer rank onto decode rank 0
+            # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
+            # (treated as homogeneous downstream).
             tp_size=int(
                 kv_transfer_params.get("remote_tp_size")
                 or kv_transfer_params.get("tp_size")
