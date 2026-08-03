@@ -157,11 +157,19 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+        """Extract reasoning content and main content from the model output.
 
         This is the base implementation that works for most models.
         Subclasses can override this method for specific behavior.
+        If start and end tokens delimit reasoning, text preceding the start token
+        and text following the end token are preserved as content.
+
+        Args:
+            model_output: The raw output string from the model.
+            request: The chat completion or responses request protocol.
+
+        Returns:
+            A tuple of `(reasoning_content, main_content)`.
         """
         if self.start_token in model_output:
             content_before, _, after_start = model_output.partition(self.start_token)
