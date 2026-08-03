@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal, Union
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -682,8 +684,11 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        intermediate_size = round_up(intermediate_size, 256)
-        hidden_size = round_up(hidden_size, 256)
+        if activation != MoEActivation.SITU:
+            # SiTU FlyDSL kernel pads per gate/up half internally; rounding up
+            # to 256 would inflate weight tensors and OOM on native sizes.
+            intermediate_size = round_up(intermediate_size, 256)
+            hidden_size = round_up(hidden_size, 256)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -1279,6 +1284,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    activation: MoEActivation | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1475,6 +1481,34 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
+
+        if activation == MoEActivation.SITU:
+            from aiter.utility.fp4_utils import e8m0_shuffle
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            fp4_dtype = torch.float4_e2m1fn_x2
+            e8m0_dtype = torch.float8_e8m0fnu
+            # a8w4 (AITER_SITUV2_A8W4=1) uses gate/up-interleaved flydsl kernels;
+            # default a16w4 keeps the separated layout.
+            guinterleave = envs.AITER_SITUV2_A8W4
+            w13 = rocm_aiter_ops.shuffle_weight_a16w4(
+                w13_weight.data.view(fp4_dtype), 16, guinterleave
+            )
+            w2 = rocm_aiter_ops.shuffle_weight_a16w4(
+                w2_weight.data.view(fp4_dtype), 16, False
+            )
+            w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
+            w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+            w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                w13_scale_raw.view(-1, w13_scale_raw.shape[-1]),
+                num_experts,
+                guinterleave,
+            )
+            w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+            w13.is_shuffled = True
+            w2.is_shuffled = True
+            return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
         import os
 
