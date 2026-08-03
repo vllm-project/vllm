@@ -670,10 +670,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
         if self.enable_cuda_graph:
-            # For full cudagraph capture, one `decode_wrapper` for each batch
-            # size is needed for FlashInfer.
+            # For full cudagraph capture, one `decode_wrapper` for each
+            # (batch_size, q_len_per_req) pair is needed for FlashInfer,
+            # because plan() freezes q_len_per_req at planning time.
             self._decode_wrappers_cudagraph: dict[
-                int, BatchDecodeWithPagedKVCacheWrapper
+                tuple[int, int], BatchDecodeWithPagedKVCacheWrapper
             ] = {}
             self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
             if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -1019,9 +1020,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
-    def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
+    def _get_decode_wrapper(
+        self, batch_size: int, use_cudagraph: bool = False, q_len_per_req: int = 1
+    ):
+        cache_key = (batch_size, q_len_per_req) if use_cudagraph else batch_size
         if use_cudagraph:
-            decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
+            decode_wrapper = self._decode_wrappers_cudagraph.get(cache_key, None)
         else:
             decode_wrapper = self._decode_wrapper
 
@@ -1053,7 +1057,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # save the decode wrapper
             if use_cudagraph:
-                self._decode_wrappers_cudagraph[batch_size] = decode_wrapper
+                self._decode_wrappers_cudagraph[cache_key] = decode_wrapper
             else:
                 self._decode_wrapper = decode_wrapper
 
@@ -1493,7 +1497,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 assert num_decode_tokens % num_decodes == 0
                 decode_q_len = num_decode_tokens // num_decodes
 
-                decode_wrapper = self._get_decode_wrapper(num_decodes, use_cudagraph)
+                decode_wrapper = self._get_decode_wrapper(
+                    num_decodes, use_cudagraph, q_len_per_req=decode_q_len
+                )
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
