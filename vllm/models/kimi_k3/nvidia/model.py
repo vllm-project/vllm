@@ -30,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_grouped_topk,
 )
-from vllm.model_executor.layers.fused_moe.runner.latent_moe_runner import (
-    LatentMoERunner,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -88,20 +85,23 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
-from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
-from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
-    enable_kimi_k3_low_latency_gemm,
-)
-from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-from vllm.models.kimi_k3.nvidia.ops import attn_res
-from vllm.models.kimi_k3.nvidia.ops.sequence_parallel import (
+from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
+    LatentMoERunner,
+)
+from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
+    enable_kimi_k3_low_latency_gemm,
+)
+from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -129,7 +129,42 @@ logger = init_logger(__name__)
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
 
+def shard_sequence_parallel_mlp(
+    hidden_size: int,
+    intermediate_size: int,
+    use_sequence_parallel: bool,
+    eligible: bool,
+) -> bool:
+    """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
+
+    Opt-in via ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT``; see :class:`KimiMLP` for
+    the trade-off and :mod:`vllm.envs` for when it is worth enabling.
+    """
+    enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
+    if not (use_sequence_parallel and eligible and enabled):
+        return False
+    tp_size = get_tensor_model_parallel_world_size()
+    return (
+        tp_size > 1 and intermediate_size % tp_size == 0 and hidden_size % tp_size == 0
+    )
+
+
 class KimiMLP(nn.Module):
+    """Dense / shared-expert MLP, optionally TP-sharded under sequence parallel.
+
+    Under sequence parallelism each rank owns a distinct slice of the tokens, so
+    by default both projections are replicated (``disable_tp``) and the block
+    needs no collective. That makes every rank stream the entire weight to serve
+    its own token shard.
+
+    With ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`` the weights are TP-sharded
+    instead. A rank then holds only a slice of the intermediate dim, so it
+    cannot finish its own tokens alone: ``forward`` all-gathers the full token
+    set, computes this rank's partial, and reduce-scatters. The reduce-scatter
+    sums across TP and restores the sequence sharding in one collective, so the
+    block still ends with one collective per direction.
+    """
+
     def __init__(
         self,
         hidden_size: int,
@@ -138,18 +173,27 @@ class KimiMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
+        can_shard_sequence_parallel: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
     ) -> None:
         super().__init__()
 
+        self.shard_sequence_parallel = shard_sequence_parallel_mlp(
+            hidden_size,
+            intermediate_size,
+            use_sequence_parallel,
+            can_shard_sequence_parallel,
+        )
+        replicate = use_sequence_parallel and not self.shard_sequence_parallel
+
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            disable_tp=use_sequence_parallel,
+            disable_tp=replicate,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -157,8 +201,10 @@ class KimiMLP(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
-            disable_tp=use_sequence_parallel,
+            # Sharded sequence parallel reduces via the reduce-scatter in
+            # forward(), which also restores the sequence sharding.
+            reduce_results=False if self.shard_sequence_parallel else reduce_results,
+            disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "silu":
@@ -175,9 +221,17 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, x):
+        if self.shard_sequence_parallel:
+            # Each rank holds a weight shard but only its own tokens, so it
+            # cannot finish those tokens alone: gather the full token set,
+            # compute this rank's partial for all of them, then reduce-scatter,
+            # which sums across TP and restores the sequence sharding.
+            x = sp_all_gather(x)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
+        if self.shard_sequence_parallel:
+            x = sp_reduce_scatter(x)
         return x
 
 
@@ -472,12 +526,16 @@ class KimiMoE(nn.Module):
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate_size,
+                hidden_size=config.hidden_size,  # 7618
+                intermediate_size=shared_intermediate_size,  # 3072*2
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
+                # Only the MegaMoE path calls the shared experts directly; the
+                # FusedMoE path below hands them to the runner, which fuses
+                # their reduction and assumes the replicated layout.
+                can_shard_sequence_parallel=self.use_mega_moe,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -553,13 +611,6 @@ class KimiMoE(nn.Module):
                 activation_linear_beta=activation_situ_linear_beta,
             )
         else:
-            # The tail-fusion kernels are tcgen05-based, so they require an
-            # SM100 NVIDIA device; the runner falls back to the default latent
-            # MoE path everywhere else.
-            enable_tail_fusion = (
-                current_platform.is_cuda()
-                and current_platform.is_device_capability_family(100)
-            )
             self.experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
@@ -586,11 +637,6 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
-                runner_args=(
-                    {"enable_k3_latent_moe_tail_fusion": enable_tail_fusion}
-                    if self.use_latent_moe
-                    else None
-                ),
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -800,6 +846,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
+                can_shard_sequence_parallel=True,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
