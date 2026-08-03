@@ -13,10 +13,16 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
+from argparse import Namespace
+from http import HTTPStatus
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
 
+from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
@@ -38,6 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.utils.server_utils import validation_exception_handler
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -1385,3 +1392,67 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+# ======================================================================
+# cache_salt pass-through (Issue #46688)
+# ======================================================================
+
+
+class TestCacheSalt:
+    def test_cache_salt_passed_through(self):
+        """cache_salt on the Anthropic request reaches the converted
+        ChatCompletionRequest so prefix-cache isolation works via /v1/messages."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            cache_salt="tenant-abc-secret-salt",
+        )
+        result = _convert(request)
+        assert result.cache_salt == "tenant-abc-secret-salt"
+
+    def test_cache_salt_defaults_to_none(self):
+        """Omitting cache_salt leaves it unset (unchanged default behavior)."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+        result = _convert(request)
+        assert result.cache_salt is None
+
+    @staticmethod
+    def _make_api_app():
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = AssertionError(
+            "invalid requests must not reach the serving handler"
+        )
+        app.state.anthropic_serving_messages = handler
+        return app, handler
+
+    def test_cache_salt_openapi_requires_non_empty_string(self):
+        app, _ = self._make_api_app()
+        field_schema = app.openapi()["components"]["schemas"][
+            "AnthropicMessagesRequest"
+        ]["properties"]["cache_salt"]
+        string_schema = next(
+            option for option in field_schema["anyOf"] if option.get("type") == "string"
+        )
+
+        assert string_schema["minLength"] == 1
+
+    def test_empty_cache_salt_returns_bad_request(self):
+        app, handler = self._make_api_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "cache_salt": "",
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        handler.create_messages.assert_not_awaited()
