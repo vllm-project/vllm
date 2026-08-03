@@ -59,7 +59,8 @@ def test_accuracy():
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/chat/completions,"
             f"num_concurrent={NUM_CONCURRENT},"
-            "tokenizer_backend=huggingface"
+            "tokenizer_backend=huggingface,"
+            "trust_remote_code=True"
         )
         results = lm_eval.simple_evaluate(
             model="local-chat-completions",
@@ -72,7 +73,8 @@ def test_accuracy():
         model_args = (
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/completions,"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
+            "trust_remote_code=True"
         )
         results = lm_eval.simple_evaluate(
             model="local-completions",
