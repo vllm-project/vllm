@@ -748,6 +748,20 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def is_eagle_prefix_cache_hashing_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = vllm_config.speculative_config
+    kv_events_config = vllm_config.kv_events_config
+    return (
+        vllm_config.cache_config.enable_prefix_caching
+        and speculative_config is not None
+        and speculative_config.use_eagle()
+        and vllm_config.kv_transfer_config is None
+        and not (
+            kv_events_config is not None and kv_events_config.enable_kv_cache_events
+        )
+    )
+
+
 def get_request_eagle_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],

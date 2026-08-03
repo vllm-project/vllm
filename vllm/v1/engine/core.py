@@ -51,6 +51,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     get_request_eagle_block_hasher,
     init_none_hash,
+    is_eagle_prefix_cache_hashing_enabled,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -231,19 +232,7 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size, caching_hash_fn
             )
-            speculative_config = vllm_config.speculative_config
-            kv_events_config = vllm_config.kv_events_config
-            enable_eagle_hashing = (
-                vllm_config.cache_config.enable_prefix_caching
-                and speculative_config is not None
-                and speculative_config.method == "mtp"
-                and vllm_config.kv_transfer_config is None
-                and not (
-                    kv_events_config is not None
-                    and kv_events_config.enable_kv_cache_events
-                )
-            )
-            if enable_eagle_hashing:
+            if is_eagle_prefix_cache_hashing_enabled(vllm_config):
                 self.request_eagle_block_hasher = get_request_eagle_block_hasher(
                     hash_block_size, caching_hash_fn
                 )
