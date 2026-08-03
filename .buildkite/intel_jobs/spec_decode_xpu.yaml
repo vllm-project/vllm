@@ -2,6 +2,38 @@ group: Spec Decode XPU
 depends_on:
   - image-build-xpu
 steps:
+- label: V1 Spec Decode
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -m 'not slow_test' v1/spec_decode
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/v1/spec_decode
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    cd tests &&
+    pytest -v -s -m not slow_test v1/spec_decode || true'
 - label: Spec Decode Eagle
   device: intel_gpu
   timeout_in_minutes: 25
@@ -15,7 +47,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
@@ -24,10 +56,10 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode -k eagle_correctness || true'
+    pytest -v -s v1/e2e/spec_decode/eagle/ || true'
 - label: Spec Decode Speculators + MTP
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 50
   working_dir: .
   no_plugin: true
   env:
@@ -38,7 +70,8 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s v1/e2e/spec_decode/mtp/
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
@@ -49,7 +82,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode -k speculators or mtp_correctness || true'
+    pytest -v -s v1/e2e/spec_decode/speculators/ || true &&
+    pytest -v -s v1/e2e/spec_decode/mtp/ || true'
 - label: Spec Decode Ngram + Suffix
   device: intel_gpu
   timeout_in_minutes: 20
@@ -63,7 +97,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+  - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
   - python3 spec_decode/test_custom_proposer.py
   source_file_dependencies:
   - vllm/v1/spec_decode/
@@ -74,7 +108,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode -k ngram or suffix || true'
+    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true'
 - label: Spec Decode Draft Model
   device: intel_gpu
   timeout_in_minutes: 45
@@ -88,7 +122,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
@@ -97,8 +131,8 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode -k draft_model or no_sync or batch_inference || true'
-- label: Speculators Correctness
+    pytest -v -s v1/e2e/spec_decode/draft_model/ || true'
+- label: Speculators Correctness Nightly (H100)
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 1
@@ -117,6 +151,7 @@ steps:
   - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
   source_file_dependencies:
   - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/dflash/
   - vllm/model_executor/models/qwen3_dflash.py
   - tests/v1/spec_decode/test_speculators_correctness.py
   commands:
@@ -125,32 +160,6 @@ steps:
     'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
     cd tests &&
     pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
-- label: Spec Decode MTP hybrid (B200)
-  device: intel_gpu
-  timeout_in_minutes: 20
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-  _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode -k "qwen3_5-hybrid"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/models/qwen3_5.py
-  - vllm/model_executor/models/qwen3_5_mtp.py
-  - tests/v1/e2e/spec_decode/
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest -v -s v1/e2e/spec_decode -k qwen3_5-hybrid || true'
 - label: Spec Decode DeepSeek MTP Parallel Load (B200)
   device: intel_gpu
   timeout_in_minutes: 30
@@ -179,7 +188,33 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
-- label: Spec Decode Acceptance Rates Nightly
+- label: Spec Decode AL DFlash Nightly
+  device: intel_gpu
+  timeout_in_minutes: 90
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/models/laguna_dflash.py
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ || true'
+- label: Spec Decode AL DSpark Nightly
   device: intel_gpu
   timeout_in_minutes: 60
   optional: true
@@ -193,13 +228,40 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "acceptance_rates"
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/model_executor/models/gemma4_dspark.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k acceptance_rates || true'
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/ || true'
+- label: Spec Decode AL MTP + Other Acceptance Nightly
+  device: intel_gpu
+  timeout_in_minutes: 60
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/conftest.py
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ || true'
