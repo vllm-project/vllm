@@ -4,9 +4,18 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models import supports_multimodal_embeddings
+from vllm.model_executor.models.exaone4_5_mtp import Exaone4_5_MTP
+from vllm.model_executor.models.llama4_eagle import EagleLlama4ForCausalLM
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.mistral_eagle import EagleMistralForCausalLM
+from vllm.model_executor.models.mistral_large_3_eagle import (
+    EagleMistralLarge3ForCausalLM,
+)
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
@@ -125,15 +134,40 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = True
     draft_model = _TextOnlyDraftModel()
+    warning_messages = []
     monkeypatch.setattr(
         DraftModelSpeculator,
         "load_model",
         lambda self, target_model: setattr(self, "model", draft_model),
     )
+    monkeypatch.setattr(
+        spec_module.logger,
+        "warning_once",
+        lambda message, *args: warning_messages.append(message % args),
+    )
 
     speculator.load_model(torch.nn.Module())
 
     assert not speculator.supports_mm_inputs
+    assert warning_messages == [
+        "Draft model _TextOnlyDraftModel does not support external multimodal "
+        "embeddings. Embeddings from the target model will not be passed to the "
+        "drafter; using text-only draft inputs instead."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "expected"),
+    [
+        (EagleLlama4ForCausalLM, True),
+        (EagleMistralForCausalLM, True),
+        (EagleMistralLarge3ForCausalLM, True),
+        (Exaone4_5_MTP, True),
+        (Eagle3LlamaForCausalLM, False),
+    ],
+)
+def test_draft_model_multimodal_embedding_capability(model_cls, expected):
+    assert supports_multimodal_embeddings(model_cls) is expected
 
 
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):

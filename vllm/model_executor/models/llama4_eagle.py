@@ -153,6 +153,8 @@ class LlamaModel(nn.Module):
 
 
 class EagleLlama4ForCausalLM(Llama4ForCausalLM):
+    supports_multimodal_embeddings = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config

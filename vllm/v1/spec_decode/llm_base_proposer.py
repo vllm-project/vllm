@@ -1355,9 +1355,11 @@ class SpecDecodeBaseProposer:
         # Even if the target model is multimodal, we can also use
         # text-only draft models
         if self.supports_mm_inputs and not supports_multimodal_embeddings(self.model):
-            logger.warning(
-                "Draft model does not support multimodal inputs, "
-                "falling back to text-only mode"
+            logger.warning_once(
+                "Draft model %s does not support external multimodal embeddings. "
+                "Embeddings from the target model will not be passed to the "
+                "drafter; using text-only draft inputs instead.",
+                type(self.model).__name__,
             )
             self.supports_mm_inputs = False
 

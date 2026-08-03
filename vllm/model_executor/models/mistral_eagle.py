@@ -110,6 +110,8 @@ class EagleMistralModel(MistralModel):
 
 
 class EagleMistralForCausalLM(MistralForCausalLM):
+    supports_multimodal_embeddings = True
+
     mistral_mapping = MistralForCausalLM.mistral_mapping | {
         "eagle_linear": "model.fc",
     }

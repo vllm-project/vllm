@@ -108,6 +108,8 @@ class EagleMistralLarge3Model(DeepseekV2Model):
 
 
 class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
+    supports_multimodal_embeddings = True
+
     hf_to_vllm_mapper = MistralLarge3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_regex={
             regex.compile(r"\Aeagle_linear\.weight\Z"): r"model.fc.weight",
