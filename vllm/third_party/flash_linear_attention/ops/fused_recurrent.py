@@ -451,6 +451,15 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             BV = 4
         elif initial_state.dtype == torch.float32:
             BV = 8
+    if (
+        H == HV == 16
+        and K == V == 128
+        and B <= 24
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(120, device_id=dev.index)
+    ):
+        # Tuned on RTX PRO 5000; larger batches retain BV32.
+        BV = 16
     num_stages = 3
     num_warps = 1
 
