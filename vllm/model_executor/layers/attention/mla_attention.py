@@ -2310,7 +2310,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
-        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        fp8_dtype = current_platform.fp8_dtype()
+        use_fp8_prefill = prefill_metadata.q_data_type == fp8_dtype
+        kv_b_proj_weight = getattr(self.kv_b_proj, "weight", None)
+        preserve_kv_b_proj_input_dtype = use_fp8_prefill and (
+            kv_b_proj_weight is not None
+            and kv_b_proj_weight.dtype in (fp8_dtype, torch.uint8)
+        )
 
         output = None
         merge_output = None
@@ -2356,7 +2362,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
+            if not preserve_kv_b_proj_input_dtype:
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2426,7 +2433,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
         assert prefill_metadata.chunked_context.chunk_size is not None
 
-        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        fp8_dtype = current_platform.fp8_dtype()
+        use_fp8_prefill = prefill_metadata.q_data_type == fp8_dtype
+        kv_b_proj_weight = getattr(self.kv_b_proj, "weight", None)
+        preserve_kv_b_proj_input_dtype = use_fp8_prefill and (
+            kv_b_proj_weight is not None
+            and kv_b_proj_weight.dtype in (fp8_dtype, torch.uint8)
+        )
         output = None
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
@@ -2508,7 +2521,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 chunk_idx=i,
                 toks=toks,
             )
-            kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
+            if not preserve_kv_b_proj_input_dtype:
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
