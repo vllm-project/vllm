@@ -183,6 +183,8 @@ def mamba_v2_sharded_weight_loader(
     """
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        from vllm.model_executor.parameter import copy_weight
+
         # - track boundary of (sharded) param, and loaded_weight, respectively
         boundary, loaded_boundary = 0, 0
 
@@ -213,16 +215,21 @@ def mamba_v2_sharded_weight_loader(
             take = min(shard_size, full_dim - extra - loaded_skip)
 
             # - always shard on dim 0
-            # - the ignore is for a mundane mypy error as it does not
-            #   seem to handle slices well.
-            # https://github.com/python/mypy/issues/2410
-            param.data[
+            param_slice = param.data[
                 boundary : (boundary + take), ...  # type: ignore[misc]
-            ] = loaded_weight[
+            ]
+
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
+            loaded_slice = loaded_weight[
                 loaded_start_idx : (
                     loaded_start_idx + take
                 )  # type: ignore[misc]
-            ]  # type: ignore[misc]
+            ]
+            if param_slice.shape != loaded_slice.shape:
+                loaded_slice = loaded_slice.view(param_slice.shape)
+            loaded_slice.copy_attr = copy_attr
+
+            copy_weight(param_slice, loaded_slice)
 
             # move indexing boundaries
             boundary += shard_size

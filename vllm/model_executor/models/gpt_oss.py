@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
     remap_moe_expert_weights,
 )
+from vllm.model_executor.parameter import copy_weight
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -543,7 +544,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
                 narrow_weight = weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                copy_weight(param.data, narrow_weight)
                 loaded_params.add(name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -680,7 +681,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
             ):
                 assert loaded_weight.numel() == 1
                 expert_data = params_dict[fused_name].data[expert_id]
-                expert_data.copy_(loaded_weight)
+                copy_weight(expert_data, loaded_weight)
                 loaded_params.add(fused_name)
                 continue
 
@@ -764,11 +765,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
                 dim2 = sliced_weight.shape[1]
-                expert_data.data[:dim1, :dim2].copy_(sliced_weight)
+                copy_weight(expert_data.data[:dim1, :dim2], sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
             elif name.endswith(".w13_weight") and moe_quant_method == "fp8":
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -780,14 +782,16 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         narrow_weight = loaded_weight[
                             2 * tp_rank_start : 2 * tp_rank_end, :
                         ]
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
 
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
                 if expert_id is None:
-                    param.data.copy_(narrow_weight)
+                    copy_weight(param.data, narrow_weight)
                 else:
-                    param.data[expert_id].copy_(narrow_weight)
+                    copy_weight(param.data[expert_id], narrow_weight)
 
                 loaded_params.add(fused_name)
                 continue
@@ -797,6 +801,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 param = params_dict[fused_name]
 
                 # Check if this is per-channel or per-tensor scale
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 if loaded_weight.numel() > 1 and loaded_weight.dim() == 1:
                     if use_ep:
                         narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
@@ -806,11 +811,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         ]
                 else:
                     narrow_weight = loaded_weight
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
 
                 if expert_id is None:
-                    param.data.copy_(narrow_weight)
+                    copy_weight(param.data, narrow_weight)
                 else:
-                    param.data[expert_id].copy_(narrow_weight)
+                    copy_weight(param.data[expert_id], narrow_weight)
 
                 loaded_params.add(fused_name)
                 continue
@@ -820,14 +827,15 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 param = params_dict[fused_name]
 
                 if expert_id is None:
-                    param.data.copy_(loaded_weight)
+                    copy_weight(param.data, loaded_weight)
                 else:
-                    param.data[expert_id].copy_(loaded_weight)
+                    copy_weight(param.data[expert_id], loaded_weight)
 
                 loaded_params.add(fused_name)
                 continue
 
             elif name.endswith(".w2_weight") and moe_quant_method == "fp8":
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -835,14 +843,16 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         narrow_weight = loaded_weight[..., tp_rank_start:tp_rank_end]
                     else:
                         narrow_weight = loaded_weight[..., tp_rank_start:tp_rank_end]
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
 
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
                 if expert_id is None:
-                    param.data.copy_(narrow_weight)
+                    copy_weight(param.data, narrow_weight)
                 else:
-                    param.data[expert_id].copy_(narrow_weight)
+                    copy_weight(param.data[expert_id], narrow_weight)
 
                 loaded_params.add(fused_name)
                 continue
@@ -851,15 +861,18 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = loaded_weight
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
 
                 if expert_id is None:
-                    param.data.copy_(narrow_weight)
+                    copy_weight(param.data, narrow_weight)
                 else:
-                    param.data[expert_id].copy_(narrow_weight)
+                    copy_weight(param.data[expert_id], narrow_weight)
 
                 loaded_params.add(fused_name)
                 continue
@@ -868,6 +881,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
             elif name.endswith(".w13_bias") or name.endswith(".w2_bias"):
                 is_w13_bias = name.endswith(".w13_bias")
 
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 if use_ep:
                     sliced_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -884,6 +898,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         sliced_weight = loaded_weight
                         if tp_rank != 0:
                             sliced_weight = sliced_weight.zero_()
+                if copy_attr is not None:
+                    sliced_weight.copy_attr = copy_attr
 
                 # NOTE(rob): because gpt-oss ckpt has "unique" structure with
                 # fused gate_up_proj fused on disk, we cannot use the existing
@@ -893,7 +909,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 param = params_dict[fused_name]
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
-                expert_data.data[:dim1].copy_(sliced_weight)
+                copy_weight(expert_data.data[:dim1], sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
@@ -901,7 +917,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
                 narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                copy_weight(param.data, narrow_weight)
                 loaded_params.add(name)
                 continue
 
@@ -1021,58 +1037,70 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
+                copy_attr = getattr(weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[:, :, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
                 param = params_dict[name]
 
-                param.copy_(narrow_weight)
+                copy_weight(param, narrow_weight)
                 loaded_params.add(name)
                 continue
             elif ".w2_weight" in name:
                 # Handle MLP down projection weights
+                copy_attr = getattr(weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[:, tp_rank_start:tp_rank_end, :]
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
                 param = params_dict[name]
 
-                param.copy_(narrow_weight)
+                copy_weight(param, narrow_weight)
                 loaded_params.add(name)
                 continue
             elif ".w13_bias" in name:
                 # Handle MLP gate and up projection biases
                 # Extract gate and up projection bias parts
+                copy_attr = getattr(weight, "copy_attr", None)
                 if use_ep:
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
+                if copy_attr is not None:
+                    narrow_weight.copy_attr = copy_attr
 
                 param = params_dict[name]
-                param.copy_(narrow_weight)
+                copy_weight(param, narrow_weight)
                 loaded_params.add(name)
                 continue
             elif ".w2_bias" in name:
                 # Handle MLP down projection bias
+                copy_attr = getattr(weight, "copy_attr", None)
                 if use_ep:
                     weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
                         weight.zero_()
+                if copy_attr is not None:
+                    weight.copy_attr = copy_attr
                 param = params_dict[name]
-                param.copy_(weight)
+                copy_weight(param, weight)
                 loaded_params.add(name)
                 continue
             elif "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
                 narrow_weight = weight.narrow(0, head_start, heads_per_rank)
-                param.data.copy_(narrow_weight)
+                copy_weight(param.data, narrow_weight)
                 loaded_params.add(name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:

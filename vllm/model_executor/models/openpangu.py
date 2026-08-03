@@ -696,6 +696,8 @@ class OpenPanguSinkAttention(nn.Module):
         self.post_weight_load()
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        from vllm.model_executor.parameter import copy_weight
+
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -708,15 +710,20 @@ class OpenPanguSinkAttention(nn.Module):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = self.tp_rank * shard_size
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
     def forward(
         self,

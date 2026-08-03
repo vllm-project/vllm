@@ -126,13 +126,16 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
         def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
+            from vllm.model_executor.parameter import copy_weight
+
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
-            param.data.copy_(
-                loaded_weight.data.split(loaded_weight.shape[0] // tp_size, dim=0)[
-                    tp_rank
-                ]
-            )
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
+            sharded_weight = loaded_weight.data.split(
+                loaded_weight.shape[0] // tp_size, dim=0
+            )[tp_rank]
+            sharded_weight.copy_attr = copy_attr
+            copy_weight(param.data, sharded_weight)
 
         def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
             weight_loader(param, -torch.exp(loaded_weight.float()))

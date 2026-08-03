@@ -1230,19 +1230,24 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
+    from vllm.model_executor.parameter import copy_weight
+
     try:
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
             # reshape to match before copying
-            param.data.copy_(loaded_weight.view(param.shape))
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
+            loaded_weight = loaded_weight.view(param.shape)
+            loaded_weight.copy_attr = copy_attr
+            copy_weight(param, loaded_weight)
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
                 f"into parameter ({param.size()})"
             )
 
-            param.data.copy_(loaded_weight)
+            copy_weight(param, loaded_weight)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.
@@ -1259,7 +1264,9 @@ def row_parallel_weight_loader(
     if shard_dim is not None:
         shard_size = param.data.shape[shard_dim]
         start_idx = tp_rank * shard_size
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
+        loaded_weight.copy_attr = copy_attr
 
     return default_weight_loader(param, loaded_weight)
 
@@ -1275,7 +1282,9 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
 
         shard_size = param.data.shape[shard_axis]
         start_idx = tp_rank * shard_size
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+        loaded_weight.copy_attr = copy_attr
 
         return default_weight_loader(param, loaded_weight)
 

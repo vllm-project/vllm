@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parameter import copy_weight
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step3_vl import Step3TextConfig
 
@@ -504,7 +505,7 @@ class Step3TextModel(nn.Module):
                         param_slice = param.narrow(
                             param.output_dim, begin_idx, end_idx - begin_idx
                         )
-                        param_slice.copy_(loaded_weight)
+                        copy_weight(param_slice, loaded_weight)
                         loaded_params.add(name)
                         break
                     else:

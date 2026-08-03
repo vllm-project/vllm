@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.direct_io_loader import DirectIOModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
@@ -46,6 +47,7 @@ LoadFormats = Literal[
     "safetensors",
     "sharded_state",
     "tensorizer",
+    "directio",
 ]
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
@@ -63,6 +65,7 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "safetensors": DefaultModelLoader,
     "sharded_state": ShardedStateLoader,
     "tensorizer": TensorizerLoader,
+    "directio": DirectIOModelLoader,
 }
 
 
@@ -157,4 +160,5 @@ __all__ = [
     "RunaiModelStreamerLoader",
     "ShardedStateLoader",
     "TensorizerLoader",
+    "DirectIOModelLoader",
 ]

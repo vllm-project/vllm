@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
 )
+from vllm.model_executor.parameter import copy_weight
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -573,6 +574,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
             device = get_tp_group().device
             tp_rank = get_tensor_model_parallel_rank()
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.to(device)
             shard_size = layer.intermediate_size_per_partition
 
@@ -610,19 +612,24 @@ class MoeWNA16Method(FusedMoEMethodBase):
                     layer.group_size_div_factor, 1
                 )
 
+            loaded_weight.copy_attr = copy_attr
+
             if "w13_qzeros" in weight_name:
                 tensor = loaded_weight.view(
                     layer.moe_config.tp_size, -1, loaded_weight.size(1)
                 )[tp_rank]
+                tensor.copy_attr = copy_attr
                 if shard_id == "w1":
-                    param.data[expert_id, : shard_size // 2] = tensor
+                    copy_weight(param.data[expert_id, : shard_size // 2], tensor)
                 else:
-                    param.data[expert_id, shard_size // 2 :] = tensor
+                    copy_weight(param.data[expert_id, shard_size // 2 :], tensor)
                 return True if return_success else None
             elif "w2_qzeros" in weight_name:
-                param.data[expert_id] = loaded_weight.view(
+                tensor = loaded_weight.view(
                     loaded_weight.size(0), layer.moe_config.tp_size, -1
                 )[:, tp_rank]
+                tensor.copy_attr = copy_attr
+                copy_weight(param.data[expert_id], tensor)
                 return True if return_success else None
             else:
                 # Delegate to the original loader, passing return_success

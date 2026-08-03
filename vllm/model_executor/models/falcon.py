@@ -443,6 +443,7 @@ class FalconModel(nn.Module):
                 output_dim = getattr(param, "output_dim", None)
                 loaded_weight_shape = loaded_weight.shape
                 if output_dim is not None:
+                    copy_attr = getattr(loaded_weight, "copy_attr", None)
                     loaded_weight = loaded_weight.view(
                         loaded_weight_shape[:output_dim]
                         + (total_num_kv_heads, num_query_heads_per_kv_head + 2, -1)
@@ -470,6 +471,8 @@ class FalconModel(nn.Module):
                         *loaded_weight_shape[output_dim + 1 :],
                     )
                     loaded_weight = torch.cat([wq, wk, wv], dim=output_dim)
+                    if copy_attr is not None:
+                        loaded_weight.copy_attr = copy_attr
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

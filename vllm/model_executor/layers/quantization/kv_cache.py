@@ -31,12 +31,17 @@ class KVCacheScaleParameter(torch.nn.Parameter):
 
     @staticmethod
     def weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        from vllm.model_executor.parameter import copy_weight
+
         if loaded_weight.numel() != 1:
             raise ValueError(
                 f"KV-cache scale expects a scalar weight, got shape "
                 f"{tuple(loaded_weight.shape)}"
             )
-        param.data.copy_(loaded_weight.reshape(()))
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
+        scalar_weight = loaded_weight.reshape(())
+        scalar_weight.copy_attr = copy_attr
+        copy_weight(param.data, scalar_weight)
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):

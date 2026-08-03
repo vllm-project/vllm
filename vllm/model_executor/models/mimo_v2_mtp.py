@@ -327,9 +327,12 @@ class MiMoV2MTP(nn.Module):
             if "attention_sink_bias" in name:
                 total_heads = loaded_weight.shape[0]
                 heads_per_rank = total_heads // tp_size
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.narrow(
                     0, tp_rank * heads_per_rank, heads_per_rank
                 )
+                if copy_attr is not None:
+                    loaded_weight.copy_attr = copy_attr
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

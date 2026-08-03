@@ -29,6 +29,22 @@ __all__ = [
 logger = init_logger(__name__)
 
 
+def copy_weight(
+    param: torch.Tensor,
+    loaded_weight: torch.Tensor,
+) -> None:
+    # use custom copy function instead of raw tensor copy if available. TODO GGUF
+    copy_attr = getattr(loaded_weight, "copy_attr", None)
+    if copy_attr is not None:
+        custom_copy = copy_attr.get("copy_weight")
+
+        if custom_copy is not None:
+            custom_copy(param, loaded_weight)
+            return
+
+    param.data.copy_(loaded_weight)
+
+
 class BasevLLMParameter(Parameter):
     """
     Base parameter for vLLM linear layers. Extends the torch.nn.parameter
@@ -94,7 +110,7 @@ class BasevLLMParameter(Parameter):
         assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(
             loaded_weight
         )
-        self.data.copy_(loaded_weight)
+        copy_weight(self.data, loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
@@ -147,11 +163,14 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         shard_size = self.data.shape[self.output_dim]
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        if copy_attr is not None:
+            loaded_weight.copy_attr = copy_attr
+        copy_weight(self.data, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -169,11 +188,14 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
 
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        if copy_attr is not None:
+            loaded_weight.copy_attr = copy_attr
+        copy_weight(param_data, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -193,12 +215,15 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
         shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(
             self.output_dim, shard_id_int * shard_size, shard_size
         )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        if copy_attr is not None:
+            loaded_weight.copy_attr = copy_attr
+        copy_weight(param_data, loaded_weight)
 
 
 class RowvLLMParameter(BasevLLMParameter):
@@ -219,6 +244,7 @@ class RowvLLMParameter(BasevLLMParameter):
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         shard_size = self.data.shape[self.input_dim]
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(
             self.input_dim, self.tp_rank * shard_size, shard_size
         )
@@ -227,7 +253,9 @@ class RowvLLMParameter(BasevLLMParameter):
             loaded_weight = loaded_weight.reshape(1)
 
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        if copy_attr is not None:
+            loaded_weight.copy_attr = copy_attr
+        copy_weight(self.data, loaded_weight)
 
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
@@ -303,11 +331,14 @@ class PerTensorScaleParameter(BasevLLMParameter):
         # compressed-tensors scales do have a shape
         if len(loaded_weight.shape) != 0:
             assert loaded_weight.shape[0] == 1
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight[0]
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
 
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
 
 class PackedColumnParameter(_ColumnvLLMParameter):

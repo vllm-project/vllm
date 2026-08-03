@@ -195,11 +195,16 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @staticmethod
     def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        from vllm.model_executor.parameter import copy_weight
+
         if loaded_weight.shape != param.shape:
             slices = tuple(slice(0, s) for s in loaded_weight.shape)
-            param.data[slices].copy_(loaded_weight)
+            copy_weight(param.data[slices], loaded_weight)
         else:
-            param.data.copy_(loaded_weight.view(param.shape))
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
+            loaded_weight = loaded_weight.view(param.shape)
+            loaded_weight.copy_attr = copy_attr
+            copy_weight(param, loaded_weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_name, weight_scale_name, _, _ = self.layer_param_names

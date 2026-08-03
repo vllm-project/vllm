@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parameter import copy_weight
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -300,6 +301,7 @@ class NomicMoE(nn.Module):
         param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         if weight_name.endswith("w1"):
             loaded_weight = loaded_weight.reshape(
                 self.num_total_experts,
@@ -312,7 +314,9 @@ class NomicMoE(nn.Module):
                 self.total_intermediate_size,
                 self.hidden_size,
             )[:, shard].transpose(1, 2)
-        param_data.copy_(loaded_weight)
+        if copy_attr is not None:
+            loaded_weight.copy_attr = copy_attr
+        copy_weight(param_data, loaded_weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape

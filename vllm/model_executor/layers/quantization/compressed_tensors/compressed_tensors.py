@@ -1123,11 +1123,14 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 kind: Literal["q", "k", "v"],
                 param_type: Literal["scale", "zero_point"],
             ):
+                from vllm.model_executor.parameter import copy_weight
+
                 # Zero-points are not used as vLLM only supports symmetric quantization
                 if param_type == "zero_point":
                     return
 
                 # LLM-Compressor stores scales as 3D tensors of shape [num_heads, 1, 1]
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.flatten()
 
                 # FlashAttn expects [num_kv_heads] instead of [num_heads] for q_scale.
@@ -1157,7 +1160,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                     shard_rank = tp_rank // replicas
                     loaded_weight = loaded_weight[shard_rank : shard_rank + 1]
 
-                param.data.copy_(loaded_weight.to(dtype=param.dtype))
+                loaded_weight = loaded_weight.to(dtype=param.dtype)
+                loaded_weight.copy_attr = copy_attr
+                copy_weight(param.data, loaded_weight)
 
             layer.q_scale.weight_loader = partial(
                 _tp_aware_loader, kind="q", param_type="scale"

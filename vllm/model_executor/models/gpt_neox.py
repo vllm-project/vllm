@@ -256,9 +256,12 @@ class GPTNeoXModel(nn.Module):
         for name, loaded_weight in weights:
             if "query_key_value" in name:
                 shape = loaded_weight.shape
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.view((num_heads, 3, -1) + shape[1:])
                 loaded_weight = loaded_weight.transpose(0, 1)
                 loaded_weight = loaded_weight.reshape(shape)
+                if copy_attr is not None:
+                    loaded_weight.copy_attr = copy_attr
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

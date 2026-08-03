@@ -512,14 +512,19 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
     sharded_dims = [d // tp_size for d in dims]
 
     def weight_loader(param, loaded_weight, loaded_shard_id=None):
+        from vllm.model_executor.parameter import copy_weight
+
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         if loaded_weight.dim() == 2:
             loaded_weight = loaded_weight.unsqueeze(1)
+            loaded_weight.copy_attr = copy_attr
         dim = dims[loaded_shard_id]
         shard_size = dim // tp_size
         tp_start = tp_rank * shard_size
         sharded_weight = loaded_weight[tp_start : tp_start + shard_size]
+        sharded_weight.copy_attr = copy_attr
         offset = sum(sharded_dims[:loaded_shard_id])
-        param.data[offset : offset + shard_size].copy_(sharded_weight)
+        copy_weight(param.data[offset : offset + shard_size], sharded_weight)
 
     return weight_loader
 

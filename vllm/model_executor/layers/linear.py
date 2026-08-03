@@ -40,6 +40,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
     RowvLLMParameter,
+    copy_weight,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -135,7 +136,9 @@ def adjust_scalar_to_fused_array(
     # compressed-tensors scales do have a shape
     if len(loaded_weight.shape) != 0:
         assert loaded_weight.shape[0] == 1
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight[0]
+        loaded_weight.copy_attr = copy_attr
 
     return param_data[shard_id], loaded_weight
 
@@ -386,13 +389,15 @@ class ReplicatedLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         if len(loaded_weight.shape) == 0:
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.reshape(1)
+            loaded_weight.copy_attr = copy_attr
 
         assert param.size() == loaded_weight.size(), (
             f"Tried to load weights of size {loaded_weight.size()}"
             f"to a parameter of size {param.size()}"
         )
-        param.data.copy_(loaded_weight)
+        copy_weight(param.data, loaded_weight)
 
     def forward(
         self,
@@ -570,22 +575,28 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = self.tp_rank * shard_size
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            loaded_weight.copy_attr = copy_attr
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.reshape(1)
+            loaded_weight.copy_attr = copy_attr
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             assert loaded_weight.numel() == 1
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.reshape(1)
+            loaded_weight.copy_attr = copy_attr
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
@@ -755,6 +766,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         output_dim = getattr(param, "output_dim", None)
         # Special case for per-tensor scale to load scalar into fused array.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
 
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             # Loaded weight is already fused on disk (mlp).
@@ -764,9 +776,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0
                     )
+                    loaded_weight.copy_attr = copy_attr
 
                 assert param_data.shape == loaded_weight.shape
-                param_data.copy_(loaded_weight)
+                copy_weight(param_data, loaded_weight)
                 return
 
             output_sizes = (
@@ -823,6 +836,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size
                 )
+                loaded_weight_shard.copy_attr = copy_attr
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -870,11 +884,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = self.tp_rank * shard_size
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+                loaded_weight.copy_attr = copy_attr
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id
             )
+            loaded_weight.copy_attr = copy_attr
 
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
@@ -886,7 +902,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
     def _load_fused_module_from_checkpoint(
         self,
@@ -923,9 +939,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size=shard_size, shard_offset=shard_offset
                 )
 
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight_shard = loaded_weight.narrow(
                 param.output_dim, shard_offset, shard_size
             )
+            loaded_weight_shard.copy_attr = copy_attr
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def weight_loader_v2(
@@ -1170,9 +1188,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                     shard_size=shard_size, shard_offset=shard_offset
                 )
 
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight_shard = loaded_weight.narrow(
                 param.output_dim, shard_offset, shard_size
             )
+            loaded_weight_shard.copy_attr = copy_attr
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def weight_loader_v2(
@@ -1232,6 +1252,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # Special case for per-tensor scales in fused case.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
 
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv).
@@ -1241,9 +1262,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0
                     )
+                    loaded_weight.copy_attr = copy_attr
 
                 assert param_data.shape == loaded_weight.shape
-                param_data.copy_(loaded_weight)
+                copy_weight(param_data, loaded_weight)
                 return
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
@@ -1309,6 +1331,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size
                 )
+                loaded_weight_shard.copy_attr = copy_attr
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -1381,12 +1404,14 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+                loaded_weight.copy_attr = copy_attr
 
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id
             )
+            loaded_weight.copy_attr = copy_attr
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -1397,7 +1422,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -1601,11 +1626,13 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             shard_rank = 0  # replicated to every rank
         else:
             shard_rank = self.tp_rank // self.num_kv_head_replicas
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.narrow(
             output_dim, shard_rank * shard_size, shard_size
         )
+        loaded_weight.copy_attr = copy_attr
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
 
 # --8<-- [start:row_parallel_linear]
@@ -1721,27 +1748,32 @@ class RowParallelLinear(LinearBase):
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
 
         param_data = param.data
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
             start_idx = self.tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
+            loaded_weight.copy_attr = copy_attr
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
+            loaded_weight.copy_attr = copy_attr
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             assert loaded_weight.numel() == 1
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.reshape(1)
+            loaded_weight.copy_attr = copy_attr
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
