@@ -12,7 +12,7 @@ import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -712,6 +712,66 @@ class CudaPlatformBase(Platform):
         except Exception:
             return False
         return major >= 9
+
+    @classmethod
+    def launch_multi_stream(
+        cls,
+        default_fn: Callable[[], Any],
+        aux_fns: list[Callable[[], Any] | None],
+        start_event: torch.cuda.Event,
+        done_events: list[torch.cuda.Event],
+        aux_streams: list[torch.cuda.Stream] | None = None,
+        queue_aux_before_default: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Launch default and auxiliary work on separate CUDA streams.
+
+        Runs ``default_fn`` on the current stream and each non-None
+        ``aux_fns[i]`` on ``aux_streams[i]``, synchronizing via CUDA events.
+        ``start_event`` must be recorded before default work begins; each
+        ``done_events[i]`` joins the corresponding aux stream back to the
+        current stream before returning.
+
+        Args:
+            default_fn: Callable for the current (default) stream.
+            aux_fns: Per-aux callables; entries may be None to skip.
+            start_event: Recorded on the current stream to fan out to aux
+                streams.
+            done_events: One event per aux slot, recorded after the aux fn.
+            aux_streams: Per-aux CUDA streams. Length must match ``aux_fns``.
+            queue_aux_before_default: When True, queue aux kernels before
+                ``default_fn`` (``execute_in_parallel`` overlap pattern).
+                When False, run ``default_fn`` first, then queue aux
+                (``maybe_execute_in_parallel`` / LoRA pattern).
+
+        Returns:
+            Tuple of (default_result, aux_results).
+        """
+        assert aux_streams is not None
+        aux_results = [None] * len(aux_fns)
+        pending: list[torch.cuda.Event] = []
+
+        def _launch_aux() -> None:
+            for i, fn in enumerate(aux_fns):
+                if fn is None:
+                    continue
+                with torch.cuda.stream(aux_streams[i]):
+                    start_event.wait()
+                    aux_results[i] = fn()
+                    done_events[i].record()
+                pending.append(done_events[i])
+
+        start_event.record()
+        if queue_aux_before_default:
+            _launch_aux()
+            default_result = default_fn()
+        else:
+            default_result = default_fn()
+            _launch_aux()
+
+        for ev in pending:
+            ev.wait()
+
+        return default_result, aux_results
 
 
 # NVML utils

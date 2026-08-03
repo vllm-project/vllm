@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -1108,3 +1109,78 @@ class RocmPlatform(Platform):
         except Exception as e:
             logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
             return None
+
+    @classmethod
+    def launch_multi_stream(
+        cls,
+        default_fn: Callable[[], Any],
+        aux_fns: list[Callable[[], Any] | None],
+        start_event: torch.cuda.Event,
+        done_events: list[torch.cuda.Event],
+        aux_streams: list[torch.cuda.Stream] | None = None,
+        queue_aux_before_default: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Launch default and auxiliary work on separate HIP streams.
+
+        ROCm uses a different sync path than CUDA because the HIP backend is
+        sensitive to cross-stream ordering via bare ``Event.wait()``. DSV4 CSA
+        multistream decode experiments (#43718, #41820) observed deadlocks and
+        hangs with the CUDA-style path; this implementation avoids them by:
+
+        * Using ``Stream.wait_event()`` and stream-qualified ``Event.record()``
+          instead of bare ``Event.wait()`` / ``Event.record()``.
+        * Calling ``Tensor.record_stream()`` on aux results so tensors
+          produced on aux streams remain valid when consumed on the main
+          stream (required under graph capture on ROCm).
+        * Always scheduling ``default_fn`` before aux work. The
+          ``queue_aux_before_default`` flag is accepted for API compatibility
+          with CUDA but ignored on ROCm because aux-first ordering caused
+          hangs in upstream multistream experiments.
+
+        Args:
+            default_fn: Callable for the current (default) stream.
+            aux_fns: Per-aux callables; entries may be None to skip.
+            start_event: Recorded on the current stream to fan out to aux
+                streams.
+            done_events: One event per aux slot, recorded after the aux fn.
+            aux_streams: Per-aux HIP streams. Length must match ``aux_fns``.
+            queue_aux_before_default: Ignored on ROCm; kept for a uniform
+                platform API.
+
+        Returns:
+            Tuple of (default_result, aux_results).
+        """
+        del queue_aux_before_default
+        assert aux_streams is not None
+        aux_results = [None] * len(aux_fns)
+        current_stream = torch.cuda.current_stream()
+        pending: list[tuple[torch.cuda.Event, Any]] = []
+
+        def _record_result_stream(result: Any, stream: torch.cuda.Stream) -> None:
+            if isinstance(result, torch.Tensor):
+                result.record_stream(stream)
+            elif isinstance(result, (tuple, list)):
+                for item in result:
+                    _record_result_stream(item, stream)
+            elif isinstance(result, dict):
+                for item in result.values():
+                    _record_result_stream(item, stream)
+
+        start_event.record(current_stream)
+        default_result = default_fn()
+
+        for i, fn in enumerate(aux_fns):
+            if fn is None:
+                continue
+            aux_stream = aux_streams[i]
+            with torch.cuda.stream(aux_stream):
+                aux_stream.wait_event(start_event)
+                aux_results[i] = fn()
+                done_events[i].record(aux_stream)
+            pending.append((done_events[i], aux_results[i]))
+
+        for ev, result in pending:
+            current_stream.wait_event(ev)
+            _record_result_stream(result, current_stream)
+
+        return default_result, aux_results
