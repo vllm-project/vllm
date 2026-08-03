@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import numpy as np
 import torch
+
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -1502,6 +1504,12 @@ class FlashInferImpl(AttentionImpl):
             )
 
         self.sinks: torch.Tensor | None = None
+        # Keep the checkpoint-backed source separately: post-load processing
+        # publishes a runtime fp32 copy into self.sinks, and a reload
+        # refreshes that copy FROM this source. Without the source
+        # reference, the second post-load pass has nothing to recompute
+        # from and the runtime copy silently keeps pre-reload values.
+        self._sinks_source: torch.Tensor | None = None
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -1510,6 +1518,7 @@ class FlashInferImpl(AttentionImpl):
                     f"{sinks.shape[0]}."
                 )
             self.sinks = sinks
+            self._sinks_source = sinks
 
         self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             num_heads, num_kv_heads, is_prefill=False
@@ -1562,8 +1571,18 @@ class FlashInferImpl(AttentionImpl):
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if self.sinks is not None and self.sinks.dtype != torch.float32:
-            self.sinks = self.sinks.to(torch.float32)
+        # Recompute the runtime fp32 copy from the source UNCONDITIONALLY.
+        # The old dtype guard made the second pass a no-op (already fp32),
+        # so a reload never refreshed the runtime copy. The arena keeps the
+        # copy's address stable for any capture that read it.
+        if self._sinks_source is not None:
+            sinks_f32 = self._sinks_source.to(torch.float32)
+            arena = current_arena()
+            self.sinks = (
+                arena.put("flashinfer.sinks_f32", sinks_f32)
+                if arena is not None
+                else sinks_f32
+            )
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale

@@ -12,6 +12,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.reload_arena import (
+    arena_scope,
+    get_reload_arena,
+    peek_reload_arena,
+)
 
 from .meta import (
     SKIP_TENSORS,
@@ -37,6 +42,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "get_layer_arena_findings",
 ]
 
 
@@ -51,6 +57,42 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
 
 # Global set used to track loading for logging purposes only
 LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
+
+# Per-layer arena drift found during the current reload, accumulated as each
+# layer's PWAL re-runs (that is where the per-layer info -- and its
+# arena_snapshot -- is still alive; it is reset immediately after). Cleared at
+# the start of each reload, read after finalize. Verify-only, see
+# LayerReloadingInfo.arena_snapshot.
+_LAYER_ARENA_FINDINGS: list[str] = []
+_LAYER_ARENA_PATHS: WeakKeyDictionary[torch.nn.Module, str] = WeakKeyDictionary()
+
+
+def get_layer_arena_findings() -> list[str]:
+    """Arena drift the per-layer verification found during the last reload."""
+    return list(_LAYER_ARENA_FINDINGS)
+
+
+def _verify_layer_arena(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Check this layer's arena slots against the snapshot taken at initialize.
+
+    Called after the layer's process_weights_after_loading has re-run (which
+    repopulates the arena) and before info.reset() clears the snapshot. A slot
+    that moved / vanished / changed layout means the PWAL rebuild did not reuse
+    the arena's storage, so a captured graph now points at stale memory.
+    """
+    snap = info.arena_snapshot
+    if snap is None:
+        return
+    arena = peek_reload_arena(layer)
+    layer_name = _LAYER_ARENA_PATHS.get(layer, layer.__class__.__name__)
+    if arena is None:
+        # The arena vanished with the layer: every snapshotted slot is gone.
+        if snap:
+            _LAYER_ARENA_FINDINGS.append(
+                f"{layer_name}: arena vanished across reload")
+        return
+    for violation in arena.verify(snap):
+        _LAYER_ARENA_FINDINGS.append(f"{layer_name}: {violation}")
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -100,15 +142,34 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
-    for layer in model.modules():
+    # Fresh reload: drop any arena drift from a prior one. Guarded by
+    # can_load() below so a nested initialize (e.g. via a wrapped
+    # load_weights) does not clear findings mid-reload -- only the outermost
+    # initialize, which finds no layer already loadable, reaches here first.
+    if not any(get_layerwise_info(m).can_load() for m in model.modules()):
+        _LAYER_ARENA_FINDINGS.clear()
+        _LAYER_ARENA_PATHS.clear()
+
+    for layer_name, layer in model.named_modules():
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
         if info.can_load():
             continue
 
+        _LAYER_ARENA_PATHS[layer] = layer_name
+
         # Save current tensors for later copying
         info.kernel_tensors = get_layer_params_buffers(layer)
+
+        # Snapshot this layer's arena storage identities for verification at
+        # finalize. Verify-only: arena slots are NOT restored-to-meta below,
+        # because the arena already keeps their storage stable across the PWAL
+        # rebuild. The model has been serving before a reload, so lazily
+        # allocated slots (e.g. MoE permute scratch) already exist and are
+        # captured here.
+        arena = peek_reload_arena(layer)
+        info.arena_snapshot = arena.snapshot() if arena is not None else None
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -272,6 +333,10 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
+        # Covers the fallback branch above (no PWAL re-ran, so no drift is
+        # possible, but keep it uniform); a no-op when _layerwise_process
+        # already verified and reset the snapshot.
+        _verify_layer_arena(layer, info)
         info.reset()
 
     # Process attention layers after all other layers are done
@@ -300,7 +365,11 @@ def _finalize_attention_layer(
         )
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    with arena_scope(get_reload_arena(layer)):
+        layer.process_weights_after_loading(model_config.dtype)
+    # Attention arena slots (e.g. MLA W_UV/W_UK_T) — verify after PWAL,
+    # before the caller resets info.
+    _verify_layer_arena(layer, info)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -323,7 +392,8 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
-    quant_method.process_weights_after_loading(layer)
+    with arena_scope(get_reload_arena(layer)):
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -359,12 +429,18 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        with arena_scope(get_reload_arena(layer)):
+            quant_method.process_weights_after_loading(layer)
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
+
+    # Verify arena slots survived the PWAL rebuild (symmetric to the copy-back
+    # above: params/buffers are restored, arena slots are checked). Must run
+    # before reset() clears the snapshot.
+    _verify_layer_arena(layer, info)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)

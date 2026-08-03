@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -52,29 +53,45 @@ class TrtLlmMxfp4ExpertsBase:
 
         # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()
+        arena = current_arena()
+
+        def stable(slot: str, value: torch.Tensor) -> torch.Tensor:
+            if arena is None:
+                return value
+            return arena.put(f"trtllm_mxfp4.{slot}", value)
+
         if quant_config.gemm1_alpha is not None:
-            self.gemm1_alpha = torch.tensor(
-                [quant_config.gemm1_alpha] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_alpha = stable(
+                "gemm1_alpha",
+                torch.tensor(
+                    [quant_config.gemm1_alpha] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_alpha = None
 
         if quant_config.gemm1_beta is not None:
-            self.gemm1_beta = torch.tensor(
-                [quant_config.gemm1_beta] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_beta = stable(
+                "gemm1_beta",
+                torch.tensor(
+                    [quant_config.gemm1_beta] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_beta = None
 
         if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_clamp_limit = stable(
+                "gemm1_clamp_limit",
+                torch.tensor(
+                    [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_clamp_limit = None
