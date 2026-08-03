@@ -217,14 +217,22 @@ def create_composite_attention_backend(
             general_builder_cls.supports_update_block_table
             and decode_builder_cls.supports_update_block_table
         )
+        requires_block_table_width = (
+            general_builder_cls.requires_block_table_width
+            or decode_builder_cls.requires_block_table_width
+        )
 
-        def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        def __init__(self, kv_cache_spec, layer_names, vllm_config, device, **kwargs):
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+            args = (kv_cache_spec, layer_names, vllm_config, device)
+            # Only the variant that asked for the extra ctor kwargs receives them.
             self.general_builder = general_builder_cls(
-                kv_cache_spec, layer_names, vllm_config, device
+                *args,
+                **(kwargs if general_builder_cls.requires_block_table_width else {}),
             )
             self.decode_builder = decode_builder_cls(
-                kv_cache_spec, layer_names, vllm_config, device
+                *args,
+                **(kwargs if decode_builder_cls.requires_block_table_width else {}),
             )
             thresholds = (
                 self.general_builder.reorder_batch_threshold,
@@ -419,7 +427,7 @@ def get_kv_cache_layout():
     cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.info_once(
+        logger.debug_once(
             "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
             "Setting KV cache layout to %s.",
             cache_layout,

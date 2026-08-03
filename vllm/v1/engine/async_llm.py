@@ -21,6 +21,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -309,7 +310,7 @@ class AsyncLLM(EngineClient):
             and not is_pooling
             and params.prompt_logprobs
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "--kv-sharing-fast-prefill produces incorrect logprobs for "
                 "prompt tokens, please disable it when the requests need "
                 "prompt logprobs"
@@ -348,18 +349,35 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            request = self.input_processor.process_inputs(
-                request_id,
-                prompt,
-                params,
-                supported_tasks=await self.get_supported_tasks(),
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-            )
+            if isinstance(prompt, dict) and "type" in prompt:
+                # Rendered EngineInput; no blocking preprocessing needed.
+                request = self.input_processor.process_inputs(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                )
+            else:
+                # Raw prompts require tokenization and possibly multimodal
+                # processing, which must not block the event loop.
+                request = await self.input_processor.process_inputs_async(
+                    request_id,
+                    prompt,
+                    params,
+                    supported_tasks=await self.get_supported_tasks(),
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         if reasoning_ended is not None:
@@ -476,7 +494,7 @@ class AsyncLLM(EngineClient):
                     )
                     req.external_req_id = request_id
                     if req.prompt_embeds is not None:
-                        raise ValueError(
+                        raise VLLMValidationError(
                             "prompt_embeds not supported for streaming inputs"
                         )
                     prompt_text, _, _ = extract_prompt_components(
@@ -512,7 +530,7 @@ class AsyncLLM(EngineClient):
             or params.output_kind == RequestOutputKind.FINAL_ONLY
             or params.stop
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Input streaming not currently supported "
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
@@ -604,7 +622,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError as e:
+        except VLLMClientError as e:
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -869,7 +887,7 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError:
+        except VLLMClientError:
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise

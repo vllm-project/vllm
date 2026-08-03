@@ -383,6 +383,7 @@ def test_disjoint_kernel_block_sizes_are_incompatible():
 
 class _Builder:
     supports_update_block_table = False
+    requires_block_table_width = False
 
     def __init__(self, *args):
         self.reorder_batch_threshold = 1

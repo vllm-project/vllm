@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
-    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -167,12 +166,14 @@ def init_attn_backend(
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
             # Check cudagraph support for the attention backend
-            kv_cache_spec = cast(AttentionSpec, group.kv_cache_spec)
-            cg_support = builder.get_cudagraph_support(vllm_config, kv_cache_spec)
+            cg_support = builder.get_cudagraph_support(
+                vllm_config,
+                group.kv_cache_spec,
+            )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.get_cudagraph_support_backend_name(
-                    vllm_config, kv_cache_spec
+                    vllm_config, group.kv_cache_spec
                 )
 
     attn_cg_support_info = AttentionCGSupportInfo(
@@ -324,7 +325,6 @@ def _reshape_kv_cache(
                 layer_cache_dtype = (
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
                     else cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(

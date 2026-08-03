@@ -17,6 +17,7 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        num_prefill_lookahead: int = 1,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -79,7 +80,10 @@ class RequestState:
         )
 
         self.next_prefill_tokens = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            num_prefill_lookahead,
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=device,
         )
 
     @property

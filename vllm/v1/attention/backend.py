@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -163,7 +163,7 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_cudagraph_support_backend_name(
-        cls, vllm_config: "VllmConfig", kv_cache_spec: "AttentionSpec"
+        cls, vllm_config: "VllmConfig", kv_cache_spec: "KVCacheSpec"
     ) -> str:
         """Name of the backend that determines this backend's cudagraph support."""
         return cls.__name__
@@ -648,11 +648,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    # Whether the builder constructor requires the block-table width.
+    requires_block_table_width: ClassVar[bool] = False
 
     @abstractmethod
     def __init__(
         self,
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
         layer_names: list[str],
         vllm_config: "VllmConfig",
         device: torch.device,
@@ -666,7 +668,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     def get_cudagraph_support(
         cls: type["AttentionMetadataBuilder"],
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
