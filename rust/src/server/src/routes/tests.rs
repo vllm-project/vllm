@@ -153,6 +153,20 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
     ]
 }
 
+fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (
+            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
+            None,
+        ),
+        (
+            bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
+            Some(EngineCoreFinishReason::Stop),
+        ),
+    ]
+}
+
 fn assert_adapter_a_lora_request(request: &EngineCoreRequest) {
     let lora = request.lora_request.as_ref().expect("lora request");
     assert_eq!(lora.lora_name, "adapter-a");
@@ -551,9 +565,10 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } | ChatContentPart::VideoUrl { .. } => {
-                        out.push_str(placeholder)
-                    }
+                    ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::VideoUrl { .. }
+                    | ChatContentPart::InputAudio { .. }
+                    | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
                 }
             }
             out
@@ -562,6 +577,12 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn qwen_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -579,6 +600,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
             ..Default::default()
         },
         Arc::new(fake_chat_tokenizer()),
+        limit_mm_per_prompt,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -2294,6 +2316,74 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(1),
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 1 image(s) may be provided in one prompt."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -2378,6 +2468,14 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     assert_eq!(
         json["choices"][0]["logprobs"]["content"][1]["token"],
         json!("i")
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+        json!([])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"],
+        json!([])
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
@@ -4545,17 +4643,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
-        vec![
-            (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
-            (
-                bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
-                None,
-            ),
-            (
-                bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
-                Some(EngineCoreFinishReason::Stop),
-            ),
-        ],
+        weather_tool_call_output_specs(),
     )
     .await;
 
@@ -4602,6 +4690,63 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
         "{text}"
     );
     assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn named_tool_choice_uses_stop_finish_reason() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            weather_tool_call_output_specs(),
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "description": "Get weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"city": {"type": "string"}}
+                                    }
+                                }
+                            }],
+                            "tool_choice": {
+                                "type": "function",
+                                "function": {"name": "get_weather"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        assert!(text.contains("\"tool_calls\":"), "{text}");
+        assert!(text.contains("\"name\":\"get_weather\""), "{text}");
+        assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
+        assert!(!text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

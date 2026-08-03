@@ -28,6 +28,7 @@ from vllm.parser.engine.events import EventType
 class ParserState(Enum):
     CONTENT = auto()
     REASONING = auto()
+    MESSAGE_HEADER = auto()
     TOOL_PREAMBLE = auto()
     TOOL_NAME = auto()
     TOOL_ARGS = auto()

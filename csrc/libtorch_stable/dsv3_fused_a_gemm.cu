@@ -647,17 +647,17 @@ __global__ __launch_bounds__(256, 1) void fused_a_gemm_kernel(
 #endif
 }
 
-template <typename T, int kHdIn, int kHdOut, int kTileN>
+template <typename T, int kHdIn, int kHdOut, int kTileN, int kTileK = 256>
 void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
-                      cudaStream_t const stream) {
-  constexpr int gemm_m = kHdOut;  // 2112
-  int const gemm_n = num_tokens;  // 1-16
-  constexpr int gemm_k = kHdIn;   // 7168
+                      cudaStream_t const stream, bool enable_pdl) {
+  constexpr int gemm_m = kHdOut;
+  int const gemm_n = num_tokens;
+  constexpr int gemm_k = kHdIn;
   constexpr int batch_size = 1;
   std::swap(mat_a, mat_b);
   constexpr int tile_m = 16;
-  constexpr int tile_n = kTileN;                        // 8 or 16
-  constexpr int tile_k = std::max(256, 1024 / tile_n);  // 256
+  constexpr int tile_n = kTileN;
+  constexpr int tile_k = kTileK;
   constexpr int max_stage_cnt =
       1024 * 192 / ((tile_m + tile_n) * tile_k * sizeof(bf16_t));
   constexpr int k_iter_cnt = gemm_k / tile_k;
@@ -679,7 +679,8 @@ void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = getEnvEnablePDL();
+  attrs[0].val.programmaticStreamSerializationAllowed =
+      enable_pdl || getEnvEnablePDL();
   config.numAttrs = 1;
   config.attrs = attrs;
   if (smem_bytes >= (48 * 1024)) {
@@ -694,36 +695,50 @@ void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
                      output, mat_a, mat_b, gemm_n);
 }
 
-template void invokeFusedAGemm<__nv_bfloat16, 7168, 2112, 8>(
-    __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
-    cudaStream_t);
-
-template void invokeFusedAGemm<__nv_bfloat16, 7168, 2112, 16>(
-    __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
-    cudaStream_t);
+template <typename T, int kHdIn, int kHdOut, int kTileK = 256>
+void invokeFusedAGemmForTokens(T* output, T const* mat_a, T const* mat_b,
+                               int num_tokens, cudaStream_t const stream,
+                               bool enable_pdl) {
+  if (num_tokens <= 8) {
+    invokeFusedAGemm<T, kHdIn, kHdOut, 8, kTileK>(
+        output, mat_a, mat_b, num_tokens, stream, enable_pdl);
+  } else {
+    invokeFusedAGemm<T, kHdIn, kHdOut, 16, kTileK>(
+        output, mat_a, mat_b, num_tokens, stream, enable_pdl);
+  }
+}
 
 void dsv3_fused_a_gemm(torch::stable::Tensor& output,
                        torch::stable::Tensor const& mat_a,
-                       torch::stable::Tensor const& mat_b) {
+                       torch::stable::Tensor const& mat_b, bool enable_pdl) {
   STD_TORCH_CHECK(mat_a.dim() == 2 && mat_b.dim() == 2 && output.dim() == 2);
   int const num_tokens = mat_a.size(0);
   int const hd_in = mat_a.size(1);
   int const hd_out = mat_b.size(1);
 
-  constexpr int kHdIn = 7168;
-  constexpr int kHdOut = 2112;
   STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
                   "required 1 <= mat_a.shape[0] <= 16");
-  STD_TORCH_CHECK(hd_in == kHdIn, "required mat_a.shape[1] == 7168");
-  STD_TORCH_CHECK(hd_out == kHdOut, "required mat_b.shape[1] == 2112");
   STD_TORCH_CHECK(output.size(0) == num_tokens,
                   "required output.shape[0] == mat_a.shape[0]");
   STD_TORCH_CHECK(output.size(1) == hd_out,
                   "required output.shape[1] == mat_b.shape[1]");
+  STD_TORCH_CHECK(mat_b.size(0) == hd_in,
+                  "required mat_b.shape[0] == mat_a.shape[1]");
 
-  STD_TORCH_CHECK(mat_a.stride(1) == 1, "mat_a must be a row major tensor");
-  STD_TORCH_CHECK(output.stride(1) == 1, "output must be a row major tensor");
-  STD_TORCH_CHECK(mat_b.stride(0) == 1, "mat_b must be a column major tensor");
+  STD_TORCH_CHECK(mat_a.get_device_index() == mat_b.get_device_index() &&
+                      mat_a.get_device_index() == output.get_device_index(),
+                  "mat_a, mat_b, and output must be on the same device");
+
+  // The kernels index global memory with raw pointers and packed strides, so
+  // reject any padded or transposed view rather than reading out of bounds.
+  STD_TORCH_CHECK(
+      mat_a.stride(0) == hd_in && mat_a.stride(1) == 1,
+      "mat_a must be a packed row-major [num_tokens, hd_in] tensor");
+  STD_TORCH_CHECK(
+      output.stride(0) == hd_out && output.stride(1) == 1,
+      "output must be a packed row-major [num_tokens, hd_out] tensor");
+  STD_TORCH_CHECK(mat_b.stride(0) == 1 && mat_b.stride(1) == hd_in,
+                  "mat_b must be a packed column-major [hd_in, hd_out] tensor");
 
   STD_TORCH_CHECK(
       mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
@@ -738,19 +753,85 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
   STD_TORCH_CHECK(getSMVersion() >= 90, "required CUDA ARCH >= SM_90");
 
   auto stream = get_current_cuda_stream(mat_a.get_device_index());
-  if (num_tokens <= 8) {
-    invokeFusedAGemm<__nv_bfloat16, kHdIn, kHdOut, 8>(
-        reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr()),
-        reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
-        reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), num_tokens,
-        stream);
-  } else {
-    invokeFusedAGemm<__nv_bfloat16, kHdIn, kHdOut, 16>(
-        reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr()),
-        reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
-        reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), num_tokens,
-        stream);
+  auto* output_ptr =
+      reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr());
+  auto const* mat_a_ptr =
+      reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr());
+  auto const* mat_b_ptr =
+      reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr());
+
+#define DISPATCH_DSV3_SHAPE(HD_IN, HD_OUT)                                 \
+  if (hd_in == HD_IN && hd_out == HD_OUT) {                                \
+    invokeFusedAGemmForTokens<__nv_bfloat16, HD_IN, HD_OUT>(               \
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl); \
+    return;                                                                \
   }
+
+  // Shapes the Kimi-K3 selector routes to dsv3_fused_a (see the dsv3 winners
+  // in KIMI_K3_PROJECTIONS) plus the DeepSeek V2/V3 QKV A-projection.
+  DISPATCH_DSV3_SHAPE(7168, 1536)
+  DISPATCH_DSV3_SHAPE(7168, 2112)
+  DISPATCH_DSV3_SHAPE(1536, 2304)
+  DISPATCH_DSV3_SHAPE(1536, 4608)
+  DISPATCH_DSV3_SHAPE(7168, 3584)
+  DISPATCH_DSV3_SHAPE(768, 7168)
+  // TP16 dsv3 winners, as (hd_in=K, hd_out=N). TP16 dense down_proj is absent
+  // because hd_in=2112 is not a multiple of any supported tile_k.
+  DISPATCH_DSV3_SHAPE(1536, 1152)
+  DISPATCH_DSV3_SHAPE(7168, 768)
+  DISPATCH_DSV3_SHAPE(7168, 3216)
+  DISPATCH_DSV3_SHAPE(7168, 4224)
+
+#ifdef VLLM_K3_BENCH_SHAPES
+  // The selector routes these shapes to CuTe or the default GEMM, so they are
+  // never reached in production. They are compiled only for offline
+  // DSV3-vs-CuTe benchmarking.
+  DISPATCH_DSV3_SHAPE(7168, 6288)
+  DISPATCH_DSV3_SHAPE(1536, 7168)
+  DISPATCH_DSV3_SHAPE(3584, 7168)
+  DISPATCH_DSV3_SHAPE(7168, 8448)
+  DISPATCH_DSV3_SHAPE(7168, 20480)
+  DISPATCH_DSV3_SHAPE(7168, 3072)
+  DISPATCH_DSV3_SHAPE(7168, 12448)
+  DISPATCH_DSV3_SHAPE(3072, 7168)
+  DISPATCH_DSV3_SHAPE(8448, 7168)
+  DISPATCH_DSV3_SHAPE(7168, 16896)
+  DISPATCH_DSV3_SHAPE(7168, 40960)
+#endif
+
+#undef DISPATCH_DSV3_SHAPE
+
+  if (hd_in == 128 && hd_out == 1536) {
+    invokeFusedAGemmForTokens<__nv_bfloat16, 128, 1536, 128>(
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+    return;
+  }
+  if (hd_in == 128 && hd_out == 3072) {
+    invokeFusedAGemmForTokens<__nv_bfloat16, 128, 3072, 128>(
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+    return;
+  }
+  // TP16 KDA f_b_proj and shared_expert down_proj. Neither hd_in is a multiple
+  // of 256, so both need the 128 tile_k.
+  if (hd_in == 128 && hd_out == 768) {
+    invokeFusedAGemmForTokens<__nv_bfloat16, 128, 768, 128>(
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+    return;
+  }
+  if (hd_in == 384 && hd_out == 7168) {
+    invokeFusedAGemmForTokens<__nv_bfloat16, 384, 7168, 128>(
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+    return;
+  }
+#ifdef VLLM_K3_BENCH_SHAPES
+  if (hd_in == 4224 && hd_out == 7168) {
+    invokeFusedAGemmForTokens<__nv_bfloat16, 4224, 7168, 128>(
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK(false, "unsupported DSV3 fused-A GEMM shape");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {

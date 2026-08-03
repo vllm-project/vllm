@@ -92,6 +92,10 @@ class VideoLoaderRegistry(ExtensionManager):
 
         return self.processor2backend.get(video_processor)
 
+    def register_gpu_codec(self, name: str) -> None:
+        """Mark a codec name as requiring GPU without registering a loader."""
+        self._requires_gpu[name] = True
+
     def backend_requires_gpu(self, name: str) -> bool:
         return self._requires_gpu.get(name, False)
 
@@ -208,15 +212,26 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 
 PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
-# Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
+# Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
-PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
+PYNVVIDEOCODEC_DEFAULT_HW_DECODERS = 2
 # Per-API-server CUDA context and driver allocation, measured with
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
+
+
+def validate_pynvvideocodec_hw_decoders(hw_decoders: object) -> int:
+    if (
+        isinstance(hw_decoders, bool)
+        or not isinstance(hw_decoders, int)
+        or hw_decoders < 1
+    ):
+        raise ValueError("hw_decoders must be a positive integer")
+    return hw_decoders
 
 
 class PyNvVideoCodecDecoderSlot:
@@ -628,6 +643,7 @@ class PyNvVideoCodecVideoBackendMixin:
     _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
     _active_decoder_slots: ClassVar[int] = 0
     _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
+    _max_decoder_slots: ClassVar[int | None] = None
     _DEVICE_INDEX: ClassVar[int] = 0
 
     @classmethod
@@ -651,6 +667,18 @@ class PyNvVideoCodecVideoBackendMixin:
 
         return PyNvVideoCodecDecoderSlot(torch.cuda.Stream(device=cls._DEVICE_INDEX))
 
+    @classmethod
+    def _configure_decoder_slots(cls, hw_decoders: object) -> None:
+        hw_decoders = validate_pynvvideocodec_hw_decoders(hw_decoders)
+        with cls._decoder_slot_cond:
+            if cls._max_decoder_slots is None:
+                cls._max_decoder_slots = hw_decoders
+            elif cls._max_decoder_slots != hw_decoders:
+                raise RuntimeError(
+                    "PyNvVideoCodec decoder count is already configured as "
+                    f"{cls._max_decoder_slots}, got {hw_decoders}"
+                )
+
     @staticmethod
     @contextmanager
     def _torch_stream_context(stream):
@@ -669,11 +697,14 @@ class PyNvVideoCodecVideoBackendMixin:
     def _borrow_decoder_slot(cls):
         create_slot = False
         with cls._decoder_slot_cond:
+            max_decoder_slots = cls._max_decoder_slots
+            if max_decoder_slots is None:
+                raise RuntimeError("PyNvVideoCodec decoder slots are not configured")
             while True:
                 if cls._decoder_slots:
                     slot = cls._decoder_slots.pop()
                     break
-                if cls._active_decoder_slots < PYNVVIDEOCODEC_MAX_RETAINED_DECODERS:
+                if cls._active_decoder_slots < max_decoder_slots:
                     cls._active_decoder_slots += 1
                     create_slot = True
                     break
@@ -999,6 +1030,7 @@ class VideoBackend(
         ] = "opencv",
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "exact",
+        hw_decoders: int = PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
@@ -1025,6 +1057,8 @@ class VideoBackend(
                 at the cost of relying on the file's metadata. See
                 https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                 for details.
+            hw_decoders: Maximum number of concurrent PyNvVideoCodec decoder
+                slots. Defaults to 2 and must be a positive integer.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
@@ -1088,6 +1122,7 @@ class VideoBackend(
                     "frame_recovery is not supported for "
                     f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
                 )
+            cls._configure_decoder_slots(hw_decoders)
             frames, source, frame_idx, valid = cls.decode_frames_pynvvideocodec(
                 data,
                 target,
@@ -1106,6 +1141,7 @@ class VideoBackend(
             from nvidia.deepstream_videodecode import probe_metadata
 
             total_frames, original_fps, duration, _w, _h, codec = probe_metadata(data)
+            _check_frame_pixel_limit(_w, _h)
             source = cls._prepare_source(
                 VideoSourceMetadata(
                     total_frames_num=total_frames,
@@ -1177,7 +1213,7 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register(
     "qwen3_vl",
-    video_processor="Qwen3VLVideoProcessor",
+    video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
 )
 class Qwen3VLVideoBackend(VideoBackend):
     @classmethod

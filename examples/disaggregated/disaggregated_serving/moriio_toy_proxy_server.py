@@ -210,8 +210,39 @@ async def stream_decode_response(session, response, request_id):
         await session.close()
 
 
-def example_round_robin_dp_loader(request_number, dp_size):
-    return request_nums % dp_size
+def flat_interleaved_dp_route(request_number, instances):
+    """Flat round-robin over the full (instance, dp_rank) slot space.
+
+    ONE counter over (n_instances * dp_size) slots, so instance-selection and
+    DP-rank-selection are derived from the SAME index and can never alias. The
+    previous scheme computed instance = req % n and rank = req % dp from the
+    same counter with n | dp, which locked each instance to a stride-n subset
+    of its ranks (e.g. 2 prefill instances -> 4 of 8 ranks each -> half the
+    GPUs never receive a request, so the deployment falsely appears not to
+    scale).
+
+    Interleaved order — inst0_r0, inst1_r0, inst0_r1, inst1_r1, ... — so
+    consecutive requests alternate instances AND every rank gets walked.
+
+    Assumes homogeneous dp_size across a role's instances (true for the
+    DP<->DP and DP<->TP deployments this proxy targets). Returns
+    (instance_index, dp_rank); dp_rank is None when dp_size == 1 (e.g. a TP
+    decode), which avoids forwarding an out-of-range data-parallel rank.
+    """
+    n = len(instances)
+    dp = instances[0]["dp_size"]
+    slot = (request_number - 1) % (n * dp)
+    inst_idx = slot % n
+    dp_rank = (slot // n) if dp > 1 else None
+    return inst_idx, dp_rank
+
+
+@app.route("/health", methods=["GET"])
+async def health():
+    # Benchmark harnesses and load balancers often probe the proxy URL and
+    # treat a non-200 response as a dead service. Backends expose /health, but
+    # this proxy used to lack one; report the proxy process itself as healthy.
+    return ("ok", 200)
 
 
 @app.route("/v1/completions", methods=["POST"])
@@ -244,17 +275,20 @@ async def handle_request(api: str, request: Request):
                     503,
                 )
             )
-        pid = request_nums % len(prefill_instances)
-        did = request_nums % len(decode_instances)
+        # Flat interleaved round-robin (see flat_interleaved_dp_route): ONE
+        # counter over the full (instance, dp_rank) slot space per role, so
+        # instance-selection and DP-rank-selection derive from the same index
+        # and can never alias. The old scheme keyed both on request_nums with
+        # n_instances | dp_size, stranding half the ranks (e.g. in 2P_DP8EP).
+        pid, selected_prefill_dp_rank = flat_interleaved_dp_route(
+            request_nums, prefill_instances
+        )
+        # Decode instance selection uses the same interleaved walk; in READ
+        # mode the decode reads KV from selected_prefill_dp_rank, so the
+        # decode's own dp_rank is not forwarded here.
+        did, _ = flat_interleaved_dp_route(request_nums, decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
         decode_instance_endpoint = decode_instances[did]
-
-        selected_prefill_dp_rank = None
-        if prefill_instance_endpoint["dp_size"] > 1:
-            selected_prefill_dp_rank = example_round_robin_dp_loader(
-                request_nums // len(prefill_instance_endpoint),
-                prefill_instance_endpoint["dp_size"],
-            )
 
         # Embed both zmq_addresses in the request_id so the connector can parse
         # the peer's host/ports from it, similar to P2P-NCCL
@@ -288,7 +322,13 @@ async def handle_request(api: str, request: Request):
             )
         )
 
-        req_data["max_tokens"] -= 1
+        # max_completion_tokens takes precedence when present (that's the limit
+        # the backend enforces); fall back to max_tokens. If neither is set
+        # (e.g. benchmark clients that omit it), leave the request unchanged.
+        if "max_completion_tokens" in req_data:
+            req_data["max_completion_tokens"] -= 1
+        elif "max_tokens" in req_data:
+            req_data["max_tokens"] -= 1
 
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
@@ -413,9 +453,33 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     t = start_service_discovery("0.0.0.0", 36367)
-    app.debug = True
+    # High-concurrency hardening. Quart's app.run() uses a shallow listen
+    # backlog (100) and, with app.debug=True, adds per-request overhead that
+    # starves the single accept loop. Under a burst of ~512 simultaneous client
+    # connections the backlog overflows and the kernel RSTs the excess, so
+    # clients see "ClientOSError: [Errno 104] Connection reset by peer" before
+    # any response (~16% request loss at c=512). Serve via hypercorn with debug
+    # OFF and a deep backlog so the burst QUEUES (higher TTFT) instead of being
+    # reset -> 100% request success.
+    app.debug = False
     app.config["BODY_TIMEOUT"] = 360000
     app.config["RESPONSE_TIMEOUT"] = 360000
 
-    app.run(host="0.0.0.0", port=args.port)
+    import asyncio
+    import os
+
+    from hypercorn.asyncio import serve as _hypercorn_serve
+    from hypercorn.config import Config as _HypercornConfig
+
+    _hcfg = _HypercornConfig()
+    _hcfg.bind = [f"0.0.0.0:{args.port}"]
+    # Deep listen backlog so a wide connection burst queues, not RSTs. NOTE:
+    # effective backlog is capped by the host's net.core.somaxconn (proxy runs
+    # --network host); kernel 6.x defaults to 4096. Override via
+    # PROXY_LISTEN_BACKLOG.
+    _hcfg.backlog = int(os.environ.get("PROXY_LISTEN_BACKLOG", "4096"))
+    # Long-lived SSE streams (8k1k decode ~5 min): never reap on keepalive.
+    _hcfg.keep_alive_timeout = 360000.0
+
+    asyncio.run(_hypercorn_serve(app, _hcfg))
     t.join()

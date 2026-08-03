@@ -46,6 +46,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.block_table import (
+    MultiGroupBlockTable,
+    SlotMappingMode,
+    get_block_table_width,
+)
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -831,7 +836,7 @@ def test_update_config(model_runner):
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
     # Raise error on non-existing config
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="do_not_exist_config"):
         model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
@@ -1380,6 +1385,29 @@ def test_hybrid_block_table_initialization():
     )
 
 
+def test_get_block_table_width_aligns_to_128_tokens():
+    assert get_block_table_width(1875, 64) == 1876
+
+
+def test_get_block_table_width_splits_virtual_blocks():
+    assert get_block_table_width(235, 256, 64) == 940
+
+
+def test_mamba_state_table_width_is_not_aligned():
+    block_tables = MultiGroupBlockTable(
+        max_num_reqs=1,
+        max_num_batched_tokens=1,
+        pin_memory=False,
+        device=torch.device("cpu"),
+        block_sizes=[39664],
+        kernel_block_sizes=[39664],
+        max_num_blocks=[1],
+        slot_mapping_modes=[SlotMappingMode.NONE],
+    )
+
+    assert block_tables[0].max_num_blocks_per_req == 1
+
+
 def test_input_batch_with_kernel_block_sizes():
     """Test InputBatch initialization with kernel_block_sizes parameter."""
     max_num_reqs = 10
@@ -1669,3 +1697,59 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+class TestInitFp8KvScalesHybridModels:
+    """Verify init_fp8_kv_scales handles heterogeneous kv_caches entries.
+
+    Hybrid models (Mamba, DeltaNet) store per-layer state as a list of tensors
+    rather than a single tensor. init_fp8_kv_scales must iterate both forms.
+    """
+
+    @staticmethod
+    def _make_runner_stub(kv_caches):
+        runner = Mock(spec=GPUModelRunner)
+        runner.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
+        runner.kv_caches = kv_caches
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.init_fp8_kv_scales = GPUModelRunner.init_fp8_kv_scales.__get__(
+            runner, GPUModelRunner
+        )
+        return runner
+
+    def test_zeroes_both_tensor_and_list_entries(self):
+        single_tensor = torch.ones(4, 8)
+        list_tensors = [torch.ones(2, 4), torch.ones(3, 6)]
+
+        runner = self._make_runner_stub([single_tensor, list_tensors])
+        runner.init_fp8_kv_scales()
+
+        assert (single_tensor == 0).all()
+        assert all((t == 0).all() for t in list_tensors)
+
+    def test_skips_none_entries(self):
+        tensor = torch.ones(4, 8)
+        runner = self._make_runner_stub([None, tensor, None])
+        runner.init_fp8_kv_scales()
+
+        assert (tensor == 0).all()
+
+    def test_noop_when_kv_cache_not_quantized(self):
+        tensor = torch.ones(4, 8)
+        runner = self._make_runner_stub([tensor])
+        runner.cache_config.cache_dtype = "auto"
+        runner.init_fp8_kv_scales()
+
+        assert (tensor == 1).all()
+
+    def test_mixed_none_tensor_and_list(self):
+        t1 = torch.ones(2, 2)
+        t2 = torch.ones(3, 3)
+        list_entry = [torch.ones(1, 1), torch.ones(1, 1)]
+
+        runner = self._make_runner_stub([None, t1, list_entry, None, t2])
+        runner.init_fp8_kv_scales()
+
+        assert (t1 == 0).all()
+        assert (t2 == 0).all()
+        assert all((t == 0).all() for t in list_entry)

@@ -268,6 +268,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
             num_tokens_across_dp,
+            input_batch.seq_lens_cpu_upper_bound,
         )
 
         return self.draft_tokens[:num_reqs]
@@ -376,6 +377,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -400,6 +402,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
                 )
 
             # Update the current draft step.
@@ -442,10 +446,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 
+        sample_positions = positions
+        if not self.advance_draft_positions:
+            # The forward pass holds positions fixed (Q-only, shared target KV),
+            # but Gumbel sampling still needs the absolute draft position.
+            sample_positions = positions + self.current_draft_step
+
         # Sample the draft tokens.
         draft_tokens = self.sample_draft(
             last_hidden_states,
-            positions,
+            sample_positions,
             idx_mapping,
             self.temperature,
             self.seeds,
@@ -626,6 +636,9 @@ def _prepare_decode_inputs_kernel(
     draft_token = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride)
     tl.store(input_ids_ptr + req_idx, draft_token)
 
+    target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
+    num_rejected = tl.load(num_rejected_ptr + req_idx)
+    seq_len = target_seq_len - num_rejected
     if ADVANCE_DRAFT_POSITIONS:
         # Compute position and seq_lens.
         # NOTE(woosuk): To prevent out-of-range access, we clamp these values
@@ -633,12 +646,8 @@ def _prepare_decode_inputs_kernel(
         position = tl.load(positions_ptr + req_idx)
         position = tl.minimum(position + 1, max_model_len - 1)
         tl.store(positions_ptr + req_idx, position)
-
-        target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
-        num_rejected = tl.load(num_rejected_ptr + req_idx)
-        seq_len = target_seq_len - num_rejected
         seq_len = tl.minimum(seq_len + 1, max_model_len)
-        tl.store(seq_lens_ptr + req_idx, seq_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
 def prepare_decode_inputs(

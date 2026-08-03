@@ -3,7 +3,6 @@
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
-import json
 import time
 from typing import Annotated, Any, Literal
 
@@ -11,15 +10,13 @@ from pydantic import Field, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
-    LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
     StreamOptions,
-    StructuralTagResponseFormat,
     UsageInfo,
+    structured_outputs_from_response_format,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -187,6 +184,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -209,10 +207,10 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
-            "Additional request parameters with string or "
+            "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
     )
@@ -233,6 +231,16 @@ class CompletionRequest(OpenAIBaseModel):
             "Maximum number of tokens allowed for thinking operations "
             "(reasoning models). Non-negative integer sets the limit; "
             "-1 means unlimited (treated as unset)."
+        ),
+    )
+
+    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+        default=None,
+        description=(
+            "Number of tokens to batch into each streamed chunk. Raises the "
+            "server's `--stream-interval` for this request. Values below the "
+            "server setting are clamped up to it. The first and last chunks "
+            "are always sent immediately. Ignored for non-streaming requests."
         ),
     )
 
@@ -279,6 +287,13 @@ class CompletionRequest(OpenAIBaseModel):
             temperature=temperature,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+        )
+
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into ``StructuredOutputsParams``."""
+        return structured_outputs_from_response_format(
+            self.structured_outputs,
+            self.response_format,
         )
 
     def to_sampling_params(
@@ -330,38 +345,6 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        response_format = self.response_format
-        if response_format is not None:
-            structured_outputs_kwargs = dict[str, Any]()
-
-            # Set structured output params for response format
-            if response_format.type == "json_object":
-                structured_outputs_kwargs["json_object"] = True
-            elif response_format.type == "json_schema":
-                json_schema = response_format.json_schema
-                assert json_schema is not None
-                structured_outputs_kwargs["json"] = json_schema.json_schema
-            elif response_format.type == "structural_tag":
-                structural_tag = response_format
-                assert isinstance(
-                    structural_tag,
-                    (
-                        LegacyStructuralTagResponseFormat,
-                        StructuralTagResponseFormat,
-                    ),
-                )
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
-
-            # If structured outputs wasn't already enabled,
-            # we must enable it for these features to work
-            if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
-                )
-
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
@@ -393,7 +376,8 @@ class CompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            stream_interval=self.stream_interval,
+            structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             bad_words=self.bad_words,
@@ -496,6 +480,18 @@ class CompletionRequest(OpenAIBaseModel):
                 parameter="logprob_token_ids",
             )
 
+        # These fields are integers, but `mode="before"` runs on the raw
+        # request data, so a non-numeric value (e.g. a JSON string) would
+        # reach the comparisons below and raise TypeError -> HTTP 500. Reject
+        # it here so the client gets a clean 400 instead.
+        for field_name in ("prompt_logprobs", "logprobs"):
+            field_value = data.get(field_name)
+            if field_value is not None and not isinstance(field_value, (int, float)):
+                raise VLLMValidationError(
+                    f"`{field_name}` must be an integer.",
+                    parameter=field_name,
+                    value=field_value,
+                )
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
             if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise VLLMValidationError(
@@ -578,18 +574,6 @@ class CompletionRequest(OpenAIBaseModel):
                 parameter="prompt_embeds",
             )
 
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
-            )
         return data
 
 
