@@ -28,7 +28,9 @@ def create_error_response(
         )
 
         from vllm.exceptions import (
+            VLLMClientError,
             VLLMNotFoundError,
+            VLLMServerError,
             VLLMUnprocessableEntityError,
             VLLMValidationError,
         )
@@ -45,18 +47,29 @@ def create_error_response(
             err_type = "NotFoundError"
             status_code = HTTPStatus.NOT_FOUND
             param = None
+        elif isinstance(exc, VLLMClientError):
+            # Any other client-caused error defaults to 400.
+            err_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            param = None
+        elif isinstance(exc, GenerationError):
+            err_type = "InternalServerError"
+            status_code = exc.status_code
+            param = None
+        elif isinstance(exc, VLLMServerError):
+            # Any other server-caused error defaults to 500.
+            err_type = "InternalServerError"
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            param = None
+        # Fallback for raw exceptions not yet migrated to VLLMError.
+        # TODO(zqzten): remove these fallback handlers after migration to VLLMError
         elif isinstance(exc, (ValueError, TypeError, OverflowError)):
-            # Common validation errors from user input
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = None
         elif isinstance(exc, NotImplementedError):
             err_type = "NotImplementedError"
             status_code = HTTPStatus.NOT_IMPLEMENTED
-            param = None
-        elif isinstance(exc, GenerationError):
-            err_type = "InternalServerError"
-            status_code = exc.status_code
             param = None
         elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
             # jinja2.TemplateError and its subclasses (avoid importing jinja2)

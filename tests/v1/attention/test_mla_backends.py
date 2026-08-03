@@ -40,12 +40,17 @@ from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+from vllm.v1.attention.backends.mla.prefill.selector import (
+    MLAPrefillSelectorConfig,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -69,7 +74,11 @@ DEVICE_TYPE = current_platform.device_type
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     cache_dtype: str, expected_quant_mode: KVQuantMode
 ):
-    layer = SimpleNamespace(kv_cache_dtype=cache_dtype, head_size=576)
+    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=576,
+        non_causal_multi_token_decode=False,
+    )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
@@ -119,6 +128,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.kv_b_proj.quant_method = None
     layer.is_aiter_triton_fp4_bmm_enabled = False
     layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
 
@@ -144,13 +154,66 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
-# Filtered per-test via validate_configuration (capability/deps/dims).
+# Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST = [
+    MLAPrefillBackendEnum.ROCM_AITER_FA,
     MLAPrefillBackendEnum.FLASH_ATTN,
     MLAPrefillBackendEnum.FLASHINFER,
     MLAPrefillBackendEnum.TRTLLM_RAGGED,
     MLAPrefillBackendEnum.TOKENSPEED_MLA,
 ]
+
+MLA_DIMENSIONS_TO_TEST = [
+    ("deepseek", 128, 128),
+    ("glm", 192, 256),
+]
+
+
+def _prefill_backend_dimension_params():
+    device_capability = current_platform.get_device_capability()
+    params = []
+    for prefill_backend in PREFILL_BACKENDS_TO_TEST:
+        for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
+            if device_capability is None:
+                invalid_reasons = ["device capability unavailable"]
+            else:
+                try:
+                    invalid_reasons = (
+                        prefill_backend.get_class().validate_configuration(
+                            device_capability,
+                            MLAPrefillSelectorConfig(
+                                dtype=torch.bfloat16,
+                                mla_dimensions=MLADimensions(
+                                    qk_nope_head_dim=qk_nope_head_dim,
+                                    qk_rope_head_dim=64,
+                                    v_head_dim=v_head_dim,
+                                ),
+                            ),
+                        )
+                    )
+                except ImportError:
+                    invalid_reasons = ["ImportError"]
+
+            marks = []
+            if invalid_reasons:
+                marks.append(
+                    pytest.mark.skip(
+                        reason=(
+                            f"Prefill backend {prefill_backend.name} unavailable: "
+                            f"{invalid_reasons}"
+                        )
+                    )
+                )
+            params.append(
+                pytest.param(
+                    prefill_backend,
+                    qk_nope_head_dim,
+                    v_head_dim,
+                    id=f"{dimensions_id}-{prefill_backend}",
+                    marks=marks,
+                )
+            )
+    return params
 
 
 SPEC_DECODE_BACKENDS = []
@@ -1097,11 +1160,9 @@ def run_attention_backend(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
-@pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
 @pytest.mark.parametrize(
-    ("qk_nope_head_dim", "v_head_dim"),
-    [(128, 128), (192, 256)],
-    ids=["deepseek", "glm"],
+    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
+    _prefill_backend_dimension_params(),
 )
 def test_backend_correctness(
     default_vllm_config,
@@ -1151,32 +1212,6 @@ def test_backend_correctness(
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
-
-    # Skip prefill backends that can't satisfy capability/deps/dimension constraints.
-    from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
-    from vllm.v1.attention.backends.mla.prefill.selector import (
-        MLAPrefillSelectorConfig,
-    )
-
-    try:
-        prefill_invalid_reasons = prefill_backend.get_class().validate_configuration(
-            current_platform.get_device_capability(),
-            MLAPrefillSelectorConfig(
-                dtype=torch.bfloat16,
-                mla_dimensions=MLADimensions(
-                    qk_nope_head_dim=qk_nope_head_dim,
-                    qk_rope_head_dim=64,
-                    v_head_dim=v_head_dim,
-                ),
-            ),
-        )
-    except ImportError:
-        prefill_invalid_reasons = ["ImportError"]
-    if prefill_invalid_reasons:
-        pytest.skip(
-            f"Prefill backend {prefill_backend.name} unavailable: "
-            f"{prefill_invalid_reasons}"
-        )
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
@@ -1461,16 +1496,9 @@ def test_backend_correctness(
             batch_spec, block_size, device
         )
 
-        # Pad block table to meet requirement:
-        # block_num % (128 / block_size) == 0
-        required_divisor = int(128 / block_size)
         current_block_num = common_attn_metadata.block_table_tensor.shape[1]
-        if current_block_num % required_divisor != 0:
-            # Pad to next multiple of required_divisor
-            padded_block_num = (
-                (current_block_num + required_divisor - 1) // required_divisor
-            ) * required_divisor
-            padding_cols = padded_block_num - current_block_num
+        padded_block_num = get_block_table_width(current_block_num, block_size)
+        if padding_cols := padded_block_num - current_block_num:
             padding = torch.zeros(
                 (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
                 dtype=torch.int32,

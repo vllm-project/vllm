@@ -41,10 +41,10 @@ def _select_swap_blocks_fn(
     if gpu_to_cpu:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm builds without Triton) or where GPU kernels cannot directly
+    # (e.g. ROCm host mappings) or where GPU kernels cannot directly
     # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
-    if not HAS_TRITON or current_platform.is_xpu():
+    if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
@@ -127,7 +127,7 @@ def _ref_copy_expansion(
     under the canonical CPU layout, expanded from the ref's mapped runs."""
     mapping = ref.mapping
     assert mapping is not None
-    runs = mapping.store_runs if gpu_to_cpu else mapping.load_runs
+    runs = mapping.runs
     local: list[int] = []
     canonical: list[int] = []
     sizes: list[int] = []
@@ -142,6 +142,20 @@ def _ref_copy_expansion(
         np.asarray(dst, dtype=np.uint64),
         np.asarray(sizes, dtype=np.int64),
     )
+
+
+def _sub_block_ids(
+    block_ids: np.ndarray, blocks_per_chunk: int, count: int, skip_count: int
+) -> np.ndarray:
+    """Global sub-block ids matching compute_sub_block_ptrs' enumeration.
+    These identify canonical pages consistently across ranks, so they key
+    CanonicalPageMapping.is_writer rotation."""
+    if blocks_per_chunk == 1:
+        return block_ids[:count]
+    flat = (
+        block_ids[:, np.newaxis] * blocks_per_chunk + np.arange(blocks_per_chunk)
+    ).ravel()
+    return flat[skip_count : skip_count + count]
 
 
 def _canonical_tensor_areas(
@@ -443,11 +457,28 @@ class SingleDirectionOffloadingHandler:
                     self.dst_tensors[t_idx],
                     skip_count=dst_logical_blocks_to_skip,
                 )
-                end_idx = op_idx + group_size * len(frag_sizes)
+                mapping = data_ref.mapping
+                assert mapping is not None
+                if self.gpu_to_cpu and mapping.num_writers > 1:
+                    # Replicas take turns writing shared canonical pages,
+                    # keyed by the rank-consistent CPU-side sub-block id
+                    cpu_sub_block_ids = _sub_block_ids(
+                        group_dst,
+                        self.dst_blocks_per_chunk,
+                        group_size,
+                        dst_logical_blocks_to_skip,
+                    )
+                    writer_mask = (
+                        cpu_sub_block_ids % mapping.num_writers == mapping.writer_index
+                    )
+                    src_base = src_base[writer_mask]
+                    dst_base = dst_base[writer_mask]
+                num_blocks_written = len(src_base)
+                end_idx = op_idx + num_blocks_written * len(frag_sizes)
                 all_src[op_idx:end_idx] = (src_base[:, None] + src_off[None, :]).ravel()
                 all_dst[op_idx:end_idx] = (dst_base[:, None] + dst_off[None, :]).ravel()
-                all_sizes[op_idx:end_idx] = np.tile(frag_sizes, group_size)
-                num_transfer_bytes += group_size * int(frag_sizes.sum())
+                all_sizes[op_idx:end_idx] = np.tile(frag_sizes, num_blocks_written)
+                num_transfer_bytes += num_blocks_written * int(frag_sizes.sum())
                 op_idx = end_idx
 
             src_offset = src_end_offset
@@ -455,7 +486,12 @@ class SingleDirectionOffloadingHandler:
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
-        assert op_idx == num_copy_ops
+        # Writer rotation may skip non-writer blocks, leaving op_idx below
+        # the sized upper bound
+        assert op_idx <= num_copy_ops
+        src = src[:op_idx]
+        dst = dst[:op_idx]
+        sizes = sizes[:op_idx]
 
         stream = (
             self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
@@ -488,7 +524,7 @@ class SingleDirectionOffloadingHandler:
         is_src_access_order_any = not self.gpu_to_cpu
         with current_platform.stream(stream):
             start_event.record(stream)
-            if num_copy_ops > 0:
+            if op_idx > 0:
                 self._swap_blocks_batch(
                     src,
                     dst,

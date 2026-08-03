@@ -348,11 +348,12 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.quant_method
 
     def apply_routed_input_transform(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoE.forward_native. The original hidden_states
+        This is called by MoERunner.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
@@ -416,6 +417,7 @@ class MoERunner(MoERunnerInterface):
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
@@ -425,18 +427,43 @@ class MoERunner(MoERunnerInterface):
         * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
           in the model.
         """
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and self._fused_output_is_reduced
+            and fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
+
+    def _maybe_reduce_routed_output_before_transform(
+        self,
+        fused_output: torch.Tensor,
+        fused_output_is_reduced: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        """All-reduce latent routed output before its output transform.
+
+        Latent MoE output transforms may contain non-linear ops, e.g. RMSNorm.
+        TP partial routed outputs must be summed in latent space before such
+        transforms are applied.
+        """
+        if (
+            self.routed_output_transform is not None
+            and not self.moe_config.is_sequence_parallel
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+            and not fused_output_is_reduced
+        ):
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+            fused_output_is_reduced = True
+        return fused_output, fused_output_is_reduced
 
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
         trunc_size: int | None,
+        output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
         """All-reduce the combined output if needed.
 
@@ -455,11 +482,14 @@ class MoERunner(MoERunnerInterface):
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
         # - The MK already reduced the fused output itself.
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+
         if (
             not self.moe_config.is_sequence_parallel
             and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._fused_output_is_reduced
+            and not output_is_reduced
         ):
             states = tensor_model_parallel_all_reduce(states)
 
@@ -616,7 +646,7 @@ class MoERunner(MoERunnerInterface):
     ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
+        #        parallel execution of shared experts with the RoutedExperts via
         #        separate cuda stream)
         if self._shared_experts is not None:
             assert shared_experts_input is not None
@@ -643,6 +673,7 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -664,11 +695,16 @@ class MoERunner(MoERunnerInterface):
            _moe_forward and _moe_forward_shared must be split.
         """
 
-        # Apply transform for routed experts (e.g., latent projection
-        # for latent MoE)
-        hidden_states, shared_experts_input = self.apply_routed_input_transform(
-            hidden_states
-        )
+        # Apply transform for routed experts (e.g., latent projection for
+        # latent MoE). When the caller pre-applies the routed input transform
+        # outside the runner (e.g. to overlap it on a separate stream), it
+        # passes the already-transformed routed input as ``hidden_states`` and
+        # the original hidden states as ``shared_experts_input``; skip the
+        # transform in that case so shared experts still see the original input.
+        if shared_experts_input is None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                hidden_states
+            )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
@@ -708,9 +744,22 @@ class MoERunner(MoERunnerInterface):
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-        # If combine kernel already reduced fused, reduce shared to match.
+        fused_output_is_reduced = self._fused_output_is_reduced
+
+        # Latent routed output has to be reduced before output transform,
+        # because the transform may include non-linear normalization.
+        fused_output, fused_output_is_reduced = (
+            self._maybe_reduce_routed_output_before_transform(
+                fused_output,
+                fused_output_is_reduced,
+            )
+        )
+
+        # If routed output is already reduced, reduce shared to match.
         # See note above re: the two all-reduce points.
-        shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+        shared_output = self._maybe_reduce_shared_expert_output(
+            shared_output, fused_output_is_reduced
+        )
 
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
@@ -724,7 +773,9 @@ class MoERunner(MoERunnerInterface):
         else:
             result = fused_output
 
-        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
+        result = self._maybe_reduce_final_output(
+            result, og_hidden_dim_post_xform, fused_output_is_reduced
+        )
 
         return self._maybe_add_zero_expert_output(result)
 
@@ -752,18 +803,12 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
-        # NOTE: Similar with DP, PCP also needs dispatch and combine. For
-        # simplicity, AgRsAll2All was added separately for PCP here. Maybe
-        # we should modify All2AllManager abstraction to better support PCP.
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
 
         return hidden_states, router_logits
 
@@ -777,11 +822,11 @@ class MoERunner(MoERunnerInterface):
                 hidden_states, self.moe_config.is_sequence_parallel
             )
 
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(
-                hidden_states,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None

@@ -9,8 +9,13 @@ and configurable secondary tiers (e.g., Storage, Network).
 Configuration via kv_connector_extra_config:
   - cpu_bytes_to_use: (required) Bytes to allocate for CPU primary tier
   - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
-  - eviction_policy: (optional) Primary tier eviction policy: "lru" or
-    "arc" (default: "lru")
+  - eviction_policy: (optional) Primary tier eviction policy: built-in "lru"/
+    "arc", or the name of a policy registered via CachePolicyFactory, or an
+    out-of-tree CachePolicy class name paired with cache_policy_module_path
+    (default: "lru")
+  - cache_policy_module_path: (optional) Python import path to load
+    eviction_policy from when it names an out-of-tree CachePolicy not
+    registered via CachePolicyFactory
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
@@ -136,14 +141,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
-        if self.kv_events_config.self_describing_kv_events:
-            raise ValueError(
-                "self_describing_kv_events is not supported by "
-                "TieringOffloadingSpec. Tier promotions can emit primary-tier "
-                "store events that do not correspond to GPU store jobs, so the "
-                "current self-describing side table cannot describe them "
-                "correctly."
-            )
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -154,9 +151,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
         # Set by create_worker when canonical_layout is enabled: True when
-        # every layer's canonical bytes are parallelism-invariant (portable),
-        # False when some layers are stored rank-private (exact-topology only)
-        self.canonical_parallel_invariant: bool | None = None
+        # every layer's canonical bytes are parallelism-agnostic (portable),
+        # False when some layers use the opaque fallback (exact-topology only)
+        self.canonical_parallelism_agnostic: bool | None = None
 
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
@@ -190,7 +187,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                cache_policy=self.eviction_policy,
+                cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 mmap_region=scheduler_mmap,
             )
@@ -241,11 +239,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
+    def _uses_shared_region(self) -> bool:
+        # Tiering always allocates on the shared region (every platform), so the
+        # replicated-layout gate must not be narrowed by the CPU spec's
+        # CUDA-alike check.
+        return True
+
+    @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        # Fold the global physical device index into the replica-local
-        # [0, world_size) slot range.
         world_size = self.config.parallel.world_size
-        rank = torch.accelerator.current_device_index() % world_size
+        if self.replicated_layout:
+            rank = 0
+        else:
+            # Fold the global physical device index into the replica-local
+            # [0, world_size) slot range.
+            rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_blocks=self.num_blocks,
@@ -268,13 +276,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     "cross-layer KV layouts are not supported). Remove "
                     "canonical_layout from kv_connector_extra_config."
                 )
-            self.canonical_parallel_invariant = all(
-                ref.mapping is not None and ref.mapping.parallel_invariant
+            self.canonical_parallelism_agnostic = all(
+                ref.mapping is not None and ref.mapping.parallelism_agnostic
                 for ref in all_refs
             )
             logger.info(
-                "Canonical KV layout enabled (parallel_invariant=%s)",
-                self.canonical_parallel_invariant,
+                "Canonical KV layout enabled (parallelism_agnostic=%s)",
+                self.canonical_parallelism_agnostic,
             )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
