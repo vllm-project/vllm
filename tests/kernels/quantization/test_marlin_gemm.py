@@ -13,6 +13,8 @@ import torch
 from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.linear import MPLinearLayerConfig
+from vllm.model_executor.kernels.linear.mixed_precision import MarlinLinearKernel
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
@@ -286,6 +288,58 @@ def test_gptq_marlin_repack(
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
+
+
+@pytest.mark.marlin_ldmatrix_s4
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Marlin is only supported on CUDA.",
+)
+@pytest.mark.parametrize(
+    "partition_weight_shape",
+    [(256, 64), (128, 64)],
+    ids=["full-k", "row-parallel"],
+)
+def test_marlin_w4a8_int8_rejects_act_order(partition_weight_shape):
+    config = MPLinearLayerConfig(
+        full_weight_shape=(256, 64),
+        partition_weight_shape=partition_weight_shape,
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.int8,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=True,
+    )
+
+    can_implement, reason = MarlinLinearKernel.can_implement(config)
+
+    assert not can_implement
+    assert reason == "Marlin W4A8-INT8 does not support act-order"
+
+
+@pytest.mark.marlin_ldmatrix_s4
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_gptq_marlin_repack_rejects_w4a8_int8_act_order():
+    size_k, size_n = 128, 64
+    q_weight = torch.zeros((size_k // 8, size_n), dtype=torch.int32, device="cuda")
+    perm = torch.arange(size_k, dtype=torch.int32, device="cuda")
+
+    with pytest.raises(
+        RuntimeError,
+        match="Marlin W4A8-INT8 repack does not support act-order",
+    ):
+        ops.gptq_marlin_repack(
+            q_weight,
+            perm,
+            size_k,
+            size_n,
+            num_bits=4,
+            is_a_8bit=True,
+            is_w4a8_int8=True,
+        )
 
 
 @pytest.mark.marlin_ldmatrix_s4

@@ -335,6 +335,11 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
   STD_TORCH_CHECK(perm.scalar_type() == torch::headeronly::ScalarType::Int,
                   "perm type is not at::kInt");
 
+  // Detect if there is act_order
+  bool has_perm = perm.size(0) != 0;
+  STD_TORCH_CHECK(!(is_w4a8_int8 && has_perm),
+                  "Marlin W4A8-INT8 repack does not support act-order");
+
   const int32_t device_index = b_q_weight.get_device_index();
   torch::stable::accelerator::DeviceGuard device_guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
@@ -344,8 +349,6 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       b_q_weight.scalar_type(), std::nullopt, b_q_weight.device());
 
-  // Detect if there is act_order
-  bool has_perm = perm.size(0) != 0;
   bool use_ldmatrix_s4 = is_w4a8_int8 && num_bits == 4 && is_a_8bit &&
                          !has_perm &&
                          marlin::supports_ldmatrix_s4(device_index);
