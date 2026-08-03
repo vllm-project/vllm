@@ -479,30 +479,21 @@ class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Reject checkpoints whose backbone is not the Qwen3 decoder.
+        """Enable the bidirectional encoder backbone for -nano checkpoints.
 
         The V5 family ships more than one backbone under a single
         `architectures` entry: the `-small` variants are Qwen3 decoders, while
         `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
         `configuration_*.py` per repository, so the config carries no backbone
         field and the encoder variants are only identifiable by
-        `is_decoder=False`. `JinaEmbeddingsV5Model` extends `Qwen3ForCausalLM`
-        and has no path to an encoder backbone, so without this check such a
-        checkpoint fails later with every `q_norm` and `k_norm` weight reported
-        as uninitialized, which does not point at the actual problem.
-
-        Raises:
-            NotImplementedError: If the checkpoint uses an encoder backbone.
+        `is_decoder=False`. For encoder checkpoints, set `is_causal=False` so the
+        Llama backbone uses EncoderOnlyAttention; `JinaEmbeddingsV5Model` then
+        dispatches to its encoder implementation.
         """
         if getattr(model_config.hf_config, "is_decoder", True):
             return
 
-        raise NotImplementedError(
-            "This jina-embeddings-v5 checkpoint uses a bidirectional encoder "
-            "backbone (is_decoder=False). JinaEmbeddingsV5Model is built on "
-            "Qwen3 and cannot serve it, so only the Qwen3-based decoder "
-            "variants are supported, such as jina-embeddings-v5-text-small."
-        )
+        model_config.hf_config.is_causal = False
 
 
 class JinaForRankingConfig(VerifyAndUpdateConfig):
