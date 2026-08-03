@@ -58,6 +58,7 @@ def _reference(
     mm_ranges: dict[int, list[tuple[int, int]]],
     sliding_window_left: int | None,
     scale: float,
+    mm_clamp_sw: int = 0,
 ) -> torch.Tensor:
     """Dense float32 ``(causal AND window) OR mm_prefix`` per request."""
     out = torch.empty_like(q, dtype=torch.float32)
@@ -78,7 +79,10 @@ def _reference(
                 continue
             q_in = (q_pos >= start) & (q_pos <= end)
             k_in = (k_pos >= start) & (k_pos <= end)
-            keep |= q_in[:, None] & k_in[None, :]
+            mm = q_in[:, None] & k_in[None, :]
+            if mm_clamp_sw > 0:
+                mm &= delta < mm_clamp_sw
+            keep |= mm
 
         q_i = q[q_off : q_off + q_len].float().transpose(0, 1)
         k_i = k[k_off : k_off + k_len].float().transpose(0, 1)
@@ -97,7 +101,17 @@ def _reference(
     return out
 
 
-def _run_kernel(q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, scale):
+def _run_kernel(
+    q,
+    k,
+    v,
+    query_lens,
+    seq_lens,
+    mm_ranges,
+    sliding_window_left,
+    scale,
+    mm_clamp_sw=0,
+):
     cu_q = _cu_seqlens(query_lens)
     cu_k = _cu_seqlens(seq_lens)
 
@@ -113,7 +127,7 @@ def _run_kernel(q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, s
     cu_q_gpu = cu_q.to(DEVICE)
 
     mask_mod = _make_mm_prefix_mask_mod(
-        sliding_window=0,
+        sliding_window=mm_clamp_sw,
         sliding_window_left=sliding_window_left,
     )
     out = torch.empty_like(q)
@@ -176,12 +190,35 @@ CASES = [
         [160, 512, 300, 97],
         {0: [(32, 127)], 1: [(4, 259)], 2: [(8, 71)], 3: [(1, 64)]},
     ),
+    # A 320-token range, wider than SLIDING_WINDOW_LEFT. Every other case has
+    # ranges narrower than the window, so this is the only one where the Gemma4
+    # clamp changes the mask -- images larger than the window are exactly why
+    # mm_prefix_clamp_sliding_window exists.
+    (
+        "range_wider_than_window",
+        [384],
+        [384],
+        {0: [(32, 351)]},
+    ),
 ]
+
+SLIDING_WINDOW_LEFT = 129
+
+# (sliding_window_left, mm_clamp_sw). Gemma4 sets mm_clamp_sw == sw_val on
+# sliding layers that opt in; the unclamped variant ignores mm_clamp_sw
+# entirely, so a clamp without a window is not a reachable configuration.
+WINDOW_MODES = [
+    (None, 0),
+    (SLIDING_WINDOW_LEFT, 0),
+    (SLIDING_WINDOW_LEFT, SLIDING_WINDOW_LEFT),
+]
+WINDOW_IDS = ["full_causal", "window", "window_clamped"]
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
-@pytest.mark.parametrize("sliding_window_left", [None, 129])
-def test_mm_prefix_mask_mod_matches_dense_reference(case, sliding_window_left):
+@pytest.mark.parametrize("window_mode", WINDOW_MODES, ids=WINDOW_IDS)
+def test_mm_prefix_mask_mod_matches_dense_reference(case, window_mode):
+    sliding_window_left, mm_clamp_sw = window_mode
     _, query_lens, seq_lens, mm_ranges = case
     torch.manual_seed(0)
 
@@ -193,13 +230,57 @@ def test_mm_prefix_mask_mod_matches_dense_reference(case, sliding_window_left):
     scale = HEAD_SIZE**-0.5
 
     actual = _run_kernel(
-        q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, scale
+        q,
+        k,
+        v,
+        query_lens,
+        seq_lens,
+        mm_ranges,
+        sliding_window_left,
+        scale,
+        mm_clamp_sw=mm_clamp_sw,
     )
     expected = _reference(
-        q, k, v, query_lens, seq_lens, mm_ranges, sliding_window_left, scale
+        q,
+        k,
+        v,
+        query_lens,
+        seq_lens,
+        mm_ranges,
+        sliding_window_left,
+        scale,
+        mm_clamp_sw=mm_clamp_sw,
     )
 
     torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+def test_clamp_narrows_a_range_wider_than_the_window():
+    """Negative control for the ``window_clamped`` parametrization.
+
+    Every case whose ranges fit inside the window is clamp-insensitive, so
+    without this the clamped axis could silently be testing nothing. Asserts the
+    clamp changes the reference at all, then that the kernel tracks the change.
+    """
+    _, query_lens, seq_lens, mm_ranges = next(
+        c for c in CASES if c[0] == "range_wider_than_window"
+    )
+    torch.manual_seed(0)
+    total = sum(seq_lens)
+    q = torch.randn(total, NUM_HEADS, HEAD_SIZE, dtype=DTYPE, device=DEVICE)
+    k = torch.randn(total, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE, device=DEVICE)
+    v = torch.randn(total, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE, device=DEVICE)
+    scale = HEAD_SIZE**-0.5
+
+    args = (q, k, v, query_lens, seq_lens, mm_ranges, SLIDING_WINDOW_LEFT, scale)
+    unclamped = _reference(*args, mm_clamp_sw=0)
+    clamped = _reference(*args, mm_clamp_sw=SLIDING_WINDOW_LEFT)
+    assert not torch.allclose(unclamped, clamped, atol=2e-2, rtol=2e-2), (
+        "case does not actually exercise the clamp branch"
+    )
+
+    actual = _run_kernel(*args, mm_clamp_sw=SLIDING_WINDOW_LEFT)
+    torch.testing.assert_close(actual.float(), clamped, atol=2e-2, rtol=2e-2)
 
 
 def _legacy_range_id_mask_mod(sliding_window_left: int | None):
@@ -268,7 +349,7 @@ LEGACY_CASES = [c for c in CASES if c[0] in ("single_no_context", "varlen_batch"
 
 
 @pytest.mark.parametrize("case", LEGACY_CASES, ids=[c[0] for c in LEGACY_CASES])
-@pytest.mark.parametrize("sliding_window_left", [None, 129])
+@pytest.mark.parametrize("sliding_window_left", [None, SLIDING_WINDOW_LEFT])
 def test_matches_legacy_range_id_kernel(case, sliding_window_left):
     """Generalize the model-level bit-exactness to varlen batches.
 
