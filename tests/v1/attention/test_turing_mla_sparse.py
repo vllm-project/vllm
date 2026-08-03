@@ -28,3 +28,31 @@ def test_turing_mla_sparse_fp16_shape_and_variance():
     assert torch.isfinite(out).all()
     assert torch.isfinite(max_logits).all()
     assert torch.isfinite(lse).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or torch.cuda.get_device_capability()[0] != 7,
+    reason="SM75 only",
+)
+def test_turing_mla_sparse_fp16_padded_indices():
+    torch.manual_seed(0)
+    num_tokens, nq, dim_qk, d_v, topk = 4, 16, 640, 512, 64
+    num_kv_tokens = 8
+    q = torch.randn(num_tokens, nq, dim_qk, dtype=torch.float16, device="cuda") * 0.02
+    kv = (
+        torch.randn(num_kv_tokens, 1, dim_qk, dtype=torch.float16, device="cuda")
+        * 0.02
+    )
+    indices = torch.full(
+        (num_tokens, 1, topk), -1, dtype=torch.int64, device="cuda"
+    )
+    indices[:, :, :16] = torch.arange(16, dtype=torch.int64, device="cuda") % (
+        num_kv_tokens
+    )
+    out, max_logits, lse = triton_mla_sparse_interface(
+        q, kv, indices, sm_scale=dim_qk**-0.5, d_v=d_v, block_dpe=128
+    )
+    assert torch.isfinite(out).all()
+    assert torch.isfinite(max_logits).all()
+    assert torch.isfinite(lse).all()

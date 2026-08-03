@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# Port of vllm/v1/attention/ops/xpu_mla_sparse.py with two CUDA/SM75 deltas:
+# BLOCK_H=8 (SM75 smem) and fp16 store.
+
 import torch
 
 from vllm.triton_utils import LOG2E, LOGE2, tl, triton
@@ -199,6 +202,7 @@ def triton_mla_sparse_interface(
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     _, num_heads_kv, _ = kv.shape
+    assert q.dtype == torch.float16, "turing sparse MLA requires FP16 input"
     assert dim_qk == kv.shape[2], "q and kv have different head dimensions"
 
     # for deepseek v3.2, index topk should be 2048
