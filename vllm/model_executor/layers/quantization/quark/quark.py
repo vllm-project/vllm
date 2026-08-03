@@ -148,26 +148,20 @@ class QuarkConfig(QuantizationConfig):
             hf_to_vllm_mapper: maps from hf model structure (the assumed
                 structure of the qconfig) to vllm model structure
         """
-        def apply_string(value: str) -> str:
-            mapped_value = hf_to_vllm_mapper.apply_list([value])
-            return mapped_value[0] if mapped_value else value
-
-        def apply_value(value: Any) -> Any:
-            if isinstance(value, str):
-                return apply_string(value)
-            if isinstance(value, list):
-                return [apply_value(item) for item in value]
-            if isinstance(value, dict):
-                return {
-                    apply_string(key) if isinstance(key, str) else key: apply_value(item)
-                    for key, item in value.items()
-                }
-            return value
-
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            quant_config_with_hf_to_vllm_mapper[k] = apply_value(v)
+            if isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, dict):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
+            else:
+                if isinstance(v, str):
+                    mapped_v_list = hf_to_vllm_mapper.apply_list([v])
+                    if mapped_v_list:
+                        quant_config_with_hf_to_vllm_mapper[k] = mapped_v_list[0]
+                else:
+                    quant_config_with_hf_to_vllm_mapper[k] = v
 
         quant_config_with_hf_to_vllm_mapper["exclude"] = self._dedupe_quark_excludes(
             quant_config_with_hf_to_vllm_mapper.get("exclude")
@@ -417,14 +411,12 @@ class QuarkConfig(QuantizationConfig):
         weight_quant: dict[str, Any] | None,
         input_quant: dict[str, Any] | None,
     ) -> bool:
-        if weight_quant is None or input_quant is not None:
+        if weight_quant is None:
             return False
 
         is_int4 = weight_quant.get("dtype") in ("int4", "uint4")
-        is_grouped = weight_quant.get("qscheme", "per_group") == "per_group"
-        is_static = not weight_quant.get("is_dynamic")
         is_packed = self.pack_method in ("order", "reorder")
-        return is_int4 and is_grouped and is_static and is_packed
+        return is_int4 and is_packed
 
     def _is_w4a8_mxfp4_fp8(
         self,
@@ -699,6 +691,8 @@ class QuarkConfig(QuantizationConfig):
                 group_size=group_size,
                 pack_method=self.pack_method,
                 is_symmetric=is_symmetric,
+                weight_config=weight_config,
+                input_config=input_config,
             )
         elif self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             is_w4a8_supported = self._check_scheme_supported(

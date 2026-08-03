@@ -124,7 +124,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_w4a16_int4(weight_config, input_config):
             return QuarkW4A16Int4MoEMethod(
-                weight_config, quant_config.pack_method, module.moe_config
+                weight_config,
+                quant_config.pack_method,
+                module.moe_config,
+                input_config=input_config,
             )
         elif quant_config._is_nvfp4(weight_config, input_config):
             return QuarkNvfp4MoEMethod(
@@ -154,8 +157,24 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         pack_method: str,
         moe: FusedMoEConfig,
+        input_config: dict[str, Any] | None = None,
     ):
         super().__init__(moe)
+        if input_config is not None:
+            raise NotImplementedError(
+                "QuarkW4A16Int4MoEMethod does not support activation "
+                "quantization; input_tensors must be null."
+            )
+        if weight_config.get("qscheme", "per_group") != "per_group":
+            raise NotImplementedError(
+                "QuarkW4A16Int4MoEMethod only supports per_group weight "
+                f"quantization, got {weight_config.get('qscheme')!r}."
+            )
+        if weight_config.get("is_dynamic"):
+            raise NotImplementedError(
+                "QuarkW4A16Int4MoEMethod only supports static weight "
+                "quantization."
+            )
         self.weight_quant = weight_config
         self.group_size, self.is_symmetric = parse_w4a16_int4_weight_config(
             weight_config
