@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from enum import Enum
 
 import numpy as np
@@ -14,6 +15,29 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)
+
+
+def get_block_table_width(
+    max_num_blocks: int,
+    block_size: int,
+    kernel_block_size: int | None = None,
+    *,
+    token_alignment: int | None = 128,
+) -> int:
+    """Return the width after optional alignment and virtual block splitting."""
+    if kernel_block_size is None:
+        kernel_block_size = block_size
+    if block_size % kernel_block_size != 0:
+        raise ValueError(
+            f"kernel_block_size {kernel_block_size} must divide "
+            f"block_size {block_size} evenly"
+        )
+    if token_alignment is not None:
+        if token_alignment <= 0:
+            raise ValueError("token_alignment must be positive")
+        block_alignment = token_alignment // math.gcd(token_alignment, block_size)
+        max_num_blocks = cdiv(max_num_blocks, block_alignment) * block_alignment
+    return max_num_blocks * block_size // kernel_block_size
 
 
 class SlotMappingMode(Enum):
@@ -144,6 +168,11 @@ class BlockTable:
         block_table_np = self.block_table.np
         block_table_np[tgt, :num_blocks] = block_table_np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+        # Clear the vacated source row: dummy-run batches dereference stale
+        # rows as mamba state slots and write state in place there, possibly
+        # after the blocks have been freed and reallocated.
+        block_table_np[src, :num_blocks] = 0
+        self.num_blocks_per_row[src] = 0
 
     def swap_row(self, src: int, tgt: int) -> None:
         src_tgt, tgt_src = [src, tgt], [tgt, src]
@@ -163,8 +192,6 @@ class BlockTable:
             return
         assert self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT
 
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
@@ -176,8 +203,8 @@ class BlockTable:
             self.slot_mapping.gpu,
             KV_CACHE_BLOCK_SIZE=self.kv_cache_block_size,
             BLOCKS_PER_KV_BLOCK=self.blocks_per_kv_block,
-            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-            TOTAL_CP_RANK=total_cp_rank,
+            TOTAL_CP_WORLD_SIZE=self.dcp_world_size,
+            TOTAL_CP_RANK=self.dcp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
@@ -274,11 +301,15 @@ class MultiGroupBlockTable:
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
-        # Align to a multiple of (128 / block_size) as required
-        # by some attention backends such as TRTLLM (#39324)
         max_num_blocks = [
-            cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
-            for n, bs in zip(max_num_blocks, block_sizes)
+            (
+                get_block_table_width(n, block_size, token_alignment=None)
+                if slot_mapping_mode == SlotMappingMode.NONE
+                else get_block_table_width(n, block_size)
+            )
+            for n, block_size, slot_mapping_mode in zip(
+                max_num_blocks, block_sizes, slot_mapping_modes
+            )
         ]
 
         self.block_tables = [

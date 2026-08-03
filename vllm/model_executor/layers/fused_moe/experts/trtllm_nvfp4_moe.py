@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -33,6 +34,10 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
+# Base scale for per-token NVFP4 activation quant; the kernel folds the
+# per-token global scale (from the activation amax) on top of it.
+_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 class TrtLlmNvFp4ExpertsBase:
     """
@@ -43,9 +48,13 @@ class TrtLlmNvFp4ExpertsBase:
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
+        # Quantize the input here (deferred from prepare) to capture a per-token
+        # global scale, instead of a static one.
+        self.per_token_activation = per_token_activation
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -102,6 +111,27 @@ class TrtLlmNvFp4ExpertsBase:
             self.gemm1_alpha = None
             self.gemm1_beta = None
 
+        # SITU (Kimi SituGLU) TRTLLM-Gen kernel computes
+        # left=alpha*tanh(x0/alpha)*sigmoid(x0), right=beta*tanh(x1/beta),
+        # matching vLLM's situ_and_mul, so map situ beta -> gatedActAlpha
+        # (gemm1_alpha) and situ linear_beta -> gatedActBeta (gemm1_beta).
+        # These operate on the dequantized gate/up, so they are NOT folded by
+        # g1_alphas in process_weights_after_loading.
+        self.is_situ = moe_config.activation == MoEActivation.SITU
+        if self.is_situ:
+            situ_beta = moe_config.activation_situ_beta
+            situ_linear_beta = moe_config.activation_situ_linear_beta
+            assert situ_beta is not None and situ_beta > 0, (
+                "SITU requires activation_situ_beta > 0"
+            )
+            assert situ_linear_beta is not None and situ_linear_beta > 0, (
+                "TRTLLM SiTuGlu requires activation_situ_linear_beta > 0 "
+                "(the private cubin has no up-passthrough path)"
+            )
+            self.gemm1_alpha = _per_expert(situ_beta)
+            self.gemm1_beta = _per_expert(situ_linear_beta)
+            self.gemm1_clamp_limit = None
+
         logger.debug_once(
             "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
             moe_config.activation,
@@ -134,7 +164,10 @@ class TrtLlmNvFp4ExpertsBase:
         # (via the in-place mul above) and never changes again, so this is a
         # static, per-expert constant. Register on the layer so EPLB
         # rearranges it alongside the other expert tensors.
-        if self.gemm1_clamp_limit is not None:
+        # SITU alpha/beta act on the dequantized gate/up (tanh clamps), not the
+        # raw GEMM1 accumulator, so they are registered as-is without the
+        # g1_alphas fold used by the SwiGLU-OAI clamp/beta below.
+        if self.gemm1_clamp_limit is not None and not self.is_situ:
             gemm1_clamp_limit = self.gemm1_clamp_limit / self.quant_config.g1_alphas
             layer.register_parameter(
                 "gemm1_clamp_limit",
@@ -147,7 +180,11 @@ class TrtLlmNvFp4ExpertsBase:
         # raw. Register both on the layer so EPLB rearranges them with the
         # other per-expert tensors.
         if self.gemm1_beta is not None:
-            gemm1_beta = self.gemm1_beta / self.quant_config.g1_alphas
+            gemm1_beta = (
+                self.gemm1_beta
+                if self.is_situ
+                else self.gemm1_beta / self.quant_config.g1_alphas
+            )
             layer.register_parameter(
                 "gemm1_beta",
                 torch.nn.Parameter(gemm1_beta, requires_grad=False),
@@ -189,7 +226,9 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU, RELU^2 non-gated, GELU, and clamped SwiGLU-OAI."""
+        """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
@@ -210,6 +249,27 @@ class TrtLlmNvFp4ExpertsBase:
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.per_token_activation
+
+    def _quantize_per_token_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """NVFP4-quantize activations with a per-token global scale.
+
+        Returns ``(packed_fp4, block_scale, per_token_scale)``.
+        """
+        from flashinfer import SfLayout, nvfp4_quantize
+
+        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
+            hidden_states,
+            _PER_TOKEN_BASE_GLOBAL_SCALE,
+            sfLayout=SfLayout.layout_linear,
+            per_token_activation=True,
+        )
+        return hs_fp4, hs_block_scale, per_token_scale
 
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
@@ -255,6 +315,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        if self.per_token_activation:
+            # Deferred input quant leaves K unpacked here, breaking the
+            # workspace assumptions below. Per-token NVFP4 is only supported on
+            # the monolithic (non-EP) path for now.
+            raise NotImplementedError(
+                "NVFP4 per-token activation is only supported on the monolithic "
+                "(non-EP) FlashInfer TRTLLM MoE path."
+            )
+
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
@@ -286,6 +355,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
+        # Per-token: input is unquantized, quantize it here. Otherwise it was
+        # already quantized in prepare() with the static global scale.
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
+
         # Pack topk ids and weights into format expected by the kernel.
         packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         output1_scale_gate_scalar = self.quant_config.g1_alphas
@@ -295,7 +373,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
@@ -321,6 +399,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routing_method_type=1,  # not used
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
             output=output,
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
@@ -346,7 +425,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         apply_router_weight_on_input: bool,
     ):
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
+        # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
+        assert a1q_scale is not None or self.per_token_activation
 
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()
@@ -375,7 +455,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                     topk_ids[start:end],
                     activation,
                     global_num_experts,
-                    a1q_scale[start:end],
+                    None if a1q_scale is None else a1q_scale[start:end],
                 )
 
 
@@ -385,6 +465,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
     """
     Monolithic version of the kernel (router + experts).
     """
+
+    def supports_routing_replay_capture(self) -> bool:
+        return True
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -439,7 +522,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None
+        assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -450,16 +533,28 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
+        # Per-token: input is unquantized, quantize it here (see modular apply).
+        if self.per_token_activation:
+            hidden_states, block_scale, per_token_scale = (
+                self._quantize_per_token_input(hidden_states)
+            )
+        else:
+            block_scale, per_token_scale = a1q_scale, None
+
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
-        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+            hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
@@ -485,5 +580,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            routing_replay_out=routing_replay_out,
         )[0]
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result

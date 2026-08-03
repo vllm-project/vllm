@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -37,6 +37,7 @@ _EMPTY_REQ_CTX = make_req_context()
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
+    cache_policy_module_path: str | None = None,
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
@@ -44,6 +45,7 @@ def make_cpu_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
+        cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
@@ -92,6 +94,21 @@ def verify_load_output(
     assert np.array_equal(expected_array, prepare_load_output.block_ids)
 
 
+def check_split_usage_stats(
+    manager: CPUOffloadingManager, write: float, read: float, total: float
+):
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC] == pytest.approx(
+        write
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC] == pytest.approx(
+        read
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(total)
+
+
 def verify_events(
     events: Iterable[OffloadingEvent],
     expected_stores: tuple[set[int], ...] = (),
@@ -100,7 +117,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == MEDIUM_CPU
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -300,6 +317,40 @@ def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     reduced = stats.reduce()
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
+def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
+    manager = make_cpu_manager(num_blocks=4)
+
+    # Store path: pins write usage until complete_store.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Load path: pins read usage until complete_load.
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.25, total=0.25)
+
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Concurrent write + read pins are both reflected and additive.
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
+
+
+def test_cpu_manager_clears_write_usage_after_failed_store():
+    manager = make_cpu_manager(num_blocks=4)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
 
 def test_cpu_manager():
