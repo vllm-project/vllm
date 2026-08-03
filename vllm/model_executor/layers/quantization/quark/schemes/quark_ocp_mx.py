@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from fractions import Fraction
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -14,6 +16,10 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.emulation import (
+    EmulationMxfp4LinearKernel,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
 )
@@ -63,6 +69,10 @@ class QuarkOCP_MX(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
+        self.cache_dequant_weight = (
+            os.environ.get("VLLM_QUARK_MX_CACHE_DEQUANT_WEIGHT", "0") == "1"
+        )
+        self._dequant_dtype: torch.dtype | None = None
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
         self.input_dtype: str | None = None
         if input_quant_spec is not None:
@@ -152,6 +162,24 @@ class QuarkOCP_MX(QuarkScheme):
         if self.dynamic_mxfp4_quant:
             self.process_dynamic_mxfp4_weights_after_loading(layer)
 
+        if self.cache_dequant_weight and isinstance(
+            self.ocp_mx_linear, EmulationMxfp4LinearKernel
+        ):
+            if layer.weight_scale is None:
+                return
+            assert self._dequant_dtype is not None
+            layer.weight = torch.nn.Parameter(
+                dequant_mxfp4(layer.weight, layer.weight_scale, self._dequant_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("weight_scale", None)
+            logger.warning_once(
+                "VLLM_QUARK_MX_CACHE_DEQUANT_WEIGHT=1 caches dequantized "
+                "Quark MXFP4 linear weights at load time. This improves "
+                "emulation latency at the cost of additional device memory."
+            )
+            return
+
         self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
@@ -163,6 +191,7 @@ class QuarkOCP_MX(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
+        self._dequant_dtype = params_dtype
         if self.dynamic_mxfp4_quant:
             weight = ModelWeightParameter(
                 data=torch.empty(
@@ -225,4 +254,11 @@ class QuarkOCP_MX(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if (
+            self.cache_dequant_weight
+            and isinstance(self.ocp_mx_linear, EmulationMxfp4LinearKernel)
+            and layer.weight_scale is None
+        ):
+            qdq_x = self.ocp_mx_linear.quant_dequant_func(x)
+            return F.linear(qdq_x, layer.weight, bias)
         return self.ocp_mx_linear.apply_weights(layer, x, bias)
