@@ -247,34 +247,29 @@ class TieringOffloadingManager(OffloadingManager):
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
+        successful_keys = completed_job.successful_keys
+        failed_keys: Collection[OffloadKey]
         if completed_job.success:
+            successful_keys = job_metadata.keys
+            failed_keys = ()
+        elif successful_keys:
+            failed_keys_set = set(job_metadata.keys)
+            assert failed_keys_set.issuperset(successful_keys), (
+                f"Finished promotion job_id {completed_job.job_id} "
+                "reported unknown successful keys"
+            )
+            failed_keys_set.difference_update(successful_keys)
+            failed_keys = failed_keys_set
+        else:
+            successful_keys = ()
+            failed_keys = job_metadata.keys
+
+        if successful_keys:
             self.primary_tier.complete_write(
-                job_metadata.keys,
+                successful_keys,
                 job_metadata.req_context,
                 True,
             )
-            return
-
-        successful_keys = completed_job.successful_keys
-        if not successful_keys:
-            self.primary_tier.complete_write(
-                job_metadata.keys,
-                job_metadata.req_context,
-                False,
-            )
-            return
-
-        failed_keys = set(job_metadata.keys)
-        assert failed_keys.issuperset(successful_keys), (
-            f"Finished promotion job_id {completed_job.job_id} "
-            "reported unknown successful keys"
-        )
-        failed_keys.difference_update(successful_keys)
-        self.primary_tier.complete_write(
-            successful_keys,
-            job_metadata.req_context,
-            True,
-        )
         if failed_keys:
             self.primary_tier.complete_write(
                 failed_keys,
