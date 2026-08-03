@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 import math
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -35,7 +36,30 @@ class QuarkW4A16Int4(QuarkScheme):
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, group_size: int, pack_method: str, is_symmetric: bool):
+    def __init__(
+        self,
+        group_size: int,
+        pack_method: str,
+        is_symmetric: bool,
+        weight_config: dict[str, Any] | None = None,
+        input_config: dict[str, Any] | None = None,
+    ):
+        if input_config is not None:
+            raise NotImplementedError(
+                "QuarkW4A16Int4 does not support activation quantization; "
+                "input_tensors must be null."
+            )
+        if weight_config is not None:
+            if weight_config.get("qscheme", "per_group") != "per_group":
+                raise NotImplementedError(
+                    "QuarkW4A16Int4 only supports per_group weight "
+                    f"quantization, got {weight_config.get('qscheme')!r}."
+                )
+            if weight_config.get("is_dynamic"):
+                raise NotImplementedError(
+                    "QuarkW4A16Int4 only supports static weight quantization."
+                )
+
         self.group_size = group_size
         self.pack_factor = 8
         self.pack_reorder = pack_method == "reorder"
