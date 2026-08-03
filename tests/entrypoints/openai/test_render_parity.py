@@ -151,7 +151,8 @@ async def _capture_responses(
     request: ResponsesRequest,
 ) -> CapturedRenderInputs:
     capture = RenderCapture(serving.online_renderer)
-    await serving._make_request(request, prev_response=None)
+    result = await serving.online_renderer.render_responses(request)
+    assert not isinstance(result, ErrorResponse), result
     return capture.take()
 
 

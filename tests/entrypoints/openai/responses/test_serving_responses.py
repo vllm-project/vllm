@@ -70,6 +70,14 @@ from vllm.sampling_params import SamplingParams
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def _new_online_renderer() -> OnlineRenderer:
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.exclude_tools_when_tool_choice_none = False
+    renderer.parser = None
+    renderer.trust_request_chat_template = True
+    return renderer
+
+
 class MockConversationContext(ConversationContext):
     """Mock conversation context for testing"""
 
@@ -222,7 +230,7 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
 
 @pytest.mark.asyncio
 async def test_online_renderer_renders_non_harmony_responses_with_explicit_history():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
     renderer.use_harmony = False
     renderer.chat_template = "server-template"
     renderer.chat_template_content_format = "string"
@@ -287,8 +295,34 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
 
 
 @pytest.mark.asyncio
+async def test_online_renderer_rejects_untrusted_responses_chat_template():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.exclude_tools_when_tool_choice_none = False
+    renderer.trust_request_chat_template = False
+    renderer.parser = None
+    renderer.preprocess_chat = AsyncMock(
+        return_value=([], [tokens_input([1])]),
+    )
+    request = ResponsesRequest(
+        input="hello",
+        chat_template_kwargs={"chat_template": "{{ messages }}"},
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 400
+    assert "untrusted chat template" in result.error.message.lower()
+    renderer.preprocess_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_online_renderer_rejects_harmony_history_for_non_harmony_model():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
     renderer.use_harmony = False
     request = ResponsesRequest(input="next")
 
@@ -305,7 +339,7 @@ async def test_online_renderer_rejects_harmony_history_for_non_harmony_model():
 
 @pytest.mark.asyncio
 async def test_online_renderer_rejects_chat_history_for_harmony_model():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
     request = ResponsesRequest(input="next")
 
@@ -319,9 +353,30 @@ async def test_online_renderer_rejects_chat_history_for_harmony_model():
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_rejects_unsupported_harmony_tool_choice():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+async def test_online_renderer_adjusts_harmony_tool_choice(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class StubParser:
+        def __init__(self, tokenizer, tools, *, model_config):
+            pass
+
+        def adjust_request(self, request):
+            request.cache_salt = "adjusted"
+            return request
+
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
+    renderer.parser = StubParser
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    tokenizer = SimpleNamespace(truncation_side="left")
+    renderer.renderer = SimpleNamespace(
+        tokenizer=tokenizer,
+        get_tokenizer=lambda: tokenizer,
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1],
+    )
     request = ResponsesRequest(
         input="next",
         tools=[
@@ -336,16 +391,15 @@ async def test_online_renderer_rejects_unsupported_harmony_tool_choice():
 
     result = await renderer.render_responses(request)
 
-    assert isinstance(result, ErrorResponse)
-    assert result.error.code == 400
-    assert result.error.param == "tool_choice"
+    assert not isinstance(result, ErrorResponse)
+    assert result.engine_input["cache_salt"] == "adjusted"
 
 
 @pytest.mark.asyncio
 async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
     renderer.model_config = SimpleNamespace(max_model_len=5)
     renderer.renderer = SimpleNamespace(
@@ -368,12 +422,18 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_renders_harmony_continuation_with_call_linkage():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+async def test_online_renderer_renders_harmony_continuation_with_call_linkage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
     renderer.model_config = SimpleNamespace(max_model_len=100)
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1],
     )
     previous_messages = [
         OpenAIHarmonyMessage.from_role_and_content(Role.USER, "first"),
@@ -429,7 +489,7 @@ async def test_online_renderer_renders_harmony_continuation_with_call_linkage():
 
 @pytest.mark.asyncio
 async def test_online_renderer_returns_typed_error_for_bad_harmony_call_reference():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
     request = ResponsesRequest(
         input=[
@@ -451,12 +511,18 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
 
 
 @pytest.mark.asyncio
-async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior():
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
     renderer.use_harmony = True
     renderer.model_config = SimpleNamespace(max_model_len=100)
     renderer.renderer = SimpleNamespace(
         tokenizer=SimpleNamespace(truncation_side="left")
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1],
     )
     request = ResponsesRequest(
         input="search",
@@ -473,7 +539,7 @@ async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior()
     [[], [tokens_input([1]), tokens_input([2])]],
 )
 def test_responses_render_result_rejects_non_single_prompt(engine_inputs):
-    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer = _new_online_renderer()
 
     result = renderer._responses_render_result([], engine_inputs)
 
@@ -517,11 +583,17 @@ class TestInitializeToolSessions:
         return instance
 
     @pytest.mark.asyncio
-    async def test_stateful_harmony_preserves_unsupported_tool_choice_exception(
+    async def test_stateful_harmony_delegates_named_tool_choice_to_renderer(
         self,
         serving_responses_instance,
     ):
         serving_responses_instance.use_harmony = True
+        serving_responses_instance.online_renderer.render_responses = AsyncMock(
+            return_value=SimpleNamespace(
+                messages=[],
+                engine_input=tokens_input([1]),
+            )
+        )
         request = ResponsesRequest(
             input="hello",
             tool_choice={"type": "function", "name": "lookup"},
@@ -534,11 +606,13 @@ class TestInitializeToolSessions:
             ],
         )
 
-        with pytest.raises(NotImplementedError, match="Only 'auto' or 'none'"):
-            await serving_responses_instance._render_resolved_response_inputs(
-                request,
-                None,
-            )
+        result = await serving_responses_instance._render_resolved_response_inputs(
+            request,
+            None,
+        )
+
+        assert result.engine_input["prompt_token_ids"] == [1]
+        serving_responses_instance.online_renderer.render_responses.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_render_next_turn_reuses_shared_responses_renderer(

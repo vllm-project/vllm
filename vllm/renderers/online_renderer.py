@@ -279,6 +279,14 @@ class OnlineRenderer:
         skip_mm_cache: bool = False,
     ) -> ResponsesRenderResult | ErrorResponse:
         """Render a Responses request using only explicitly supplied history."""
+        template_error = self.validate_chat_template(
+            request_chat_template=None,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+        if template_error is not None:
+            return template_error
+
         if self.use_harmony:
             return self._render_responses_with_harmony(
                 request,
@@ -296,7 +304,13 @@ class OnlineRenderer:
                 param="previous_response_id",
             )
 
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.exclude_tools_when_tool_choice_none
+            ),
+        )
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
@@ -335,13 +349,15 @@ class OnlineRenderer:
         previous_response_outputs: list[ResponseOutputItem] | None,
         tool_server: "ToolServer | None",
     ) -> ResponsesRenderResult | ErrorResponse:
-        if request.tool_choice not in ("auto", "none"):
-            return self.create_error_response(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony",
-                err_type="invalid_request_error",
-                param="tool_choice",
-            )
+        if self.parser is not None:
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
+
         if previous_messages is not None and any(
             not isinstance(message, OpenAIMessage) for message in previous_messages
         ):
