@@ -241,7 +241,7 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
     gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
     conv_ptr = 1 << 63
-    temporal_ptr = (1 << 64) - 1
+    temporal_ptr = (1 << 64) - 8
     block_table_ptr = (1 << 63) + 42
 
     conv_state = _FakeDataPtrTensor(
