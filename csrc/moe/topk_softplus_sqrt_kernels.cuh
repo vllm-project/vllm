@@ -81,19 +81,23 @@ __device__ __forceinline__ float toFloat(T value) {
 // Adapted from:
 // https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/csrc/deepseek_v4/hash_topk.cuh
 template <typename OutIndType, typename HashIndType>
-__launch_bounds__(128) __global__
-    void dsv4HashTopkSoftplusSqrt(const float* input, float* output,
-                                  OutIndType* indices, int num_rows,
-                                  int num_experts, float routed_scaling_factor,
-                                  const HashIndType* input_ids,
-                                  const HashIndType* tid2eid,
-                                  const bool* is_padding, const float* bias_vl,
-                                  int64_t image_sentinel_lo) {
+__launch_bounds__(128) __global__ void dsv4HashTopkSoftplusSqrt(
+    const float* input, float* output, OutIndType* indices, int num_rows,
+    int num_experts, float routed_scaling_factor, const HashIndType* input_ids,
+    const HashIndType* tid2eid, const bool* is_padding, const float* bias_vl,
+    int64_t image_sentinel_lo, int64_t hash_table_rows) {
   const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
   const int lane = threadIdx.x % 32;
   if (warp >= num_rows) return;
   const int64_t token_id = load_index_as_int64(input_ids, warp);
-  const bool is_pad_row = is_padding != nullptr && is_padding[warp];
+  // token_id is data: padded / not-yet-written rows of the input_ids buffer can
+  // hold an out-of-range value. tid2eid is [vocab_size, 6], so an unbounded
+  // token_id gathers outside the table and yields a garbage expert id, which is
+  // then used to index the gating logits (and is written to topk_ids for the
+  // downstream MoE kernels) -- an illegal access that takes down every rank.
+  const bool token_in_range = token_id >= 0 && token_id < hash_table_rows;
+  const bool is_pad_row =
+      (is_padding != nullptr && is_padding[warp]) || !token_in_range;
   // Image tokens carry five consecutive in-vocab sentinel ids starting at
   // image_sentinel_lo (0 = disabled); they skip the tid2eid lookup and
   // select experts by score + bias_vl instead. Ids above the sentinel block
@@ -207,7 +211,7 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
                         const HashIndType* input_ids,
                         const HashIndType* tid2eid, cudaStream_t stream,
                         const bool* is_padding, const float* bias_vl,
-                        int64_t image_sentinel_lo) {
+                        int64_t image_sentinel_lo, int64_t hash_table_rows) {
   if (num_rows == 0) return;
   auto* kernel = &dsv4HashTopkSoftplusSqrt<OutIndType, HashIndType>;
   cudaLaunchConfig_t config = {};
@@ -222,7 +226,7 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
   const float scale = static_cast<float>(routed_scaling_factor);
   cudaLaunchKernelEx(&config, kernel, input, output, indices, num_rows,
                      num_experts, scale, input_ids, tid2eid, is_padding,
-                     bias_vl, image_sentinel_lo);
+                     bias_vl, image_sentinel_lo, hash_table_rows);
 }
 #endif
 
@@ -255,8 +259,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         const int start_expert, const int end_expert, const bool renormalize,
         double routed_scaling_factor, const float* correction_bias,
         const HashIndType* input_ids, const HashIndType* tid2eid,
-        const bool* is_padding, const float* bias_vl,
-        int64_t image_sentinel_lo) {
+        const bool* is_padding, const float* bias_vl, int64_t image_sentinel_lo,
+        int64_t hash_table_rows) {
   static_assert(std::is_same_v<InputType, float> ||
                     std::is_same_v<InputType, __nv_bfloat16> ||
                     std::is_same_v<InputType, __half>,
@@ -321,7 +325,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     return;
   }
   const bool row_is_active = finished ? !finished[thread_row] : true;
-  const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+  bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
   // Image tokens carry five consecutive in-vocab sentinel ids starting at
   // image_sentinel_lo (0 = disabled); they select experts with bias_vl
@@ -422,7 +426,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   // (sentinel ids) fall through to the score-based top-k path with bias_vl.
   const bool hash_row = USE_HASH && !use_vl_bias;
   if (hash_row) {
-    const int64_t token_expert_offset = token_id * static_cast<int64_t>(k);
+    // See the note in dsv4HashTopkSoftplusSqrt: token_id is data and an
+    // out-of-range value gathers outside tid2eid ([vocab_size, k]).
+    const bool token_in_range = token_id >= 0 && token_id < hash_table_rows;
+    const int64_t token_expert_offset =
+        token_in_range ? token_id * static_cast<int64_t>(k) : 0;
+    is_pad_row = is_pad_row || !token_in_range;
     if (!is_pad_row) {
 #pragma unroll
       for (int ii = 0; ii < VPT; ++ii) {
@@ -673,7 +682,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
     double routed_scaling_factor, const float* correction_bias,
     const bool use_hash, const HashIndType* input_ids,
     const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding,
-    const float* bias_vl, int64_t image_sentinel_lo) {
+    const float* bias_vl, int64_t image_sentinel_lo, int64_t hash_table_rows) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -703,12 +712,13 @@ void topkGatingSoftplusSqrtLauncherHelper(
                        indices, source_row, k, start_expert, end_expert,
                        renormalize, routed_scaling_factor, correction_bias,
                        input_ids, tid2eid, is_padding, bias_vl,
-                       image_sentinel_lo);
+                       image_sentinel_lo, hash_table_rows);
 #else
     kernel<<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert,
         end_expert, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo);
+        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo,
+        hash_table_rows);
 #endif
   })
 }
@@ -723,7 +733,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
       gating_output, nullptr, topk_weights, topk_indices,                     \
       token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,    \
       routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,   \
-      stream, is_padding, bias_vl, image_sentinel_lo);
+      stream, is_padding, bias_vl, image_sentinel_lo, hash_table_rows);
 
 #ifndef USE_ROCM
   #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)       \
@@ -766,7 +776,7 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const float* correction_bias, const bool use_hash,
     const HashIndType* input_ids, const HashIndType* tid2eid,
     cudaStream_t stream, const bool* is_padding, const float* bias_vl,
-    int64_t image_sentinel_lo) {
+    int64_t image_sentinel_lo, int64_t hash_table_rows) {
 #ifndef USE_ROCM
   if constexpr (std::is_same_v<InputType, float>) {
     if (use_hash && topk == 6 && renormalize &&
@@ -774,7 +784,7 @@ void topkGatingSoftplusSqrtKernelLauncher(
       launchDsv4HashTopk<IndType, HashIndType>(
           gating_output, topk_weights, topk_indices, num_tokens, num_experts,
           routed_scaling_factor, input_ids, tid2eid, stream, is_padding,
-          bias_vl, image_sentinel_lo);
+          bias_vl, image_sentinel_lo, hash_table_rows);
       return;
     }
   }
@@ -892,7 +902,7 @@ void topkGatingSoftplusSqrtKernelLauncher(
       const InputType*, float*, IndType*, int*, const int, const int,         \
       const int, const bool, double, const float*, const bool,                \
       const HashIndType*, const HashIndType*, cudaStream_t, const bool*,      \
-      const float*, int64_t);
+      const float*, int64_t, int64_t);
 
 #define VLLM_TOPK_SOFTPLUS_SQRT_EXTERN(IndType, InputType, HashIndType) \
   VLLM_TOPK_SOFTPLUS_SQRT_DECLARE(extern, IndType, InputType, HashIndType)
