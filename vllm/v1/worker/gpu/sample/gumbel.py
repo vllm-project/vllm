@@ -207,7 +207,14 @@ def _gumbel_sample_kernel(
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    # `idx` is the argmax over a BLOCK_SIZE-wide tile whose out-of-vocab tail
+    # lanes are loaded as -inf. When every in-vocab lane of the tile is also
+    # -inf (or NaN) the reduction can settle on one of those tail lanes, giving
+    # token_id >= vocab_size. Nothing downstream bounds a sampled token id, and
+    # DeepSeek-V4's hash-MoE router indexes tid2eid[token_id * topk] directly,
+    # so such an id reads past the table and faults the context. Clamp: in that
+    # degenerate all--inf tile any index is equally arbitrary.
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
