@@ -11,6 +11,49 @@
 
 namespace marlin {
 
+namespace {
+
+bool supports_ldmatrix_s4(int device_index) {
+#if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040
+  int major;
+  int minor;
+  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
+                         device_index);
+  cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
+                         device_index);
+
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM90_ENABLED)
+  if (major == 9 && minor == 0) {
+    return true;
+  }
+  #endif
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM100_FAMILY_ENABLED)
+  if (major == 10 && (minor == 0 || minor == 3)) {
+    return true;
+  }
+  #endif
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM107_FAMILY_ENABLED)
+  if (major == 10 && minor == 7) {
+    return true;
+  }
+  #endif
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM110_FAMILY_ENABLED)
+  if (major == 11 && minor == 0) {
+    return true;
+  }
+  #endif
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM120_FAMILY_ENABLED)
+  if (major == 12 && (minor == 0 || minor == 1)) {
+    return true;
+  }
+  #endif
+#endif
+
+  return false;
+}
+
+}  // namespace
+
 template <int const num_threads, int const num_bits, bool const has_perm,
           bool is_a_8bit, bool use_ldmatrix_s4>
 __global__ void gptq_marlin_repack_kernel(

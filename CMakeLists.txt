@@ -572,10 +572,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
     # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
-      # The expanding ldmatrix instruction requires an architecture-specific
-      # Hopper target.
+      # The expanding ldmatrix instruction requires a feature-specific target.
       cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-      cuda_archs_loose_intersection(MARLIN_LDMATRIX_S4_ARCHS "9.0a" "${CUDA_ARCHS}")
+      cuda_archs_sm90plus(MARLIN_LDMATRIX_S4_ARCHS "${CUDA_ARCHS}")
+
+      set(MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+        VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+      foreach(_ARCH IN LISTS MARLIN_LDMATRIX_S4_ARCHS)
+        if(_ARCH MATCHES "^9\\.0")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            VLLM_MARLIN_LDMATRIX_S4_SM90_ENABLED=1)
+        elseif(_ARCH MATCHES "^10\\.(0|1|3)")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            VLLM_MARLIN_LDMATRIX_S4_SM100_FAMILY_ENABLED=1)
+        elseif(_ARCH MATCHES "^10\\.7")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            VLLM_MARLIN_LDMATRIX_S4_SM107_FAMILY_ENABLED=1)
+        elseif(_ARCH MATCHES "^11\\.")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            VLLM_MARLIN_LDMATRIX_S4_SM110_FAMILY_ENABLED=1)
+        elseif(_ARCH MATCHES "^12\\.")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            VLLM_MARLIN_LDMATRIX_S4_SM120_FAMILY_ENABLED=1)
+        endif()
+      endforeach()
     elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
     else()
@@ -718,7 +738,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         set_property(
           SOURCE "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
           APPEND PROPERTY COMPILE_DEFINITIONS
-          VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+          ${MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS})
       endif()
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_SRCS}"

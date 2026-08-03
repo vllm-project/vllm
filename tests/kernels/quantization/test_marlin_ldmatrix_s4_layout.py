@@ -10,6 +10,22 @@ import regex as re
 import torch
 
 
+def _ldmatrix_s4_target() -> str | None:
+    if not torch.cuda.is_available():
+        return None
+
+    capability = torch.cuda.get_device_capability()
+    return {
+        (9, 0): "90a",
+        (10, 0): "100f",
+        (10, 3): "100f",
+        (10, 7): "107f",
+        (11, 0): "110f",
+        (12, 0): "120f",
+        (12, 1): "120f",
+    }.get(capability)
+
+
 def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
     result = subprocess.run(
         [nvcc, "--version"],
@@ -25,8 +41,8 @@ def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
 
 @pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0),
-    reason="Requires a Hopper GPU.",
+    _ldmatrix_s4_target() is None,
+    reason="Requires a GPU with CUDA 13.4 ldmatrix.s8.s4 support.",
 )
 def test_ldmatrix_s4_layout_and_mma_mapping(tmp_path: Path):
     nvcc = shutil.which("nvcc")
@@ -38,12 +54,14 @@ def test_ldmatrix_s4_layout_and_mma_mapping(tmp_path: Path):
 
     source = Path(__file__).with_name("marlin_ldmatrix_s4_layout.cu")
     executable = tmp_path / "marlin_ldmatrix_s4_layout"
+    target = _ldmatrix_s4_target()
+    assert target is not None
     subprocess.run(
         [
             nvcc,
             "-std=c++17",
             "-O3",
-            "-gencode=arch=compute_90a,code=sm_90a",
+            f"-gencode=arch=compute_{target},code=sm_{target}",
             str(source),
             "-o",
             str(executable),

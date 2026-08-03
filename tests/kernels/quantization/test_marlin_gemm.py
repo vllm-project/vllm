@@ -353,7 +353,7 @@ def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
         size_k, size_n
     )
     if not ops.marlin_uses_ldmatrix_s4(linear):
-        pytest.skip("Requires the CUDA 13.4 Hopper ldmatrix.s8.s4 path.")
+        pytest.skip("Requires the CUDA 13.4 ldmatrix.s8.s4 path.")
 
     perm = torch.empty(0, dtype=torch.int32, device="cuda")
     weight_perm = get_weight_perm(4, True, use_ldmatrix_s4=True)
@@ -396,7 +396,7 @@ def test_gptq_marlin_repack_ldmatrix_s4_random(nk_factors):
 
     q_w = torch.randint(0, 16, (size_k, size_n), dtype=torch.int32, device="cuda")
     if not ops.marlin_uses_ldmatrix_s4(q_w):
-        pytest.skip("Requires the CUDA 13.4 Hopper ldmatrix.s8.s4 path.")
+        pytest.skip("Requires the CUDA 13.4 ldmatrix.s8.s4 path.")
 
     q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
     perm = torch.empty(0, dtype=torch.int32, device="cuda")

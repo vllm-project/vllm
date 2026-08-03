@@ -29,6 +29,18 @@
 #include "marlin_mma.h"
 #include "core/scalar_type.hpp"
 
+#if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040 && \
+    ((defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ == 900) || \
+     (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                            \
+      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1070 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1100 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1200 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1210)))
+  #define VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED 1
+#endif
+
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
                     std::is_same<scalar_t, nv_bfloat16>::value, \
@@ -105,8 +117,7 @@ template <int count>
 __device__ inline void ldsm_s4(uint32_t (&registers)[count],
                                const void* smem_ptr) {
   static_assert(count == 4);
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040 && \
-      defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ == 900
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED)
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
       "ldmatrix.sync.aligned.m8n16.x4.shared::cta.s8.s4 "
@@ -353,8 +364,7 @@ __global__ void Marlin(
   }
 
   constexpr bool is_a_8bit = a_type.size_bits() == 8;
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040 && \
-      defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ == 900
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED)
   constexpr bool use_ldmatrix_s4 =
       a_type == vllm::kS8 && b_type == vllm::kU4B8 && group_blocks != 0;
   #else
@@ -2122,3 +2132,5 @@ __global__ void Marlin(
 }  // namespace MARLIN_NAMESPACE_NAME
 
 #endif
+
+#undef VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED
