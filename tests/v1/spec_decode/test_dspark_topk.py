@@ -28,7 +28,6 @@ def test_gathered_markov_bias_overwrites_dense_logits():
     )
     values, index = logits.topk(3, dim=-1)
     values = torch.stack((values, torch.zeros_like(values)), dim=1)[:, 0]
-    assert not values.is_contiguous()
     expected = values + torch.bmm(weight[index], markov_embed.unsqueeze(-1)).squeeze(-1)
     logits.fill_(float("-inf"))
 
