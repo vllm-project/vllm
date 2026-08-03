@@ -214,6 +214,53 @@ def matmul_kernel_descriptor_persistent(
         c_desc.store([offs_cm, offs_cn], c)
 
 
+def _get_descriptor_matmul_config(
+    M: int, N: int, K: int, dtype: torch.dtype
+) -> dict[str, int]:
+    """Select Triton kernel config based on problem shape and dtype.
+
+    The default 128×128×64 config is optimized for large square-ish GEMMs but
+    wastes resources on skinny shapes (small M during decode, or very tall/thin
+    matrices during prefill).  Shape-dependent tuning closes the gap with oneDNN.
+    """
+    # fp32 uses smaller BLOCK_SIZE_K due to register pressure
+    block_k = 32 if dtype == torch.float32 else 64
+
+    if M <= 16:
+        # Decode: M=1-16. Tiny M means most of a 128-row tile is wasted.
+        # Use small M-block, wide N-block to maximize useful work per tile.
+        return {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": 1,
+            "num_stages": 4,
+            "num_warps": 8,
+        }
+    elif M <= 64:
+        # Small batch decode or very short prefill.
+        return {
+            "BLOCK_SIZE_M": 32,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": 4,
+            "num_stages": 4,
+            "num_warps": 8,
+        }
+    else:
+        # Medium and large prefill (M > 64). 64×128 tiles provide the best
+        # balance of register pressure vs parallelism on Intel XPU.
+        # M=2048, N=4096 → 32×32 = 1024 tiles, well above ~160 compute units.
+        return {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": 8,
+            "num_stages": 3,
+            "num_warps": 8,
+        }
+
+
 def matmul_descriptor_persistent(
     a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
@@ -255,32 +302,7 @@ def matmul_descriptor_persistent(
             ),
         )
 
-    configs = {
-        torch.bfloat16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float32: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-    }
+    cfg = _get_descriptor_matmul_config(M, N, K, dtype)
 
     matmul_kernel_descriptor_persistent[grid](
         a,
@@ -292,7 +314,7 @@ def matmul_descriptor_persistent(
         K,
         NUM_SMS=NUM_SMS,
         HAS_BIAS=bias is not None,
-        **configs[dtype],
+        **cfg,
     )
     return c
 
@@ -1144,17 +1166,23 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 128
 
-    _batch_invariant_LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
-    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
-    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
-    # (torch._native.ops.bmm_outer_product), so we need allow_override
-    # to replace it at the dispatcher level.
-    _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, key, allow_override=True
-    )
-    torch.bmm = bmm_batch_invariant
+    # Softmax, log_softmax, mean, and bmm are already batch-invariant on XPU
+    # (oneDNN backend produces bitwise-identical results regardless of batch
+    # context). Only register these overrides on CUDA where they are needed.
+    if not current_platform.is_xpu():
+        _batch_invariant_LIB.impl(
+            "aten::_log_softmax", _log_softmax_batch_invariant, key
+        )
+        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
+        # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+        # (torch._native.ops.bmm_outer_product), so we need allow_override
+        # to replace it at the dispatcher level.
+        _batch_invariant_LIB.impl(
+            "aten::bmm", bmm_batch_invariant, key, allow_override=True
+        )
+        torch.bmm = bmm_batch_invariant
 
     reduced_precision_val = (
         (False, False) if is_torch_equal_or_newer("2.10.0") else False
