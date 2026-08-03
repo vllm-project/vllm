@@ -82,7 +82,6 @@ class QuarkConfig(QuantizationConfig):
         if not exclude:
             return exclude
 
-        import fnmatch as _fnmatch
         normalized: list[str] = []
         seen: set[str] = set()
 
@@ -91,13 +90,9 @@ class QuarkConfig(QuantizationConfig):
                 continue
             seen.add(module_name)
             # should_ignore_layer only supports exact match or re:-prefixed regex.
-            # Quark config uses fnmatch-style wildcards (* and ?). Convert them.
-            if not module_name.startswith("re:"):
-                if "*" in module_name or "?" in module_name:
-                    module_name = "re:" + _fnmatch.translate(module_name)
-                elif "." not in module_name:
-                    # Bare names like "lm_head" should match nested vLLM prefixes.
-                    module_name = "re:" + _fnmatch.translate(f"*{module_name}*")
+            # Bare names like "lm_head" should match nested vLLM prefixes.
+            if not module_name.startswith("re:") and "." not in module_name:
+                module_name = "re:.*" + module_name + ".*"
             normalized.append(module_name)
 
         return normalized
