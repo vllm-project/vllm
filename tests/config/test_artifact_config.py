@@ -56,6 +56,7 @@ def test_artifact_config_defaults_to_shm():
     assert not config.enable_return_routed_experts
     assert config.backend == "shm"
     assert config.shm_dir == "/dev/shm/vllm-artifacts"
+    assert config.max_shm_bytes is None
 
 
 def test_kimi_k3_experts_per_token_config_name():

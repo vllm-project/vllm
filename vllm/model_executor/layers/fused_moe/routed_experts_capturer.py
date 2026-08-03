@@ -146,6 +146,10 @@ class RoutedExpertsCapturer:
 
         self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
 
+    def get_routing_data(self, num_tokens: int) -> torch.Tensor:
+        """Return a stable snapshot of the current routing data."""
+        return self.device_buffer[:num_tokens].clone()
+
 
 def bind_routed_experts_capturer(
     model: torch.nn.Module,

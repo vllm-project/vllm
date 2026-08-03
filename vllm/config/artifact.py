@@ -22,8 +22,8 @@ class ArtifactConfig:
     shm_dir: str = "/dev/shm/vllm-artifacts"
     """Trusted root for immutable artifact objects."""
 
-    max_shm_bytes: int = Field(default=8 << 30, gt=0)
-    """Hard capacity limit for one live engine and DP rank."""
+    max_shm_bytes: int | None = Field(default=None, gt=0)
+    """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
 
     shm_ttl_seconds: int = Field(default=3600, gt=0)
     """Grace period before an inactive engine store is removed.

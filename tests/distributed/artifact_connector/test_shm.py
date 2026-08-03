@@ -87,7 +87,12 @@ def test_background_store_surfaces_publication_failure():
         store.close()
 
 
-def _make_vllm_config(tmp_path):
+def _make_vllm_config(
+    tmp_path,
+    *,
+    enable_prefix_caching: bool = True,
+    max_shm_bytes: int | None = 1 << 20,
+):
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(
             num_hidden_layers=3,
@@ -96,25 +101,77 @@ def _make_vllm_config(tmp_path):
         ),
         get_num_experts_per_token=lambda: 2,
         get_num_experts=lambda: 256,
+        max_model_len=4096,
     )
     return SimpleNamespace(
         artifact_config=SimpleNamespace(
             enabled=True,
             enable_return_routed_experts=True,
             shm_dir=str(tmp_path),
-            max_shm_bytes=1 << 20,
+            max_shm_bytes=max_shm_bytes,
             shm_ttl_seconds=60,
         ),
         parallel_config=SimpleNamespace(data_parallel_rank=0, rank=0),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
-        cache_config=SimpleNamespace(prefix_caching_hash_algo="sha256"),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=enable_prefix_caching,
+            prefix_caching_hash_algo="sha256",
+        ),
         model_config=model_config,
         instance_id="instance",
     )
 
 
-def _make_scheduler_connector(tmp_path):
-    return ArtifactSchedulerConnector(_make_vllm_config(tmp_path))
+def _make_scheduler_connector(tmp_path, *, enable_prefix_caching: bool = True):
+    config = _make_vllm_config(
+        tmp_path,
+        enable_prefix_caching=enable_prefix_caching,
+    )
+    return ArtifactSchedulerConnector(
+        config,
+        SimpleNamespace(num_blocks=8),
+        kv_connector=None,
+        block_size=4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_cpu_blocks", "expected_blocks"),
+    [(None, 3), (2, 3), (10, 10)],
+)
+def test_connector_derives_shm_capacity_from_largest_kv_tier(
+    tmp_path,
+    num_cpu_blocks,
+    expected_blocks,
+):
+    config = _make_vllm_config(tmp_path, max_shm_bytes=None)
+    kv_connector = None
+    if num_cpu_blocks is not None:
+        kv_connector = Mock()
+        kv_connector.scheduler_manager = SimpleNamespace(num_cpu_blocks=num_cpu_blocks)
+
+    connector = ArtifactSchedulerConnector(
+        config,
+        SimpleNamespace(num_blocks=3),
+        kv_connector=kv_connector,
+        block_size=8,
+    )
+
+    block_nbytes = 8 * 3 * 2 * np.dtype(np.uint8).itemsize
+    assert connector._store._store.max_bytes == expected_blocks * block_nbytes
+    connector.shutdown()
+
+
+def test_connector_rejects_explicit_shm_capacity_below_kv_minimum(tmp_path):
+    config = _make_vllm_config(tmp_path, max_shm_bytes=1)
+
+    with pytest.raises(ValueError, match="gpu_blocks=3"):
+        ArtifactSchedulerConnector(
+            config,
+            SimpleNamespace(num_blocks=3),
+            kv_connector=None,
+            block_size=8,
+        )
 
 
 @dataclass
@@ -446,7 +503,7 @@ def test_reader_materializes_from_another_process(tmp_path):
     harness.close()
 
 
-def test_store_capacity_failure_raises(tmp_path):
+def test_store_rejects_object_larger_than_capacity_without_eviction(tmp_path):
     store = LocalSharedMemoryArtifactStore(
         str(tmp_path),
         "instance",
@@ -454,14 +511,10 @@ def test_store_capacity_failure_raises(tmp_path):
         max_bytes=5,
         ttl_seconds=60,
     )
+    store.put([ArtifactObject("small", b"1234")])
 
     with pytest.raises(ArtifactCapacityError):
-        store.put(
-            [
-                ArtifactObject("small", b"1234"),
-                ArtifactObject("large", b"123456"),
-            ]
-        )
+        store.put([ArtifactObject("large", b"123456")])
 
     assert store.get(["small"]) == [b"1234"]
     with pytest.raises(ArtifactNotFoundError):
@@ -469,18 +522,77 @@ def test_store_capacity_failure_raises(tmp_path):
     store.close()
 
 
-def test_store_keeps_first_value_for_same_key(tmp_path):
+def test_store_rejects_batch_larger_than_capacity_without_partial_write(tmp_path):
     store = LocalSharedMemoryArtifactStore(
         str(tmp_path),
         "instance",
         0,
-        max_bytes=100,
+        max_bytes=5,
+        ttl_seconds=60,
+    )
+    store.put([ArtifactObject("retained", b"r")])
+
+    with pytest.raises(ArtifactCapacityError):
+        store.put(
+            [
+                ArtifactObject("first", b"111"),
+                ArtifactObject("second", b"222"),
+            ]
+        )
+
+    assert store.get(["retained"]) == [b"r"]
+    with pytest.raises(ArtifactNotFoundError):
+        store.get(["first"])
+    with pytest.raises(ArtifactNotFoundError):
+        store.get(["second"])
+    store.close()
+
+
+def test_store_lru_evicts_least_recently_read_object(tmp_path):
+    store = LocalSharedMemoryArtifactStore(
+        str(tmp_path),
+        "instance",
+        0,
+        max_bytes=8,
+        ttl_seconds=60,
+    )
+    store.put(
+        [
+            ArtifactObject("first", b"1111"),
+            ArtifactObject("second", b"2222"),
+        ]
+    )
+    assert store.get(["first"]) == [b"1111"]
+
+    store.put([ArtifactObject("third", b"3333")])
+
+    assert store.get(["first", "third"]) == [b"1111", b"3333"]
+    with pytest.raises(ArtifactNotFoundError, match="Increase artifact_config"):
+        store.get(["second"])
+    store.close()
+
+
+def test_store_duplicate_put_keeps_first_value_and_refreshes_lru(tmp_path):
+    store = LocalSharedMemoryArtifactStore(
+        str(tmp_path),
+        "instance",
+        0,
+        max_bytes=2,
         ttl_seconds=60,
     )
     store.put([ArtifactObject("key", b"a")])
-    store.put([ArtifactObject("key", b"b")])
+    store.put([ArtifactObject("other", b"o")])
+    store.put(
+        [
+            ArtifactObject("key", b"b"),
+            ArtifactObject("new", b"n"),
+        ]
+    )
 
     assert store.get(["key"]) == [b"a"]
+    assert store.get(["new"]) == [b"n"]
+    with pytest.raises(ArtifactNotFoundError):
+        store.get(["other"])
     store.close()
 
 
@@ -759,6 +871,43 @@ def test_connector_reuses_cached_blocks_and_captures_only_suffix(tmp_path):
     connector.shutdown()
 
 
+def test_connector_uses_request_private_keys_without_prefix_caching(tmp_path):
+    connector = _make_scheduler_connector(tmp_path, enable_prefix_caching=False)
+    logical = np.arange(6 * 3 * 2, dtype=np.uint8).reshape(6, 3, 2)
+    all_keys = []
+
+    for request_id in ("request-a", "request-b"):
+        request = _scheduler_request(request_id, [], num_tokens=6)
+        connector.request_started(
+            request=request,
+            cached_token_end=0,
+            hash_block_size=4,
+        )
+        connector.capture_step(
+            _step_output([request_id], [0], [6]),
+            logical,
+            [request_id],
+        )
+        connector.request_progress(
+            request=request,
+            accepted_token_end=6,
+            hash_block_size=4,
+        )
+        keys = connector.request_finished(
+            request=request,
+            token_end=6,
+            hash_block_size=4,
+        )
+        all_keys.append(keys)
+        np.testing.assert_array_equal(
+            materialize_routed_experts(connector._store, keys),
+            logical,
+        )
+
+    assert all_keys[0] != all_keys[1]
+    connector.shutdown()
+
+
 def test_cached_kv_with_missing_artifact_fails_at_get(tmp_path):
     connector = _make_scheduler_connector(tmp_path)
     request = _scheduler_request("request-a", [b"a" * 32], num_tokens=5)
@@ -827,7 +976,7 @@ def test_cache_generation_preserves_delivery_cursor_and_changes_namespace(tmp_pa
     )
     old_namespace = connector._state(request.request_id).artifact_namespace
 
-    connector.advance_kv_cache_generation()
+    connector.reset()
 
     assert request.request_id not in connector._states
     assert connector._resume_emit_cursors[request.request_id] == 3
@@ -849,7 +998,7 @@ def test_cache_generation_preserves_delivery_cursor_and_changes_namespace(tmp_pa
 
 
 @pytest.mark.parametrize("reset_successful", [False, True])
-def test_scheduler_advances_generation_only_after_successful_kv_reset(
+def test_scheduler_resets_artifacts_only_after_successful_kv_reset(
     reset_successful,
 ):
     scheduler = object.__new__(Scheduler)
@@ -860,6 +1009,6 @@ def test_scheduler_advances_generation_only_after_successful_kv_reset(
 
     assert scheduler.reset_prefix_cache() is reset_successful
     if reset_successful:
-        scheduler.artifact_connector.advance_kv_cache_generation.assert_called_once_with()
+        scheduler.artifact_connector.reset.assert_called_once_with()
     else:
-        scheduler.artifact_connector.advance_kv_cache_generation.assert_not_called()
+        scheduler.artifact_connector.reset.assert_not_called()

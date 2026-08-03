@@ -1455,10 +1455,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         routed_experts = None
-        if self.routed_experts_capturer is not None and not dummy_run:
-            routed_experts = self.routed_experts_capturer.device_buffer[
-                :num_toks
-            ].clone()
+        if not dummy_run and self.routed_experts_capturer is not None:
+            routed_experts = self.routed_experts_capturer.get_routing_data(num_toks)
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(

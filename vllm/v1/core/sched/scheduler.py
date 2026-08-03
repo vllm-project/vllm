@@ -338,7 +338,12 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.artifact_connector = (
-            ArtifactSchedulerConnector(vllm_config)
+            ArtifactSchedulerConnector(
+                vllm_config,
+                kv_cache_config,
+                kv_connector=self.connector,
+                block_size=self.block_size,
+            )
             if vllm_config.artifact_config.enabled
             else None
         )
@@ -1852,15 +1857,15 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    if self.artifact_connector is not None and finish_reason not in (
-                        FinishReason.ABORT,
-                        FinishReason.ERROR,
-                    ):
-                        self.artifact_connector.request_finished(
-                            request=request,
-                            token_end=request.num_tokens - 1,
-                            hash_block_size=self.hash_block_size,
-                        )
+                    if self.artifact_connector is not None:
+                        if finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
+                            self.artifact_connector.request_aborted(request.request_id)
+                        else:
+                            self.artifact_connector.request_finished(
+                                request=request,
+                                token_end=request.num_tokens - 1,
+                                hash_block_size=self.hash_block_size,
+                            )
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
@@ -2197,9 +2202,7 @@ class Scheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
-        self,
-        request_ids: str | Iterable[str] | None,
-        finished_status: RequestStatus,
+        self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[Request]:
         """Handles the finish signal from outside the scheduler.
 
@@ -2257,20 +2260,18 @@ class Scheduler(SchedulerInterface):
                 self.failed_recving_kv_req_ids.discard(request.request_id)
 
             request.status = finished_status
+            if self.artifact_connector is not None:
+                self.artifact_connector.request_aborted(request.request_id)
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         return valid_requests
 
     def _free_request(
-        self,
-        request: Request,
-        delay_free_blocks: bool = False,
+        self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
-        if self.artifact_connector is not None:
-            self.artifact_connector.request_aborted(request.request_id)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing
@@ -2426,7 +2427,7 @@ class Scheduler(SchedulerInterface):
             )
 
         if reset_successful and self.artifact_connector is not None:
-            self.artifact_connector.advance_kv_cache_generation()
+            self.artifact_connector.reset()
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful

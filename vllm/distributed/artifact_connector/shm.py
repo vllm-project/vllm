@@ -13,6 +13,7 @@ import stat
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
 
@@ -105,6 +106,7 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
         self.ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
         self._used_bytes = 0
+        self._lru: OrderedDict[str, int] = OrderedDict()
 
         root_path = Path(root)
         self._prepare_directory(root_path)
@@ -113,7 +115,7 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
         try:
             self._prepare_directory(self.objects_dir)
             self._cleanup_orphan_partials()
-            self._used_bytes = self._usage_bytes()
+            self._load_lru()
         except Exception:
             self.close()
             raise
@@ -241,19 +243,43 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
                     exc_info=True,
                 )
 
-    def _usage_bytes(self) -> int:
-        return sum(
-            path.stat(follow_symlinks=False).st_size
-            for path in self.objects_dir.glob("*.bin")
-        )
+    def _load_lru(self) -> None:
+        entries: list[tuple[int, str, int]] = []
+        for path in self.objects_dir.glob("*.bin"):
+            path_stat = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.getuid():
+                raise ArtifactCorruptionError(f"unsafe artifact file: {path}")
+            entries.append((path_stat.st_mtime_ns, path.stem, path_stat.st_size))
+        entries.sort()
+        self._lru = OrderedDict((object_id, size) for _, object_id, size in entries)
+        self._used_bytes = sum(self._lru.values())
 
-    def _reserve(self, additional_bytes: int) -> None:
-        if self._used_bytes + additional_bytes > self.max_bytes:
+    def _touch(self, object_id: str) -> None:
+        if object_id in self._lru:
+            self._lru.move_to_end(object_id)
+
+    def _evict_to_fit(
+        self,
+        additional_bytes: int,
+        protected: set[str],
+    ) -> None:
+        protected_bytes = sum(
+            size for object_id, size in self._lru.items() if object_id in protected
+        )
+        if protected_bytes + additional_bytes > self.max_bytes:
             raise ArtifactCapacityError(
-                "artifact SHM capacity exceeded: "
-                f"used={self._used_bytes}, requested={additional_bytes}, "
+                "artifact SHM cannot retain the requested batch: "
+                f"retained={protected_bytes}, requested={additional_bytes}, "
                 f"limit={self.max_bytes}"
             )
+
+        while self._used_bytes + additional_bytes > self.max_bytes:
+            victim = next(
+                object_id for object_id in self._lru if object_id not in protected
+            )
+            size = self._lru.pop(victim)
+            (self.objects_dir / f"{victim}.bin").unlink(missing_ok=True)
+            self._used_bytes -= size
 
     @staticmethod
     def _write_immutable(path: Path, payload: bytes) -> bool:
@@ -293,17 +319,46 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
 
     def _put_one(self, obj: ArtifactObject) -> None:
         path = self._path(obj.key)
+        object_id = self._object_id(obj.key)
         if path.exists():
+            self._touch(object_id)
             return
-        self._reserve(len(obj.payload))
         created = self._write_immutable(path, obj.payload)
         if created:
             self._used_bytes += len(obj.payload)
+            self._lru[object_id] = len(obj.payload)
 
     def put(self, objects: list[ArtifactObject]) -> None:
+        if not objects:
+            return
         with self._lock:
+            unique: dict[str, ArtifactObject] = {}
             for obj in objects:
+                unique.setdefault(self._object_id(obj.key), obj)
+            protected = set(unique)
+            additional_bytes = sum(
+                len(obj.payload)
+                for object_id, obj in unique.items()
+                if object_id not in self._lru
+            )
+            self._evict_to_fit(additional_bytes, protected)
+            for obj in unique.values():
                 self._put_one(obj)
+
+    def get(self, keys: list[str]) -> list[bytes]:
+        with self._lock:
+            try:
+                payloads = super().get(keys)
+            except ArtifactNotFoundError as error:
+                raise ArtifactNotFoundError(
+                    f"{error}; the object may have been evicted from SHM "
+                    f"(used={self._used_bytes}, limit={self.max_bytes}). "
+                    "Increase artifact_config.max_shm_bytes when a KV cache hit "
+                    "requires it."
+                ) from error
+            for key in keys:
+                self._touch(self._object_id(key))
+            return payloads
 
     def _cleanup_orphan_partials(self) -> None:
         # The exclusive writer lock proves no partial file is still active.

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,7 +32,9 @@ from vllm.v1.core.kv_cache_utils import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
@@ -40,33 +43,63 @@ class _RequestState:
     next_full_end: int
     emit_cursor: int
     artifact_namespace: str
+    private_block_hashes: list[bytes]
 
 
 class ArtifactSchedulerConnector:
     """Persist worker-captured R3 under logical KV-cache block hashes."""
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        *,
+        kv_connector: KVConnectorBase_V1 | None,
+        block_size: int,
+    ) -> None:
         config = vllm_config.artifact_config
         parallel_config = vllm_config.parallel_config
+        shape_per_token, dtype = get_routing_shape_and_dtype(vllm_config)
+        self._shape_per_token = shape_per_token
+        self._dtype: np.dtype[Any] = np.dtype(dtype)
+
+        num_cpu_blocks = getattr(
+            getattr(kv_connector, "scheduler_manager", None),
+            "num_cpu_blocks",
+            0,
+        )
+        num_kv_blocks = max(kv_cache_config.num_blocks, num_cpu_blocks)
+        block_nbytes = block_size * int(np.prod(shape_per_token)) * self._dtype.itemsize
+        minimum_shm_bytes = num_kv_blocks * block_nbytes
+        max_shm_bytes = config.max_shm_bytes
+        if max_shm_bytes is None:
+            max_shm_bytes = minimum_shm_bytes
+        elif max_shm_bytes < minimum_shm_bytes:
+            raise ValueError(
+                "artifact_config.max_shm_bytes is smaller than required by the "
+                "KV cache capacity: "
+                f"configured={max_shm_bytes}, minimum={minimum_shm_bytes}, "
+                f"gpu_blocks={kv_cache_config.num_blocks}, "
+                f"cpu_blocks={num_cpu_blocks}, "
+                f"r3_bytes_per_block={block_nbytes}"
+            )
         self._store = BackgroundArtifactStore(
             LocalSharedMemoryArtifactStore(
                 config.shm_dir,
                 vllm_config.instance_id,
                 parallel_config.data_parallel_rank,
-                max_bytes=config.max_shm_bytes,
+                max_bytes=max_shm_bytes,
                 ttl_seconds=config.shm_ttl_seconds,
             ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        shape_per_token, dtype = get_routing_shape_and_dtype(vllm_config)
-        self._shape_per_token = shape_per_token
-        self._dtype: np.dtype[Any] = np.dtype(dtype)
         self._buffer = RoutedExpertsArtifactBuffer(self._dtype, shape_per_token)
         self._request_core = RoutedExpertsRequestCore(self._store, self._buffer)
         self._states: dict[str, _RequestState] = {}
         self._resume_emit_cursors: dict[str, int] = {}
         self._session_id = random_uuid()
         self._kv_cache_generation = 0
+        self._reuse_kv_hashes = vllm_config.cache_config.enable_prefix_caching
         self._hash_fn = get_hash_fn_by_name(
             vllm_config.cache_config.prefix_caching_hash_algo
         )
@@ -122,7 +155,26 @@ class ArtifactSchedulerConnector:
             next_full_end=cached_token_end,
             emit_cursor=emit_cursor,
             artifact_namespace=self._artifact_namespace,
+            private_block_hashes=[],
         )
+
+    def _block_hashes(
+        self,
+        state: _RequestState,
+        request: Request,
+        block_end: int,
+    ) -> list[bytes]:
+        if self._reuse_kv_hashes:
+            block_hashes = request.block_hashes[:block_end]
+            if len(block_hashes) != block_end:
+                raise RuntimeError(
+                    "missing KV-compatible hashes for completed artifact blocks"
+                )
+            return list(block_hashes)
+
+        while len(state.private_block_hashes) < block_end:
+            state.private_block_hashes.append(os.urandom(32))
+        return state.private_block_hashes[:block_end]
 
     def capture_step(
         self,
@@ -180,11 +232,7 @@ class ArtifactSchedulerConnector:
             return
         first_block = state.next_full_end // hash_block_size
         last_block = full_end // hash_block_size
-        block_hashes = list(request.block_hashes[first_block:last_block])
-        if len(block_hashes) != last_block - first_block:
-            raise RuntimeError(
-                "missing KV-compatible hashes for completed artifact blocks"
-            )
+        block_hashes = self._block_hashes(state, request, last_block)[first_block:]
         self._request_core.commit(
             [
                 ArtifactCommit(
@@ -216,11 +264,7 @@ class ArtifactSchedulerConnector:
         if token_start < stored_end:
             first_block = token_start // hash_block_size
             last_block = stored_end // hash_block_size
-            block_hashes = list(request.block_hashes[first_block:last_block])
-            if len(block_hashes) != last_block - first_block:
-                raise RuntimeError(
-                    "missing KV-compatible hashes for inline artifact output"
-                )
+            block_hashes = self._block_hashes(state, request, last_block)[first_block:]
             object_start = first_block * hash_block_size
             stored = materialize_routed_experts(
                 self._store,
@@ -263,28 +307,38 @@ class ArtifactSchedulerConnector:
                 raise RuntimeError(
                     "artifact token boundary exceeds the request token count"
                 )
-            parent_hash = (
-                request.block_hashes[full_end // hash_block_size - 1]
-                if full_end
-                else None
-            )
-            extra_keys, _ = generate_block_hash_extra_keys(
-                request,
-                full_end,
-                token_end,
-                -1 if full_end else 0,
-            )
-            tail_block_hash = hash_block_tokens(
-                self._hash_fn,
-                parent_hash,
-                request.all_token_ids[full_end:token_end],
-                extra_keys,
-            )
+            if self._reuse_kv_hashes:
+                block_hashes = self._block_hashes(
+                    state,
+                    request,
+                    full_end // hash_block_size,
+                )
+                parent_hash = block_hashes[-1] if block_hashes else None
+                extra_keys, _ = generate_block_hash_extra_keys(
+                    request,
+                    full_end,
+                    token_end,
+                    -1 if full_end else 0,
+                )
+                tail_block_hash = hash_block_tokens(
+                    self._hash_fn,
+                    parent_hash,
+                    request.all_token_ids[full_end:token_end],
+                    extra_keys,
+                )
+            else:
+                tail_block_hash = os.urandom(32)
+
+        block_hashes = self._block_hashes(
+            state,
+            request,
+            full_end // hash_block_size,
+        )
 
         finalize = ArtifactFinalize(
             request_id=request.request_id,
             artifact_namespace=state.artifact_namespace,
-            block_hashes=list(request.block_hashes),
+            block_hashes=block_hashes,
             tail_block_hash=tail_block_hash,
             token_end=token_end,
             hash_block_size=hash_block_size,
@@ -302,8 +356,8 @@ class ArtifactSchedulerConnector:
     def _artifact_namespace(self) -> str:
         return f"{self._session_id}:{self._kv_cache_generation}"
 
-    def advance_kv_cache_generation(self) -> None:
-        """Start a new namespace after a successful KV cache reset."""
+    def reset(self) -> None:
+        """Reset artifact state after a successful KV cache reset."""
         for request_id, state in self._states.items():
             self._resume_emit_cursors[request_id] = state.emit_cursor
             self._buffer.discard(request_id)

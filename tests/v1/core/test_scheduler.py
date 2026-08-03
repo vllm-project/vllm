@@ -118,6 +118,7 @@ def test_add_requests():
 
 def test_finish_request():
     scheduler = create_scheduler()
+    scheduler.artifact_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -126,6 +127,9 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+        scheduler.artifact_connector.request_aborted.assert_called_with(
+            request.request_id
+        )
 
 
 def test_get_num_unfinished_requests():
@@ -1241,12 +1245,12 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
-    scheduler.artifact_connector.advance_kv_cache_generation.assert_not_called()
+    scheduler.artifact_connector.reset.assert_not_called()
 
     # Reset prefix cache with reset_running_requests=True. All running requests
     # Should be pushed back to the waiting queue and kv cache should be freed
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
-    scheduler.artifact_connector.advance_kv_cache_generation.assert_called_once_with()
+    scheduler.artifact_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)

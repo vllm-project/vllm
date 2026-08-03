@@ -32,7 +32,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self._routed_experts = routed_experts
+        self.routed_experts = routed_experts
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -50,7 +50,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self._routed_experts_cpu = (
+            self.routed_experts_cpu = (
                 routed_experts.to("cpu", non_blocking=True)
                 if routed_experts is not None
                 else None
@@ -85,8 +85,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self._routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self._routed_experts_cpu.numpy()
+        if self.routed_experts_cpu is not None:
+            self.model_runner_output.routed_experts = self.routed_experts_cpu.numpy()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
