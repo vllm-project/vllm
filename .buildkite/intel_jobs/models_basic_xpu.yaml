@@ -110,13 +110,15 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s models/kimi_k3
+  - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
   source_file_dependencies:
   - vllm/models/kimi_k3/
   - csrc/libtorch_stable/kimi_k3/
   - tests/models/kimi_k3/
+  - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - tests/kernels/test_bf16_skinny_gemm.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/kimi_k3 || true'
+    pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py || true'
