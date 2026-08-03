@@ -52,9 +52,7 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
             ),
         )
     )
-    coordinator = ExternalElasticEPScaleCoordinator(
-        cast("DPAsyncMPClient", client)
-    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
 
     assert coordinator._calculate_num_redundant_experts(2, 3) == 64
 
@@ -335,9 +333,7 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
         for server, _ in server_manager.servers:
             parallel_config = _get_parallel_config(server)
             assert parallel_config["data_parallel_size"] == 3
-            assert (
-                parallel_config["eplb_config"]["num_redundant_experts"] == 32
-            )
+            assert parallel_config["eplb_config"]["num_redundant_experts"] == 32
             with server.get_client() as client:
                 completion = client.completions.create(
                     model=ELASTIC_EP_MODEL_NAME,
