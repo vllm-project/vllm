@@ -72,10 +72,33 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
         "LongcatFlashNgramForCausalLM",
         "Qwen2MoeForCausalLM",
     }
 )
+
+# Architectures that default to V1 on ROCm: the V2 runner faults during the
+# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
+# TODO: fix V2 enablement
+ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "KimiK3ForConditionalGeneration",
+    }
+)
+
+
+@lru_cache
+def default_v2_model_runner_architectures() -> frozenset[str]:
+    """Architectures defaulting to the V2 model runner on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return (
+            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
+            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
+        )
+    return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
 class OptimizationLevel(IntEnum):
@@ -619,16 +642,20 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        if getattr(model_config, "is_hybrid", False):
+        architectures = getattr(model_config, "architectures", [])
+        default_architectures = default_v2_model_runner_architectures()
+        is_default_v2_architecture = any(
+            arch in default_architectures for arch in architectures
+        )
+
+        if getattr(model_config, "is_hybrid", False) and (
+            not is_default_v2_architecture
+        ):
             return False
 
         if getattr(model_config, "is_attention_free", False):
             return False
-        architectures = getattr(model_config, "architectures", [])
-        return (
-            any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
-            or not model_config.is_moe
-        )
+        return is_default_v2_architecture or not model_config.is_moe
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1115,11 +1142,6 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
-        logger.info_once(
-            "Asynchronous scheduling is %s.",
-            "enabled" if self.scheduler_config.async_scheduling else "disabled",
-        )
-
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
@@ -1169,7 +1191,7 @@ class VllmConfig:
             )
 
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning(
+            logger.warning_once(
                 "Enforce eager set, disabling torch.compile and CUDAGraphs. "
                 "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
             )
@@ -1177,7 +1199,7 @@ class VllmConfig:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
-            logger.warning(
+            logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
                 "This is equivalent to setting -cc.mode=none"
             )
@@ -1196,6 +1218,9 @@ class VllmConfig:
                     "DeepSeekV4MTPModel",
                     "InklingForCausalLM",
                     "InklingForConditionalGeneration",
+                    "KimiK3ForConditionalGeneration",
+                    "KimiK3MTPModel",
+                    "KimiLinearForCausalLM",
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
                 )
@@ -1219,7 +1244,7 @@ class VllmConfig:
             self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
-            logger.warning(
+            logger.warning_once(
                 "Inductor compilation was disabled by user settings, "
                 "optimizations settings that are only active during "
                 "inductor compilation will be ignored."
@@ -1287,7 +1312,7 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
             and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         ):
-            logger.info(
+            logger.info_once(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
                 "Overriding to NONE.",
                 self.compilation_config.cudagraph_mode,
@@ -1301,7 +1326,7 @@ class VllmConfig:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
-                logger.warning("Sequence Parallelism requires TP>1, disabling")
+                logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
                 pass_config.fuse_gemm_comms = False
             else:
@@ -1319,7 +1344,7 @@ class VllmConfig:
                     )
 
                 if pass_config.sp_min_token_num is None:
-                    logger.warning(
+                    logger.warning_once(
                         "Model hidden_size too small for the SP "
                         "threshold heuristic, disabling. To force SP, "
                         "set pass_config.sp_min_token_num manually."
@@ -1398,7 +1423,7 @@ class VllmConfig:
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
-                logger.info("Cudagraph is disabled under eager mode")
+                logger.info_once("Cudagraph is disabled under eager mode")
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
@@ -1433,7 +1458,7 @@ class VllmConfig:
             and self.model_config.architecture == "WhisperForConditionalGeneration"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):
-            logger.warning(
+            logger.warning_once(
                 "Whisper is known to have issues with "
                 "forked workers. If startup is hanging, "
                 "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
@@ -1445,7 +1470,7 @@ class VllmConfig:
             and self.kv_events_config.enable_kv_cache_events
             and not self.cache_config.enable_prefix_caching
         ):
-            logger.warning(
+            logger.warning_once(
                 "KV cache events are on, but prefix caching is not enabled. "
                 "Use --enable-prefix-caching to enable."
             )
@@ -1454,7 +1479,7 @@ class VllmConfig:
             and self.kv_events_config.publisher != "null"
             and not self.kv_events_config.enable_kv_cache_events
         ):
-            logger.warning(
+            logger.warning_once(
                 "KV cache events are disabled, "
                 "but the scheduler is configured to publish them. "
                 "Modify KVEventsConfig.enable_kv_cache_events "
@@ -1492,7 +1517,7 @@ class VllmConfig:
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
             if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning(
+                logger.warning_once(
                     "Sequence parallelism is enabled, but running in wrong "
                     "vllm compile mode: %s.",
                     self.compilation_config.mode,
@@ -2273,14 +2298,6 @@ class VllmConfig:
 
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
-            assert block_size <= self.scheduler_config.max_num_batched_tokens, (
-                "In Mamba cache align mode, block_size "
-                f"({block_size}) must be <= "
-                "max_num_batched_tokens "
-                f"({self.scheduler_config.max_num_batched_tokens})."
-            )
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                assert self.scheduler_config.long_prefill_token_threshold >= block_size
             assert not self.scheduler_config.disable_chunked_mm_input, (
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "

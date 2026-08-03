@@ -467,18 +467,21 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
 FROM build_rocshmem AS build_deepep
-ARG DEEPEP_BRANCH="a9ea9774"
+ARG DEEPEP_BRANCH="0f63d3e9"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
 
 # Build DeepEP wheel. DeepEP looks for rocshmem at ROCSHMEM_DIR.
 # DeepEP only supports gfx942 and gfx950, so avoid gfx90a in the default list.
+# We pass --rocm-gfx942-fp8-fnuz-max 224 to align the DeepEP dispatch FP8
+# quantization bound with vLLM's own clamp
+# (vllm/model_executor/layers/quantization/utils/fp8_utils.py): 224 for E4M3FNUZ
 RUN --mount=type=cache,target=/root/.cache/ccache \
     export PYTORCH_ROCM_ARCH="gfx942;gfx950" \
  && git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+ && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} --rocm-gfx942-fp8-fnuz-max 224 bdist_wheel --dist-dir=/app/deep_install
 
 # MoRI runtime dependencies live in Dockerfile.rocm so NIC backend changes do
 # not force users to rebuild the long-lived Dockerfile.rocm_base image.

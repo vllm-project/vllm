@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -79,7 +79,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
-    select_main_impl_cls,
+    select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -244,7 +244,7 @@ class MiniMaxM3MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -505,15 +505,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # the attend impl reads them back (so nothing crosses the eager break as a
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
-        self.attn_backend = MiniMaxM3SparseBackend
         # Indexer (top-k selection) and main attention are separate impls, each
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
-        self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
+        self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
-        )(
+        )
+        self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -521,6 +521,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
+            msa_decode_backend=(
+                vllm_config.attention_config.minimax_m3_msa_decode_backend
+            ),
         )
         # Self-contained nn.Module: owns its side cache, selects its impl in init.
         self.indexer = MiniMaxM3Indexer(
@@ -594,6 +597,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
+        use_msa_decode = self.impl.should_use_msa_decode(self.layer_name)
+        query_fp8 = (
+            torch.empty(
+                (num_tokens, self.q_size),
+                dtype=torch.float8_e4m3fn,
+                device=qkv.device,
+            )
+            if use_msa_decode
+            else None
+        )
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.
         index_q = qkv.new_empty(
@@ -621,10 +634,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             q,
             index_q,
             self.kv_cache_dtype,
+            q_fp8_out=query_fp8,
+            q_fp8_scale=self._q_scale_float,
         )
 
         output = torch.empty_like(q)
-        attn_output = self._run_attention(q, index_q, output)
+        attn_output = self._run_attention(q, query_fp8, index_q, output)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -632,6 +647,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _run_attention(
         self,
         query: torch.Tensor,
+        query_fp8: torch.Tensor | None,
         index_query: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
@@ -639,7 +655,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # metadata and can't be captured into a cudagraph. The indexer writes its
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
         self.indexer(index_query)
-        return self.impl.forward(self, query, self.kv_cache, output)
+        return self.impl.forward(
+            self,
+            query,
+            self.kv_cache,
+            output,
+            query_fp8=query_fp8,
+        )
 
 
 class MiniMaxM3DecoderLayer(nn.Module):

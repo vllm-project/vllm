@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -164,7 +164,11 @@ def rocm_unquantized_gemm_impl(
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
+    # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
+    # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
+    # partial last tile). Some whitelisted shapes have K=2880 (e.g. gpt-oss-120b
+    # hidden), so skip aiter there and fall back to the torch GEMM path below.
+    if use_aiter_triton_gemm(n, m, k, x.dtype) and not (on_gfx1250() and k % 256 != 0):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -172,6 +176,8 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
+        # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
+        # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )
@@ -219,7 +225,7 @@ direct_register_custom_op(
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
         torch.cpu._is_amx_tile_supported()
-        and (dtype in (torch.bfloat16, torch.int8))
+        and (dtype in (torch.bfloat16, torch.float16, torch.int8))
         and k % 32 == 0
         and n % 16 == 0
     )
@@ -257,9 +263,6 @@ def dispatch_cpu_unquantized_gemm(
             layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
         return
 
-    N, K = layer.weight.size()
-    dtype = layer.weight.dtype
-
     # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
     if current_platform.is_zen_cpu() and hasattr(
         torch.ops.zentorch, "zentorch_linear_unary"
@@ -288,22 +291,7 @@ def dispatch_cpu_unquantized_gemm(
         )
         return
 
-    if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
-        packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
-        if getattr(layer, "bias", None) is not None:
-            bias_f32 = layer.bias.to(torch.float32)
-        else:
-            bias_f32 = None
-        layer.cpu_linear = lambda x, weight, bias: torch.ops._C.weight_packed_linear(
-            x, packed_weight, bias_f32 if bias is not None else None, True
-        )
-        if remove_weight:
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        logger.debug_once(
-            "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
-        )
-        return
-    elif (
+    if (
         ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
     ):

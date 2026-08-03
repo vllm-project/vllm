@@ -36,11 +36,12 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_page_sizes_ptr,
@@ -206,6 +207,11 @@ class KVBlockZeroer:
             BLOCK_SIZE=blk_size,
         )
 
+    def warmup(self, num_kv_blocks: int) -> None:
+        """JIT-compile the zeroing kernel before the first real request."""
+        if num_kv_blocks > 0:
+            self.zero_block_ids([0])
+
 
 @dataclass
 class AttentionGroup:
@@ -232,12 +238,22 @@ class AttentionGroup:
             if kernel_block_size is not None
             else self.kv_cache_spec
         )
+        builder_cls = self.backend.get_builder_cls()
+        builder_kwargs = {}
+        if builder_cls.requires_block_table_width:
+            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+                vllm_config, vllm_config.model_config.max_model_len
+            )
+            builder_kwargs["block_table_width"] = get_block_table_width(
+                max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
+            )
         self.metadata_builders = [
-            self.backend.get_builder_cls()(
+            builder_cls(
                 kv_cache_spec_builder,
                 self.layer_names,
                 vllm_config,
                 device,
+                **builder_kwargs,
             )
             for _ in range(num_metadata_builders)
         ]

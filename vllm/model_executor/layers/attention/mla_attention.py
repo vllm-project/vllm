@@ -272,6 +272,7 @@ from vllm.v1.attention.backends.mla.prefill import (
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
@@ -375,6 +376,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_sparse: bool = False,
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        non_causal_multi_token_decode: bool = False,
         **extra_impl_args,
     ):
         super().__init__()
@@ -391,6 +393,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
+        self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -769,11 +772,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if self.impl.is_sparse and num_mha_tokens > 0:
+            prefill = getattr(attn_metadata, "prefill", None)
+            use_dense_mha = getattr(prefill, "use_dense_mha", False)
             prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_mha = (
+            use_masked_mha = (
                 self.prefill_backend is not None
-                and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-                and not self._vllm_config.attention_config.sparse_mla_force_mqa
+                and self.impl.masked_mha_available  # type: ignore[attr-defined]
+                and self.impl.dcp_world_size <= 1
+                and prefill is not None
+                and _use_masked_mha(
+                    backend_name=self.attn_backend.get_name(),
+                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
+                    query_len=prefill.max_query_len,
+                    seq_len=prefill_max_seq_len,
+                )
+            )
+            use_mha = (use_dense_mha or use_masked_mha) and not (
+                self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:
                 num_mqa_tokens = q.size(0)
@@ -783,6 +798,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is None
@@ -1128,6 +1148,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
@@ -1388,6 +1409,7 @@ class MLACommonPrefillMetadata:
         seq_tot: list[int]
         max_seq_lens: list[int]
         seq_lens: torch.Tensor
+        context_lens: torch.Tensor
         workspace: torch.Tensor
         token_to_seq: torch.Tensor
         chunk_total_token: list[int]
@@ -1409,6 +1431,9 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
+    query_lens_cpu: torch.Tensor | None = None
+    use_dense_mha: bool = False
+    topk_mask_workspace: torch.Tensor | None = None
 
 
 @dataclass
@@ -1450,6 +1475,8 @@ class MLACommonMetadata(AttentionMetadata, Generic[D]):
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
+
+    causal: bool = True
 
     # The dimension of the attention heads
     head_dim: int | None = None
@@ -1501,6 +1528,39 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
         qk_rope_head_dim=hf_text_config.qk_rope_head_dim,
         v_head_dim=hf_text_config.v_head_dim,
     )
+
+
+_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
+    "FLASHMLA_SPARSE": {
+        1: (1536, 4096, None, None, None),
+        2: (512, 1024, 4096, None, None),
+        4: (512, 1024, 1536, 8192, None),
+        8: (512, 512, 1024, 2048, 16384),
+    },
+    "FLASHINFER_MLA_SPARSE": {
+        8: (512, 1024, 1024, 2048, 32768),
+    },
+}
+_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
+
+
+def _use_masked_mha(
+    *,
+    backend_name: str,
+    tensor_parallel_size: int,
+    query_len: int,
+    seq_len: int,
+) -> bool:
+    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
+        tensor_parallel_size
+    )
+    if thresholds is None:
+        return False
+    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
+        if seq_len <= bucket_seq_len:
+            min_query_len = thresholds[bucket_idx]
+            return min_query_len is not None and query_len >= min_query_len
+    return False
 
 
 @functools.cache
@@ -1677,6 +1737,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
@@ -1700,6 +1761,7 @@ def build_mla_chunked_context_metadata(
             seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
             seq_lens=chunk_seq_lens,
+            context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
             chunk_total_token=chunk_total_token,
             workspace=chunked_prefill_workspace,
@@ -1717,6 +1779,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     understand this class
     """
 
+    kv_cache_spec: AttentionSpec
+
     # Defines the level of query length support for this backend.
     # - SINGLE_ONLY: Only single-token queries (no spec decode support)
     # - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
@@ -1724,6 +1788,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # If set to UNIFORM or VARLEN, this will increase `reorder_batch_threshold` when
     # speculative decoding is enabled.
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
+
+    # Whether this builder can flatten a non-causal query block into decode rows.
+    supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
@@ -1825,8 +1892,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.non_causal_multi_token_decode = getattr(
+            kv_cache_spec, "non_causal_multi_token_decode", False
+        )
 
-        self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
+        # A draft cache group can have a different head count from the target.
+        self.num_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.aot_schedule = current_platform.is_cuda()
 
@@ -1952,14 +2025,42 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         seq_lens = common_attn_metadata.seq_lens
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
-                require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
-                treat_short_extends_as_decodes=not self.use_pcp,
+        non_causal_decode = common_attn_metadata.causal is False
+        if non_causal_decode:
+            if not (
+                self.supports_non_causal_multi_token_decode
+                and self.non_causal_multi_token_decode
+            ):
+                raise ValueError(
+                    "Non-causal multi-token MLA requires an explicitly supported "
+                    "attention group."
+                )
+            query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+            num_active_reqs = int(torch.count_nonzero(query_lens > 0))
+            uniform_active_queries = num_active_reqs > 0 and bool(
+                torch.all(query_lens[:num_active_reqs] == query_lens[0])
             )
-        )
+            trailing_graph_padding = bool(torch.all(query_lens[num_active_reqs:] == 0))
+            if not (uniform_active_queries and trailing_graph_padding):
+                raise ValueError(
+                    "Non-causal MLA requires a uniform query block; got query "
+                    f"lengths {query_lens.tolist()}."
+                )
+            # Use exact GPU sequence lengths instead of the prefill path's CPU
+            # context-length upper bounds.
+            num_decodes = num_reqs
+            num_prefills = 0
+            num_decode_tokens = num_tokens
+            num_prefill_tokens = 0
+        else:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.reorder_batch_threshold,
+                    require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
+                    treat_short_extends_as_decodes=not self.use_pcp,
+                )
+            )
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
@@ -2050,6 +2151,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            causal=not non_causal_decode,
             prefill=prefill_metadata,
             decode=decode_metadata,
         )

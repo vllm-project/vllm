@@ -442,6 +442,7 @@ def rocm_fp8_paged_mqa_logits(
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
+            out_logits.nan_to_num_(float("-inf"))
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
