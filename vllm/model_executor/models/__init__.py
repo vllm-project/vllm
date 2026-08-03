@@ -12,6 +12,7 @@ from .interfaces import (
     supports_lora,
     supports_mrope,
     supports_multimodal,
+    supports_multimodal_embeddings,
     supports_pp,
     supports_transcription,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "supports_lora",
     "SupportsMultiModal",
     "supports_multimodal",
+    "supports_multimodal_embeddings",
     "SupportsMRoPE",
     "supports_mrope",
     "SupportsPP",

@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -56,14 +57,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if not self.supports_mm_inputs:
             return
 
-        try:
-            dummy_input_ids = torch.tensor([[1]], device=self.device)
-            self.model.embed_input_ids(
-                dummy_input_ids,
-                multimodal_embeddings=None,
-                is_multimodal=None,
-            )
-        except (NotImplementedError, AttributeError, TypeError):
+        if not supports_multimodal_embeddings(self.model):
             logger.warning(
                 "Draft model does not support multimodal inputs, "
                 "falling back to text-only mode"

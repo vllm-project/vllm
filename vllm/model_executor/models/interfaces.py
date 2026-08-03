@@ -122,6 +122,9 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
+    """A flag indicating this model can merge external multimodal embeddings."""
+
     supports_multimodal_raw_input_only: ClassVar[bool] = False
     """
     A flag that indicates this model supports multi-modal inputs and processes
@@ -486,6 +489,10 @@ def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
     return getattr(model, "supports_multimodal", False)
+
+
+def supports_multimodal_embeddings(model: type[object] | object) -> bool:
+    return getattr(model, "supports_multimodal_embeddings", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
