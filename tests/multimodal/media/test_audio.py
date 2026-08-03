@@ -85,6 +85,62 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
 
 
+@pytest.fixture(params=[False, True], ids=["with-metadata", "cueless"])
+def dummy_webm_bytes(request):
+    from io import BytesIO
+
+    import av
+
+    rate = 48000
+    total = rate  # 1 second
+    t = np.arange(total, dtype=np.float32) / rate
+    pcm = (0.3 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
+
+    options = {"live": "1"} if request.param else None
+    buf = BytesIO()
+    with av.open(buf, "w", format="webm", options=options) as container:
+        stream = container.add_stream("libopus", rate=rate)
+        stream.layout = "mono"
+        frame_size = stream.codec_context.frame_size or 960
+        for offset in range(0, total, frame_size):
+            chunk = pcm[offset : offset + frame_size]
+            frame = av.AudioFrame.from_ndarray(
+                chunk.reshape(1, -1), format="flt", layout="mono"
+            )
+            frame.sample_rate = rate
+            frame.pts = offset
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buf.getvalue()
+
+
+def test_load_audio_pyav_fallback_within_duration(dummy_webm_bytes):
+    """A WebM under the duration limit should load via the PyAV fallback."""
+    from io import BytesIO
+
+    y, sr = load_audio(BytesIO(dummy_webm_bytes), sr=None, max_duration_s=3600)
+    assert isinstance(y, np.ndarray)
+    assert len(y) > 0
+
+
+def test_load_audio_pyav_fallback_max_duration_rejected(dummy_webm_bytes):
+    """The duration guard's message must survive the PyAV fallback."""
+    from io import BytesIO
+
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio(BytesIO(dummy_webm_bytes), sr=None, max_duration_s=0.25)
+
+
+def test_load_audio_invalid_bytes_rejected():
+    """Undecodable bytes keep the generic invalid-file error."""
+    from io import BytesIO
+
+    with pytest.raises(ValueError, match="Invalid or unsupported audio file"):
+        load_audio(BytesIO(b"\x00\x01not-audio"), sr=None, max_duration_s=3600)
+
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
