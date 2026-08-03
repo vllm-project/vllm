@@ -1257,24 +1257,32 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
-def test_uniform_type_spec_block_table_width_is_dcp_sharded():
-    # The runner sizes the block table from the group spec, the metadata
-    # builders from the per-layer spec; under DCP the two must agree.
+@pytest.mark.parametrize(
+    "layer_type,dcp_size,expected_width",
+    [
+        ("mla", 1, 64),
+        ("mla", 2, 32),
+        # Mamba state is replicated, not DCP-sharded, and its width is the
+        # resident state block count rather than cdiv(max_len, block_size).
+        ("mamba", 2, 3),
+    ],
+)
+def test_uniform_type_spec_block_table_width_matches_layer_spec(
+    layer_type, dcp_size, expected_width
+):
+    # The runner sizes the block table from the group spec while the metadata
+    # builders are constructed from the per-layer spec, so the aggregate must
+    # report the same width as the layers it wraps.
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
-    vllm_config.parallel_config.decode_context_parallel_size = 2
-    layer_spec = MLAAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.bfloat16,
-    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    layer_spec = new_mla_spec() if layer_type == "mla" else new_mamba_spec()
     uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=16,
+        block_size=layer_spec.block_size,
         kv_cache_specs={"layer1": layer_spec, "layer2": layer_spec},
     )
 
-    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == 32
-    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == 32
+    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
 
 
 def test_merge_kv_cache_spec():
