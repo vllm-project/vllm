@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from abc import abstractmethod
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -116,7 +115,6 @@ class SupportsMultiModalEmbeddings(Protocol):
 
     supports_multimodal_embeddings: ClassVar[Literal[True]] = True
 
-    @abstractmethod
     def embed_input_ids(
         self,
         input_ids: Tensor,
