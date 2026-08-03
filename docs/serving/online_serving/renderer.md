@@ -21,6 +21,11 @@ inline history is supported, but `previous_response_id` is not. Callers must
 resolve stored response state and include the resulting history in the request
 before rendering.
 
+For multimodal requests, the `GenerateRequest` contains the model-processed
+multimodal payload, which can be substantially larger than the source image or
+video. The caller must forward that payload unchanged to the generation service
+and provision transport limits and memory accordingly.
+
 ```bash
 curl http://localhost:8000/v1/responses/render \
     -H "Content-Type: application/json" \

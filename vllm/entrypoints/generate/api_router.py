@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
@@ -60,9 +60,11 @@ async def init_generate_state(
     args: "Namespace",
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
+    default_chat_template_kwargs: dict[str, Any],
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
     from vllm.entrypoints.chat_utils import load_chat_template
+
     # The Cohere serving handler depends on the optional `cohere` SDK for
     # its wire-format protocol models, and is additionally gated on the
     # `VLLM_ENABLE_COHERE_API` env flag (see
@@ -94,19 +96,6 @@ async def init_generate_state(
     )
 
     resolved_chat_template = load_chat_template(args.chat_template)
-
-    # Fold the dedicated ``--cohere-format`` CLI flag into the renderer's
-    # default chat-template kwargs. The cohere renderer reads
-    # ``chat_template_kwargs["cohere_format"]`` to pick cmd3 vs cmd4
-    # rendering; making this a first-class flag keeps the right format
-    # discoverable for ``vllm serve --tokenizer-mode cohere`` users
-    # without forcing them to hand-construct a JSON dict for
-    # ``--default-chat-template-kwargs``. Per-request overrides still
-    # take precedence (see ``merge_kwargs`` in
-    # ``ChatCompletionRequest.build_chat_params``).
-    default_chat_template_kwargs = dict(args.default_chat_template_kwargs or {})
-    if getattr(args, "cohere_format", None):
-        default_chat_template_kwargs.setdefault("cohere_format", args.cohere_format)
 
     # Render endpoints are always backed by OnlineRenderer so that chat,
     # completion, and Responses rendering work on both generate-mode and

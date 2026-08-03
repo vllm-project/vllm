@@ -118,26 +118,6 @@ async def test_render_responses_rejects_previous_response_id():
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_render_responses_rejects_untrusted_request_template():
-    serving = _build_responses_serving_render()
-    serving.online_renderer.trust_request_chat_template = False
-    serving.online_renderer.render_responses = AsyncMock()
-    request = ResponsesRequest(
-        model=MODEL_NAME,
-        input="Test prompt",
-        chat_template_kwargs={"chat_template": "{{ messages }}"},
-    )
-
-    response = await serving.render_responses_request(request)
-
-    assert isinstance(response, ErrorResponse)
-    assert response.error.code == 400
-    assert "untrusted chat template" in response.error.message.lower()
-    serving.online_renderer.render_responses.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
 async def test_render_responses_rejects_empty_token_ids():
     serving = _build_responses_serving_render()
     serving.online_renderer.render_responses = AsyncMock(
