@@ -306,6 +306,7 @@ steps:
   - pytest -v -s utils_
   mirror:
     amd:
+      dind: false
       device: mi300_1
       timeout_in_minutes: 36
       depends_on:
