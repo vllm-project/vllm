@@ -91,7 +91,7 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 | trtllm | standard | mxfp4,</br>nvfp4 | G(16),G(32) | <sup>5</sup> | N | Y | [`TrtLlmMxfp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsMonolithic],</br>[`TrtLlmMxfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular],</br>[`TrtLlmNvFp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsMonolithic],</br>[`TrtLlmNvfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsModular] |
 | hpc | standard | fp8 | G(128),T | silu | Y | Y | [`HPCExperts`][vllm.model_executor.layers.fused_moe.hpc_moe.HPCExperts] |
 | rocm aiter moe | standard | mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai | Y | N | `rocm_aiter_fused_experts`,</br>`AiterExperts` |
-| cpu_fused_moe | standard | N/A | N/A | silu | N | N | [`CPUFusedMOE`][vllm.model_executor.layers.fused_moe.cpu_fused_moe.CPUFusedMOE] |
+| cpu_moe | standard | N/A | N/A | silu, gelu,</br>gelu_tanh,</br>swigluoai | Y | N | [`X86CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.X86CPUUnquantizedExperts],</br>[`ArmCPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.ArmCPUUnquantizedExperts],</br>[`CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.CPUUnquantizedExperts] |
 | naive batched<sup>4</sup> | batched | int8,</br>fp8 | G,A,T | silu, gelu | <sup>6</sup> | Y | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_batched_moe.NaiveBatchedExperts] |
 
 !!! info "Table key"
