@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from fastapi import Request
 
@@ -136,6 +136,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         enable_per_request_metrics: bool = False,
+        inline_system_messages: Literal["merge", "preserve"] = "merge",
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -152,6 +153,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
+        self.inline_system_messages = inline_system_messages
 
         self.enable_auto_tools: bool = enable_auto_tools
         self._include_reasoning_tokens_details = bool(reasoning_parser)
@@ -214,6 +216,32 @@ class OpenAIServingChat(GenerateBaseServing):
         """
         return chat_template_kwargs
 
+    def _normalize_inline_system_messages(
+        self, request: ChatCompletionRequest
+    ) -> None:
+        if self.inline_system_messages == "preserve":
+            return
+
+        system_messages = [
+            message
+            for message in request.messages
+            if message["role"] == "system"
+            and isinstance(message.get("content"), str)
+        ]
+        if not system_messages or (
+            len(system_messages) == 1 and request.messages[0] is system_messages[0]
+        ):
+            return
+
+        merged_system = {
+            "role": "system",
+            "content": "".join(message["content"] for message in system_messages),
+        }
+        request.messages = [
+            merged_system,
+            *(message for message in request.messages if message not in system_messages),
+        ]
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -228,6 +256,7 @@ class OpenAIServingChat(GenerateBaseServing):
             A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
         """
+        self._normalize_inline_system_messages(request)
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
