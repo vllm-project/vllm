@@ -7,10 +7,12 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
+from vllm.assets.video import VideoAsset
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    _resolve_video_max_soft_tokens,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -51,6 +53,33 @@ def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
         torch.Size([10080, 768]),
         torch.Size([2520, 768]),
     ]
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected"),
+    [
+        ({}, 70),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, 140),
+        # Image settings must not affect the video default.
+        ({"images_kwargs": {"max_soft_tokens": 1120}}, 70),
+        (
+            {
+                "images_kwargs": {"max_soft_tokens": 1120},
+                "videos_kwargs": {"max_soft_tokens": 140},
+            },
+            140,
+        ),
+    ],
+)
+def test_resolve_video_max_soft_tokens(
+    mm_processor_kwargs: dict[str, object], expected: int
+):
+    assert _resolve_video_max_soft_tokens(mm_processor_kwargs) == expected
+
+
+def test_resolve_video_max_soft_tokens_rejects_unsupported_values():
+    with pytest.raises(ValueError, match="Unsupported video max_soft_tokens"):
+        _resolve_video_max_soft_tokens({"videos_kwargs": {"max_soft_tokens": 100}})
 
 
 @pytest.mark.parametrize(
@@ -140,6 +169,70 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     assert tokens is not None
     assert tokens["image"] == expected_image_tokens
     assert tokens["video"] == 32 * (70 + 2 + 6)
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_video_tokens"),
+    [
+        ({}, 32 * (70 + 2 + 6)),
+        ({"videos_kwargs": {"max_soft_tokens": 140}}, 32 * (140 + 2 + 6)),
+        ({"videos_kwargs": {"max_soft_tokens": 560}}, 32 * (560 + 2 + 6)),
+        # Image and video budgets are configured independently.
+        (
+            {
+                "images_kwargs": {"max_soft_tokens": 1120},
+                "videos_kwargs": {"max_soft_tokens": 140},
+            },
+            32 * (140 + 2 + 6),
+        ),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_video_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+    expected_video_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["video"] == expected_video_tokens
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_video_max_soft_tokens_is_applied_to_frame_processing(model_id: str):
+    """Video overrides must reach the image processor without duplication."""
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs={"videos_kwargs": {"max_soft_tokens": 140}},
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    video_asset = VideoAsset(name="baby_reading", num_frames=2)
+    video, metadata = video_asset.np_ndarrays, video_asset.metadata
+    mm_items = processor.info.parse_mm_data({"video": [(video, metadata)]})
+
+    processed_inputs = processor(
+        processor.info.get_hf_processor().video_token,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+
+    video_inputs = processed_inputs["mm_kwargs"].get_data()
+    pooling_kernel_size = (
+        processor.info.get_hf_config().vision_config.pooling_kernel_size
+    )
+    assert video_inputs["pixel_values_videos"].shape[1] == 140 * pooling_kernel_size**2
 
 
 @pytest.mark.parametrize(
