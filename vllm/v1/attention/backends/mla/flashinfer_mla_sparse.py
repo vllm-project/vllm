@@ -292,18 +292,115 @@ class FlashInferMLASparseMetadataBuilder(
             supports_dcp_with_varlen=True,
         )
 
+        # Under DCP the workspace must hold the trtllm-gen softmax-stats slab.
+        # The buffer address is baked into CUDA graphs, so it has to reach its
+        # final size here, before the first forward/capture (no lazy regrow).
+        if self.dcp_world_size > 1:
+            _get_workspace_buffer(
+                device,
+                _required_workspace_bytes(
+                    self.dcp_world_size,
+                    num_q_heads,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                ),
+            )
+
 
 # Global workspace buffer (lazily initialized)
 _fi_sparse_workspace: torch.Tensor | None = None
 
+# trtllm-gen carves a softmax-stats slab from the workspace whenever LSE is
+# requested (FlashInfer csrc/trtllm_fmha_kernel_launcher.cu, unchanged from
+# v0.6.14 through current main):
+#   sizeof(float2) * num_qo_heads * batch_size * round_up(max_q_len, 256)
+#   + 1 MiB guard
+# forward_mqa always passes q_len == 1, so each (head, token) pair costs
+# round_up(1, 256) == 256 slots.
+_TRTLLM_GEN_SOFTMAX_STAT_BYTES = 8  # sizeof(float2)
+_TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN = 256  # round_up(q_len=1, 256)
+_TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 
-def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
+# Keep in sync with the VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE default in
+# vllm/envs.py.
+_DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
+
+
+def compute_trtllm_sparse_mla_workspace_bytes(
+    base_workspace_bytes: int,
+    dcp_world_size: int,
+    num_heads_per_rank: int,
+    max_num_batched_tokens: int,
+) -> int:
+    """Workspace bytes needed by the trtllm-gen sparse MLA decode kernel.
+
+    Under DCP the query is all-gathered across the DCP group in the head dim
+    and the kernel is asked for LSE, so trtllm-gen carves the softmax-stats
+    slab described above from the workspace before its (batch-independent)
+    counter and scratch regions. ``base_workspace_bytes`` must stay available
+    for those regions, so the slab is added on top of it (see #50781).
+
+    Without DCP no LSE is requested, no slab is carved, and the base size is
+    returned unchanged.
+    """
+    if dcp_world_size <= 1:
+        return base_workspace_bytes
+    softmax_bytes = (
+        _TRTLLM_GEN_SOFTMAX_STAT_BYTES
+        * (num_heads_per_rank * dcp_world_size)
+        * max_num_batched_tokens
+        * _TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN
+        + _TRTLLM_GEN_SOFTMAX_GUARD_BYTES
+    )
+    return base_workspace_bytes + softmax_bytes
+
+
+def _required_workspace_bytes(
+    dcp_world_size: int,
+    num_heads_per_rank: int,
+    max_num_batched_tokens: int,
+) -> int:
+    """Resolve the workspace size, honoring an explicit env override."""
+    computed = compute_trtllm_sparse_mla_workspace_bytes(
+        _DEFAULT_WORKSPACE_BUFFER_SIZE,
+        dcp_world_size,
+        num_heads_per_rank,
+        max_num_batched_tokens,
+    )
+    if not envs.is_set("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE"):
+        return computed
+    env_bytes = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if env_bytes < computed:
+        logger.warning_once(
+            "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=%d is below the %d bytes "
+            "computed for the sparse MLA workspace with dcp_world_size=%d, "
+            "%d heads/rank and max_num_batched_tokens=%d. Respecting the "
+            "override, but the trtllm-gen kernel may crash with a workspace "
+            "overflow; set VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=%d or unset "
+            "it to use the computed size.",
+            env_bytes,
+            computed,
+            dcp_world_size,
+            num_heads_per_rank,
+            max_num_batched_tokens,
+            computed,
+        )
+    return env_bytes
+
+
+def _get_workspace_buffer(
+    device: torch.device, min_bytes: int | None = None
+) -> torch.Tensor:
     global _fi_sparse_workspace
-    if _fi_sparse_workspace is None:
+    required = (
+        min_bytes
+        if min_bytes is not None
+        else envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    )
+    if _fi_sparse_workspace is None or _fi_sparse_workspace.numel() < required:
         # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
         # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
         _fi_sparse_workspace = torch.zeros(
-            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            required,
             dtype=torch.int8,
             device=device,
         )
