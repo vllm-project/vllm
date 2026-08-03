@@ -61,6 +61,10 @@ class WorkerSentinel:
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params
+        self.data_parallel_master_ip = params["dp_master_ip"]
+        self.worker.parallel_config.data_parallel_master_ip = (
+            self.data_parallel_master_ip
+        )
         self._clean_worker_state()
         self._reset_eplb_async_state()
         if self.dp_size > 1:
@@ -80,6 +84,10 @@ class WorkerSentinel:
     def scale_down(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params
+        self.data_parallel_master_ip = params["dp_master_ip"]
+        self.worker.parallel_config.data_parallel_master_ip = (
+            self.data_parallel_master_ip
+        )
         removed_dp_ranks = params["removed_dp_ranks"]
         new_dp_size = params["new_dp_size"]
         new_dp_rank = params["new_dp_rank"]
