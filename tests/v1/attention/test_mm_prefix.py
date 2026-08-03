@@ -413,9 +413,10 @@ def test_ranges_outside_chunk_degrade_to_causal():
 # FA4 through the metadata builder and the paged KV cache
 # --------------------------------------------------------------------------- #
 
-# The production Gemma4 checkpoint: text_config.use_bidirectional_attention is
-# "vision", so is_mm_prefix_lm is True and the builder allocates its buffers.
-# Only config.json / tokenizer are read; weights are never loaded.
+# Stock google/gemma-4-E2B-it ships text_config.use_bidirectional_attention as
+# null, so is_mm_prefix_lm is False out of the box. Tests that exercise the
+# builder must flip it via `_enable_mm_prefix`. Only config.json / tokenizer
+# are read; weights are never loaded.
 MODEL = "google/gemma-4-E2B-it"
 
 BLOCK_SIZE = 16
@@ -433,6 +434,18 @@ PAGED_MM_RANGES = {
 }
 
 
+def _enable_mm_prefix(vllm_config):
+    """Flip stock Gemma4's null use_bidirectional_attention to "vision".
+
+    ``ModelConfig.__init__`` derives ``model_arch_config`` once from
+    ``hf_text_config``, so we re-derive after the flip.
+    """
+    model_config = vllm_config.model_config
+    model_config.hf_text_config.use_bidirectional_attention = "vision"
+    model_config.model_arch_config = model_config.get_model_arch_config()
+    return vllm_config
+
+
 @requires_fa4
 def test_decode_only_batch_reports_no_ranges():
     """Decode-only steps must carry no mm_prefix metadata at all.
@@ -447,11 +460,13 @@ def test_decode_only_batch_reports_no_ranges():
     The range-id scheme keyed off the request having ranges at all, so it
     attached a mask_mod to decode steps and did not have this property.
     """
-    vllm_config = create_vllm_config(
-        model_name=MODEL,
-        max_model_len=1024,
-        block_size=BLOCK_SIZE,
-        num_gpu_blocks=256,
+    vllm_config = _enable_mm_prefix(
+        create_vllm_config(
+            model_name=MODEL,
+            max_model_len=1024,
+            block_size=BLOCK_SIZE,
+            num_gpu_blocks=256,
+        )
     )
     decode_batch = BatchSpec(
         seq_lens=[513, 200, 97], query_lens=[1, 1, 1], name="decode_only"
@@ -480,14 +495,14 @@ def test_mm_prefix_kv_cache_path():
     and the packed query offsets interact.
     """
     torch.manual_seed(0)
-    vllm_config = create_vllm_config(
-        model_name=MODEL,
-        max_model_len=max(PAGED_SEQ_LENS),
-        block_size=BLOCK_SIZE,
-        num_gpu_blocks=2048,
+    vllm_config = _enable_mm_prefix(
+        create_vllm_config(
+            model_name=MODEL,
+            max_model_len=max(PAGED_SEQ_LENS),
+            block_size=BLOCK_SIZE,
+            num_gpu_blocks=2048,
+        )
     )
-    # If the checkpoint config ever stops enabling mm_prefix this test would
-    # silently exercise the plain causal path instead.
     assert vllm_config.model_config.is_mm_prefix_lm
 
     mc = vllm_config.model_config
