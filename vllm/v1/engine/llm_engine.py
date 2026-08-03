@@ -5,6 +5,7 @@ import time
 import weakref
 from collections.abc import Callable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any
 
 import torch.nn as nn
@@ -36,13 +37,22 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerIterationDetails
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
+
+
+@dataclass(frozen=True)
+class EngineStepResult:
+    """Public measurements for one offline engine iteration."""
+
+    outputs: list[RequestOutput | PoolingRequestOutput]
+    stats: SchedulerIterationDetails
+    kv_cache_usage: float
 
 
 class LLMEngine:
@@ -294,6 +304,7 @@ class LLMEngine:
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+        self._last_scheduler_stats = None
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -312,6 +323,7 @@ class LLMEngine:
                 iteration_stats=iteration_stats,
             )
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
+            self._last_scheduler_stats = outputs.scheduler_stats
 
         # 3) Abort any reqs that finished due to stop strings.
         with record_function_or_nullcontext("llm_engine step: abort_requests"):
@@ -332,6 +344,26 @@ class LLMEngine:
                 self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
+
+    def step_with_stats(self) -> EngineStepResult:
+        """Consume the next model iteration and return its existing statistics."""
+        outputs = []
+        while self.has_unfinished_requests():
+            outputs.extend(self.step())
+            scheduler_stats = self._last_scheduler_stats
+            if scheduler_stats is not None:
+                details = scheduler_stats.iteration_details
+                if details is None:
+                    raise RuntimeError(
+                        "iteration details are disabled; set "
+                        "enable_logging_iteration_details=True"
+                    )
+                return EngineStepResult(
+                    outputs=outputs,
+                    stats=details,
+                    kv_cache_usage=scheduler_stats.kv_cache_usage,
+                )
+        raise RuntimeError("no model iteration was executed")
 
     def start_profile(self, profile_prefix: str | None = None):
         self.engine_core.profile(True, profile_prefix)

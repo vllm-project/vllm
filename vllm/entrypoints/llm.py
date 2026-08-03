@@ -52,7 +52,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
-from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.llm_engine import EngineStepResult, LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
@@ -785,6 +785,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            If not provided, default naming will be used.
         """
         self.llm_engine.start_profile(profile_prefix)
+
+    def step_with_stats(self) -> EngineStepResult:
+        """Consume one queued offline model iteration and return its statistics."""
+        return self.llm_engine.step_with_stats()
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
