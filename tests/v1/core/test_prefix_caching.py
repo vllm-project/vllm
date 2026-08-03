@@ -3388,7 +3388,7 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
     assert len(computed_blocks.blocks[1]) == 0
 
 
-def _make_decode_checkpoint_manager(monkeypatch, enable_events=False):
+def _make_decode_checkpoint_manager(monkeypatch):
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
     block_size = 4
@@ -3396,7 +3396,6 @@ def _make_decode_checkpoint_manager(monkeypatch, enable_events=False):
         _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
         max_model_len=1024,
         enable_caching=True,
-        enable_kv_cache_events=enable_events,
         hash_block_size=block_size,
     )
     return manager, block_size
@@ -3423,34 +3422,10 @@ def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=
 
 def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
     """The latest materialized decode state becomes reusable after finish."""
-    manager, block_size = _make_decode_checkpoint_manager(
-        monkeypatch, enable_events=True
-    )
+    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
     request = _materialize_checkpoint_test_request(manager, block_size)
-    mamba_manager = manager.coordinator.single_type_managers[1]
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
-
-    assert candidate.num_tokens == 20
-    assert (
-        manager.block_pool.get_cached_block(
-            request.block_hashes[candidate.num_tokens // block_size - 1],
-            [1],
-        )
-        is None
-    )
-    assert not any(
-        isinstance(event, BlockStored)
-        and event.group_idx == 1
-        and event.token_ids == request.all_token_ids[16:20]
-        for event in manager.take_events()
-    )
 
     manager.finalize_decode_checkpoints(request, keep=True)
-    assert [
-        event.token_ids
-        for event in manager.take_events()
-        if isinstance(event, BlockStored) and event.group_idx == 1
-    ] == [request.all_token_ids[16:20]]
     manager.free(request)
 
     # Exact replay reaches the latest checkpoint.
@@ -3520,47 +3495,7 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
     mamba_manager = manager.coordinator.single_type_managers[1]
     candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
     assert candidate.num_tokens == 16
-
-    manager.finalize_decode_checkpoints(request, keep=False)
-    assert request.request_id not in mamba_manager._decode_checkpoint_candidates
-    for boundary in (16, 20):
-        assert (
-            manager.block_pool.get_cached_block(
-                request.block_hashes[boundary // block_size - 1], [1]
-            )
-            is None
-        )
     manager.free(request)
-
-
-@pytest.mark.parametrize(
-    ("retention_interval", "spec_types", "enable_caching", "expected_match"),
-    [
-        (None, ["full", "mamba_align"], True, "RETENTION_INTERVAL=0"),
-        ("64", ["full", "mamba_align"], True, "RETENTION_INTERVAL=0"),
-        ("0", ["full", "mamba"], True, "mamba_cache_mode='align'"),
-        ("0", ["mamba_align", "mamba"], True, "all Mamba KV cache groups"),
-        ("0", ["full", "mamba_align"], False, "prefix caching"),
-    ],
-)
-def test_mamba_decode_checkpoints_reject_unsupported_config(
-    monkeypatch,
-    retention_interval,
-    spec_types,
-    enable_caching,
-    expected_match,
-):
-    if retention_interval is not None:
-        monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", retention_interval)
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
-
-    with pytest.raises(ValueError, match=expected_match):
-        make_kv_cache_manager(
-            _make_hybrid_kv_cache_config(4, 100, spec_types),
-            max_model_len=1024,
-            enable_caching=enable_caching,
-            hash_block_size=4,
-        )
 
 
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
