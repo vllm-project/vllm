@@ -28,29 +28,38 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Transpose scale from checkpoint [N, K//32] to oneDNN [K//32, N]
-        # at load time (one-time cost, eliminates per-call .t().contiguous()).
+        # Checkpoint scale is [N, K//32] (one E8M0 scale per 32 elements).
+        # oneDNN fp8_gemm requires contiguous [K//32, N] layout. Store the
+        # transposed contiguous buffer as a .t() view so that:
+        #   - dequantization consumers still see the checkpoint shape
+        #   - apply_weights recovers the oneDNN layout via .t() at zero cost
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
-        scale_t = weight_scale.data.t().contiguous()
-        replace_parameter(layer, "weight_scale", scale_t)
+        scale_kn = weight_scale.data.t().contiguous()
+        replace_parameter(layer, "weight_scale", scale_kn.t())
 
-        # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         if getattr(layer, "is_bmm", False):
-            batch = layer.bmm_batch_size
-            k_blocks = scale_t.shape[0]  # K//32
-            n_per_batch_blocks = scale_t.shape[1] // batch
-            layer.bmm_scale = (
-                scale_t.reshape(k_blocks, batch, n_per_batch_blocks)
-                .permute(1, 0, 2)
-                .contiguous()
-            )  # [G, K//32, N_per_group]
-            # Precompute contiguous [G, K, N] weight for fp8_bmm.
-            w = layer.weight.data
-            N_total, K = w.shape
-            N_per_group = N_total // batch
-            layer.bmm_weight = (
-                w.reshape(batch, N_per_group, K).permute(0, 2, 1).contiguous()
-            )  # [G, K, N]
+            self._prepare_bmm_params(layer, scale_kn)
+
+    def _prepare_bmm_params(
+        self, layer: torch.nn.Module, scale_kn: torch.Tensor
+    ) -> None:
+        """Precompute batched weight and scale for grouped fp8_bmm (e.g. wo_a).
+
+        Splits scale [K//32, N_total] into [G, K//32, N_per_group] and weight
+        [N_total, K] into contiguous [G, K, N_per_group] for batch GEMM.
+        """
+        batch = layer.bmm_batch_size
+        k_blocks, n_blocks = scale_kn.shape
+        layer.bmm_scale = (
+            scale_kn.reshape(k_blocks, batch, n_blocks // batch)
+            .permute(1, 0, 2)
+            .contiguous()
+        )
+        w = layer.weight
+        n_total, k = w.shape
+        layer.bmm_weight = (
+            w.reshape(batch, n_total // batch, k).permute(0, 2, 1).contiguous()
+        )
 
     def apply_weights(
         self,
@@ -60,13 +69,14 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     ) -> torch.Tensor:
         out_dtype = x.dtype
         x_fp8, x_scale = quant_mxfp8(x)
-        # Weight is [N, K]. Use .t() to create a [K, N] view.
-        # Scale is already [K//32, N] from process_weights_after_loading.
+        # Weight is [N, K]; .t() gives a [K, N] view without copying.
+        # Scale is stored as [N, K//32]; .t() recovers the contiguous
+        # [K//32, N] buffer that oneDNN expects.
         return torch.ops._xpu_C.fp8_gemm(
             x_fp8,
             layer.weight.t(),
             out_dtype,
             x_scale,
-            layer.weight_scale,
+            layer.weight_scale.t(),
             bias,
         )
