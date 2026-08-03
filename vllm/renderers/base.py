@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
+from vllm.entrypoints.metrics.mm_preprocessing import (
+    observe_preprocessing_total,
+)
 from vllm.inputs import (
     EmbedsInput,
     EmbedsPrompt,
@@ -1199,6 +1202,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
+        _preproc_start = time.monotonic()
         arrival_time = time.time()
 
         if tok_params is None:
@@ -1230,4 +1234,5 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         )
 
+        observe_preprocessing_total(time.monotonic() - _preproc_start)
         return out_conversations, eng_prompts
