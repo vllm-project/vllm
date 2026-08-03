@@ -1157,8 +1157,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_decode_wrapper(
         self, batch_size: int, use_cudagraph: bool = False, q_len_per_req: int = 1
     ):
-        cache_key = (batch_size, q_len_per_req) if use_cudagraph else batch_size
         if use_cudagraph:
+            cache_key: tuple[int, int] = (batch_size, q_len_per_req)
             decode_wrapper = self._decode_wrappers_cudagraph.get(cache_key, None)
         else:
             decode_wrapper = self._decode_wrapper
@@ -1653,7 +1653,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Spec-as-decode verify batches carry a uniform
                 # num_decode_tokens // num_decodes tokens per request; the
                 # wrapper's batch size and kv metadata are per request.
-                assert num_decode_tokens % num_decodes == 0
+                assert num_decode_tokens % num_decodes == 0, (
+                    f"Expected num_decode_tokens ({num_decode_tokens}) to be"
+                    f" divisible by num_decodes ({num_decodes}) for uniform"
+                    f" spec-decode verify batches"
+                )
                 decode_q_len = num_decode_tokens // num_decodes
 
                 decode_wrapper = self._get_decode_wrapper(
