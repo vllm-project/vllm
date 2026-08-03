@@ -5,6 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -24,6 +25,48 @@ __all__ = [
     "aiter_triton_kernel_w4a8_moe_forward",
     "aiter_triton_kernel_w4a16_moe_forward",
 ]
+
+
+def _get_padding_mask() -> torch.Tensor | None:
+    """
+    Retrieves a boolean mask with non-padding (0) and padding (1) tokens.
+
+    `slot_mapping < 0` comes from:
+
+        slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+
+    in gpu_model_runner.py.
+    """
+    forward_context = get_forward_context()
+
+    # model runner v2.
+    if forward_context.is_padding is not None:
+        return forward_context.is_padding
+
+    # model runner v1.
+    slot_mapping = forward_context.slot_mapping
+    if isinstance(slot_mapping, list):
+        slot_mapping = slot_mapping[0]
+    if isinstance(slot_mapping, dict):
+        slot_mapping = next(iter(slot_mapping.values()), None)
+
+    if isinstance(slot_mapping, torch.Tensor):
+        return slot_mapping < 0
+    else:
+        return None
+
+
+def patch_gating_output(
+    gating_output: torch.Tensor, global_num_experts: int
+) -> torch.Tensor:
+    if global_num_experts != 128:
+        is_padding = _get_padding_mask()
+
+        if is_padding is not None:
+            assert is_padding.shape[0] == gating_output.shape[0]
+            gating_output = gating_output.masked_fill(is_padding[:, None], 0.0)
+
+    return gating_output
 
 
 def aiter_triton_kernel_w4a8_moe_forward(
@@ -58,6 +101,11 @@ def aiter_triton_kernel_w4a8_moe_forward(
     if on_gfx1250():
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
+
+    # See context in XXX.
+    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
+    # AITER released, and AITER pin in vLLM increased from 0.1.19.
+    gating_output = patch_gating_output(gating_output, global_num_experts)
 
     routing_data, gather_idx, scatter_idx = aiter_routing(
         gating_output, topk, sm_first=not renormalize
@@ -437,6 +485,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
     if on_gfx1250():
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
+
+    # See context in XXX.
+    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
+    # AITER released, and AITER pin in vLLM increased from 0.1.19.
+    gating_output = patch_gating_output(gating_output, global_num_experts)
 
     if score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
