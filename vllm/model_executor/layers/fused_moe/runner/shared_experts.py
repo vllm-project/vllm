@@ -82,6 +82,7 @@ class SharedExperts(torch.nn.Module):
         #   - we are using flashinfer with DP, since there nothing to gain
         parallel_config = self._moe_config.moe_parallel_config
         if getattr(self._layer, "shard_sequence_parallel", False):
+            # TODO: we may enable this to optimize further
             return True
         return (
             parallel_config.enable_eplb
