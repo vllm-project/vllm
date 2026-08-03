@@ -198,7 +198,6 @@ def test_mla_rope_kvcache_fusion_enabled(default_vllm_config):
             is_sparse=False,
             model_dtype=torch.bfloat16,
             fuse_rope_kvcache_cat_mla=True,
-            calculate_kv_scales=False,
         )
         kwargs.update(overrides)
         return _mla_rope_kvcache_fusion_enabled(**kwargs)
@@ -243,9 +242,6 @@ def test_mla_rope_kvcache_fusion_enabled(default_vllm_config):
     # Unsupported cache layouts.
     assert probe(kv_cache_dtype="fp8_ds_mla") is False
     assert probe(is_sparse=True) is False
-    # Dynamic KV-scale calibration runs after the fused write would have
-    # quantized with the stale scale.
-    assert probe(calculate_kv_scales=True) is False
 
 
 @pytest.mark.cpu_test
@@ -256,7 +252,6 @@ def test_mla_attention_forward_skips_kv_update_when_dep_provided():
 
     def run(dep):
         self = MagicMock()
-        self.calculate_kv_scales = False
         self.use_direct_call = True
         self.layer_name = "layer.0"
         self.kv_cache_dtype = "auto"
