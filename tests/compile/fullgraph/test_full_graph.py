@@ -181,7 +181,9 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)
