@@ -64,6 +64,7 @@ from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.v1.core.kv_cache_utils import get_kv_cache_capacity
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -653,6 +654,19 @@ class Worker(WorkerBase):
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+        # num_gpu_blocks * block_size is not the pool's token capacity when a
+        # request occupies more than one KV cache group, which is why
+        # kv_cache_size_tokens exists. It is only ever filled in by the engine
+        # core and the front end, so the worker's copy stays None and anything
+        # sizing a buffer off the KV pool during warmup -- the AITER MLA verify
+        # view, for one -- silently falls back to a far looser bound. Fill it in
+        # here too; get_kv_cache_capacity is documented to give the same answer
+        # for the worker's config as for the scheduler's.
+        if kv_cache_config.kv_cache_groups:
+            (
+                self.cache_config.kv_cache_size_tokens,
+                self.cache_config.kv_cache_max_concurrency,
+            ) = get_kv_cache_capacity(self.vllm_config, kv_cache_config)
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
