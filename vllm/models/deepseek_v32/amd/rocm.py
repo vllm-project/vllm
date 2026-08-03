@@ -167,7 +167,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
@@ -222,7 +222,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -244,7 +244,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             quantize_mqa=self._fp8_kv,
         )
 
-        self._run_indexer(q_c, index_q_fp8, index_weights_out)
+        if self.indexer is not None and not self.skip_topk:
+            self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:
             output.zero_()
