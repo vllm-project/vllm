@@ -197,6 +197,39 @@ def test_silu_and_mul_with_clamp(
     opcheck(torch.ops._C.silu_and_mul_with_clamp, (out_buf, x, swiglu_limit))
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
+def test_swiglu_limit_pad_aware_bounds_expert_map_gather(dtype: torch.dtype):
+    """Out-of-range topk_ids must not index expert_map.
+
+    topk_ids is data, not a loop bound: routers allocate it with torch.empty
+    and do not always overwrite every slot, so a stale slot can hold an
+    arbitrary positive value. Masking the gather on `expert_id >= 0` alone
+    read past the end of expert_map -- a fault that takes down every rank.
+    """
+    from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+
+    d, rows = 64, 6
+    x = torch.randn((rows, 2 * d), device="cuda", dtype=dtype)
+    out = torch.zeros((rows, d), device="cuda", dtype=dtype)
+
+    topk_ids = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    topk_ids[1] = 0x3F988A43
+    topk_ids[2] = 1 << 30
+    topk_ids[3] = -1
+
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+    swiglu_limit_func(out, x, 0.0, topk_ids, expert_map)
+
+    computed = out.abs().sum(dim=-1) > 0
+    # Only rows whose id is in range and maps to a local expert may compute.
+    assert bool(computed[0])
+    assert not bool(computed[1]), "float-bit-pattern id must not compute"
+    assert not bool(computed[2]), "far out-of-range id must not compute"
+    assert not bool(computed[3]), "-1 id must not compute"
+
+
 @pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
 @torch.inference_mode()

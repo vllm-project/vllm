@@ -14,6 +14,7 @@ def moe_fused_mul_sum_kernel(
     outputs_ptr,
     top_ids_ptr,
     expert_map_ptr,
+    num_experts,
     num_tokens,
     stride_m,
     has_expert_map: tl.constexpr,
@@ -41,7 +42,18 @@ def moe_fused_mul_sum_kernel(
         b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
         if has_expert_map:
             id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
-            expert_mask = tl.load(expert_map_ptr + id_val) >= 0
+            # id_val is data from topk_ids and can be stale/out-of-range on rows
+            # the router did not overwrite; bound it before indexing expert_map
+            # (an unbounded gather here faults the whole context).
+            id_in_range = (id_val >= 0) & (id_val < num_experts)
+            expert_mask = (
+                tl.load(
+                    expert_map_ptr + tl.where(id_in_range, id_val, 0),
+                    mask=id_in_range,
+                    other=-1,
+                )
+                >= 0
+            )
             a_vec = tl.load(
                 a_base + n * size,
                 mask=mask & expert_mask[:, None],
@@ -188,6 +200,7 @@ def moe_fused_mul_sum(
             outputs,
             topk_ids,
             expert_map,
+            expert_map.numel() if expert_map is not None else 0,
             num_tokens,
             top_k * size,
             expert_map is not None,
