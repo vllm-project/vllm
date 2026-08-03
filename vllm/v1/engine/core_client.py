@@ -755,6 +755,7 @@ class MPClient(EngineCoreClient):
         # worker for hybrid Mamba models.
         cache_config = vllm_config.cache_config
         cache_config.block_size = response.block_size
+        cache_config.mamba_block_size = response.mamba_block_size
         # Keep these as per-engine cache_config_info values; do not sum across DP.
         cache_config.kv_cache_size_tokens = (
             getattr(cache_config, "kv_cache_size_tokens", None)

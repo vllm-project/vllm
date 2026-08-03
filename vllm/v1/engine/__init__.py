@@ -76,6 +76,7 @@ class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
     block_size: int
+    mamba_block_size: int
     dp_stats_address: str | None
     dtype: str
     vllm_version: str
