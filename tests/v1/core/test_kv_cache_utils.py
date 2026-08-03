@@ -1257,6 +1257,26 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_uniform_type_spec_block_table_width_is_dcp_sharded():
+    # The runner sizes the block table from the group spec, the metadata
+    # builders from the per-layer spec; under DCP the two must agree.
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    layer_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer1": layer_spec, "layer2": layer_spec},
+    )
+
+    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == 32
+    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == 32
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
