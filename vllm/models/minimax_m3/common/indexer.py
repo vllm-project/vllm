@@ -480,10 +480,10 @@ def select_indexer_impl_cls(
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
-    main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
-    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
-    (bf16 only).
+    On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
+    ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
+    used for both bf16 and fp8 index caches. Everything else falls back to the
+    Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -495,7 +495,7 @@ def select_indexer_impl_cls(
     )
     use_msa = (
         is_sm100
-        and topk_blocks in (4, 8, 16, 32)
+        and topk_blocks == 16
         and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
     )
     if use_msa:
@@ -505,7 +505,7 @@ def select_indexer_impl_cls(
         )
 
         logger.info_once(
-            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + Triton top-k) "
+            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + top-k) "
             "[topk_blocks=%d, indexer_kv_dtype=%s]",
             topk_blocks,
             indexer_kv_dtype,
