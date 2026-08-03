@@ -20,7 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -31,6 +31,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.ec_transfer import has_ec_transfer
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -55,9 +56,18 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    DraftTokenIds,
+    ECConnectorOutput,
+    ModelRunnerOutput,
+    make_empty_encoder_model_runner_output,
+)
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.ec_connector_model_runner_mixin import (
+    ECConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -124,7 +134,7 @@ from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 logger = init_logger(__name__)
 
 
-class GPUModelRunner(LoRAModelRunnerMixin):
+class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -139,6 +149,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
+        ec_config = vllm_config.ec_transfer_config
+        self.is_ec_producer_only = (
+            ec_config is not None
+            and ec_config.is_ec_producer
+            and not ec_config.is_ec_consumer
+        )
+        mm_config = self.model_config.multimodal_config
+        self.is_encoder_only = self.is_ec_producer_only or bool(
+            mm_config and mm_config.mm_encoder_only
+        )
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
@@ -430,6 +450,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
+        if self.is_encoder_only:
+            return {}
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -562,6 +584,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.is_encoder_only:
+            empty = torch.empty(0, device=self.device)
+            return empty, empty
         if skip_attn and not is_profile:
             raise ValueError(
                 "skip_attn must only be True for initial memory profiling."
@@ -716,6 +741,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dummy_mm_inputs, mm_budget
                 )
 
+        if self.is_encoder_only:
+            torch.accelerator.synchronize()
+            self.reset_encoder_cache()
+            gc.collect()
+            return
+
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
@@ -752,6 +783,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self) -> int:
+        if self.is_encoder_only:
+            return 0
+
         assert self.cudagraph_manager is not None
         if not self.cudagraph_manager.needs_capture():
             logger.warning(
@@ -1205,6 +1239,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
 
+    def _merge_ec_connector_no_forward(
+        self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
+    ) -> ModelRunnerOutput:
+        """Merge the EC connector's send/recv bookkeeping into `output` for a
+        step with no work to run. The EC connector only ever runs on the
+        first PP rank (that's where the multimodal encoder lives); other
+        ranks have nothing of their own to report and must not touch
+        encoder_cache.
+        """
+        if not (
+            has_ec_transfer()
+            and self.is_first_pp_rank
+            and self.encoder_cache is not None
+        ):
+            return output
+        ec_connector_output = self.ec_connector_no_forward(
+            scheduler_output, self.vllm_config, self.encoder_cache.encoder_outputs
+        ).ec_connector_output
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            # Don't mutate the shared singleton in place.
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
+        return output
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1225,7 +1285,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return empty_output
+                return self._merge_ec_connector_no_forward(
+                    scheduler_output, empty_output
+                )
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
@@ -1261,7 +1323,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
-            return empty_output
+            return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         if not dummy_run:
             # Common case.
@@ -1327,7 +1389,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
+        ec_connector_output = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
+            assert self.encoder_cache is not None
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
             if dummy_run:
@@ -1346,11 +1410,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_state=self.lora_state,
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
-                inputs_embeds = self.model_state.get_mm_embeddings(
-                    scheduled_encoder_inputs, input_batch, self.req_states
-                )
+
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache.encoder_outputs,
+                    enabled=not self.is_encoder_decoder,
+                    save_new_caches=self.is_ec_producer_only,
+                ) as ec_connector_output:
+                    inputs_embeds = self.model_state.get_mm_embeddings(
+                        scheduled_encoder_inputs, input_batch, self.req_states
+                    )
+
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
+
+        if self.is_encoder_only:
+            output = make_empty_encoder_model_runner_output(scheduler_output)
+            output.ec_connector_output = ec_connector_output
+            return output
 
         model_inputs = {
             "input_ids": input_ids,
@@ -1445,6 +1522,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            ec_connector_output=ec_connector_output,
         )
 
         if not self.is_last_pp_rank:
@@ -1467,6 +1545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        ec_connector_output = self.execute_model_state.ec_connector_output
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1485,7 +1564,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Post-step KV connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            # This rank never has a "real" ModelRunnerOutput of its own (see the
+            # is_last_pp_rank early return in execute_model above), but may have
+            # produced ec_connector_output on the first PP rank -- pass it through.
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            if ec_connector_output is not None and not ec_connector_output.is_empty():
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    # Don't mutate the shared singleton in place.
+                    output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.ec_connector_output = ec_connector_output
+            return output
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
@@ -1596,6 +1684,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
+        model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
 
@@ -1712,6 +1801,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    ec_connector_output: ECConnectorOutput | None
 
 
 def sort_batch_req_ids(

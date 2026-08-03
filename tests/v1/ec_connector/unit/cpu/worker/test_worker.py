@@ -23,6 +23,7 @@ Mocking policy
 import contextlib
 import logging
 import uuid
+from collections import deque
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -50,6 +51,14 @@ _NUM_BLOCKS = 8
 _requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="exercises real CUDA stream/event coordination in ECCPUWorker",
+)
+
+_requires_swap_blocks_batch = pytest.mark.skipif(
+    not hasattr(torch.ops._C_cache_ops, "swap_blocks_batch"),
+    reason=(
+        "installed vllm C++ extension predates the swap_blocks_batch op "
+        "flush_saves/start_load_caches use; rebuild the extension to run this"
+    ),
 )
 
 
@@ -137,6 +146,7 @@ def make_worker():
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 @pytest.mark.parametrize(
     "n_elements,n_blocks",
     [
@@ -229,6 +239,7 @@ def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_save_caches_batches_multiple_hashes(make_worker):
     """Multiple save_caches calls are batched into a single flush."""
     worker = make_worker()
@@ -259,6 +270,7 @@ def test_save_caches_batches_multiple_hashes(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker):
     """Single batched load across all hashes with correct byte→dtype→shape."""
     worker = make_worker()
@@ -283,19 +295,22 @@ def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker
 
 
 @_requires_cuda
-def test_start_load_caches_preserves_existing_encoder_cache_entry(make_worker):
-    """If ``encoder_cache`` already holds the ``mm_hash``, the worker must
-    not overwrite it."""
+def test_start_load_caches_overwrites_existing_encoder_cache_entry(make_worker):
+    """Every dispatched load is copied unconditionally. A resident entry with
+    the same ``mm_hash`` is replaced with freshly loaded bytes so that every
+    scheduler pin is balanced by exactly one completion report."""
     worker = make_worker()
-    worker._region.blocks[0].fill_(0x42)
+    src_orig = torch.arange(_HIDDEN_DIM, dtype=_DTYPE).reshape(1, _HIDDEN_DIM)
+    src_int8 = src_orig.view(torch.int8).reshape(1, _BLOCK_SIZE_BYTES)
+    worker._region.blocks[0].copy_(src_int8[0])
 
-    sentinel = torch.full((_HIDDEN_DIM,), 7.0, dtype=_DTYPE, device="cuda")
-    encoder_cache = {"h": sentinel}
+    stale = torch.full((1, _HIDDEN_DIM), 7.0, dtype=_DTYPE, device="cuda")
+    encoder_cache = {"h": stale}
     worker.start_load_caches(encoder_cache, _meta(loads={"h": [0]}))
 
-    assert encoder_cache["h"] is sentinel, (
-        "existing encoder_cache entry must not be replaced"
-    )
+    out = encoder_cache["h"]
+    assert out is not stale, "resident entry must be replaced by the fresh load"
+    assert torch.equal(out.cpu(), src_orig)
 
 
 @_requires_cuda
@@ -309,34 +324,39 @@ def test_start_load_caches_noop_when_loads_is_empty(make_worker):
 
 
 @_requires_cuda
-def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
-    """Cached entries are preserved while new ones are loaded."""
+def test_start_load_caches_loads_all_dispatched_hashes(make_worker):
+    """Every hash in ``meta.loads`` is copied from mmap, including one whose
+    key is already resident in ``encoder_cache`` — there is no worker-side
+    skip."""
     worker = make_worker()
-    n_blocks = 2
+    n_blocks = 3
     src_orig = torch.arange(n_blocks * _HIDDEN_DIM, dtype=_DTYPE).reshape(
         n_blocks, _HIDDEN_DIM
     )
     src_int8 = src_orig.view(torch.int8).reshape(n_blocks, _BLOCK_SIZE_BYTES)
-    new_block_ids = [4, 2]
-    for i, idx in enumerate(new_block_ids):
+    block_ids = [0, 4, 2]
+    for i, idx in enumerate(block_ids):
         worker._region.blocks[idx].copy_(src_int8[i])
 
-    cached_tensor = torch.full((1, _HIDDEN_DIM), 99.0, dtype=_DTYPE, device="cuda")
-    encoder_cache: dict[str, torch.Tensor] = {"cached_h": cached_tensor}
+    stale = torch.full((1, _HIDDEN_DIM), 99.0, dtype=_DTYPE, device="cuda")
+    encoder_cache: dict[str, torch.Tensor] = {"resident_h": stale}
     worker.start_load_caches(
         encoder_cache,
-        _meta(loads={"cached_h": [0], "new_h": new_block_ids}),
+        _meta(loads={"resident_h": [block_ids[0]], "new_h": block_ids[1:]}),
     )
 
-    assert encoder_cache["cached_h"] is cached_tensor
-    assert "new_h" in encoder_cache
-    out = encoder_cache["new_h"]
-    assert out.shape == (n_blocks, _HIDDEN_DIM)
-    assert out.dtype == _DTYPE
-    assert torch.equal(out.cpu(), src_orig)
+    resident = encoder_cache["resident_h"]
+    assert resident is not stale, "resident entry must be reloaded, not skipped"
+    assert torch.equal(resident.cpu(), src_orig[:1])
+
+    new = encoder_cache["new_h"]
+    assert new.shape == (2, _HIDDEN_DIM)
+    assert new.dtype == _DTYPE
+    assert torch.equal(new.cpu(), src_orig[1:])
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 @pytest.mark.parametrize(
     "tp_rank,pcp_rank",
     [(0, 0), (1, 0), (0, 1), (1, 1)],
@@ -366,6 +386,7 @@ def test_start_load_caches_works_on_all_ranks(make_worker, tp_rank, pcp_rank):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_save_then_load_round_trips_bytes(make_worker):
     """Full producer→mmap→consumer byte path in one shot."""
     worker = make_worker()
@@ -391,6 +412,7 @@ def test_save_then_load_round_trips_bytes(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_buffer_pool_is_reused_across_save_steps(make_worker):
     """After flush_saves, descriptor buffers are returned to the pool and
     reused on the next flush — no reallocation."""
@@ -412,6 +434,7 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_buffer_pool_is_reused_across_load_steps(make_worker):
     """After start_load_caches, descriptor buffers are returned to the pool
     and reused on the next call."""
@@ -436,10 +459,10 @@ def test_buffer_pool_is_reused_across_load_steps(make_worker):
 
 
 @_requires_cuda
-def test_stream_initialized_at_construction(make_worker):
-    """``_load_stream`` must be a fully initialized CUDA stream."""
+def test_stream_pool_empty_at_construction(make_worker):
+    """Streams are created lazily per transfer, so the pool starts empty."""
     worker = make_worker()
-    assert isinstance(worker._load_stream, torch.cuda.Stream)
+    assert worker._stream_pool == []
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
@@ -495,12 +518,15 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     worker = object.__new__(ECCPUWorker)
     mock_region = Mock(spec=ECSharedRegion)
     worker._region = mock_region
-    worker._load_stream = MagicMock()
     worker._save_bufs = None
     worker._save_count = 0
+    worker._save_mm_hashes = []
+    worker._inflight_saves = deque()
+    worker._inflight_loads = deque()
+    worker._stream_pool = []
+    worker._event_pool = []
 
     worker.shutdown()
-    worker._load_stream.synchronize.assert_called_once()
     mock_region.cleanup.assert_called_once()
 
     mock_region.cleanup.side_effect = RuntimeError("boom")
@@ -519,13 +545,15 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
 
 
 @_requires_cuda
+@_requires_swap_blocks_batch
 def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
-    """Full pipeline: scheduler allocates blocks, worker saves GPU tensor to
-    mmap via flush_saves, scheduler marks ready after step delay, worker
-    loads from mmap back to GPU, and the result matches the original.
+    """Full pipeline: scheduler allocates blocks, worker saves a GPU tensor to
+    mmap via flush_saves, the worker's completion report marks the entry ready,
+    the worker loads from mmap back to GPU, and the result matches the original.
 
     Exercises the real scheduler + worker cooperation through a shared
-    ECSharedRegion, with real CUDA transfers and stream coordination.
+    ECSharedRegion, with real CUDA transfers and stream coordination, and the
+    event-driven mark_ready path.
     """
     import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
     from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import (
@@ -545,7 +573,6 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
 
     class _Cfg:
         ec_transfer_config = _EC()
-        max_concurrent_batches = 1
 
     scheduler = ECCPUScheduler(_Cfg())
 
@@ -575,10 +602,17 @@ def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     worker.save_caches(encoder_cache, "img_001", meta_save)
     worker.flush_saves()
 
-    # -- Step 2: readiness delay (max_concurrent_batches=1) --
-    meta_step2 = scheduler.build_connector_meta(scheduler_output=None)
+    # -- Step 2: worker reports the save memcpy complete → scheduler marks ready --
+    torch.accelerator.synchronize()
+    worker_meta = worker.build_connector_worker_meta()
+    assert worker_meta is not None
+    assert "img_001" in worker_meta.completed_saves
+
+    class _Output:
+        ec_connector_worker_meta = worker_meta
+
+    scheduler.update_connector_output(_Output())
     assert scheduler.has_cache_item("img_001") is True
-    assert meta_step2.loads == {}  # no load requested yet
 
     # -- Step 3: scheduler emits load, worker loads --
     scheduler.update_state_after_alloc(_Request(), 0)

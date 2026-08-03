@@ -1679,6 +1679,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
@@ -1974,6 +1975,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
+
+        # EC Connector: update state from worker-side EC connector output.
+        if self.ec_connector is not None and ec_connector_output:
+            self.ec_connector.update_connector_output(ec_connector_output)
 
         # Worker-side KV connector stats from the model runner output.
         kv_connector_stats: KVConnectorStats | None = (

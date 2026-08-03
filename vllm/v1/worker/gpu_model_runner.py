@@ -941,6 +941,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self.ec_connector_output: ECConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
@@ -4213,7 +4214,22 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                    return make_empty_encoder_model_runner_output(scheduler_output)
+                # Read ec_connector_output only after the context manager's
+                # __exit__ has run: that's what populates
+                # ec_connector_worker_meta (build_connector_worker_meta() is
+                # called in its finally block). Returning from inside the
+                # `with` would exit before that assignment lands, silently
+                # dropping the worker's completion report.
+                output = make_empty_encoder_model_runner_output(scheduler_output)
+                if (
+                    ec_connector_output is not None
+                    and not ec_connector_output.is_empty()
+                ):
+                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                        # Don't mutate the shared singleton in place.
+                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                    output.ec_connector_output = ec_connector_output
+                return output
 
             if not num_scheduled_tokens:
                 if (
@@ -4228,10 +4244,27 @@ class GPUModelRunner(
                     # dummy run to ensure coordinate_batch_across_dp
                     # is called into to avoid out of sync issues.
                     self._dummy_run(1)
-                if not has_kv_transfer_group():
+                if not has_kv_transfer_group() and not has_ec_transfer():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                output = (
+                    self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    if has_kv_transfer_group()
+                    else EMPTY_MODEL_RUNNER_OUTPUT
+                )
+                # EC transfer only ever runs on the first PP rank (that's
+                # where the multimodal encoder lives, see the is_first_rank
+                # gate above in _preprocess); other ranks have nothing of
+                # their own to report and must not touch encoder_cache.
+                if has_ec_transfer() and get_pp_group().is_first_rank:
+                    ec_output = self.ec_connector_no_forward(
+                        scheduler_output, self.vllm_config, self.encoder_cache
+                    )
+                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                        # Don't mutate the shared singleton in place.
+                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                    output.ec_connector_output = ec_output.ec_connector_output
+                return output
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (
@@ -4470,6 +4503,7 @@ class GPUModelRunner(
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     self.kv_connector_output = kv_connector_output
+                    self.ec_connector_output = ec_connector_output
                     return hidden_states
 
                 if self.is_pooling_model:
@@ -4556,12 +4590,21 @@ class GPUModelRunner(
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
+            ec_connector_output = self.ec_connector_output
+            self.ec_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
-            # In case of PP with kv transfer, we need to pass through the
-            # kv_connector_output
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            # In case of PP with kv/ec transfer, we need to pass through their
+            # outputs -- this rank never has a "real" ModelRunnerOutput of its
+            # own (see the is_last_rank early return in execute_model above).
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            if ec_connector_output is not None and not ec_connector_output.is_empty():
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    # Don't mutate the shared singleton in place.
+                    output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.ec_connector_output = ec_connector_output
+            return output
 
         # Unpack ephemeral state.
         (
