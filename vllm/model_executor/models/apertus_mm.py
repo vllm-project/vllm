@@ -9,36 +9,36 @@ from typing import Annotated, Any, Literal
 import torch
 import torch.nn.functional as F
 from transformers import (
+    Apertus1p5Config,
+    Apertus1p5ImageProcessor,
+    Apertus1p5Processor,
     Apertus1p5VisionTokenizerModel,
     AutoConfig,
     AutoModel,
+    BatchFeature,
     PretrainedConfig,
 )
+from transformers.models.wavtokenizer import WavTokenizerFeatureExtractor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
-from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    PlaceholderRange,
 )
-from vllm.multimodal.parse import (
-    AudioProcessorItems,
-    ImageProcessorItems,
-    MultiModalDataParser,
-)
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    ProcessorInputs,
+    PromptReplacement,
     PromptUpdate,
-    TimingContext,
+    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -65,20 +65,12 @@ _MAX_AUDIO_SECONDS = 300
 _AUDIO_TOKEN_BUDGET_OVERHEAD = 4
 
 _DEFAULT_IMAGE_PLACEHOLDER = "<|image|>"
-_DEFAULT_BOI_TOKEN = "<|img_start|>"
-_DEFAULT_EOI_TOKEN = "<|img_end|>"
 _DEFAULT_AUDIO_PLACEHOLDER = "<|audio|>"
-_DEFAULT_AUDIO_START_TOKEN = "<|audio_start|>"
-_DEFAULT_AUDIO_END_TOKEN = "<|audio_end|>"
 
 _DEFAULT_IMAGE_TOKEN_ID = 131079
 _DEFAULT_AUDIO_TOKEN_ID = 131085
 _DEFAULT_IMAGE_TOKEN_OFFSET = 131272
 _DEFAULT_AUDIO_TOKEN_OFFSET = 262344
-_DEFAULT_IMAGE_START_TOKEN_ID = 131073
-_DEFAULT_IMAGE_END_TOKEN_ID = 131074
-_DEFAULT_AUDIO_START_TOKEN_ID = 131080
-_DEFAULT_AUDIO_END_TOKEN_ID = 131081
 
 
 class Apertus1p5ImageInputs(TensorSchema):
@@ -124,8 +116,26 @@ def _init_component_model(
 
 
 class Apertus1p5ProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self) -> Apertus1p5Config:
+        return self.ctx.get_hf_config(Apertus1p5Config)
+
+    def get_hf_processor(self, **kwargs: object) -> Apertus1p5Processor:
+        return self.ctx.get_hf_processor(Apertus1p5Processor, **kwargs)
+
+    def get_image_processor(self, **kwargs: object) -> Apertus1p5ImageProcessor:
+        hf_processor = self.get_hf_processor(**kwargs)
+        image_processor = hf_processor.image_processor
+        assert isinstance(image_processor, Apertus1p5ImageProcessor)
+        return image_processor
+
+    def get_feature_extractor(self, **kwargs: object) -> WavTokenizerFeatureExtractor:
+        hf_processor = self.get_hf_processor(**kwargs)
+        feature_extractor = hf_processor.feature_extractor
+        assert isinstance(feature_extractor, WavTokenizerFeatureExtractor)
+        return feature_extractor
+
     def get_data_parser(self) -> MultiModalDataParser:
-        audio_feature_extractor = self.get_hf_processor().feature_extractor
+        audio_feature_extractor = self.get_feature_extractor()
         return MultiModalDataParser(
             target_sr=audio_feature_extractor.sampling_rate,
             target_channels=1,
@@ -153,9 +163,8 @@ class Apertus1p5ProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
         del mm_counts
-        processor = self.get_hf_processor()
-        image_processor = processor.image_processor
-        feature_extractor = processor.feature_extractor
+        image_processor = self.get_image_processor()
+        feature_extractor = self.get_feature_extractor()
         return {
             # Maximum image codes plus room for the image layout's wrapper
             # and row-separator tokens.
@@ -199,8 +208,9 @@ class Apertus1p5DummyInputsBuilder(BaseDummyInputsBuilder[Apertus1p5ProcessingIn
     ) -> MultiModalDataDict:
         image_overrides = mm_options.get("image")
         audio_overrides = mm_options.get("audio")
-        processor = self.info.get_hf_processor()
-        max_image_side = isqrt(processor.image_processor.max_pixels)
+        image_processor = self.info.get_image_processor()
+        feature_extractor = self.info.get_feature_extractor()
+        max_image_side = isqrt(image_processor.max_pixels)
 
         return {
             "image": self._get_dummy_images(
@@ -210,7 +220,7 @@ class Apertus1p5DummyInputsBuilder(BaseDummyInputsBuilder[Apertus1p5ProcessingIn
                 overrides=image_overrides,
             ),
             "audio": self._get_dummy_audios(
-                length=processor.feature_extractor.sampling_rate * _MAX_AUDIO_SECONDS,
+                length=feature_extractor.sampling_rate * _MAX_AUDIO_SECONDS,
                 num_audios=mm_counts.get("audio", 0),
                 overrides=audio_overrides,
             ),
@@ -228,33 +238,28 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
         cache: object | None = None,
     ) -> None:
         super().__init__(info, dummy_inputs, cache=cache)
-        tokenizer = info.get_tokenizer()
-        self.hf_processor = info.get_hf_processor()
         config = info.get_hf_config()
         self.image_token_id = getattr(config, "image_token_id", _DEFAULT_IMAGE_TOKEN_ID)
         self.audio_token_id = getattr(config, "audio_token_id", _DEFAULT_AUDIO_TOKEN_ID)
-        self.image_start_token = getattr(tokenizer, "boi_token", _DEFAULT_BOI_TOKEN)
-        self.image_end_token = getattr(tokenizer, "eoi_token", _DEFAULT_EOI_TOKEN)
-        self.audio_start_token = getattr(
-            tokenizer, "boa_token", _DEFAULT_AUDIO_START_TOKEN
-        )
-        self.audio_end_token = getattr(tokenizer, "eoa_token", _DEFAULT_AUDIO_END_TOKEN)
-        self.image_start_token_id = getattr(
-            tokenizer, "boi_token_id", _DEFAULT_IMAGE_START_TOKEN_ID
-        )
-        self.image_end_token_id = getattr(
-            tokenizer, "eoi_token_id", _DEFAULT_IMAGE_END_TOKEN_ID
-        )
-        self.audio_start_token_id = getattr(
-            tokenizer, "boa_token_id", _DEFAULT_AUDIO_START_TOKEN_ID
-        )
-        self.audio_end_token_id = getattr(
-            tokenizer, "eoa_token_id", _DEFAULT_AUDIO_END_TOKEN_ID
-        )
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        tokenizer = self.info.get_tokenizer()
+        bos_token_id = tokenizer.bos_token_id
+
+        # Keep raw token prompts aligned with HF's text-processing path.
+        if bos_token_id is not None and (
+            not prompt_tokens or prompt_tokens[0] != bos_token_id
+        ):
+            return [bos_token_id, *prompt_tokens]
+
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: object,
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Routes per-item tensors to the GPU Worker's embed_multimodal kwargs."""
@@ -263,152 +268,122 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
             "audio_values": MultiModalFieldConfig.batched("audio"),
         }
 
-    def _get_prompt_updates(self, *args: Any, **kwargs: Any) -> Sequence[PromptUpdate]:
-        return []
-
-    def apply(
-        self, inputs: ProcessorInputs, timing_ctx: TimingContext
-    ) -> MultiModalInput:
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        del mm_items
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
-        prompt_text = (
-            inputs.prompt
-            if isinstance(inputs.prompt, str)
-            else tokenizer.decode(inputs.prompt)
-        )
 
-        tokenization_kwargs = dict(inputs.tokenization_kwargs)
-        if not isinstance(inputs.prompt, str):
-            # A template-rendered prompt already starts with BOS. Otherwise,
-            # restore the BOS added before token IDs were decoded to text.
-            tokenization_kwargs.setdefault(
-                "add_special_tokens",
-                not (
-                    bool(inputs.prompt) and inputs.prompt[0] == tokenizer.bos_token_id
-                ),
-            )
-
-        num_images = inputs.mm_data_items.get_count("image", strict=False)
-        num_audios = inputs.mm_data_items.get_count("audio", strict=False)
-
-        images = (
-            inputs.mm_data_items.get_items("image", ImageProcessorItems).get_all()
-            if num_images > 0
-            else None
-        )
-        audios = (
-            inputs.mm_data_items.get_items("audio", AudioProcessorItems).get_all()
-            if num_audios > 0
-            else None
-        )
-
-        mm_kwargs: dict[str, torch.Tensor | list[torch.Tensor]] = {}
-
-        with timing_ctx.record("preprocess_apertus"):
-            hf_outputs = self.hf_processor(
-                text=prompt_text,
-                images=images,
-                audio=audios,
-                padding=True,
-                return_tensors="pt",
-                **tokenization_kwargs,
-            )
-            prompt_token_ids = hf_outputs["input_ids"][0].tolist()
-
-        if num_images > 0:
-            # Hugging Face pads images in a multimodal batch to a common size.
-            # Crop each item back to its reported dimensions before encoding it.
-            pixel_values = [
-                image[:, : int(height), : int(width)].contiguous()
-                for image, (height, width) in zip(
-                    hf_outputs["pixel_values"],
-                    hf_outputs["image_sizes"],
-                )
+        def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
+            pixel_values = out_mm_kwargs["image"][item_idx]["pixel_values"].data
+            assert isinstance(pixel_values, torch.Tensor)
+            height, width = pixel_values.shape[-2:]
+            # Pixels were cropped to HF's per-image size before reaching here.
+            image_grids = [
+                [
+                    height // image_processor.spatial_factor,
+                    width // image_processor.spatial_factor,
+                ]
             ]
-            mm_kwargs["pixel_values"] = pixel_values
-
-        if num_audios > 0:
-            # Apertus1p5 input-processor pads audio features in a multimodal
-            # batch to a common length. Remove that padding with each item's
-            # attention mask.
-            audio_values = [
-                audio[0, : int(mask.sum())].contiguous()
-                for audio, mask in zip(
-                    hf_outputs["input_features"],
-                    hf_outputs["feature_attention_mask"],
-                )
-            ]
-            mm_kwargs["audio_values"] = audio_values
-
-        # Each placeholder range marks the token positions replaced by embeddings.
-        with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
-
-        def _span_ranges(
-            start_token: str,
-            start_id: int,
-            end_token: str,
-            end_id: int,
-            embed_token_id: int,
-            count: int,
-        ) -> list[PlaceholderRange]:
-            """Locate processor-created multimodal spans and embedding slots.
-
-            The Apertus1p5 input-processor from transformers expands images into
-            ``<|img_start|>H*W<|img_token_start|><|image|>...<|img_end|>``
-            and audio into ``<|audio_start|><|audio|>...<|audio_end|>``.
-            For each item, find the next complete range after the previous
-            one and mark its ``<|image|>`` or ``<|audio|>`` positions for
-            replacement with the corresponding encoded embeddings.
-            """
-            ranges: list[PlaceholderRange] = []
-            pos = 0
-            for _ in range(count):
-                try:
-                    s = prompt_token_ids.index(start_id, pos)
-                    e = prompt_token_ids.index(end_id, s)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Apertus MM: {start_token!r}/{end_token!r} pair not "
-                        f"found in prompt (search from {pos})"
-                    ) from exc
-                span = prompt_token_ids[s : e + 1]
-                is_embed = torch.tensor(
-                    [tok == embed_token_id for tok in span], dtype=torch.bool
-                )
-                ranges.append(
-                    PlaceholderRange(offset=s, length=e - s + 1, is_embed=is_embed)
-                )
-                pos = e + 1
-            return ranges
-
-        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
-        if num_images > 0:
-            mm_placeholders["image"] = _span_ranges(
-                self.image_start_token,
-                self.image_start_token_id,
-                self.image_end_token,
-                self.image_end_token_id,
-                self.image_token_id,
-                num_images,
+            image_replacement = processor.replace_image_token(
+                {"image_grids": image_grids}, 0
             )
-        if num_audios > 0:
-            mm_placeholders["audio"] = _span_ranges(
-                self.audio_start_token,
-                self.audio_start_token_id,
-                self.audio_end_token,
-                self.audio_end_token_id,
-                self.audio_token_id,
-                num_audios,
-            )
+            image_ids = tokenizer.encode(image_replacement, add_special_tokens=False)
 
-        return mm_input(
-            prompt_token_ids=prompt_token_ids,
-            mm_kwargs=MultiModalKwargsItems.from_hf_inputs(
-                mm_kwargs, self._get_mm_fields_config(mm_kwargs, {})
+            return PromptUpdateDetails.select_token_id(image_ids, self.image_token_id)
+
+        def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
+            audio_values = out_mm_kwargs["audio"][item_idx]["audio_values"].data
+            assert isinstance(audio_values, torch.Tensor)
+            # Use HF's code-count calculation so cache replay follows HF exactly.
+            num_audio_codes = feature_extractor.get_num_audio_codes(
+                audio_values.shape[-1]
+            )
+            audio_replacement = processor.replace_audio_token(
+                {"num_audio_codes": [num_audio_codes]}, 0
+            )
+            audio_ids = tokenizer.encode(audio_replacement, add_special_tokens=False)
+
+            return PromptUpdateDetails.select_token_id(audio_ids, self.audio_token_id)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[self.image_token_id],
+                replacement=get_image_replacement,
             ),
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholders,
+            PromptReplacement(
+                modality="audio",
+                target=[self.audio_token_id],
+                replacement=get_audio_replacement,
+            ),
+        ]
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data.get("images", []) and not mm_data.get("audios", []):
+            # Apertus HF rejects raw MM markers without their media. The cache's
+            # text-only pass needs those raw markers so BaseMultiModalProcessor
+            # can apply the cached PromptReplacement entries itself.
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(
+                prompt,
+                add_special_tokens=tok_kwargs.get("add_special_tokens", True),
+            )
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        item_processor_data = dict(mm_data)
+        audios = item_processor_data.pop("audios", [])
+        if audios:
+            # MultiModalDataItems uses the plural modality key; HF uses audio.
+            item_processor_data["audio"] = audios
+            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            mm_kwargs = dict(
+                **mm_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=item_processor_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs={**tok_kwargs, "padding": True},
         )
+
+        if "pixel_values" in processed_outputs:
+            pixel_values = processed_outputs["pixel_values"]
+            image_sizes = processed_outputs["image_sizes"]
+            assert isinstance(image_sizes, torch.Tensor)
+            # Apertus1p5 input-processor pads images to a common request size.
+            # Cache each image without that request-dependent padding.
+            processed_outputs["pixel_values"] = [
+                image[:, : int(height), : int(width)].contiguous()
+                for image, (height, width) in zip(pixel_values, image_sizes)
+            ]
+
+        if "input_features" in processed_outputs:
+            input_features = processed_outputs["input_features"]
+            attention_mask = processed_outputs["feature_attention_mask"]
+            # Apertus1p5 input-processor pads audio to a common request size.
+            # Cache each feature without that request-dependent padding.
+            processed_outputs["audio_values"] = [
+                audio[0, : int(mask.sum())].contiguous()
+                for audio, mask in zip(input_features, attention_mask)
+            ]
+
+        return processed_outputs
 
 
 @MULTIMODAL_REGISTRY.register_processor(
