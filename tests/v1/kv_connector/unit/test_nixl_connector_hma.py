@@ -212,6 +212,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._engine_last_active = {}
     worker._bidirectional_kv_xfer_enabled = False
+    worker._done_recving_without_xfer = set()
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
@@ -1634,8 +1635,8 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
-    worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
+    worker.dst_xfer_side_handles = {engine_id: {(0, 0): 100, (1, 0): 101}}
+    worker.src_xfer_handles_by_tp_ratio = {(-2, 4): {0: 200, 1: 201}}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()

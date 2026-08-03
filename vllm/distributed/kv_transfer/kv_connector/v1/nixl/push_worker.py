@@ -318,7 +318,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[tuple[dict[tuple[int, int], str], float]],
+            f: Future[tuple[dict[tuple[int, int, int], str], float]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -434,7 +434,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if fut is not None:
 
             def _on_handshake(
-                f: Future[tuple[dict[tuple[int, int], str], float]],
+                f: Future[tuple[dict[tuple[int, int, int], str], float]],
                 rid: str = request_id,
                 blocks: BlockIds = local_block_ids,
                 rd: dict[str, Any] = registration_data,
@@ -514,6 +514,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
         num_groups = len(local_block_ids)
+        remote_worker_by_tp_rank = {
+            worker_key[0]: worker_key
+            for worker_key in self.dst_xfer_side_handles[engine_id]
+        }
 
         # MLA latent is replicated across D's TP ranks: the tp-mapping
         # collapses it to one rank (fine for reads), but push must WRITE every
@@ -524,9 +528,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         replicate_attn = self.use_mla and tp_ratio < 0
         if replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+            write_ranks = sorted(remote_worker_by_tp_rank)
         else:
-            write_ranks = list(plan.all_source_ranks)
+            write_ranks = [
+                rank
+                for rank in plan.all_source_ranks
+                if rank in remote_worker_by_tp_rank
+            ]
 
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
@@ -547,7 +555,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ]
 
         handles: list[int] = []
-        for i, spec in enumerate(read_specs):
+        for spec in read_specs:
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _xfer_blocks"
@@ -557,19 +565,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_size,
                 req_id,
             )
-            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+            if tp_ratio < 0 and (not self.use_mla or self._has_mamba):
                 # Multiple targets: write each rank its chunk of local memory.
                 # Hybrid MLA+SSM also lands here: its split handles replicate
                 # the attention descriptors and chunk only the SSM state.
                 split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][
+                    spec.remote_rank
+                ]
             else:
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
                 ]
 
+            remote_worker_key = remote_worker_by_tp_rank[spec.remote_rank]
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+                remote_worker_key
             ]
 
             handle = self._xfer_blocks(

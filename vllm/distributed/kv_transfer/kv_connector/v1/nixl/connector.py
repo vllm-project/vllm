@@ -119,6 +119,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
 
+        if (
+            vllm_config.kv_transfer_config.is_kv_consumer
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "NixlConnector consumer (decode) does not support "
+                "prefill_context_parallel_size > 1."
+            )
+
         if vllm_config.kv_transfer_config.kv_role == "kv_both":
             logger.warning_once(
                 "Using kv_role='kv_both' with NixlConnector is deprecated "
@@ -159,6 +168,23 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def get_finished_count(self) -> int | None:
+        parallel_config = self._vllm_config.parallel_config
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            publishing_pcp_replica_count = min(
+                parallel_config.prefill_context_parallel_size,
+                parallel_config.decode_context_parallel_size,
+            )
+            return (
+                parallel_config.tensor_parallel_size
+                * parallel_config.pipeline_parallel_size
+                * publishing_pcp_replica_count
+            )
+        return None
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -208,10 +234,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler.request_finished(request, block_ids)
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+        self,
+        metadata: dict[tuple[int, int, int], KVConnectorHandshakeMetadata],
     ) -> None:
         """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        Set handshake metadata keyed by (pp_rank, tp_rank, pcp_rank) so the side
         channel can serve every PP stage's agent metadata.
 
         Args:
@@ -240,7 +267,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        done_sending, done_recving = self.connector_worker.get_finished()
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and self.connector_worker.pcp_rank
+            >= self._vllm_config.parallel_config.decode_context_parallel_size
+        ):
+            done_sending.clear()
+        return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
@@ -316,6 +350,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             None if no handshake metadata is available.
         """
         assert self.connector_worker is not None
+        if (
+            self.kv_transfer_config.kv_role == "kv_producer"
+            and self.connector_worker.pcp_rank
+            >= self._vllm_config.parallel_config.decode_context_parallel_size
+        ):
+            return None
         return self.connector_worker.xfer_handshake_metadata
 
 

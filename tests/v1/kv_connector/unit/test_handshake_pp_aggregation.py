@@ -21,7 +21,7 @@ class _Metadata(KVConnectorHandshakeMetadata):
 
 class _FakeExecutor:
     handshake_metadata_src: (
-        list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
+        list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None] | None
     )
     last_instance: "_FakeExecutor | None" = None
 
@@ -36,7 +36,7 @@ class _FakeExecutor:
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None:
+    ) -> list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None] | None:
         self.handshake_calls += 1
         return self.handshake_metadata
 
@@ -49,7 +49,7 @@ def _run_engine_core_handshake(
     connector: KVConnectorBase_V1,
     *,
     handshake_metadata: (
-        list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
+        list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None] | None
     ),
 ) -> _FakeExecutor:
     class _FakeScheduler:
@@ -161,11 +161,12 @@ class _PPAwareConnector(_LegacyConnector):
     def __init__(self) -> None:
         super().__init__()
         self.pp_aware_metadata: (
-            dict[tuple[int, int], KVConnectorHandshakeMetadata] | None
+            dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None
         ) = None
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+        self,
+        metadata: dict[tuple[int, int, int], KVConnectorHandshakeMetadata],
     ) -> None:
         self.pp_aware_metadata = metadata
 
@@ -173,9 +174,9 @@ class _PPAwareConnector(_LegacyConnector):
 def test_engine_unwraps_handshake_metadata_for_legacy_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Engine core always asks workers for `(pp_rank, tp_rank)`-keyed metadata,
+    """Engine core asks workers for `(pp_rank, tp_rank, pcp_rank)` metadata,
     then unwraps to `{tp_rank: metadata}` for a connector that has not opted
-    into PP-aware handshake (single-PP producer, all `pp_rank == 0`)."""
+    into PP-aware handshake (all PP and PCP ranks are zero)."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _LegacyConnector()
@@ -184,9 +185,9 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
         monkeypatch,
         connector,
         handshake_metadata=[
-            {(0, 0): metadata_0},
+            {(0, 0, 0): metadata_0},
             None,
-            {(0, 1): metadata_1},
+            {(0, 1, 0): metadata_1},
         ],
     )
 
@@ -205,15 +206,17 @@ def test_engine_rejects_pp_producer_for_legacy_connector(
         _run_engine_core_handshake(
             monkeypatch,
             connector,
-            handshake_metadata=[{(0, 0): _Metadata()}, {(1, 0): _Metadata()}],
+            handshake_metadata=[
+                {(0, 0, 0): _Metadata()},
+                {(1, 0, 0): _Metadata()},
+            ],
         )
 
 
 def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A PP-aware connector receives the full `(pp_rank, tp_rank)`-keyed dict
-    unchanged."""
+    """A PP-aware connector receives the full worker-keyed dict unchanged."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _PPAwareConnector()
@@ -221,12 +224,12 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
     executor = _run_engine_core_handshake(
         monkeypatch,
         connector,
-        handshake_metadata=[{(0, 0): metadata_0}, {(1, 0): metadata_1}],
+        handshake_metadata=[{(0, 0, 0): metadata_0}, {(1, 0, 0): metadata_1}],
     )
 
     assert executor.handshake_calls == 1
     assert connector.legacy_metadata is None
     assert connector.pp_aware_metadata == {
-        (0, 0): metadata_0,
-        (1, 0): metadata_1,
+        (0, 0, 0): metadata_0,
+        (1, 0, 0): metadata_1,
     }
