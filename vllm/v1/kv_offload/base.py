@@ -395,6 +395,11 @@ class OffloadingManager(ABC):
         """Return collected metrics since last call, or None if disabled."""
         return None
 
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        """Static config to emit once at startup as Info-style gauges,
+        mapping ``metric_name -> {label: value}``. None when unavailable."""
+        return None
+
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
         return

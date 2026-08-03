@@ -42,6 +42,7 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
+        config_info: dict[str, str] | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
@@ -50,6 +51,9 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: Medium = Medium.CPU
         self._num_blocks: int = num_blocks
+        # Static per-tier config emitted as the CPU_CONFIG_INFO metric labels
+        # (None when the caller does not report config info, e.g. in tests).
+        self._config_info: dict[str, str] | None = config_info
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -325,3 +329,8 @@ class CPUOffloadingManager(OffloadingManager):
             self.stores_skipped_in_current_batch = 0
 
         return stats
+
+    def get_config_info(self) -> dict[str, dict[str, str]] | None:
+        if self._config_info is None:
+            return None
+        return {CPUOffloadingMetrics.CPU_CONFIG_INFO: self._config_info}
