@@ -664,6 +664,12 @@ class VllmConfig:
             # start. Keep all decoder pooling on V1 until it is supported.
             if model_config.attn_type != "encoder_only":
                 return False
+            # The Transformers backend registers attention layers under names
+            # V2's encoder-only path does not build metadata for. This also
+            # covers models with no in-tree implementation, which fall back to
+            # that backend even though model_impl is left as "auto".
+            if model_config.using_transformers_backend():
+                return False
             # Fall through rather than return, so pooling models are still
             # subject to the MoE and hybrid checks below.
         elif model_config.runner_type != "generate":

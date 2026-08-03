@@ -289,10 +289,25 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 architectures=["BertModel"],
                 runner_type="pooling",
                 attn_type="encoder_only",
+                using_transformers_backend=lambda: False,
                 is_moe=False,
                 is_quantized=False,
             ),
             True,
+        ),
+        (
+            # The Transformers backend is unsupported on V2, including models
+            # that fall back to it for lack of an in-tree implementation.
+            SimpleNamespace(
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                architectures=["BertModel"],
+                runner_type="pooling",
+                attn_type="encoder_only",
+                using_transformers_backend=lambda: True,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
         ),
         (
             # Decoder pooling stays on V1: token-wise tasks are unsupported
