@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
+    resolve_kv_cache_block_sizes,
     tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
@@ -1255,6 +1256,51 @@ def test_project_kv_cache_groups_to_worker():
     proj_spec = projected[0].kv_cache_spec
     assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
+
+
+@pytest.mark.parametrize(
+    "spec_kind,dcp_size,expected",
+    [
+        ("attention", 1, 16),
+        ("attention", 2, 32),
+        # Mamba state is replicated across DCP ranks, so a uniform group of
+        # Mamba layers keeps its span.
+        ("mamba", 2, 16),
+    ],
+)
+def test_resolve_block_sizes_scales_uniform_type_group_by_dcp(
+    spec_kind, dcp_size, expected
+):
+    # A UniformType group is a container rather than an AttentionSpec, but the
+    # span of the layers it wraps is what decides whether DCP scaling applies.
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    inner_specs = (
+        {"layer1": new_kv_cache_spec(), "layer2": new_kv_cache_spec(head_size=32)}
+        if spec_kind == "attention"
+        else {"layer1": mamba_spec, "layer2": mamba_spec}
+    )
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1", "layer2"],
+                UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=inner_specs),
+            ),
+            KVCacheGroupSpec(["mamba_layer"], mamba_spec),
+        ],
+    )
+
+    scheduler_block_size, _ = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+    assert scheduler_block_size == expected
 
 
 def test_merge_kv_cache_spec():
