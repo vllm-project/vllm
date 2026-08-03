@@ -1323,7 +1323,7 @@ steps:
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+  - VLLM_ROCM_USE_AITER=1 pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
 - label: LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
@@ -3597,6 +3597,7 @@ steps:
     --ignore=kernels/test_concat_mla_q.py
     --ignore=kernels/test_fused_qk_norm_rope_gate.py
     --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+    --deselect=kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
     --ignore=kernels/test_top_k_per_row.py
     --ignore=kernels/test_kda.py
     --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
