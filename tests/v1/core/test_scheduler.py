@@ -47,6 +47,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.external import (
+    register_external_metrics_provider,
+    unregister_external_metrics_provider,
+)
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -287,6 +291,53 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
     assert len(engine_core_outputs[1].outputs) == 1
+
+
+def test_scheduler_collects_external_metrics():
+    register_external_metrics_provider("example.plugin", lambda: {"used_bytes": 42})
+    try:
+        scheduler = create_scheduler()
+        stats = scheduler.make_stats()
+    finally:
+        unregister_external_metrics_provider("example.plugin")
+
+    assert stats is not None
+    assert stats.external_metrics == {"example.plugin": {"used_bytes": 42}}
+
+
+@pytest.mark.parametrize("sample_while_busy", [False, True])
+def test_scheduler_refreshes_external_metrics_when_requests_finish(
+    monkeypatch, sample_while_busy
+):
+    clock = [10.0]
+    monkeypatch.setattr("vllm.v1.metrics.external.time.monotonic", lambda: clock[0])
+    provider = Mock()
+    register_external_metrics_provider("example.plugin", provider)
+    try:
+        scheduler = create_scheduler()
+        provider.return_value = {"active_requests": 0}
+        assert scheduler.make_stats().external_metrics == {
+            "example.plugin": {"active_requests": 0}
+        }
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        provider.return_value = {"active_requests": 1}
+        if sample_while_busy:
+            clock[0] += 1.0
+            assert scheduler.make_stats().external_metrics == {
+                "example.plugin": {"active_requests": 1}
+            }
+            assert scheduler.make_stats().external_metrics is None
+
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+        scheduler.schedule()
+        provider.return_value = {"active_requests": 0}
+        stats = scheduler.make_stats()
+        assert stats.external_metrics == {"example.plugin": {"active_requests": 0}}
+        assert scheduler.make_stats().external_metrics is None
+        assert provider.call_count == (3 if sample_while_busy else 2)
+    finally:
+        unregister_external_metrics_provider("example.plugin")
 
 
 def test_schedule_multimodal_requests():
