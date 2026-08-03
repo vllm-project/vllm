@@ -760,6 +760,7 @@ def reinit_gloo_group(
     port: int,
     rank: int,
     size: int,
+    timeout: timedelta | None = None,
 ) -> None:
     """Destroy and recreate a Gloo cpu_group on *group_coordinator*."""
     if group_coordinator.cpu_group is not None:
@@ -770,6 +771,7 @@ def reinit_gloo_group(
         rank,
         size,
         backend="gloo",
+        timeout=timeout,
     )
 
 
