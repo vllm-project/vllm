@@ -69,6 +69,11 @@ class KVConnectorLogging:
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats_data to be aggregated across all workers and
         # consist of observations from a single connector or a MultiConnector.
+        # The full pipeline is: observe() -> aggregate() -> reduce() -> log().
+        # Stats arrive here pre-aggregated across workers (each TP rank
+        # records its own per-transfer observations, which are concatenated
+        # upstream), so summaries computed later describe the combined pool of
+        # observations from every rank rather than a single rank.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )
@@ -97,7 +102,11 @@ class KVConnectorLogging:
             and not self.transfer_stats_accumulator.is_empty()
         ):
             # Produce a single cumulative stats object for the last time
-            # interval from the recorded observations.
+            # interval from the recorded observations. The accumulator holds
+            # observations aggregated across all TP ranks, so the logged
+            # summary reflects the combined pool of all ranks' transfers (see
+            # the connector-specific stats class docstring, e.g.
+            # NixlKVConnectorStats, for the exact semantics of each metric).
             xfer_metrics = self.transfer_stats_accumulator.reduce()
             xfer_metrics_str = ", ".join(f"{k}={v}" for k, v in xfer_metrics.items())
             log_fn("KV Transfer metrics: %s", xfer_metrics_str)
