@@ -7,6 +7,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import openai  # use the official client for correctness check
 import pytest
@@ -18,6 +19,9 @@ from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.core_client import DPAsyncMPClient
 
 MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 ELASTIC_EP_MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
@@ -48,14 +52,18 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
             ),
         )
     )
-    coordinator = ExternalElasticEPScaleCoordinator(client)
+    coordinator = ExternalElasticEPScaleCoordinator(
+        cast("DPAsyncMPClient", client)
+    )
 
     assert coordinator._calculate_num_redundant_experts(2, 3) == 64
 
 
 @pytest.mark.asyncio
 async def test_external_elastic_ep_late_rank_observes_epoch_error():
-    coordinator = ExternalElasticEPScaleCoordinator(SimpleNamespace())
+    coordinator = ExternalElasticEPScaleCoordinator(
+        cast("DPAsyncMPClient", SimpleNamespace())
+    )
     epoch = "failed-epoch"
     store = DictStore(
         {
