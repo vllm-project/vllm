@@ -24,7 +24,7 @@ def vqa_ppl_test(
     model_info: GenerateModelInfo,
     mm_processor_kwargs=None,
     vllm_extra_kwargs=None,
-    rtol=PPL_TOL,
+    tol=PPL_TOL,
 ):
     dataset = load_dataset("lmms-lab-encoder/llava-bench-in-the-wild", split="train")
 
@@ -151,5 +151,5 @@ def vqa_ppl_test(
     print("Transformers:", hf_dtype, hf_ppl)
     print("Difference (%):", differ * 100)
 
-    assert abs(differ) < PPL_TOL
+    assert abs(differ) < tol
     return vllm_ppl
