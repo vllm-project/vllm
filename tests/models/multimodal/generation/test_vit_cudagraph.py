@@ -249,6 +249,19 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
+    "gemma4": VitCudagraphTestConfig(
+        model="google/gemma-4-E2B-it",
+        image_prompt=(
+            "<bos><start_of_turn>user\n<|image|>\nWhat is in this image?<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        ),
+        video_prompt=(
+            "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
+            "<end_of_turn>\n<start_of_turn>model\n"
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+    ),
 }
 
 

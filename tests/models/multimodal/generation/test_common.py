@@ -234,7 +234,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "default_torch_num_threads": 1,
         },
         marks=[pytest.mark.core_model],
     ),
@@ -1242,7 +1241,7 @@ def test_custom_inputs_models(
         create_new_process_for_each_test=True,
     ),
 )
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_single_image_models_heavy(
     tmp_path: PosixPath,
     model_type: str,

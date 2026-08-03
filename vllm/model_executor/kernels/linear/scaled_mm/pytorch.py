@@ -32,8 +32,12 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
-            return False, "requires ROCm, CUDA or CPU."
+        if not (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
+            return False, "requires ROCm, CUDA, CPU or XPU."
 
         if compute_capability is not None and compute_capability < 89:
             return False, "requires compute capability 89 and above."
@@ -104,10 +108,10 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        if not on_mi3xx():
-            return False, "requires MI3xx."
+        if get_cdna_version() <= 2:
+            return False, "requires CDNA3+"
 
         if compute_capability is not None and compute_capability < 94:
             return False, "requires compute capability 94 and above."
