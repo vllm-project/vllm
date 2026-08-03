@@ -620,7 +620,7 @@ class TestMultiConnectorStats:
         correct data."""
         serialized_data = {
             "NixlConnector": {
-                "transfer_duration": [1.5, 2.3],
+                "end_to_end_transfer_duration": [1.5, 2.3],
                 "post_duration": [0.1, 0.2],
                 "bytes_transferred": [1024, 2048],
                 "num_descriptors": [10, 20],
@@ -637,7 +637,7 @@ class TestMultiConnectorStats:
         assert "NixlConnector" in stats.data
         nixl_stats = stats.data["NixlConnector"]
         assert isinstance(nixl_stats, NixlKVConnectorStats)
-        assert nixl_stats.data["transfer_duration"] == [1.5, 2.3]
+        assert nixl_stats.data["end_to_end_transfer_duration"] == [1.5, 2.3]
         assert nixl_stats.data["post_duration"] == [0.1, 0.2]
         assert nixl_stats.data["bytes_transferred"] == [1024, 2048]
         assert nixl_stats.data["num_descriptors"] == [10, 20]
@@ -646,7 +646,7 @@ class TestMultiConnectorStats:
         """Test reconstruction with multiple connector types that have custom stats."""
         serialized_data = {
             "NixlConnector": {
-                "transfer_duration": [1.5],
+                "end_to_end_transfer_duration": [1.5],
                 "post_duration": [0.1],
                 "bytes_transferred": [1024],
                 "num_descriptors": [10],
@@ -678,7 +678,7 @@ class TestMultiConnectorStats:
         serialized_data = {
             "UnknownConnector": {"some_field": [1, 2, 3]},
             "NixlConnector": {
-                "transfer_duration": [1.5],
+                "end_to_end_transfer_duration": [1.5],
                 "post_duration": [0.1],
                 "bytes_transferred": [1024],
                 "num_descriptors": [10],
@@ -700,7 +700,7 @@ class TestMultiConnectorStats:
         # This simulates the in-process case where stats are not serialized
         nixl_stats = NixlKVConnectorStats(
             data={
-                "transfer_duration": [1.5],
+                "end_to_end_transfer_duration": [1.5],
                 "post_duration": [0.1],
                 "bytes_transferred": [1024],
                 "num_descriptors": [10],
@@ -732,7 +732,7 @@ class TestMultiConnectorStats:
         # This can happen during transition or partial serialization
         nixl_stats = NixlKVConnectorStats(
             data={
-                "transfer_duration": [1.5],
+                "end_to_end_transfer_duration": [1.5],
                 "post_duration": [0.1],
                 "bytes_transferred": [1024],
                 "num_descriptors": [10],
@@ -766,7 +766,7 @@ class TestMultiConnectorStats:
         # so it returns None and should be skipped
         serialized_data = {
             "NixlConnector": {
-                "transfer_duration": [1.5],
+                "end_to_end_transfer_duration": [1.5],
                 "post_duration": [0.1],
                 "bytes_transferred": [1024],
                 "num_descriptors": [10],
@@ -794,11 +794,13 @@ class TestMultiConnectorStats:
         child_metrics = MagicMock()
         metrics = object.__new__(MultiKVConnectorPromMetrics)
         metrics._prom_metrics = {"NixlConnector": child_metrics}
-        payload = {"NixlConnector": {"transfer_duration": [1.5]}}
+        payload = {"NixlConnector": {"end_to_end_transfer_duration": [1.5]}}
 
         metrics.observe(payload, engine_idx=2)
 
-        child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
+        child_metrics.observe.assert_called_once_with(
+            {"end_to_end_transfer_duration": [1.5]}, 2
+        )
 
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
@@ -806,7 +808,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [1.0],
+                        "end_to_end_transfer_duration": [1.0],
                         "post_duration": [0.1],
                         "bytes_transferred": [1024],
                         "num_descriptors": [10],
@@ -824,7 +826,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [2.0],
+                        "end_to_end_transfer_duration": [2.0],
                         "post_duration": [0.2],
                         "bytes_transferred": [2048],
                         "num_descriptors": [20],
@@ -843,7 +845,7 @@ class TestMultiConnectorStats:
         assert result is stats1  # Should return self
         assert "NixlConnector" in result.data
         nixl_stats = result.data["NixlConnector"]
-        assert nixl_stats.data["transfer_duration"] == [1.0, 2.0]
+        assert nixl_stats.data["end_to_end_transfer_duration"] == [1.0, 2.0]
         assert nixl_stats.data["post_duration"] == [0.1, 0.2]
         assert nixl_stats.data["bytes_transferred"] == [1024, 2048]
         assert nixl_stats.data["num_descriptors"] == [10, 20]
@@ -858,7 +860,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [1.0],
+                        "end_to_end_transfer_duration": [1.0],
                         "post_duration": [0.1],
                         "bytes_transferred": [1024],
                         "num_descriptors": [10],
@@ -887,7 +889,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [1.0, 2.0],
+                        "end_to_end_transfer_duration": [1.0, 2.0],
                         "post_duration": [0.1, 0.2],
                         "bytes_transferred": [1024, 2048],
                         "num_descriptors": [10, 20],
@@ -916,7 +918,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [1.0, 2.0],
+                        "end_to_end_transfer_duration": [1.0, 2.0],
                         "post_duration": [0.1, 0.2],
                         "bytes_transferred": [1024, 2048],
                         "num_descriptors": [10, 20],
@@ -948,7 +950,7 @@ class TestMultiConnectorStats:
             data={
                 "NixlConnector": NixlKVConnectorStats(
                     data={
-                        "transfer_duration": [1.0, 2.0],
+                        "end_to_end_transfer_duration": [1.0, 2.0],
                         "post_duration": [0.1, 0.2],
                         "bytes_transferred": [1024, 2048],
                         "num_descriptors": [10, 20],
@@ -969,7 +971,7 @@ class TestMultiConnectorStats:
         # After reset, stats should be empty
         assert stats.is_empty()
         nixl_stats = stats.data["NixlConnector"]
-        assert len(nixl_stats.data["transfer_duration"]) == 0
+        assert len(nixl_stats.data["end_to_end_transfer_duration"]) == 0
 
     def test_is_empty_with_multiple_connectors(self):
         """Test is_empty() returns correct value with multiple connectors."""
@@ -984,7 +986,7 @@ class TestMultiConnectorStats:
         assert stats.is_empty()
 
         # One non-empty
-        stats.data["NixlConnector"].data["transfer_duration"].append(1.0)
+        stats.data["NixlConnector"].data["end_to_end_transfer_duration"].append(1.0)
         assert not stats.is_empty()
 
 
