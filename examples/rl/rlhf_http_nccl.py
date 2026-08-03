@@ -43,7 +43,7 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
 BASE_URL = "http://localhost:8000"

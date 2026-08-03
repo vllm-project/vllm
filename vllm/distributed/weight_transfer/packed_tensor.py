@@ -177,6 +177,14 @@ def packed_nccl_broadcast_producer(
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
+    # Drain every slot before returning. The loop only synchronizes the slot it
+    # is about to reuse, so on exit the other slots may still be broadcasting —
+    # and `in_flight`, the only thing keeping their packed buffers alive, dies
+    # with this frame. Waiting here also means the caller's weights are on the
+    # wire (not merely enqueued) once this returns.
+    for stream in streams:
+        stream.synchronize()
+
 
 def packed_nccl_broadcast_consumer(
     iterator: Iterator[tuple[str, tuple[list[int], torch.dtype]]],

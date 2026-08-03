@@ -41,7 +41,7 @@ from vllm.distributed.weight_transfer import (
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -81,9 +81,6 @@ class TrainModel:
 
         self.port = get_open_port()
         self.master_address = get_ip()
-
-    def get_master_address_and_port(self):
-        return self.master_address, self.port
 
     def init_weight_transfer(self, world_size, llm_handle):
         """Build the trainer-side weight-transfer engine.

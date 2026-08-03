@@ -14,9 +14,10 @@ The inference side is a standalone HTTP server (spawned by this script with
 plane run inside the rank-0 FSDP Ray actor. That lets the trainer use the
 unified `TrainerWeightTransferEngine.send_weights()` with an
 `HTTPVLLMWeightSyncClient` — one call drives start/update/finish on the server
-concurrently with the NCCL broadcast. The 4 FSDP ranks all participate in the
-incremental `full_tensor()` all-gather; only rank 0 holds the engine and
-broadcasts (rank 0 is the only trainer rank in the NCCL group).
+concurrently with the NCCL broadcast. Every FSDP rank builds an engine and calls
+`send_weights()`, so all 4 participate in the incremental `full_tensor()`
+all-gather; only rank 0 holds a communicator and broadcasts (it is the only
+trainer rank in the NCCL group).
 
 GPU split (single node): the server takes GPUs 0-3 (CUDA_VISIBLE_DEVICES), and
 Ray (training) is restricted to GPUs 4-7.
@@ -51,7 +52,7 @@ from vllm.distributed.weight_transfer import (
     ModuleSource,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"

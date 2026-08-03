@@ -49,7 +49,7 @@ from vllm.distributed.weight_transfer import (
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLTrainerInitInfo,
     SparseWeightPatch,
@@ -129,6 +129,15 @@ class TrainModel:
             source=ModuleSource(self.model),
         )
 
+    def shutdown_engines(self) -> None:
+        """Drop the NCCL communicators before the vLLM engine they point at
+        goes away, so the next phase rendezvouses from a clean slate."""
+        for attr in ("dense_engine", "sparse_engine"):
+            engine = getattr(self, attr)
+            if engine is not None:
+                engine.shutdown()
+                setattr(self, attr, None)
+
     def dense_payload_bytes(self) -> int:
         return sum(
             param.numel() * param.element_size() for param in self.model.parameters()
@@ -165,7 +174,7 @@ class TrainModel:
         self,
         prompts: Sequence[str],
         max_patch_rows: int = MAX_PATCH_ROWS,
-    ) -> tuple[dict[str, object], list[int], str, int]:
+    ) -> tuple[list[int], str, int]:
         selected_token_ids: list[int] = []
         special_ids = set(self.tokenizer.all_special_ids)
         for prompt in prompts:
@@ -212,7 +221,7 @@ class TrainModel:
         flat_indices = (
             row_ids.unsqueeze(1).mul(hidden_size).add(column_offsets).reshape(-1)
         )
-        flat_values = self.patched_param[row_ids].reshape(-1).contiguous()
+        flat_values = self.patched_param[row_ids].detach().reshape(-1).contiguous()
         self.pending_sparse_patches = [
             SparseWeightPatch(
                 name=PATCHED_PARAM_NAME,
@@ -223,25 +232,14 @@ class TrainModel:
         ]
         patch_digest = hashlib.sha256(
             self.pending_sparse_patches[0].indices.cpu().numpy().tobytes()
-            + self.pending_sparse_patches[0]
-            .values.detach()
-            .float()
-            .cpu()
-            .numpy()
-            .tobytes()
+            + self.pending_sparse_patches[0].values.float().cpu().numpy().tobytes()
         ).hexdigest()
 
         sparse_payload_bytes = (
             flat_indices.numel() * torch.tensor([], dtype=torch.int32).element_size()
             + flat_values.numel() * flat_values.element_size()
         )
-        update_info = dict(
-            names=[PATCHED_PARAM_NAME],
-            dtype_names=[str(self.patched_param.dtype).split(".")[-1]],
-            shapes=[list(self.patched_param.shape)],
-            num_updates_list=[flat_indices.numel()],
-        )
-        return update_info, selected_token_ids, patch_digest, sparse_payload_bytes
+        return selected_token_ids, patch_digest, sparse_payload_bytes
 
     def send_dense_weights(self) -> float:
         """One call drives start/update/finish on the inference side
@@ -345,7 +343,7 @@ def run_dense_phase(
         ray.get(train_model.init_dense_engine.remote(world_size, llm))
 
         dense_payload_bytes = ray.get(train_model.dense_payload_bytes.remote())
-        _, selected_token_ids, patch_digest, _ = ray.get(
+        selected_token_ids, patch_digest, _ = ray.get(
             train_model.prepare_sparse_patch.remote(PROMPTS)
         )
 
@@ -364,6 +362,7 @@ def run_dense_phase(
             "dense_send_ms": dense_send_ms,
         }
     finally:
+        ray.get(train_model.shutdown_engines.remote())
         ray.kill(llm)
 
 
@@ -381,7 +380,7 @@ def run_sparse_phase(
         world_size = ray.get(llm.get_world_size.remote()) + 1
         ray.get(train_model.init_sparse_engine.remote(world_size, llm))
 
-        _, selected_token_ids, patch_digest, sparse_payload_bytes = ray.get(
+        selected_token_ids, patch_digest, sparse_payload_bytes = ray.get(
             train_model.prepare_sparse_patch.remote(PROMPTS)
         )
         sparse_send_ms = ray.get(train_model.send_pending_sparse_patch.remote())
@@ -398,6 +397,7 @@ def run_sparse_phase(
             "sparse_send_ms": sparse_send_ms,
         }
     finally:
+        ray.get(train_model.shutdown_engines.remote())
         ray.kill(llm)
 
 
