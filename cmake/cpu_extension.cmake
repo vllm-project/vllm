@@ -345,7 +345,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             FetchContent_Declare(
                 oneDNN
                 GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-                GIT_TAG        v3.10
+                GIT_TAG        v3.13
                 GIT_PROGRESS   TRUE
                 GIT_SHALLOW    TRUE
             )
