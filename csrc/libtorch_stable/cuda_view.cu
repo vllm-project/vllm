@@ -8,8 +8,12 @@
 
 // This function assumes that `cpu_tensor` is a CPU tensor,
 // and that UVA (Unified Virtual Addressing) is enabled.
+//
+// When `require_live_view` is true the function will raise instead of falling
+// through to the detached alloc+copy path.  Callers that depend on
+// write-through coherence (e.g. V2 UVA buffers) must set this flag.
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
-    torch::stable::Tensor& cpu_tensor) {
+    torch::stable::Tensor& cpu_tensor, bool require_live_view) {
   STD_TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
   const auto dtype = cpu_tensor.scalar_type();
@@ -42,7 +46,15 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
                   "cudaHostGetDevicePointer failed with unexpected error: ",
                   cudaGetErrorString(err));
 
-  // Zero-copy failed -- the memory is truly not pinned/registered.
+  // Zero-copy mapping failed -- the memory is truly not pinned/registered.
+  // If the caller requires a live alias, raise now before allocating anything.
+  STD_TORCH_CHECK(!require_live_view,
+                  "get_cuda_view_from_cpu_tensor: host memory is not "
+                  "registered for zero-copy access but require_live_view=true. "
+                  "The returned view would be a detached copy without "
+                  "write-through coherence.  Under GPU Confidential Computing "
+                  "this may require a driver update.");
+
   // Allocate a new pinned+mapped buffer and copy the data once.
   // NOTE: this path produces a *detached* copy; subsequent writes to the
   // original cpu_tensor will NOT be visible through the returned view.

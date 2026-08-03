@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.engine import FinishReason
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -723,6 +724,7 @@ def test_placeholder_underflow_graceful_stop():
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
     request.num_output_placeholders = 1
+    request.resumable = True
 
     scheduler.perf_metrics = None
     scheduler.connector = None
@@ -777,7 +779,9 @@ def test_placeholder_underflow_graceful_stop():
     scheduler.update_from_output(output, model_runner_output)
 
     assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.get_finished_reason() == FinishReason.ERROR
     assert request.num_output_placeholders == 0
     assert request.resumable is False
     assert request.request_id in scheduler.finished_req_ids
     assert request.request_id not in scheduler.requests
+    assert request not in scheduler.running
