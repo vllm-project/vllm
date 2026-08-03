@@ -88,6 +88,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
@@ -96,12 +102,6 @@ from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.ops import attn_res
-from vllm.models.kimi_k3.nvidia.ops.sequence_parallel import (
-    sp_all_gather,
-    sp_padding_mask,
-    sp_reduce_scatter,
-    sp_shard,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -472,8 +472,8 @@ class KimiMoE(nn.Module):
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate_size,
+                hidden_size=config.hidden_size,  # 7618
+                intermediate_size=shared_intermediate_size,  # 3072*2
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -553,13 +553,6 @@ class KimiMoE(nn.Module):
                 activation_linear_beta=activation_situ_linear_beta,
             )
         else:
-            # The tail-fusion kernels are tcgen05-based, so they require an
-            # SM100 NVIDIA device; the runner falls back to the default latent
-            # MoE path everywhere else.
-            enable_tail_fusion = (
-                current_platform.is_cuda()
-                and current_platform.is_device_capability_family(100)
-            )
             self.experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
@@ -586,11 +579,6 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
-                runner_args=(
-                    {"enable_k3_latent_moe_tail_fusion": enable_tail_fusion}
-                    if self.use_latent_moe
-                    else None
-                ),
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -951,7 +939,13 @@ class KimiDecoderLayer(nn.Module):
         return hidden_states, prefix_sum, residual
 
 
-class KimiLinearModel(nn.Module, EagleModelMixin):
+class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
+        "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1221,6 +1215,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
+
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
         # them ``.weight_packed``. Rebind so the expert mapping resolves; scales
