@@ -98,11 +98,6 @@ class SharedOffloadRegion:
             # failure here must clean up so concurrent joiners don't
             # land on a 0-byte stub and spin in _wait_for_file_size
             # for the full 30 s timeout.
-            logger.info(
-                "Created mmap file %s (%.2f GB)",
-                self.mmap_path,
-                self.total_size_bytes / 1e9,
-            )
             try:
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
@@ -117,11 +112,7 @@ class SharedOffloadRegion:
                     )
                 fd = self.fd
                 self.fd = None
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        logger.warning("Failed to close fd %s", fd, exc_info=True)
+                os.close(fd)
                 if isinstance(e, RuntimeError):
                     raise RuntimeError(
                         f"{e} Reduce the CPU KV offloading capacity by lowering "
@@ -130,6 +121,11 @@ class SharedOffloadRegion:
                     ) from e
                 raise
             self._creator = True
+            logger.info(
+                "Created mmap file %s (%.2f GB)",
+                self.mmap_path,
+                self.total_size_bytes / 1e9,
+            )
 
         self.mmap_obj: mmap.mmap | None = mmap.mmap(
             self.fd,

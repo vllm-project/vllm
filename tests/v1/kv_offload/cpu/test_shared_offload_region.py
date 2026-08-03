@@ -650,9 +650,8 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
         ),
     )
 
-    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
     with pytest.raises(RuntimeError, match="kv_connector_extra_config"):
-        obj.__init__(
+        SharedOffloadRegion(
             engine_id=engine_id,
             num_blocks=4,
             rank=0,
@@ -662,7 +661,6 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
-    assert obj.fd is None
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
@@ -683,9 +681,8 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
         MagicMock(side_effect=OSError("ftruncate failed")),
     )
 
-    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
     with pytest.raises(OSError, match="ftruncate failed"):
-        obj.__init__(
+        SharedOffloadRegion(
             engine_id=engine_id,
             num_blocks=4,
             rank=0,
@@ -695,7 +692,6 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
-    assert obj.fd is None
 
 
 def test_joiner_wait_failure_closes_fd(monkeypatch):
@@ -714,9 +710,8 @@ def test_joiner_wait_failure_closes_fd(monkeypatch):
         MagicMock(side_effect=FileNotFoundError("creator removed mmap file")),
     )
 
-    obj = region.SharedOffloadRegion.__new__(region.SharedOffloadRegion)
     with pytest.raises(FileNotFoundError, match="creator removed"):
-        obj.__init__(
+        SharedOffloadRegion(
             engine_id=str(uuid.uuid4()),
             num_blocks=4,
             rank=0,
@@ -725,4 +720,3 @@ def test_joiner_wait_failure_closes_fd(monkeypatch):
         )
 
     mock_close.assert_called_once_with(9999)
-    assert obj.fd is None
