@@ -64,7 +64,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
-    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -2353,8 +2352,7 @@ class GPUModelRunner(
             # by the next ``_prepare_inputs``; we need a stable snapshot
             # because the async D2H may still be in flight on the copy
             # stream when the next step runs.
-            attn_gid = self.routed_experts_attn_gid
-            slot_mapping_attn = slot_mappings[attn_gid]
+            slot_mapping_attn = slot_mappings[self.routed_experts_capturer.attn_gid]
             self.routed_experts_slot_mapping_device[:num_tokens].copy_(
                 slot_mapping_attn[:num_tokens]
             )
@@ -7670,8 +7668,9 @@ class GPUModelRunner(
         if not self.routed_experts_initialized:
             return None
 
+        device_buffer = self.routed_experts_capturer.get_device_buffer()
         return RoutedExpertsTensors(
-            routing_data=self.routed_experts_capturer.get_routing_data(num_tokens),
+            routing_data=device_buffer[:num_tokens].clone(),
             slot_mapping=self.routed_experts_slot_mapping_device[:num_tokens].clone(),
         )
 
@@ -7683,8 +7682,8 @@ class GPUModelRunner(
         self.routed_experts_capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
         )
-        self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
         bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
         # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on

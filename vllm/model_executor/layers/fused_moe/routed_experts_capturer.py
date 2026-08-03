@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class RoutedExpertsCapturer:
         self,
         max_num_batched_tokens: int,
         vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
@@ -115,6 +117,8 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # KV cache group whose slot layout the routing data is keyed by.
+        self.attn_gid = get_routed_experts_attn_gid(kv_cache_config)
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
@@ -221,9 +225,24 @@ class RoutedExpertsCapturer:
         """
         return self.device_buffer
 
-    def get_routing_data(self, num_tokens: int) -> torch.Tensor:
-        """Return a stable snapshot of the current routing data."""
-        return self.device_buffer[:num_tokens].clone()
+    def get_routed_experts(
+        self, slot_mappings: torch.Tensor, num_tokens: int
+    ) -> RoutedExpertsTensors:
+        """Snapshot this step's routing data and its attention slot mapping.
+
+        Both tensors are cloned since the capture buffer and the shared
+        ``slot_mappings`` are overwritten by the next step, which may race
+        with an in-flight D2H copy.
+
+        Args:
+            slot_mappings: Per-KV-cache-group slot mappings for this step,
+                shape ``(num_kv_cache_groups, max_num_batched_tokens)``.
+            num_tokens: Total number of tokens scheduled in this step.
+        """
+        return RoutedExpertsTensors(
+            routing_data=self.device_buffer[:num_tokens].clone(),
+            slot_mapping=slot_mappings[self.attn_gid, :num_tokens].clone(),
+        )
 
 
 def bind_routed_experts_capturer(

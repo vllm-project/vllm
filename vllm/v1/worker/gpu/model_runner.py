@@ -42,7 +42,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
-    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -296,25 +295,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def init_routed_experts_capturer(self) -> None:
         """Initialize target-model capture on every participating worker."""
-        capturer = RoutedExpertsCapturer(
+        self.routed_experts_capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
         )
-        bind_routed_experts_capturer(self.model, capturer)
-        self.routed_experts_capturer = capturer
-        self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
-
-    def get_routed_experts(
-        self, slot_mappings: torch.Tensor, num_tokens: int
-    ) -> RoutedExpertsTensors | None:
-        if self.routed_experts_capturer is None:
-            return None
-
-        slot_mapping = slot_mappings[self.routed_experts_attn_gid, :num_tokens].clone()
-        routing_data = self.routed_experts_capturer.get_routing_data(num_tokens)
-        return RoutedExpertsTensors(
-            routing_data=routing_data, slot_mapping=slot_mapping
-        )
+        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1470,9 +1456,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         routed_experts = None
-        if not dummy_run:
+        if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
             assert slot_mappings is not None
-            routed_experts = self.get_routed_experts(slot_mappings, num_toks)
+            routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(

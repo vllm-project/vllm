@@ -303,10 +303,8 @@ def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
     capturer = Mock()
     constructor = Mock(return_value=capturer)
     bind = Mock()
-    get_attn_gid = Mock(return_value=0)
     monkeypatch.setattr(model_runner, "RoutedExpertsCapturer", constructor)
     monkeypatch.setattr(model_runner, "bind_routed_experts_capturer", bind)
-    monkeypatch.setattr(model_runner, "get_routed_experts_attn_gid", get_attn_gid)
 
     runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
     runner.max_num_tokens = 32
@@ -317,10 +315,12 @@ def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
     runner.init_routed_experts_capturer()
 
     constructor.assert_called_once_with(
-        max_num_batched_tokens=32, vllm_config=runner.vllm_config
+        max_num_batched_tokens=32,
+        vllm_config=runner.vllm_config,
+        kv_cache_config=runner.kv_cache_config,
     )
     bind.assert_called_once_with(runner.model, capturer)
-    get_attn_gid.assert_called_once_with(runner.kv_cache_config)
+    assert runner.routed_experts_capturer is capturer
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):
