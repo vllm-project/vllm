@@ -2508,7 +2508,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 chunk_idx=i,
                 toks=toks,
             )
-
             kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
