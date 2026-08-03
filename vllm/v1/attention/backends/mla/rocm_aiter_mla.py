@@ -826,7 +826,11 @@ class AiterMLAHelper:
         # padding heads cannot affect heads [0:num_heads]; they are sliced back
         # off in get_mla_unpadded_o.
         reps = -(-m // num_heads)  # ceil(m / num_heads)
-        return q.repeat(1, reps, 1)[:, :m, :]
+        # Slicing a tiled tensor down to m yields a non-contiguous view whenever
+        # reps * num_heads > m (the common case: TP8 12->24->16, TP16 6->18->16).
+        # The asm persistent decode reads q as a packed [tokens, m, head_dim]
+        # buffer, so materialize a contiguous copy. No-op when already contiguous.
+        return q.repeat(1, reps, 1)[:, :m, :].contiguous()
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
