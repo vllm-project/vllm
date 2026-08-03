@@ -270,6 +270,51 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
     assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)
 
 
+@torch.inference_mode()
+def test_chunk_kda_none_matches_zero_initial_state():
+    H, D = 2, 32
+    cu_seqlens = torch.tensor([0, 17, 49], dtype=torch.int32, device=DEVICE)
+    T = 49
+    N = cu_seqlens.numel() - 1
+    torch.manual_seed(123)
+
+    kwargs = {
+        "q": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "k": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "v": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "raw_g": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "raw_beta": torch.randn(1, T, H, dtype=torch.bfloat16, device=DEVICE),
+        "A_log": torch.randn(H, dtype=torch.float32, device=DEVICE),
+        "g_bias": torch.randn(H * D, dtype=torch.float32, device=DEVICE),
+        "output_final_state": True,
+        "cu_seqlens": cu_seqlens,
+        "use_qk_l2norm_in_kernel": True,
+    }
+    zero_state = torch.zeros(
+        N,
+        H,
+        D,
+        D,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    def run(initial_state: torch.Tensor | None):
+        return chunk_kda_with_fused_gate(
+            **{
+                key: value.clone() if isinstance(value, torch.Tensor) else value
+                for key, value in kwargs.items()
+            },
+            initial_state=initial_state,
+        )
+
+    output_with_zero, state_with_zero = run(zero_state)
+    output_without_state, state_without_state = run(None)
+
+    torch.testing.assert_close(output_without_state, output_with_zero)
+    torch.testing.assert_close(state_without_state, state_with_zero)
+
+
 @pytest.mark.parametrize("num_seqs", [1, 8, 32])
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @pytest.mark.parametrize("state_indices_stride", [1, 8])

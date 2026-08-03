@@ -556,10 +556,16 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
-                initial_state = gather_initial_states(
-                    recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
+                # Chunk KDA initializes its recurrence to zero when no initial
+                # state is supplied, so an all-fresh batch needs no dense gather.
+                initial_state = (
+                    None
+                    if m.all_initial_states_fresh
+                    else gather_initial_states(
+                        recurrent_state,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                    )
                 )
                 (
                     core_attn_out_non_spec,
