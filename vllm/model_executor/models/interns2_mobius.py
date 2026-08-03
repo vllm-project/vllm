@@ -509,14 +509,7 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
         self.video_pruning_rate = multimodal_config.video_pruning_rate
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
 
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
-        self.deepstack_num_level = (
-            len(config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+        self.use_deepstack = False
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
