@@ -1041,13 +1041,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_decode_tokens: int,
     ) -> tuple[int, torch.Tensor | None, list[int] | None]:
         """Return the query width, ragged offsets, and effective query lengths."""
+        assert self.use_dedicated_xqa
         if num_decodes == 0 or num_decode_tokens == 0:
             return 1, None, None
-
-        if not self.use_dedicated_xqa:
-            if num_decode_tokens % num_decodes != 0:
-                return 1, None, None
-            return num_decode_tokens // num_decodes, None, None
 
         decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
         nonzero = decode_q_lens[decode_q_lens > 0]
@@ -1872,9 +1868,6 @@ class FlashInferImpl(AttentionImpl):
         )
         decode_with_xqa = decode_kernel == FlashInferDecodeKernel.XQA
         decode_with_trtllm_gen = decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
-        decode_with_dedicated_xqa = (
-            decode_with_xqa and current_platform.is_device_capability_family(120)
-        )
         decode_with_flashinfer_trtllm_api = decode_with_xqa or decode_with_trtllm_gen
 
         # The attn+quant fusion happens when output_scale is provided.
@@ -2003,6 +1996,14 @@ class FlashInferImpl(AttentionImpl):
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
         use_dcp = self.dcp_world_size > 1
+        decode_with_dedicated_xqa = (
+            decode_with_xqa and current_platform.is_device_capability_family(120)
+        )
+        if decode_with_dedicated_xqa:
+            assert not use_dcp
+            assert not self.is_kvcache_nvfp4
+            assert self.o_sf_scale is None
+            assert output.dtype != FP4_DTYPE
 
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back.
@@ -2316,12 +2317,6 @@ class FlashInferImpl(AttentionImpl):
                     decode_query = canonicalize_singleton_dim_strides(decode_query)
 
                 if decode_with_dedicated_xqa:
-                    assert decode_with_xqa
-                    assert not use_dcp
-                    assert not self.is_kvcache_nvfp4
-                    assert self.o_sf_scale is None
-                    assert output.dtype != FP4_DTYPE
-
                     bmm1_scale = self.get_xqa_bmm1_scale(
                         layer, attn_metadata.q_data_type_decode
                     )
