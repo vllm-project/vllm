@@ -213,6 +213,13 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    # Namespaced, JSON-serializable snapshots produced by external metrics
+    # providers in the engine core and consumed by stat logger plugins in the
+    # API process. ``None`` means no provider produced an update this step.
+    # The producer API validates this as a portable recursive value. ``Any``
+    # is required here because msgspec does not support recursive type aliases.
+    external_metrics: dict[str, dict[str, Any]] | None = None
+
 
 @dataclass
 class RequestStateStats:

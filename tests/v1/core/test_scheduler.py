@@ -38,6 +38,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.external import (
+    register_external_metrics_provider,
+    unregister_external_metrics_provider,
+)
 from vllm.v1.outputs import (
     DraftTokenIds,
     KVConnectorOutput,
@@ -197,6 +201,18 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
     assert len(engine_core_outputs[1].outputs) == 1
+
+
+def test_scheduler_collects_external_metrics():
+    register_external_metrics_provider("example.plugin", lambda: {"used_bytes": 42})
+    try:
+        scheduler = create_scheduler()
+        stats = scheduler.make_stats()
+    finally:
+        unregister_external_metrics_provider("example.plugin")
+
+    assert stats is not None
+    assert stats.external_metrics == {"example.plugin": {"used_bytes": 42}}
 
 
 def test_schedule_multimodal_requests():
