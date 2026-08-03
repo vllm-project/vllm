@@ -360,7 +360,6 @@ class SpecDecodeBaseProposer:
             self.parallel_drafting_token_id = model_hf_config.ptd_token_id
         else:
             self.parallel_drafting_token_id = 0
-            self.pass_hidden_states_to_model = False
 
         if self.pass_hidden_states_to_model:
             self.parallel_drafting_hidden_state_tensor = torch.empty(
