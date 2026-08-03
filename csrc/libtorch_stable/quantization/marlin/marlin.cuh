@@ -38,20 +38,6 @@ static constexpr int repack_threads = 256;
 static constexpr int tile_k_size = tile_size;
 static constexpr int tile_n_size = tile_k_size * 4;
 
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040
-inline bool supports_ldmatrix_s4(int device_index) {
-  int major;
-  int minor;
-  cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
-                         device_index);
-  cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
-                         device_index);
-  return major == 9 && minor == 0;
-}
-  #else
-inline bool supports_ldmatrix_s4(int) { return false; }
-  #endif
-
 // Helpers
 template <typename T, int n>
 struct Vec {

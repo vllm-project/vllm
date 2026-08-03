@@ -293,8 +293,15 @@ bool validate_mma() {
 int main() {
   cudaDeviceProp properties;
   CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-  if (properties.major != 9 || properties.minor != 0) {
-    std::fprintf(stderr, "expected compute capability 9.0, found %d.%d\n",
+  bool supported = (properties.major == 9 && properties.minor == 0) ||
+                   (properties.major == 10 &&
+                    (properties.minor == 0 || properties.minor == 3 ||
+                     properties.minor == 7)) ||
+                   (properties.major == 11 && properties.minor == 0) ||
+                   (properties.major == 12 &&
+                    (properties.minor == 0 || properties.minor == 1));
+  if (!supported) {
+    std::fprintf(stderr, "unsupported compute capability %d.%d\n",
                  properties.major, properties.minor);
     return EXIT_FAILURE;
   }
