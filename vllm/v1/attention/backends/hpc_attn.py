@@ -7,7 +7,9 @@ Independent metadata / builder; KV cache layout is NHD:
 (num_blocks, 2, block_size, num_kv_heads, head_size).
 """
 
+import functools
 import importlib.util
+import inspect
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -48,6 +50,19 @@ def _get_fp8_dtype_for_kv_cache(kv_cache_dtype: str) -> torch.dtype:
         return torch.float8_e5m2
     else:
         raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+
+@functools.cache
+def _bf16_decode_supports_task_map() -> bool:
+    """hpc >= 6e2eced (PR #73) extends dynamic scheduling to bf16 decode.
+
+    Older hpc builds only accept ``task_map`` on ``attention_decode_fp8``;
+    passing it to ``attention_decode_bf16`` would raise. Probe the installed
+    version once and cache the result.
+    """
+    import hpc
+
+    return "task_map" in inspect.signature(hpc.attention_decode_bf16).parameters
 
 
 @dataclass
@@ -146,12 +161,25 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             supports_spec_as_decode=True,
         )
 
-        self.task_map = hpc.get_attention_decode_task_workspace(
-            vllm_config.scheduler_config.max_num_seqs,
-            vllm_config.model_config.max_model_len or 4096,
-            self.num_kv_heads,
-            min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
-        )
+        # Dynamic-scheduled decode:
+        #   - fp8 KV cache path always uses task_map (FP8 decode kernel
+        #     requires it).
+        #   - bf16 KV cache path only uses task_map when the installed hpc
+        #     version supports it (hpc >= 6e2eced / PR #73). Older builds
+        #     take the static split-K path with no task_map.
+        # This matches sglang's HPCOpsAttnBackend behavior.
+        kv_cache_dtype = kv_cache_spec.dtype
+        self.use_fp8 = kv_cache_dtype == torch.float8_e4m3fn
+        self._dynamic_sched = self.use_fp8 or _bf16_decode_supports_task_map()
+        if self._dynamic_sched:
+            self.task_map = hpc.get_attention_decode_task_workspace(
+                vllm_config.scheduler_config.max_num_seqs,
+                vllm_config.model_config.max_model_len or 4096,
+                self.num_kv_heads,
+                min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
+            )
+        else:
+            self.task_map = None
 
     @override  # type: ignore[misc]
     @classmethod
@@ -214,17 +242,27 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens_decode = seq_lens[:num_decodes]
             # block_table is per-request, indexed by num_decodes (not tokens)
             qo_indptr_decode = common_attn_metadata.query_start_loc[: num_decodes + 1]
-            import hpc
 
-            hpc.assign_attention_decode_task(
-                seq_lens_decode,
-                self.task_map,
-                self.num_kv_heads,
-                decode_query_len,
-                new_kv_included=True,
-                min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
-            )
+            # Skip the task-map scheduler pass when dynamic scheduling is off
+            # (bf16 KV cache on an older hpc that lacks bf16 decode task_map).
+            if self._dynamic_sched:
+                import hpc
 
+                hpc.assign_attention_decode_task(
+                    seq_lens_decode,
+                    self.task_map,
+                    self.num_kv_heads,
+                    decode_query_len,
+                    new_kv_included=True,
+                    min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
+                )
+
+        # ``hpc_kv_written`` defaults to False: KV cache is written either by
+        # ``reshape_and_cache_flash`` inside ``HpcAttentionImpl.forward`` (the
+        # standard path, e.g. bf16 KV cache without HpcRopeNorm), or by
+        # ``HpcRopeNorm._forward_impl`` (fp8 KV cache, or bf16 KV cache with
+        # the fused RoPE path enabled). When the fused RoPE op runs, it flips
+        # this to True so the attention impl skips the redundant write.
         return HpcAttnMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decodes=num_decodes,
@@ -236,7 +274,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             qo_indptr=qo_indptr,
-            hpc_kv_written=True,
+            hpc_kv_written=False,
             hpc_prefill_q_scale=None,
             hpc_decode_q_scale=None,
             hpc_split_k_flag=None,
@@ -366,10 +404,10 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                 f"(num_heads={num_heads}, num_kv_heads={num_kv_heads})"
             )
 
-        if kv_cache_dtype not in ("auto", "fp8_e4m3"):
+        if kv_cache_dtype not in ("auto", "fp8_e4m3", "bfloat16"):
             raise ValueError(
                 f"HPC attention only supports kv_cache_dtype 'auto' or "
-                f"'fp8_e4m3', got '{kv_cache_dtype}'"
+                f"'fp8_e4m3' or 'bfloat16', got '{kv_cache_dtype}'"
             )
 
         self.num_heads = num_heads
@@ -539,6 +577,16 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     output=output_decode,
                 )
             else:
+                # Older hpc's bf16 decode has no task_map kwarg; the map is
+                # only ever built when the installed hpc supports it (see
+                # HpcAttnMetadataBuilder._dynamic_sched). Pass task_map
+                # conditionally to stay compatible with both versions -
+                # matches sglang's HPCOpsAttnBackend.forward_decode.
+                task_map_kwargs = (
+                    {"task_map": attn_metadata.task_map}
+                    if attn_metadata.task_map is not None
+                    else {}
+                )
                 hpc.attention_decode_bf16(
                     q_decode,
                     kv_cache[:, 0],
@@ -549,6 +597,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     output=output_decode,
                     new_kv_included=True,
                     splitk=self.splitk,
+                    **task_map_kwargs,
                 )
 
         return output_padded
