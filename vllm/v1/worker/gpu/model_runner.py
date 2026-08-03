@@ -314,9 +314,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Do not rely on pooling_runner here, since this information is needed
             # on the first PP rank, while pooling_runner is only initialized
             # on the last PP rank.
-            tasks.extend(
-                PoolingRunner.get_supported_tasks(self.model, self.model_config)
-            )
+            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:

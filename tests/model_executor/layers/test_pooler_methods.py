@@ -319,6 +319,8 @@ class TestAllPool:
         )
         out1 = pooler(chunk1, metadata1)
         assert out1[0] is None
+        expected_chunk1 = chunk1.clone()
+        chunk1.zero_()
 
         chunk2 = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
         metadata2 = _make_metadata(
@@ -329,7 +331,7 @@ class TestAllPool:
         metadata2.pooling_states = metadata1.pooling_states
         out2 = pooler(chunk2, metadata2)
         assert out2[0] is not None
-        expected = torch.cat([chunk1, chunk2], dim=0)
+        expected = torch.cat([expected_chunk1, chunk2], dim=0)
         assert torch.equal(out2[0], expected)
 
     def test_chunked_prefill_single_shot_matches_non_chunked(self):
@@ -337,11 +339,13 @@ class TestAllPool:
         hidden = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]]
         )
+        expected = [hidden[:2].clone(), hidden[2:].clone()]
         metadata = _make_metadata([2, 3])
         out = pooler(hidden, metadata)
+        hidden.zero_()
         assert len(out) == 2
-        assert torch.equal(out[0], hidden[:2])
-        assert torch.equal(out[1], hidden[2:])
+        assert torch.equal(out[0], expected[0])
+        assert torch.equal(out[1], expected[1])
 
     def test_chunked_prefill_mixed_finished_unfinished(self):
         pooler = self._make_all_pool(chunked=True)
