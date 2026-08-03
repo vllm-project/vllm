@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 
 from vllm.platforms import current_platform
@@ -799,7 +801,7 @@ def fused_q(
     index_q_head_dim = index_q.shape[2]
     # fused_q is shared with the ROCm path, and the CuTeDSL module imports
     # cutlass at module scope, so only reach for it on CUDA.
-    cutedsl_kernel = None
+    cutedsl_kernel: Callable[..., None] | None = None
     if current_platform.is_cuda():
         from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
             fused_q_cutedsl,
