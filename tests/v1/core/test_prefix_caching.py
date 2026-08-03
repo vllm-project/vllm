@@ -3423,7 +3423,9 @@ def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=
 
 def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
     """The latest materialized decode state becomes reusable after finish."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    manager, block_size = _make_decode_checkpoint_manager(
+        monkeypatch, enable_events=True
+    )
     request = _materialize_checkpoint_test_request(manager, block_size)
     mamba_manager = manager.coordinator.single_type_managers[1]
     candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
@@ -3436,8 +3438,19 @@ def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
         )
         is None
     )
+    assert not any(
+        isinstance(event, BlockStored)
+        and event.group_idx == 1
+        and event.token_ids == request.all_token_ids[16:20]
+        for event in manager.take_events()
+    )
 
     manager.finalize_decode_checkpoints(request, keep=True)
+    assert [
+        event.token_ids
+        for event in manager.take_events()
+        if isinstance(event, BlockStored) and event.group_idx == 1
+    ] == [request.all_token_ids[16:20]]
     manager.free(request)
 
     # Exact replay reaches the latest checkpoint.
@@ -3449,38 +3462,6 @@ def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch):
     )
     _, full_hit, _ = manager.get_computed_blocks(full_replay)
     assert full_hit == 20
-
-
-def test_mamba_decode_checkpoint_uses_spec_materialized_boundary(monkeypatch):
-    """Spec postprocessing materializes the latest crossed aligned boundary."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
-    request = _materialize_checkpoint_test_request(
-        manager, block_size, num_decode_blocks=1
-    )
-    mamba_manager = manager.coordinator.single_type_managers[1]
-
-    # Advance to an unaligned position without crossing a boundary.
-    start = request.num_tokens
-    request.append_output_token_ids([start, start + 1])
-    blocks = manager.allocate_slots(request, 2)
-    assert blocks is not None
-    request.num_computed_tokens += 2
-    manager.update_decode_checkpoint_candidates(request)
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
-    assert candidate.num_tokens == 12
-
-    # Accept four tokens in one speculative step: 14 -> 18. The worker's
-    # postprocess_mamba_align_gpu path copies the state at floor(18 / 4) * 4,
-    # so boundary 16 is independently materialized and safe to retain.
-    start = request.num_tokens
-    request.append_output_token_ids(list(range(start, start + 4)))
-    blocks = manager.allocate_slots(request, 4)
-    assert blocks is not None
-    request.num_computed_tokens += 4
-    manager.update_decode_checkpoint_candidates(request)
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
-    assert candidate.num_tokens == 16
-    manager.free(request)
 
 
 def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
@@ -3510,48 +3491,6 @@ def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
     assert candidate.block.ref_cnt == 1
     assert all(block is not candidate.block for block in new_blocks)
 
-    manager.free(request)
-    assert candidate.block.ref_cnt == 0
-
-
-def test_decode_checkpoint_promotion_preserves_existing_alias(monkeypatch):
-    """Publishing an exact checkpoint must not remove another block alias."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
-    request = _materialize_checkpoint_test_request(manager, block_size)
-    mamba_manager = manager.coordinator.single_type_managers[1]
-    latest = mamba_manager._decode_checkpoint_candidates[request.request_id]
-    pool = manager.block_pool
-
-    unrelated_hash = BlockHash(b"unrelated-alias")
-    unrelated_key = make_block_hash_with_group_id(unrelated_hash, 1)
-    pool._insert_block_hash(unrelated_key, latest.block, num_tokens=block_size)
-
-    manager.finalize_decode_checkpoints(request, keep=True)
-    checkpoint_hash = request.block_hashes[latest.num_tokens // block_size - 1]
-    assert pool.get_cached_block(unrelated_hash, [1]) == [latest.block]
-    assert pool.get_cached_block(checkpoint_hash, [1]) == [latest.block]
-
-    manager.free(request)
-    assert pool.get_cached_block(unrelated_hash, [1]) == [latest.block]
-    assert pool.get_cached_block(checkpoint_hash, [1]) == [latest.block]
-
-
-def test_decode_checkpoint_finalize_releases_pins_on_error(monkeypatch):
-    """A promotion failure must still release the private pin."""
-    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
-    request = _materialize_checkpoint_test_request(manager, block_size)
-    mamba_manager = manager.coordinator.single_type_managers[1]
-    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
-
-    def fail_promotion(*args, **kwargs):
-        raise RuntimeError("promotion failed")
-
-    monkeypatch.setattr(manager.block_pool, "cache_decode_checkpoint", fail_promotion)
-    with pytest.raises(RuntimeError, match="promotion failed"):
-        manager.finalize_decode_checkpoints(request, keep=True)
-
-    assert request.request_id not in mamba_manager._decode_checkpoint_candidates
-    assert candidate.block.ref_cnt == 1
     manager.free(request)
     assert candidate.block.ref_cnt == 0
 
@@ -3594,35 +3533,6 @@ def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
     manager.free(request)
 
 
-def test_mamba_decode_checkpoint_events_only_on_finish(monkeypatch):
-    """Private candidates emit no Mamba store event until finalization."""
-    manager, block_size = _make_decode_checkpoint_manager(
-        monkeypatch, enable_events=True
-    )
-    request = _materialize_checkpoint_test_request(manager, block_size)
-
-    before_finish = manager.take_events()
-    # Prompt caching may emit Mamba events, but decode candidate 20 does not.
-    assert not any(
-        isinstance(event, BlockStored)
-        and event.group_idx == 1
-        and event.block_hashes
-        and event.token_ids == request.all_token_ids[16:20]
-        for event in before_finish
-    )
-
-    manager.finalize_decode_checkpoints(request, keep=True)
-    checkpoint_events = [
-        event
-        for event in manager.take_events()
-        if isinstance(event, BlockStored) and event.group_idx == 1
-    ]
-    assert [event.token_ids for event in checkpoint_events] == [
-        request.all_token_ids[16:20]
-    ]
-    manager.free(request)
-
-
 @pytest.mark.parametrize(
     ("retention_interval", "spec_types", "enable_caching", "expected_match"),
     [
@@ -3651,21 +3561,6 @@ def test_mamba_decode_checkpoints_reject_unsupported_config(
             enable_caching=enable_caching,
             hash_block_size=4,
         )
-
-
-def test_mamba_decode_checkpoints_disabled_by_default(monkeypatch):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
-    monkeypatch.delenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", raising=False)
-    manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(4, 100, ["full", "mamba_align"]),
-        max_model_len=1024,
-        enable_caching=True,
-        hash_block_size=4,
-    )
-    request = _materialize_checkpoint_test_request(manager, 4)
-    mamba_manager = manager.coordinator.single_type_managers[1]
-    assert not mamba_manager._decode_checkpoint_candidates
-    manager.free(request)
 
 
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):

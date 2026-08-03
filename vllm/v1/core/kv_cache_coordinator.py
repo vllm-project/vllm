@@ -160,6 +160,11 @@ class KVCacheCoordinator(ABC):
         self.retain_decode_checkpoints = (
             envs.VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS
         )
+        if self.retain_decode_checkpoints and use_eagle:
+            raise ValueError(
+                "VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS is not compatible "
+                "with hidden-state speculative decoding."
+            )
         _validate_prefix_cache_retention_interval(
             self.retention_interval,
             self.retain_decode_checkpoints,
