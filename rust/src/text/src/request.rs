@@ -225,6 +225,34 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if self
+            .decode_options
+            .stop_strings
+            .as_ref()
+            .is_some_and(|stops| stops.iter().any(String::is_empty))
+        {
+            return Err(Error::EmptyStopString {
+                request_id: self.request_id.clone(),
+            });
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_empty_stop_string_at_shared_chokepoint() {
+        let mut request = TextRequest::for_test();
+        request.request_id = "req-empty-stop".to_string();
+        request.decode_options.stop_strings = Some(vec!["valid".to_string(), String::new()]);
+
+        let err = request.validate().expect_err("empty stop strings should be rejected");
+
+        assert!(err.is_request_validation_error());
+        assert!(err.to_string().contains("stop strings cannot be empty"));
+        assert!(err.to_string().contains("req-empty-stop"));
     }
 }
