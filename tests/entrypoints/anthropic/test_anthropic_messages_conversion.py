@@ -929,6 +929,27 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[1]["role"] == "system"
         assert result.messages[1]["content"] == "Real system content."
 
+    def test_inline_system_uses_shared_merge_policy(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "system", "content": "LATESYS"},
+                {"role": "user", "content": "Q2"},
+            ],
+            system="S",
+        )
+        result = _convert(request)
+        serving = MagicMock(spec=AnthropicServingMessages)
+        serving.inline_system_messages = "merge"
+
+        AnthropicServingMessages._normalize_inline_system_messages(serving, result)
+
+        assert result.messages == [
+            {"role": "system", "content": "SLATESYS"},
+            {"role": "user", "content": "Q"},
+            {"role": "user", "content": "Q2"},
+        ]
+
 
 # ======================================================================
 # Streaming conversion: message_stream_converter
@@ -1302,109 +1323,6 @@ class TestStreamingCacheUsageSemantics:
         assert "cache_creation_input_tokens" not in start_usage
         assert "cache_read_input_tokens" not in delta_usage
         assert "cache_creation_input_tokens" not in delta_usage
-
-
-# ======================================================================
-# Auto-detection of system-first template requirement
-# ======================================================================
-
-
-Q35_TEMPLATE = (
-    "{%- for message in messages %}"
-    "{%- if message.role == 'system' %}"
-    "{%- if not loop.first %}"
-    "{{- raise_exception('System message must be at the beginning.') }}"
-    "{%- endif %}"
-    "{%- endif %}"
-    "{%- endfor %}"
-)
-
-
-class TestResolveMergeInlineSystem:
-    """Verify _resolve_merge_inline_system auto-detection.
-
-    Tests the three modes:
-    1. "merge" mode → always merge
-    2. "preserve" mode → always preserve
-    3. "auto" mode → merge by default, preserve for allowlisted models
-
-    Also verifies:
-    4. Template with system-first guard (e.g. Qwen) → merge even in auto
-    5. No template → merge (safe default)
-    """
-
-    @staticmethod
-    def _make_mock():
-        obj = MagicMock(spec=AnthropicServingMessages)
-        obj.model_config = MagicMock()
-        obj._INLINE_SYSTEM_ALLOWLIST = set()
-        obj._INLINE_SYSTEM_MODE_MERGE = "merge"
-        obj._INLINE_SYSTEM_MODE_PRESERVE = "preserve"
-        obj._INLINE_SYSTEM_MODE_AUTO = "auto"
-        return obj
-
-    def test_merge_mode_always_merge(self):
-        """merge mode always returns True regardless of template."""
-        obj = self._make_mock()
-        obj.model_config.model = "unknown/model"
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj, "some template", "merge"
-        )
-        assert result is True
-
-    def test_preserve_mode_always_preserve(self):
-        """preserve mode always returns False regardless of template."""
-        obj = self._make_mock()
-        obj.model_config.model = "unknown/model"
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj, "some template", "preserve"
-        )
-        assert result is False
-
-    def test_auto_mode_template_raises_merges(self):
-        """In auto mode, a template that rejects inline (Qwen) → merge."""
-        obj = self._make_mock()
-        obj.model_config.model = "unknown/model"
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj, Q35_TEMPLATE, "auto"
-        )
-        assert result is True
-
-    def test_auto_mode_no_template_merges(self):
-        """In auto mode, no chat_template → merge (safe default)."""
-        obj = self._make_mock()
-        obj.model_config.model = "unknown/model"
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj, None, "auto"
-        )
-        assert result is True
-
-    def test_auto_mode_unknown_model_merges(self):
-        """In auto mode, an unknown model with permissive template → merge."""
-        obj = self._make_mock()
-        obj.model_config.model = "unknown/model"
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj,
-            "{%- for message in messages %}"
-            "{{- message.role }}: {{ message.content }}\n"
-            "{%- endfor %}",
-            "auto",
-        )
-        assert result is True
-
-    def test_auto_mode_allowlisted_model_preserves(self):
-        """In auto mode, an allowlisted model with permissive template → preserve."""
-        obj = self._make_mock()
-        obj.model_config.model = "verified/model"
-        obj._INLINE_SYSTEM_ALLOWLIST = {"verified/model"}
-        result = AnthropicServingMessages._resolve_merge_inline_system(
-            obj,
-            "{%- for message in messages %}"
-            "{{- message.role }}: {{ message.content }}\n"
-            "{%- endfor %}",
-            "auto",
-        )
-        assert result is False
 
 
 # ======================================================================

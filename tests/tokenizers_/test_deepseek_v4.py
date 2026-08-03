@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.entrypoints.chat_utils import parse_chat_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
@@ -83,6 +85,41 @@ def test_deepseek_v4_defaults_to_chat_mode():
     )
 
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
+
+
+def test_deepseek_v4_merges_inline_system_messages_before_rendering():
+    request = ChatCompletionRequest(
+        messages=[
+            {"role": "user", "content": "Q"},
+            {"role": "system", "content": "LATESYS"},
+            {"role": "user", "content": "Q2"},
+        ]
+    )
+    serving = SimpleNamespace(inline_system_messages="merge")
+
+    OpenAIServingChat._normalize_inline_system_messages(serving, request)
+    prompt = _tokenizer().apply_chat_template(request.messages, tokenize=False)
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜>LATESYS<｜User｜>Q<｜User｜>Q2"
+        "<｜Assistant｜></think>"
+    )
+
+
+def test_deepseek_v4_can_preserve_inline_system_messages():
+    request = ChatCompletionRequest(
+        messages=[
+            {"role": "user", "content": "Q"},
+            {"role": "system", "content": "LATESYS"},
+            {"role": "user", "content": "Q2"},
+        ]
+    )
+    serving = SimpleNamespace(inline_system_messages="preserve")
+
+    OpenAIServingChat._normalize_inline_system_messages(serving, request)
+    prompt = _tokenizer().apply_chat_template(request.messages, tokenize=False)
+
+    assert "<｜User｜>QLATESYS<｜User｜>Q2" in prompt
 
 
 @pytest.mark.parametrize("kwargs", [{"thinking": True}, {"enable_thinking": True}])
