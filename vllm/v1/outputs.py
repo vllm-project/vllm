@@ -14,6 +14,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -23,6 +24,7 @@ else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    ECConnectorWorkerMetadata = object
 
 
 class LogprobsLists(NamedTuple):
@@ -253,6 +255,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
+
+    def is_empty(self):
+        return (
+            not self.finished_sending
+            and not self.finished_recving
+            and not self.ec_connector_worker_meta
+        )
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -318,6 +328,19 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_ec_conn_output_only(
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return ModelRunnerOutput containing the provided ECConnectorOutput,
+        otherwise empty.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
         return output
 
 

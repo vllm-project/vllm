@@ -165,6 +165,9 @@ def warmup_kernels(
     decode_query_len + 1 prompt tokens each. The second iteration simulates
     a decode step with all requests generating decode_query_len tokens.
     """
+    if model_runner.is_encoder_only:
+        return
+
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
