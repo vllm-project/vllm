@@ -113,8 +113,17 @@ def _fwd_kernel(
     # Apply causal attention pruning and sliding window attention pruning
     end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
 
-    # Calculate the start position for backward sliding window
+    # Calculate the start position for backward sliding window.
+    # Keys outside the window are fully masked below, so skip those blocks
+    # rather than loading them and discarding the result. Without this a
+    # windowed pass still costs O(seq_len^2).
     start_n_limit = 0
+    if SLIDING_WINDOW_Q > 0:
+        first_needed = start_m * BLOCK_M - SLIDING_WINDOW_Q
+        start_n_limit = tl.maximum(0, (first_needed // BLOCK_N) * BLOCK_N)
+    if SLIDING_WINDOW_K > 0:
+        last_needed = (start_m + 1) * BLOCK_M - 1 + SLIDING_WINDOW_K
+        end_n = tl.minimum(end_n, last_needed + 1)
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):

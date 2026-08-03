@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    AITER_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -1211,9 +1211,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
     # interleaved flydsl kernels instead of the default a16w4 separated path.
-    # Shared with the AITER runtime, which reads the same env var directly.
-    "AITER_SITUV2_A8W4": lambda: (
-        os.getenv("AITER_SITUV2_A8W4", "0").lower() in ("true", "1")
+    # This is the only flag users need: vLLM picks the kernels by passing
+    # gate_mode to AITER and sets the AITER-side workaround env at init.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
