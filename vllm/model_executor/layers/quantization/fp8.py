@@ -519,6 +519,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             weight_key=weight_key,
             activation_key=activation_key,
             allow_vllm_cutlass=False,
+            use_deep_gemm=self.quant_config.use_deep_gemm,
         )
 
     def create_weights(

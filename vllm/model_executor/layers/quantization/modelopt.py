@@ -767,6 +767,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=kFp8StaticTensorSym,
             activation_key=kFp8StaticTensorSym,
+            use_deep_gemm=getattr(self.quant_config, "use_deep_gemm", None),
         )
 
     def maybe_make_prepare_finalize(

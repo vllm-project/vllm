@@ -273,6 +273,7 @@ def select_fp8_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
+    use_deep_gemm: bool | None = None,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary FP8 MoE backend
@@ -281,6 +282,25 @@ def select_fp8_moe_backend(
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
+
+    # Honor the per-model DeepGEMM auto-disable (see
+    # vllm/utils/deep_gemm.py::should_auto_disable_deep_gemm): if the
+    # quantization config explicitly disabled DeepGEMM, never select the
+    # DeepGEMM MoE backends (e.g. Qwen3.5/3.6 hybrid models on Blackwell,
+    # where the E8M0 scale format causes accuracy degradation). Explicit
+    # VLLM_USE_DEEP_GEMM / VLLM_MOE_USE_DEEP_GEMM env overrides take
+    # precedence and are handled below.
+    if (
+        use_deep_gemm is False
+        and not envs.is_set("VLLM_USE_DEEP_GEMM")
+        and not envs.is_set("VLLM_MOE_USE_DEEP_GEMM")
+    ):
+        for backend in (
+            Fp8MoeBackend.DEEPGEMM,
+            Fp8MoeBackend.BATCHED_DEEPGEMM,
+        ):
+            if backend in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(backend)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which

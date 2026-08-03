@@ -182,6 +182,20 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         return False
 
     quant_method = module._quant_method
+
+    # Honor the per-model DeepGEMM auto-disable (see
+    # vllm/utils/deep_gemm.py::should_auto_disable_deep_gemm): skip the
+    # module when its quantization config explicitly disabled DeepGEMM.
+    # Explicit VLLM_USE_DEEP_GEMM / VLLM_MOE_USE_DEEP_GEMM env overrides
+    # take precedence (they are handled by the caller/environment).
+    quant_config = getattr(quant_method, "quant_config", None)
+    if (
+        not envs.is_set("VLLM_USE_DEEP_GEMM")
+        and not envs.is_set("VLLM_MOE_USE_DEEP_GEMM")
+        and getattr(quant_config, "use_deep_gemm", None) is False
+    ):
+        return False
+
     moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
 
     if (
