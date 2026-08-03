@@ -712,6 +712,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
          "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
          "csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu")
       if(MARLIN_LDMATRIX_S4_ARCHS)
+        set_gencode_flags_for_srcs(
+          SRCS "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
+          CUDA_ARCHS "${MARLIN_LDMATRIX_S4_ARCHS}")
         set_property(
           SOURCE "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
           APPEND PROPERTY COMPILE_DEFINITIONS
