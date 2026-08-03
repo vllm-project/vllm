@@ -508,7 +508,11 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -662,7 +666,11 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -865,7 +873,11 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -1008,6 +1020,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         return (
             current_platform.is_cpu()
             and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
         )
 
     @staticmethod
