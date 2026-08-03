@@ -791,25 +791,54 @@ def test_capture_drops_output_for_an_aborted_request(tmp_path):
     connector.shutdown()
 
 
-def test_cache_generation_discards_request_state_and_changes_namespace(tmp_path):
+def test_capture_drops_stale_output_after_cache_reset(tmp_path):
     connector = _make_scheduler_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
     connector.request_started(request=request, cached_token_end=0, hash_block_size=4)
+    step_output = _step_output([request.request_id], [0], [1])
+    rows = np.zeros((1, 3, 2), dtype=np.uint8)
+
+    connector.capture_step(
+        step_output,
+        rows,
+        [request.request_id],
+        {request.request_id},
+    )
+    with pytest.raises(RuntimeError, match="buffer is missing"):
+        connector._buffer.read(request.request_id, 0, 1)
+
+    connector.capture_step(step_output, rows, [request.request_id])
+    np.testing.assert_array_equal(
+        connector._buffer.read(request.request_id, 0, 1),
+        rows,
+    )
+    connector.shutdown()
+
+
+def test_cache_generation_preserves_delivery_cursor_and_changes_namespace(tmp_path):
+    connector = _make_scheduler_connector(tmp_path)
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
+    connector.request_started(request=request, cached_token_end=0, hash_block_size=4)
+    connector._state(request.request_id).emit_cursor = 3
     connector._buffer.capture(
         request.request_id,
         0,
-        np.zeros((1, 3, 2), dtype=np.uint8),
+        np.zeros((3, 3, 2), dtype=np.uint8),
     )
     old_namespace = connector._state(request.request_id).artifact_namespace
 
     connector.advance_kv_cache_generation()
 
     assert request.request_id not in connector._states
+    assert connector._resume_emit_cursors[request.request_id] == 3
     with pytest.raises(RuntimeError, match="buffer is missing"):
         connector._buffer.read(request.request_id, 0, 1)
 
     connector.request_started(request=request, cached_token_end=0, hash_block_size=4)
-    new_namespace = connector._state(request.request_id).artifact_namespace
+    state = connector._state(request.request_id)
+    new_namespace = state.artifact_namespace
+    assert state.emit_cursor == 3
+    assert request.request_id not in connector._resume_emit_cursors
     assert new_namespace != old_namespace
     assert routed_experts_key(b"a" * 32, new_namespace) != routed_experts_key(
         b"a" * 32,

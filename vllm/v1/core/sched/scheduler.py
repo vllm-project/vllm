@@ -1687,10 +1687,18 @@ class Scheduler(SchedulerInterface):
 
         # Persist #50721's stable per-step snapshot before handling stops.
         if self.artifact_connector is not None:
+            stale_request_ids = {
+                request_id
+                for request_id in model_runner_output.req_ids
+                if (request := self.requests.get(request_id)) is not None
+                and request.drop_stale_output
+                and request.num_stale_output_tokens > 0
+            }
             self.artifact_connector.capture_step(
                 scheduler_output,
                 model_runner_output.routed_experts,
                 model_runner_output.req_ids,
+                stale_request_ids,
             )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -2408,8 +2416,8 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
-        kv_reset_successful = self.kv_cache_manager.reset_prefix_cache()
-        if reset_running_requests and not kv_reset_successful:
+        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
                 "preempted and moved to the waiting queue. This is likely due to "
@@ -2417,10 +2425,8 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
-        if kv_reset_successful and self.artifact_connector is not None:
+        if reset_successful and self.artifact_connector is not None:
             self.artifact_connector.advance_kv_cache_generation()
-
-        reset_successful = kv_reset_successful
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful

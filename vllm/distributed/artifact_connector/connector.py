@@ -64,6 +64,7 @@ class ArtifactSchedulerConnector:
         self._buffer = RoutedExpertsArtifactBuffer(self._dtype, shape_per_token)
         self._request_core = RoutedExpertsRequestCore(self._store, self._buffer)
         self._states: dict[str, _RequestState] = {}
+        self._resume_emit_cursors: dict[str, int] = {}
         self._session_id = random_uuid()
         self._kv_cache_generation = 0
         self._hash_fn = get_hash_fn_by_name(
@@ -107,9 +108,19 @@ class ArtifactSchedulerConnector:
                 f"({prompt_start}) must be >= 0 and < num_prompt_tokens "
                 f"({request.num_prompt_tokens})"
             )
+        emit_cursor = self._resume_emit_cursors.pop(
+            request.request_id,
+            prompt_start,
+        )
+        if not prompt_start <= emit_cursor <= request.num_tokens - 1:
+            raise RuntimeError(
+                "invalid artifact resume cursor: "
+                f"request={request.request_id}, cursor={emit_cursor}, "
+                f"range=[{prompt_start}, {request.num_tokens - 1}]"
+            )
         self._states[request.request_id] = _RequestState(
             next_full_end=cached_token_end,
-            emit_cursor=prompt_start,
+            emit_cursor=emit_cursor,
             artifact_namespace=self._artifact_namespace,
         )
 
@@ -118,6 +129,7 @@ class ArtifactSchedulerConnector:
         scheduler_output: SchedulerOutput,
         routed_experts: np.ndarray | None,
         request_ids: list[str],
+        stale_request_ids: set[str] | None = None,
     ) -> None:
         """Split #50721's stable per-step R3 snapshot by logical request."""
         if routed_experts is None:
@@ -134,6 +146,7 @@ class ArtifactSchedulerConnector:
             zip(cached.req_ids, cached.num_computed_tokens, strict=True)
         )
 
+        stale_request_ids = stale_request_ids or set()
         offset = 0
         for request_id in request_ids:
             num_tokens = scheduler_output.num_scheduled_tokens[request_id]
@@ -144,7 +157,7 @@ class ArtifactSchedulerConnector:
                 raise RuntimeError(
                     f"artifact token start is missing for request {request_id}"
                 ) from error
-            if request_id in self._states:
+            if request_id in self._states and request_id not in stale_request_ids:
                 self._buffer.capture(
                     request_id,
                     token_start,
@@ -282,6 +295,7 @@ class ArtifactSchedulerConnector:
 
     def request_aborted(self, request_id: str) -> None:
         self._states.pop(request_id, None)
+        self._resume_emit_cursors.pop(request_id, None)
         self._buffer.discard(request_id)
 
     @property
@@ -289,9 +303,11 @@ class ArtifactSchedulerConnector:
         return f"{self._session_id}:{self._kv_cache_generation}"
 
     def advance_kv_cache_generation(self) -> None:
-        """Invalidate request state after a successful KV cache reset."""
-        for request_id in tuple(self._states):
-            self.request_aborted(request_id)
+        """Start a new namespace after a successful KV cache reset."""
+        for request_id, state in self._states.items():
+            self._resume_emit_cursors[request_id] = state.emit_cursor
+            self._buffer.discard(request_id)
+        self._states.clear()
         self._kv_cache_generation += 1
 
     def shutdown(self) -> None:
