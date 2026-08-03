@@ -1098,14 +1098,6 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                     )
                 )
-                if (
-                    dspark_draft_topk is not None
-                    and self.draft_tensor_parallel_size != 1
-                ):
-                    raise ValueError(
-                        "dspark_draft_topk requires draft_tensor_parallel_size=1"
-                    )
-
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,

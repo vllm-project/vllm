@@ -89,10 +89,14 @@ class DSparkMarkovHead(nn.Module):
         that dense buffer so the normal sampler sees the truncated proposal.
         """
         weight = self.markov_w2.weight[index]
-        bias = torch.bmm(weight, markov_embed.unsqueeze(-1)).squeeze(-1)
-        if scale != 1.0:
-            bias = bias * scale
-        return logits.scatter_(1, index, values + bias)
+        corrected = values.unsqueeze(-1)
+        corrected.baddbmm_(
+            weight,
+            markov_embed.unsqueeze(-1),
+            beta=1.0,
+            alpha=scale,
+        )
+        return logits.scatter_(1, index, corrected.squeeze(-1))
 
 
 class Qwen3DSparkModel(DFlashQwen3Model):
