@@ -21,6 +21,9 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    _masked_mha_workspace_fits,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -857,6 +860,67 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "batch_size",
+        "max_query_len",
+        "context_chunk_max_seq_lens",
+        "workspace_numel",
+        "expected",
+    ),
+    [
+        pytest.param(
+            1,
+            32768,
+            None,
+            128 * 1024 * 1024 // torch.int32.itemsize,
+            True,
+            id="single-32k-fits-128-mib",
+        ),
+        pytest.param(
+            5,
+            16384,
+            None,
+            128 * 1024 * 1024 // torch.int32.itemsize,
+            False,
+            id="mixed-prefill-exceeds-128-mib",
+        ),
+        pytest.param(
+            1,
+            16,
+            [16],
+            128,
+            True,
+            id="per-chunk-mask-fits-when-global-mask-does-not",
+        ),
+        pytest.param(
+            2,
+            256,
+            [512],
+            7000,
+            False,
+            id="context-chunk-mask-exceeds-workspace",
+        ),
+    ],
+)
+def test_masked_mha_workspace_fits(
+    batch_size,
+    max_query_len,
+    context_chunk_max_seq_lens,
+    workspace_numel,
+    expected,
+):
+    assert (
+        _masked_mha_workspace_fits(
+            batch_size=batch_size,
+            max_query_len=max_query_len,
+            context_chunk_max_seq_lens=context_chunk_max_seq_lens,
+            workspace_numel=workspace_numel,
+        )
+        is expected
+    )
 
 
 PREFILL_BATCH_SPECS = {

@@ -40,7 +40,29 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
 
-GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MiB
+GLOBAL_TOPK_MASK_MAX_BYTES = 128 * 1024 * 1024  # 128 MiB
+
+
+def _masked_mha_workspace_fits(
+    batch_size: int,
+    max_query_len: int,
+    context_chunk_max_seq_lens: list[int] | None,
+    workspace_numel: int,
+) -> bool:
+    """Return whether every required per-run mask fits the workspace.
+
+    The optional full-sequence mask has its own capacity check and falls back
+    to suffix and per-context-chunk masks when it is too large.
+    """
+    max_key_len = max(
+        max_query_len,
+        max(context_chunk_max_seq_lens or (), default=0),
+    )
+    tile_m = 128 if max_query_len <= 128 else 256
+    padded_q_len = (max_query_len + tile_m - 1) // tile_m * tile_m
+    num_words = (max_key_len + 31) // 32
+    needed = batch_size * padded_q_len * num_words
+    return needed <= workspace_numel
 
 
 def _is_masked_mha_available(
@@ -235,17 +257,31 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_seq_len = int(
                 seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
             )
+            chunked_context = self._build_chunked_context_fields(
+                common_attn_metadata,
+                num_decodes,
+                num_prefills,
+                prefill_query_lens_cpu,
+            )
+            workspace = self.topk_mask_workspace
+            masked_mha_workspace_fits = workspace is not None and (
+                _masked_mha_workspace_fits(
+                    batch_size=num_prefills,
+                    max_query_len=prefill_max_query_len,
+                    context_chunk_max_seq_lens=(
+                        None
+                        if chunked_context is None
+                        else chunked_context.max_seq_lens
+                    ),
+                    workspace_numel=workspace.numel(),
+                )
+            )
             prefill = MLACommonPrefillMetadata(
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=prefill_max_query_len,
                 query_lens_cpu=prefill_query_lens_cpu,
-                chunked_context=self._build_chunked_context_fields(
-                    common_attn_metadata,
-                    num_decodes,
-                    num_prefills,
-                    prefill_query_lens_cpu,
-                ),
+                chunked_context=chunked_context,
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
@@ -253,7 +289,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
                 ),
-                topk_mask_workspace=self.topk_mask_workspace,
+                topk_mask_workspace=workspace,
+                masked_mha_workspace_fits=masked_mha_workspace_fits,
             )
             self._prefill_backend.prepare_metadata(prefill)
 

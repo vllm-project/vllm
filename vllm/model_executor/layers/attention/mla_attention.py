@@ -763,6 +763,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 and self.impl.masked_mha_available  # type: ignore[attr-defined]
                 and self.impl.dcp_world_size <= 1
                 and prefill is not None
+                and prefill.masked_mha_workspace_fits
                 and _use_masked_mha(
                     backend_name=self.attn_backend.get_name(),
                     tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
@@ -1393,6 +1394,7 @@ class MLACommonPrefillMetadata:
     query_lens_cpu: torch.Tensor | None = None
     use_dense_mha: bool = False
     topk_mask_workspace: torch.Tensor | None = None
+    masked_mha_workspace_fits: bool = False
 
 
 @dataclass
