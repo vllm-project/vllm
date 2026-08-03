@@ -7,6 +7,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HeartbeatInfo,
+    NixlConnectorMetadata,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_scheduler
@@ -54,6 +58,29 @@ def test_on_new_request_tracks_and_groups():
     r3.kv_transfer_params["remote_engine_id"] = "engine-b"
     s.on_new_request(r3)
     assert len(s._heartbeat_by_engine) == 2
+
+
+def test_on_new_request_preserves_all_parallel_sizes():
+    s = _sched()
+    request = _req(1)
+    request.kv_transfer_params.update(
+        {
+            "tp_size": 4,
+            "dcp_size": 2,
+            "pcp_size": 2,
+            "pp_size": 3,
+        }
+    )
+
+    s.on_new_request(request)
+
+    info = s._heartbeat_by_engine[_ENGINE_A]
+    assert (info.tp_size, info.dcp_size, info.pcp_size, info.pp_size) == (
+        4,
+        2,
+        2,
+        3,
+    )
 
 
 @pytest.mark.parametrize(
@@ -163,3 +190,32 @@ def test_handle_heartbeat():
     assert w._reqs_to_send["req-b"] >= far_future
     # req-unknown: not added.
     assert "req-unknown" not in w._reqs_to_send
+
+
+def test_send_heartbeat_preserves_all_parallel_sizes():
+    w = _worker_stub()
+    w._hb_handshake_notif_only = True
+    w._ensure_handshake = MagicMock(return_value=MagicMock())
+    metadata = NixlConnectorMetadata()
+    metadata.heartbeat_by_engine[_ENGINE_A] = HeartbeatInfo(
+        req_ids={"prefill-1"},
+        host="my-host",
+        port=1234,
+        tp_size=4,
+        dcp_size=2,
+        pcp_size=2,
+        pp_size=3,
+    )
+
+    w._send_heartbeats(metadata)
+
+    w._ensure_handshake.assert_called_once_with(
+        _ENGINE_A,
+        "my-host",
+        1234,
+        4,
+        2,
+        2,
+        3,
+        True,
+    )

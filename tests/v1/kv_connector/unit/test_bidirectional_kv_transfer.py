@@ -1043,7 +1043,7 @@ def test_handshake_listener_appends_perf_counter_frame():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
     from vllm.utils.network_utils import get_open_port, make_zmq_path
 
-    encoded_data = {(0, 0): b"payload-rank-0"}
+    encoded_data = {(0, 0, 0): b"payload-rank-0"}
     ready_event = threading.Event()
     stop_event = threading.Event()
     host = "127.0.0.1"
@@ -1060,7 +1060,7 @@ def test_handshake_listener_appends_perf_counter_frame():
         with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # type: ignore[attr-defined]
             t0 = time.perf_counter()
-            sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0)))
+            sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0, 0)))
             parts = sock.recv_multipart()
             t1 = time.perf_counter()
         assert len(parts) == 2

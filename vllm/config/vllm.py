@@ -2269,6 +2269,43 @@ class VllmConfig:
                 "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
             )
 
+    def adjust_dcp_kv_cache_interleave_size(self) -> None:
+        """Normalize DCP interleave size before configs are sent to workers."""
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        if dcp_size <= 1:
+            return
+
+        if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+            self.parallel_config.cp_kv_cache_interleave_size
+            != self.parallel_config.dcp_kv_cache_interleave_size
+        ):
+            self.parallel_config.cp_kv_cache_interleave_size = (
+                self.parallel_config.dcp_kv_cache_interleave_size
+            )
+            logger.warning_once(
+                "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                "deprecated when PCP is fully supported."
+            )
+
+        block_size = self.cache_config.block_size
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+            and self.parallel_config.cp_kv_cache_interleave_size != block_size
+        ):
+            interleave = self.parallel_config.cp_kv_cache_interleave_size
+            self.parallel_config.cp_kv_cache_interleave_size = block_size
+            logger.warning_once(
+                "When using PD disaggregation with DCP "
+                "(decode_context_parallel_size=%d), "
+                "cp_kv_cache_interleave_size is automatically adjusted "
+                "from %d to block_size %d for block-level alignment.",
+                dcp_size,
+                interleave,
+                block_size,
+            )
+
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
 
@@ -2276,21 +2313,10 @@ class VllmConfig:
         finalised block_size.
         """
         block_size = self.cache_config.block_size
+        self.adjust_dcp_kv_cache_interleave_size()
 
         # DCP interleave-size compatibility
         if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
-            ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
-                )
-                logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
-                )
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
@@ -2299,7 +2325,6 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
             assert not self.scheduler_config.disable_chunked_mm_input, (

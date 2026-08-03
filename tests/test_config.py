@@ -15,8 +15,10 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     KernelConfig,
+    KVTransferConfig,
     ModelConfig,
     ParallelConfig,
     PoolerConfig,
@@ -37,6 +39,27 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=3,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config.validate_block_size()
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 16
+    assert "automatically adjusted from 3 to block_size 16" in caplog.text
 
 
 def test_compile_config_repr_succeeds():
