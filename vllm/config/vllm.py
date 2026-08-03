@@ -617,27 +617,29 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             return True
 
-        # DSpark routes to V2, matching upstream. This branch used to pin it to
-        # V1 on the grounds that "V2 collapses under concurrency at long
-        # context"; a paired A/B on 2x GB10 measured that claim and it does not
-        # hold on the current tree. arthur long-context recall is exact on both
-        # runners at c=1 (2/2), and at c=12 they are 23/24 vs 22/24 -- both
-        # inside the 22-24 band this branch has always seen there, which is
-        # batch-dependent reduction order under greedy + spec decode, not a
-        # recall loss. On the axes that were actually in question V2 is ahead:
-        # +4.70 GiB KV headroom (+27.5%, measured twice against a ~1.3 GiB noise
-        # floor) and higher draft acceptance (mean 2.097 vs 1.967, n=24/26,
-        # Mann-Whitney z=-2.45, p<0.05). GSM8K x3, tool-calling over 135 cases,
-        # #19 and engine health are at parity. See
-        # docs/sm120/experiments/2026-08-02-v2-model-runner-ab/.
-        # Force V2 as upstream does: _validate_v2_model_runner raises if V2 is
-        # unsupported for the rest of the config, rather than silently falling
-        # back to V1, which cannot run dspark at all.
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-        ):
-            return True
+        # DSpark runs on BOTH the V1 and V2 GPU model runners. Upstream force-
+        # routes it to V2; we do not, because on this SM12x DeepSeek-V4 stack V2
+        # loses long-context recall under concurrency.
+        #
+        # This guard was removed on 2026-08-03 and restored the same day. The
+        # removal was argued from ONE arthur c=12 sample per runner (V1 23/24 vs
+        # V2 22/24, "both inside the historical 22-24 band") -- but that band came
+        # from MTP2-on-V1 history, and one sample cannot see a distribution. Eight
+        # samples per runner, same serve, same head, DSpark on both:
+        #
+        #   V1  20 23 21 23 24 23 23 21   mean 22.25, range [20, 24]
+        #   V2  13 12  8 13 11  6 12  9   mean 10.50, range [ 6, 13]
+        #
+        # Completely separated -- V1's worst is above V2's best -- so Mann-Whitney
+        # gives U=0 at n=8,8. V2 drops more than half the needles. c=1 is exact
+        # (2/2) on both runners, so this is specifically a concurrency failure,
+        # which is what the original comment said.
+        #
+        # V2 remains ahead on KV headroom (+4.70 GiB, +27.5%) and draft acceptance
+        # (mean 2.097 vs 1.967, p<0.05); neither is worth long-context recall.
+        # See docs/sm120/experiments/2026-08-02-v2-model-runner-ab/.
+        #
+        # Opt into V2 explicitly with VLLM_USE_V2_MODEL_RUNNER=1.
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
         # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
