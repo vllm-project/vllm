@@ -864,9 +864,6 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
-DEFAULT_TOPK_MASK_WORKSPACE_NUMEL = GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize
-
-
 @pytest.mark.parametrize(
     ("max_query_len", "expected"),
     [(32768, True), (33024, False)],
@@ -879,7 +876,7 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
             batch_size=1,
             max_query_len=max_query_len,
             context_chunk_max_seq_lens=None,
-            workspace_numel=DEFAULT_TOPK_MASK_WORKSPACE_NUMEL,
+            workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
         )
         is expected
     )
