@@ -145,16 +145,25 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
-    # Deep GEMM warmup
+    # Deep GEMM warmup — respect both the env var and the per-model
+    # auto-disable flag (quant_config.use_deep_gemm). Auto-disable
+    # fires for qwen3_5_text / qwen3_5_moe on Blackwell SM120+ because
+    # DeepGemm's E8M0 scale format causes accuracy degradation.
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
         and is_deep_gemm_supported()
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
-        max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        if worker.vllm_config.quant_config.use_deep_gemm is False:
+            logger.info_once(
+                "Skipping DeepGEMM warmup: auto-disabled for model_type=%s",
+                worker.vllm_config.model_config.model_type,
+            )
+        else:
+            model = worker.get_model()
+            max_tokens = worker.scheduler_config.max_num_batched_tokens
+            deep_gemm_warmup(model, max_tokens)
 
     minimax_m3_msa_warmup(worker)
 
