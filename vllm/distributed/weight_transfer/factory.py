@@ -185,8 +185,8 @@ class WeightTransferTrainerFactory:
                 `packed`).
             client: Inference-side control-plane client.
             source: `WeightSource` of `(name, tensor)` pairs to send each round,
-                for full-resync backends (NCCL, IPC). Delta backends (sparse)
-                omit it and pass their per-round payload to `send_weights`.
+                for full-resync backends (NCCL, IPC). Sparse backend
+                omits it and passes its per-round payload to `send_weights`.
 
         Raises:
             ValueError: If `init_info.backend` is not registered.

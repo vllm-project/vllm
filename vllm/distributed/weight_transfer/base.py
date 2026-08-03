@@ -77,17 +77,7 @@ class WeightSource(ABC):
 
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
-        """Declare what iteration will yield, without transferring anything.
-
-        Must agree with iteration element-for-element: same parameters, same
-        order, and for each one the dtype and full shape that iteration
-        actually yields. Engines ship this to the worker as the round's
-        contract, so the worker sizes its receive buffers from it — and, in
-        packed mode, cuts its chunk boundaries from it. A source that reorders,
-        omits, or re-dtypes a parameter between the two channels makes the two
-        sides compute different chunk splits, which hangs the transfer or loads
-        garbage rather than raising.
-        """
+        """Declare what iteration will yield, without transferring anything."""
         raise NotImplementedError
 
     @abstractmethod
@@ -413,11 +403,7 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`. Full-resync backends (NCCL, IPC) take a `WeightSource` at
-    `trainer_init` and replay it each round via the no-argument
-    `send_weights()`. Backends that push per-round deltas instead (e.g. sparse
-    patches) leave `source` as `None` and take their payload as a `send_weights`
-    argument.
+    plans) on `self`.
 
     Unlike the worker engine, the trainer side does not take a
     `WeightTransferConfig`: the backend is selected from the init info's

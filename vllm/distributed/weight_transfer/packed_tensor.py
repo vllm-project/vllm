@@ -177,11 +177,7 @@ def packed_nccl_broadcast_producer(
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
-    # Drain every slot before returning. The loop only synchronizes the slot it
-    # is about to reuse, so on exit the other slots may still be broadcasting —
-    # and `in_flight`, the only thing keeping their packed buffers alive, dies
-    # with this frame. Waiting here also means the caller's weights are on the
-    # wire (not merely enqueued) once this returns.
+    # Drain every slot before returning.
     for stream in streams:
         stream.synchronize()
 
@@ -287,12 +283,7 @@ def packed_nccl_broadcast_consumer(
                     )
                 break
 
-    # Drain every slot before returning. The loop only synchronizes the slot it
-    # is about to reuse, so on exit the other slots may still be receiving and
-    # loading — and the caller's `finish_weight_update` post-processing runs on
-    # the default stream, which would otherwise finalize weights that have not
-    # landed. This also keeps the receive buffers alive until their broadcasts
-    # complete, mirroring the producer.
+    # Drain every slot before returning.
     for stream in streams:
         stream.synchronize()
 
