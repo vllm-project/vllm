@@ -24,7 +24,7 @@ def vqa_ppl_test(
     model_info: GenerateModelInfo,
     mm_processor_kwargs=None,
     vllm_extra_kwargs=None,
-    atol=PPL_TOL,
+    rtol=PPL_TOL,
 ):
     dataset = load_dataset("lmms-lab-encoder/llava-bench-in-the-wild", split="train")
 
@@ -151,8 +151,5 @@ def vqa_ppl_test(
     print("Transformers:", hf_dtype, hf_ppl)
     print("Difference (%):", differ * 100)
 
-    # PPL the smaller, the better
-    # We are not concerned that the vllm PPL is less than Transformers,
-    # so we only perform one-sided testing.
-    assert differ < atol
+    assert abs(differ) < PPL_TOL
     return vllm_ppl
