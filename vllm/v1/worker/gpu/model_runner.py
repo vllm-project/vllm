@@ -1383,14 +1383,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_state=self.lora_state,
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
-
                 with self.ec_connector.maybe_get_output(
                     scheduler_output
                 ) as ec_connector_output:
                     inputs_embeds = self.model_state.get_mm_embeddings(
                         scheduled_encoder_inputs, input_batch, self.req_states
                     )
-
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 
