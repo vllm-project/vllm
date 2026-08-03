@@ -50,14 +50,6 @@ input_tokens = [
     2,
 ]
 
-if current_platform.is_rocm():
-    # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-
 # On ROCm, floating-point reductions in attention and GEMM kernels are
 # non-associative and sensitive to batch geometry. Force LLM instances
 # into an identical, deterministic execution mode:
@@ -507,11 +499,17 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
         "The best thing about vLLM is that it supports many different models",
     ]
 
+    def check_outputs(outputs: list[list[float]]) -> None:
+        # The embeddings endpoint executes list elements as separate scheduler
+        # requests, so use the same per-request geometry for the HF reference.
+        for input_text, output in zip(input_texts, outputs, strict=True):
+            run_embedding_correctness_test(hf_model, [input_text], [output])
+
     responses_float = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="float"
     )
     float_data = [d.embedding for d in responses_float.data]
-    run_embedding_correctness_test(hf_model, input_texts, float_data)
+    check_outputs(float_data)
 
     responses_base64 = await client.embeddings.create(
         input=input_texts, model=model_name, encoding_format="base64"
@@ -522,14 +520,14 @@ async def test_base64_embedding(hf_model, client: openai.AsyncOpenAI, model_name
             np.frombuffer(base64.b64decode(data.embedding), dtype="float32").tolist()
         )
 
-    run_embedding_correctness_test(hf_model, input_texts, base64_data)
+    check_outputs(base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(
         input=input_texts, model=model_name
     )
     default_data = [d.embedding for d in responses_default.data]
-    run_embedding_correctness_test(hf_model, input_texts, default_data)
+    check_outputs(default_data)
 
 
 @pytest.mark.asyncio

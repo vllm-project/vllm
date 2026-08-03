@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
 
 import httpx
 import pytest
@@ -79,11 +78,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    envs = os.environ.copy()
-    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
-    envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
-
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
