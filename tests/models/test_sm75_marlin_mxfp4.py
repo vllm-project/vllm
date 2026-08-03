@@ -42,6 +42,7 @@ def test_sm75_marlin_mxfp4_selected(default_vllm_config, monkeypatch):
     )
     assert supported is True, reason
 
+    # default_vllm_config has model_config=None; the real override would raise
     monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
     backend, kcls = select_mxfp4_moe_backend(moe)
     assert backend == Mxfp4MoeBackend.MARLIN
