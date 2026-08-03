@@ -174,14 +174,20 @@ def test_select_default_backend_by_platform(
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, platform_method, return_value=True),
     ):
-        moe_config = make_dummy_moe_config()
+        # CPU's grouped-gemm kernels require hidden/intermediate sizes
+        # aligned to 32; the size-1 defaults only work for backends that
+        # don't check shapes at selection time.
+        moe_config = (
+            make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+            if expected_backend == UnquantizedMoeBackend.CPU
+            else make_dummy_moe_config()
+        )
         selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config
         )
 
         assert selected_backend == expected_backend
         if expected_backend in [
-            UnquantizedMoeBackend.CPU,
             UnquantizedMoeBackend.OOT,
             UnquantizedMoeBackend.TPU,
         ]:
