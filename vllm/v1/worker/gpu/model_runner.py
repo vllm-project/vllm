@@ -42,6 +42,11 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+    IndexerTopkCapturer,
+    get_indexer_attn_group_id,
+    get_sparse_attn_indexers,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
@@ -55,7 +60,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, IndexerTopkTensors, ModelRunnerOutput
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -279,10 +284,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
+        self.indexer_topk_capturer: IndexerTopkCapturer | None = None
+        self.indexer_topk_attn_group_id = -1
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
+
+    def init_indexer_topk_capturer(self) -> None:
+        indexers = get_sparse_attn_indexers(self.model)
+        if not indexers:
+            raise RuntimeError(
+                "--enable-return-indexer-topk requires SparseAttnIndexer layers."
+            )
+
+        capturer = IndexerTopkCapturer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            num_indexer_layers=len(indexers),
+            index_topk=indexers[0].topk_tokens,
+            device=self.device,
+        )
+        for layer_id, indexer in enumerate(indexers):
+
+            def capture_fn(
+                topk_indices: torch.Tensor,
+                compact_layer_id: int = layer_id,
+            ) -> None:
+                capturer.capture(compact_layer_id, topk_indices)
+
+            indexer.capture_fn = capture_fn
+
+        self.indexer_topk_capturer = capturer
+        self.indexer_topk_attn_group_id = get_indexer_attn_group_id(
+            self.kv_cache_config
+        )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1214,6 +1249,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.indexer_topk_capturer is not None:
+            self.indexer_topk_capturer.clear_buffer()
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1437,6 +1474,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        indexer_topk = None
+        if self.indexer_topk_capturer is not None and not dummy_run:
+            assert slot_mappings is not None
+            indexer_topk = IndexerTopkTensors(
+                topk_data=self.indexer_topk_capturer.get_device_buffer()[
+                    :num_toks
+                ].clone(),
+                slot_mapping=slot_mappings[self.indexer_topk_attn_group_id][
+                    :num_toks
+                ].clone(),
+            )
+
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -1445,6 +1494,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            indexer_topk=indexer_topk,
         )
 
         if not self.is_last_pp_rank:
@@ -1467,6 +1517,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        indexer_topk = self.execute_model_state.indexer_topk
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1532,6 +1583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
+            indexer_topk=indexer_topk,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1712,6 +1764,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    indexer_topk: IndexerTopkTensors | None
 
 
 def sort_batch_req_ids(

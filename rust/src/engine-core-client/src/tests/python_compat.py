@@ -95,6 +95,7 @@ class EngineCoreOutput(
     trace_headers: object | None = None
     prefill_stats: object | None = None
     routed_experts: object | None = None
+    indexer_topk: object | None = None
     num_nans_in_logits: int = 0
 
 
