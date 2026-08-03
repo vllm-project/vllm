@@ -75,6 +75,18 @@ def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
     return value is not None and peel(value) is not node
 
 
+def _declared_hidden_size(module: nn.Module) -> int | None:
+    """Hidden size a weightless norm declares on itself, or `None`."""
+    for attr in ("normalized_shape", "hidden_size", "dim"):
+        value = getattr(module, attr, None)
+        if isinstance(value, (tuple, list)):
+            if value:
+                return int(value[-1])
+        elif isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
 class TPAwareNormMixin(nn.Module):
     """Mixin for RMSNorms that reconstructs a TP-sharded input before normalizing."""
 
@@ -192,9 +204,14 @@ class RMSNormFuser(BaseFuser):
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
         model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
-        hidden_size = (
-            weight.size(0) if weight is not None else model_config.get_hidden_size()
-        )
+        if weight is not None:
+            hidden_size = weight.size(0)
+        else:
+            hidden_size = _declared_hidden_size(module)
+            if hidden_size is None:
+                # Last resort: the LM hidden size is wrong for norms on a
+                # sub-dimension (e.g. a vision encoder's head-dim norm).
+                hidden_size = model_config.get_hidden_size()
         graph = trace(module)
         eps = self._eps_from_graph(graph) if graph is not None else None
         if eps is None:

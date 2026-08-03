@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers import RMSNormFuser
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class RMSNorm(nn.Module):
     """The canonical HF RMSNorm: `weight * x * rsqrt(mean(x**2) + eps)`."""
@@ -166,6 +168,36 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     assert isinstance(built.weight, nn.Parameter) == (
         getattr(module, "weight", None) is not None
     )
+
+
+def test_weightless_norm_keeps_its_own_width(default_vllm_config):
+    """A weightless norm fuses at its declared width, not the model's (LM)
+    hidden size — the mismatch reported in #39061 (5376 vs 72)."""
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+
+    class WeightlessNorm(nn.Module):
+        def __init__(self, width: int, eps: float = 1e-6):
+            super().__init__()
+            self.normalized_shape = (width,)
+            self.variance_epsilon = eps
+
+        def forward(self, x):
+            return x * torch.rsqrt(
+                x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon
+            )
+
+    # Model config reports the LM hidden size (5376); the norm is a sub-dim.
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(get_hidden_size=lambda: 5376)
+    )
+    with torch.device("meta"):
+        module = WeightlessNorm(72)
+        fuser = get_fuser(module)
+        assert isinstance(fuser, RMSNormFuser)
+        built = fuser.fuse(module, "norm", vllm_config)
+    assert isinstance(built, VLLMRMSNorm)
+    assert built.hidden_size == 72
+    assert not isinstance(built.weight, nn.Parameter)
 
 
 def test_fused_rms_norm_op_default_eps(default_vllm_config):
