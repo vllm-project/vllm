@@ -1495,6 +1495,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             ),
             requires_grad=False,
         )
+        # use_gu_interleave
         shuffled_w2_scale = _shuf_s(
             w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
             num_experts,
