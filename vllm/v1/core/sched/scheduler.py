@@ -2129,11 +2129,13 @@ class Scheduler(SchedulerInterface):
             mm_feature = request.mm_features[input_id]
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
+            freed = False
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
+                freed = True
             elif (
                 start_pos + num_tokens + spec_lookahead
                 <= request.num_computed_tokens - request.num_output_placeholders
@@ -2142,6 +2144,12 @@ class Scheduler(SchedulerInterface):
                 # the placeholder range (plus the drafter's look-ahead) that no
                 # rejection or drafter gather can reference it.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
+                freed = True
+            if freed and request.resumable:
+                # The encoder output is committed, so the raw input tensors are
+                # no longer needed. Drop them so resumable sessions do not
+                # retain every frame's data for the lifetime of the session.
+                mm_feature.data = None
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
