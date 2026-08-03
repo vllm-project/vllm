@@ -63,7 +63,14 @@ RUN apt-get update -y && \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install UMD
+# Install XPUM
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging && \
+    apt-get update -y && \
+    apt-get install -y xpu-smi
+
+# Install UMD, force install libze* to replace the one installed by XPUM
 RUN mkdir neo && \
     cd neo && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.34.4/intel-igc-core-2_2.34.4+21428_amd64.deb && \
@@ -74,7 +81,7 @@ RUN mkdir neo && \
     wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/libze-intel-gpu1_26.18.38308.1-0_amd64.deb && \
     wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero_1.28.2+u24.04_amd64.deb && \
     wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero-devel_1.28.2+u24.04_amd64.deb && \
-    dpkg -i *.deb && \
+    dpkg -i --force-overwrite *.deb && \
     cd .. && \
     rm -rf neo
 
