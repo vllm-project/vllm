@@ -48,3 +48,38 @@ def test_create_processor_error_uses_served_model_name():
         match="friendly-model-name is not a multimodal model",
     ):
         MULTIMODAL_REGISTRY.create_processor(model_config)
+
+
+@pytest.mark.parametrize(
+    "runner_type,expect_warning",
+    [
+        # A model that is served directly has no business declaring
+        # SupportsMultiModal without a processor -- keep warning about it.
+        ("generate", True),
+        # Speculative drafters for multimodal targets legitimately do, so
+        # text-only mode is expected and should stay quiet.
+        ("draft", False),
+    ],
+)
+def test_missing_processor_falls_back_to_text_only(
+    monkeypatch, caplog, runner_type, expect_warning
+):
+    # The model path doubles as the `warning_once` cache key, so give each
+    # case its own to keep them independent.
+    model_config = SimpleNamespace(
+        is_multimodal_model=True,
+        model=f"/path/to/{runner_type}/weights",
+        runner_type=runner_type,
+        get_multimodal_config=SimpleNamespace,
+    )
+
+    def _no_processor(*args, **kwargs):
+        raise ValueError("Model class SomeMTP has no registered multimodal processor")
+
+    monkeypatch.setattr(MULTIMODAL_REGISTRY, "_create_processing_info", _no_processor)
+
+    with caplog.at_level("WARNING", logger="vllm.multimodal.registry"):
+        assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(model_config) is False
+
+    warned = "has no registered multimodal processor" in caplog.text
+    assert warned is expect_warning
