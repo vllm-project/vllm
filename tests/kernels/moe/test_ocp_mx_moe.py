@@ -1204,7 +1204,7 @@ ROCM_BACKEND_CONFIGS = {
     },
     "AITER_MXFP4_BF16": {
         "activation": "SWIGLUOAI",
-        "rtol": 1.0,
+        "rtol": 0.1,
         "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
