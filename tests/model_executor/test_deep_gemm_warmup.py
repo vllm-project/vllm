@@ -48,11 +48,11 @@ def test_fp8_linear_returns_false_when_deep_gemm_unavailable_plain_module():
         from vllm.model_executor.warmup.deep_gemm_warmup import (
             _fp8_linear_may_use_deep_gemm,
         )
+
         module = _make_plain_linear()
         result = _fp8_linear_may_use_deep_gemm(module)
         assert result is False, (
-            "Expected False when deep_gemm is unavailable, "
-            f"got {result!r}"
+            f"Expected False when deep_gemm is unavailable, got {result!r}"
         )
 
 
@@ -61,22 +61,29 @@ def test_fp8_linear_returns_false_when_deep_gemm_unavailable_mock_fp8():
     Same as above but with a mock that passes isinstance checks — the guard
     must fire before get_mk_alignment_for_contiguous_layout() is called.
     """
-    with patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
-        return_value=False,
-    ), patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup"
-        ".get_mk_alignment_for_contiguous_layout"
-    ) as mock_align:
+    with (
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup"
+            ".get_mk_alignment_for_contiguous_layout"
+        ) as mock_align,
+    ):
         from vllm.model_executor.warmup.deep_gemm_warmup import (
             _fp8_linear_may_use_deep_gemm,
         )
+
         module = _make_mock_fp8_linear()
         result = _fp8_linear_may_use_deep_gemm(module)
         assert result is False
-        mock_align.assert_not_called(), (
-            "get_mk_alignment_for_contiguous_layout should not be called "
-            "when is_deep_gemm_supported() is False"
+        (
+            mock_align.assert_not_called(),
+            (
+                "get_mk_alignment_for_contiguous_layout should not be called "
+                "when is_deep_gemm_supported() is False"
+            ),
         )
 
 
@@ -91,34 +98,40 @@ def test_deep_gemm_warmup_noop_when_unavailable():
         torch.nn.Linear(64, 32),
     )
 
-    with patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
-        return_value=False,
-    ), patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup"
-        ".get_mk_alignment_for_contiguous_layout"
-    ) as mock_align:
+    with (
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup"
+            ".get_mk_alignment_for_contiguous_layout"
+        ) as mock_align,
+    ):
         from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 
         deep_gemm_warmup(model, max_tokens=512)
-        mock_align.assert_not_called(), (
-            "No deep_gemm calls expected for a bf16 model "
-            "when deep_gemm is unavailable"
+        (
+            mock_align.assert_not_called(),
+            (
+                "No deep_gemm calls expected for a bf16 model "
+                "when deep_gemm is unavailable"
+            ),
         )
 
 
-def _make_mock_fused_moe():
-    """A minimal mock that looks like a FusedMoE module."""
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+def _make_mock_moe_runner():
+    """A minimal mock that looks like a MoERunner module."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
 
-    m = MagicMock(spec=FusedMoE)
+    m = MagicMock(spec=MoERunner)
     return m
 
 
 def test_fused_moe_returns_false_when_deep_gemm_unavailable():
     """
     _fused_moe_grouped_gemm_may_use_deep_gemm must return False (not raise)
-    for any FusedMoE-like module when is_deep_gemm_supported() is False.
+    for any MoERunner-like module when is_deep_gemm_supported() is False.
 
     Before the fix: only VLLM_USE_DEEP_GEMM / VLLM_MOE_USE_DEEP_GEMM env
     vars were checked — has_deep_gemm() (part of is_deep_gemm_supported())
@@ -129,21 +142,27 @@ def test_fused_moe_returns_false_when_deep_gemm_unavailable():
     After the fix: is_deep_gemm_supported() is the first guard, so the
     function returns False immediately and never touches deep_gemm internals.
     """
-    with patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
-        return_value=False,
-    ), patch(
-        "vllm.model_executor.warmup.deep_gemm_warmup"
-        ".get_mk_alignment_for_contiguous_layout"
-    ) as mock_align:
+    with (
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.warmup.deep_gemm_warmup"
+            ".get_mk_alignment_for_contiguous_layout"
+        ) as mock_align,
+    ):
         from vllm.model_executor.warmup.deep_gemm_warmup import (
             _fused_moe_grouped_gemm_may_use_deep_gemm,
         )
 
-        module = _make_mock_fused_moe()
+        module = _make_mock_moe_runner()
         result = _fused_moe_grouped_gemm_may_use_deep_gemm(module)
         assert result is False
-        mock_align.assert_not_called(), (
-            "get_mk_alignment_for_contiguous_layout should not be called "
-            "when is_deep_gemm_supported() is False"
+        (
+            mock_align.assert_not_called(),
+            (
+                "get_mk_alignment_for_contiguous_layout should not be called "
+                "when is_deep_gemm_supported() is False"
+            ),
         )
