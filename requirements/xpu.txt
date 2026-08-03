@@ -1,5 +1,7 @@
 # Common dependencies
 -r common.txt
+--extra-index-url=http://10.239.182.107:8081/sample
+triton
 
 ray>=2.9
 cmake>=3.26.1
