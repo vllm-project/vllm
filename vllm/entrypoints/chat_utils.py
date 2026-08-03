@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import time
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -52,6 +53,7 @@ from typing_extensions import Required, TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.metrics.mm_preprocessing import observe_resolve_items
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
@@ -871,6 +873,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
         if not self._items_by_modality:
             return None, None
 
+        resolve_start = time.monotonic()
         # Fetch all modalities together. Each tracked item is already an
         # independent awaitable, and the async connector offloads blocking
         # decode work, so waiting for one modality before starting the next
@@ -895,6 +898,8 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[_AsyncMultiModalItem]
             next_result_idx = result_idx + len(group)
             resolved_items_by_modality[modality] = results[result_idx:next_result_idx]
             result_idx = next_result_idx
+
+        observe_resolve_items(time.monotonic() - resolve_start)
 
         mm_processor = (
             self.mm_processor if self._model_config.is_multimodal_model else None
