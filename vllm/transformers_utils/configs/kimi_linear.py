@@ -116,8 +116,7 @@ class KimiLinearConfig(PretrainedConfig):
         self.topk_method = topk_method
 
         if linear_attn_config is not None:
-            assert linear_attn_config["kda_layers"] is not None
-            assert linear_attn_config["full_attn_layers"] is not None
+            self._validate_linear_attn_config(linear_attn_config, num_hidden_layers)
         self.linear_attn_config = linear_attn_config
 
         super().__init__(
@@ -127,6 +126,83 @@ class KimiLinearConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @staticmethod
+    def _validate_linear_attn_config(config: dict, num_hidden_layers: int) -> None:
+        """Validate the hybrid KDA / full-attention layer lists.
+
+        vLLM chooses each decoder layer's attention type (KDA vs MLA) from
+        ``kda_layers`` membership alone and treats the complement as MLA; the
+        ``full_attn_layers`` list is only a declaration and is never consulted
+        for dispatch. A config that does not partition the layer stack would
+        therefore silently select wrong attention implementations. This helper
+        rejects such configs up front.
+        """
+        kda_layers = config.get("kda_layers")
+        full_attn_layers = config.get("full_attn_layers")
+        if kda_layers is None or full_attn_layers is None:
+            raise ValueError(
+                "linear_attn_config must define both 'kda_layers' and "
+                "'full_attn_layers'."
+            )
+
+        valid_layers = range(1, num_hidden_layers + 1)
+        layer_specs = (
+            ("kda_layers", kda_layers),
+            ("full_attn_layers", full_attn_layers),
+        )
+        for name, layers in layer_specs:
+            if not isinstance(layers, (list, tuple)):
+                raise ValueError(
+                    f"linear_attn_config['{name}'] must be a list or tuple "
+                    f"of layer indices, got {type(layers).__name__} {layers!r}."
+                )
+            for layer in layers:
+                # bool is an int subclass; reject True/False so they are not
+                # silently accepted as layer 1 / the sentinel for no coverage.
+                if isinstance(layer, bool) or not isinstance(layer, int):
+                    raise ValueError(
+                        f"linear_attn_config['{name}'] contains invalid entry "
+                        f"{layer!r}; expected integer layer indices within the "
+                        f"1-based range [1, {num_hidden_layers}]."
+                    )
+                if layer not in valid_layers:
+                    raise ValueError(
+                        f"linear_attn_config['{name}'] contains layer index "
+                        f"{layer} outside the 1-based range "
+                        f"[1, {num_hidden_layers}]."
+                    )
+
+            seen: set[int] = set()
+            duplicates: list[int] = []
+            for layer in layers:
+                if layer in seen:
+                    duplicates.append(layer)
+                else:
+                    seen.add(layer)
+            if duplicates:
+                raise ValueError(
+                    f"linear_attn_config['{name}'] contains duplicate layer "
+                    f"index(es) {sorted(set(duplicates))}."
+                )
+
+        kda_set = set(kda_layers)
+        full_attn_set = set(full_attn_layers)
+        overlap = kda_set & full_attn_set
+        if overlap:
+            raise ValueError(
+                "kda_layers and full_attn_layers overlap at layer(s) "
+                f"{sorted(overlap)}; each decoder layer must be exactly one "
+                "attention type."
+            )
+
+        missing = set(valid_layers) - kda_set - full_attn_set
+        if missing:
+            raise ValueError(
+                "kda_layers and full_attn_layers do not cover layer(s) "
+                f"{sorted(missing)}; every decoder layer must be either a KDA "
+                "layer or a full-attention layer."
+            )
 
     @property
     def is_mla(self):
