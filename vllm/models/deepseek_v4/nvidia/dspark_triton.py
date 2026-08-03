@@ -482,6 +482,7 @@ def _dspark_markov_probs_reduce_kernel(
     row_invz_ptr,
     out_tokens_ptr,
     out_tokens_stride,
+    vocab_size: tl.constexpr,
     scratch_stride: tl.constexpr,
     num_blocks: tl.constexpr,
     block_nb: tl.constexpr,
@@ -518,6 +519,20 @@ def _dspark_markov_probs_reduce_kernel(
     greedy_token = tl.min(tl.where((bmax == row_max) & mask, bmaxid, int_max), axis=0)
 
     token = tl.where(greedy != 0, greedy_token, gumbel_token)
+    # A fully-masked row -- every candidate -inf, which structured-output
+    # constraints can produce -- leaves no active lane in ANY block, so each
+    # block stores its `vocab_size` filler and both reductions above return that
+    # filler verbatim. A NaN row_max returns `int_max` the same way. Either
+    # escapes as an out-of-vocab token id, and nothing downstream bounds it:
+    # the runner clamps input_ids with min=0 only, and the DSv4 hash-MoE router
+    # then does tid2eid[token_id * 6 + lane] on a [vocab_size, 6] table, reading
+    # off the end -> illegal memory access on every TP rank.
+    #
+    # torch.argmax returns 0 on such a row, so fold to 0 rather than to
+    # vocab_size - 1: it keeps the fused kernel bit-identical to the eager
+    # reference on degenerate rows instead of introducing a divergence that only
+    # shows up where nobody looks.
+    token = tl.where(token >= vocab_size, 0, token)
     tl.store(out_tokens_ptr + batch_pid * out_tokens_stride, token)
 
 
@@ -645,6 +660,7 @@ def dspark_markov_probs_sample(
         row_invz,
         out_tokens,
         out_tokens.stride(0),
+        vocab_size=vocab_size,
         scratch_stride=block_max.stride(0),
         num_blocks=num_blocks,
         block_nb=triton.next_power_of_2(num_blocks),

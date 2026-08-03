@@ -630,3 +630,74 @@ def test_dspark_triton_context_kv_store_matches_reference():
     )
 
     assert torch.allclose(cache.float(), cache_ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dspark_fused_markov_sampler_bounds_fully_masked_row():
+    """A fully-masked row must not emit an out-of-vocab token id.
+
+    The fused sampler's per-block kernel stores `vocab_size` as the filler when a
+    block has no active lane. On a row where every candidate is -inf -- which
+    structured-output constraints can produce -- NO block has an active lane, so
+    every block stores the filler, and the reduce kernel's tie-break (all blocks
+    compare equal at -inf) returns it verbatim as the sampled token.
+
+    Nothing downstream bounds that id: the runner clamped input_ids with min=0
+    only, and the DSv4 hash-MoE router indexes tid2eid[token_id * 6 + lane] on a
+    [vocab_size, 6] table, reading off the end -- an illegal memory access on
+    every TP rank, reported from production in vllm-project/vllm#41834.
+
+    Only the fused path is affected: the eager fallback uses argmax, and the
+    fused path is skipped for all-greedy or seeded batches, so the whole class is
+    invisible to any greedy gate. Both sampler modes are checked here, and the
+    eager reference is checked too so the expectation is anchored to real
+    behaviour rather than to my assumption about it.
+    """
+    batch, block, vocab = 2, 3, 4096
+
+    # Deliberately a bias that does NOT gather on prev_token_ids. The real bias
+    # does (w1[prev_token_ids]), and with the bug the out-of-vocab id from step 0
+    # is fed straight back into that gather at step 1, tripping a DEVICE-SIDE
+    # assert. That is a faithful demonstration of the consequence, but it aborts
+    # the CUDA context and takes every later test in the file down with it, so
+    # the failure would be unreadable and the suite unusable. Isolating the
+    # sampler keeps the explicit range assertion below as the failure mode.
+    def apply_markov_bias(logits, prev_token_ids, step_idx):
+        del prev_token_ids, step_idx
+        return logits
+
+    # Row 0 fully masked; row 1 ordinary, to prove the fix is row-local.
+    base_logits = torch.randn(batch, block, vocab, device=DEVICE_TYPE)
+    base_logits[0] = -float("inf")
+    first_prev = torch.tensor([1, 2], device=DEVICE_TYPE)
+
+    for all_greedy in (True, False):
+        tokens, _ = sample_dspark_markov_block_fused(
+            base_logits.clone(),
+            first_prev,
+            apply_markov_bias,
+            _sampling_metadata(all_greedy=all_greedy, batch_size=batch),
+        )
+        assert tokens.min() >= 0, f"negative token id (all_greedy={all_greedy})"
+        assert tokens.max() < vocab, (
+            f"out-of-vocab token id {int(tokens.max())} >= vocab_size {vocab} "
+            f"(all_greedy={all_greedy}) -- this is the #41834 illegal access"
+        )
+
+    # The eager reference is the contract the fused path must match, including
+    # on a degenerate row: torch.argmax over all--inf returns index 0.
+    eager, _ = sample_dspark_markov_block(
+        base_logits.clone(),
+        first_prev,
+        apply_markov_bias,
+        _sampling_metadata(all_greedy=True, batch_size=batch),
+        return_probs=False,
+    )
+    assert eager.max() < vocab
+    fused, _ = sample_dspark_markov_block_fused(
+        base_logits.clone(),
+        first_prev,
+        apply_markov_bias,
+        _sampling_metadata(all_greedy=True, batch_size=batch),
+    )
+    torch.testing.assert_close(fused[0], eager[0])

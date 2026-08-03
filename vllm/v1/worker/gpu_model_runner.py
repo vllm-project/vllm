@@ -3564,8 +3564,18 @@ class GPUModelRunner(
         is_encoder_decoder = self.model_config.is_encoder_decoder
 
         # Clamp speculative scheduler placeholders (-1) before embedding lookup.
+        #
+        # Bound the top as well, not just the bottom. A draft token id is data,
+        # not a loop bound, and this clamp is the last thing standing between a
+        # speculator and every downstream gather. The DSv4 hash-MoE router
+        # indexes tid2eid[token_id * 6 + lane] on a [vocab_size, 6] table with no
+        # bound of its own, so a single out-of-vocab draft id is an illegal
+        # access that takes down every TP rank. Cheap: one extra bound on a
+        # kernel that already runs.
         if self.speculative_config is not None:
-            self.input_ids.gpu[:num_input_tokens].clamp_(min=0)
+            self.input_ids.gpu[:num_input_tokens].clamp_(
+                min=0, max=self.model_config.get_vocab_size() - 1
+            )
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
