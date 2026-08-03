@@ -155,10 +155,16 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        if worker.vllm_config.quant_config.use_deep_gemm is False:
+        quant_config = worker.vllm_config.quant_config
+        if getattr(quant_config, "use_deep_gemm", None) is False:
+            model_type = getattr(
+                worker.vllm_config.model_config.hf_text_config,
+                "model_type", None,
+            )
             logger.info_once(
-                "Skipping DeepGEMM warmup: auto-disabled for model_type=%s",
-                worker.vllm_config.model_config.model_type,
+                "Skipping DeepGEMM warmup: disabled by quantization config "
+                "(model_type=%s).",
+                model_type,
             )
         else:
             model = worker.get_model()
