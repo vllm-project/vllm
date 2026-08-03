@@ -687,6 +687,14 @@ shadow slots, or a shadow model. A strict failure prevents the reload from
 being reported as successful, but callers must treat the worker as unsafe for
 continued serving and recover according to the surrounding reload protocol.
 
+`reload_storage_guard` also runs arena and global-manifest verification when
+the reload body itself raises. Findings on that path are diagnostic: they are
+logged without replacing the original load exception. The original exception
+is annotated, when supported by the Python runtime, to state that mutation may
+have started and the worker must be restarted. A clean identity check does not
+make a failed reload safe, because parameters or value-bearing slots may
+already have been partially updated without changing addresses.
+
 ### Graph visibility discovery
 
 The arena is an explicit declaration mechanism, not an automatic proof that
