@@ -110,7 +110,22 @@ _language_model_by_module = dict[nn.Module, "VllmModel"]()
 
 
 @runtime_checkable
-class SupportsMultiModal(Protocol):
+class SupportsMultiModalEmbeddings(Protocol):
+    """The interface for models that can merge external multimodal embeddings."""
+
+    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
+
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """The interface required for all multi-modal models."""
 
     supports_multimodal: ClassVar[Literal[True]] = True
@@ -121,9 +136,6 @@ class SupportsMultiModal(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
-    """A flag indicating this model can merge external multimodal embeddings."""
 
     supports_multimodal_raw_input_only: ClassVar[bool] = False
     """
@@ -491,7 +503,21 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-def supports_multimodal_embeddings(model: type[object] | object) -> bool:
+@overload
+def supports_multimodal_embeddings(
+    model: type[object],
+) -> TypeIs[type[SupportsMultiModalEmbeddings]]: ...
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: object,
+) -> TypeIs[SupportsMultiModalEmbeddings]: ...
+
+
+def supports_multimodal_embeddings(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModalEmbeddings]] | TypeIs[SupportsMultiModalEmbeddings]:
     return getattr(model, "supports_multimodal_embeddings", False)
 
 
