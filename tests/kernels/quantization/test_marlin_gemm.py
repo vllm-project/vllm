@@ -315,7 +315,6 @@ def test_gptq_marlin_repack_ldmatrix_s4_random(nk_factors):
         pytest.skip("Requires the CUDA 13.4 Hopper ldmatrix.s8.s4 path.")
 
     q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
-    perm = torch.empty(0, dtype=torch.int32, device="cuda")
     expected = marlin_weights(
         q_w,
         size_k,
@@ -327,7 +326,6 @@ def test_gptq_marlin_repack_ldmatrix_s4_random(nk_factors):
     )
     actual = ops.gptq_marlin_repack(
         q_w_gptq,
-        perm,
         size_k,
         size_n,
         4,
@@ -452,7 +450,6 @@ def marlin_generate_valid_test_cases():
                 if (
                     sub_case[0] == scalar_types.int8
                     and sub_case[1] == scalar_types.uint4b8
-                    and not act_order
                 ):
                     cases.append(
                         pytest.param(*args, marks=pytest.mark.marlin_ldmatrix_s4)
