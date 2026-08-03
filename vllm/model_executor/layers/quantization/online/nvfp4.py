@@ -66,7 +66,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
 
     Quantizes fp16/bf16 expert weights to NVFP4 at load time; the FlashInfer
     TRTLLM kernel computes per-token activation scales at runtime. Blackwell
-    (SM100) only.
+    (SM10.x or SM12.x) only.
     """
 
     def __init__(
@@ -74,9 +74,13 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         *,
         layer: torch.nn.Module,
     ):
-        if not current_platform.is_device_capability_family(100):
+        if not (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        ):
             raise ValueError(
-                "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
+                "nvfp4_per_token online quantization requires a Blackwell"
+                " GPU with compute capability 10.x or 12.x."
             )
         super().__init__(layer.moe_config)
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(

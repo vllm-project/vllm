@@ -57,7 +57,12 @@ class GateLinear(ReplicatedLinear):
         prefix: str = "",
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
-        is_blackwell = current_platform.is_device_capability_family(100)
+        is_blackwell = (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        )
+        # tcgen05/TMEM instructions are SM100 datacenter only; not available on SM120
+        is_sm100_family = current_platform.is_device_capability_family(100)
         can_use_specialized_kernels = (
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
@@ -107,7 +112,7 @@ class GateLinear(ReplicatedLinear):
             not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
-            and is_blackwell
+            and is_sm100_family
             and input_size % 8 == 0
             and enable_bf16x3_router_gemm
         )
