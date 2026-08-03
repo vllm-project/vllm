@@ -22,25 +22,28 @@ For instructions on installing appropriate NIC userspace libraries, see [Install
 
 Start the proxy first; the producer and consumer instances will retry registration until the proxy is reachable.
 
+The `127.0.0.1` example below is for local-only runs where the proxy, prefiller, and decoder share the same network namespace, such as three bare-metal processes on one node or all three processes in one container. For separate containers, use a reachable node/container IP for `proxy_ip` and usually leave `host_ip` unset.
+
+Because the prefiller and decoder share one network namespace in this example, they use distinct `handshake_port` and `notify_port` values. MoRIIO opens one port per DP/TP rank, increasing from the configured base port with `base + dp_rank * tp_size + tp_rank`. For `-tp 4`, `handshake_port: 6301` uses ports `6301-6304` and `notify_port: 6105` uses `6105-6108`; the decoder uses separate ranges, `7301-7304` and `7501-7504`.
+
 ### Producer (prefiller) configuration
 
 Start a prefiller instance that produces KV caches
 
 ```bash
-# Prefill instance (GPU 0-3) 
+# Prefill instance (GPU 0-3)
 export VLLM_ROCM_USE_AITER=1
-export CUDA_VISIBLE_DEVICES=0,1,2,3
 export HIP_VISIBLE_DEVICES=0,1,2,3
- 
+
 vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
   --port 20005 \
-  --gpu-memory-utilization 0.9 \
   --kv-transfer-config '{
     "kv_connector": "MoRIIOConnector",
     "kv_role": "kv_producer",
     "kv_connector_extra_config": {
       "proxy_ip": "127.0.0.1",
+      "host_ip": "127.0.0.1",
       "proxy_ping_port": "36367",
       "http_port": "20005",
       "handshake_port": "6301",
@@ -56,18 +59,17 @@ Start a decoder instance that consumes KV caches:
 ```bash
 # Decode instance (GPU 4-7)
 export VLLM_ROCM_USE_AITER=1
-export CUDA_VISIBLE_DEVICES=4,5,6,7
 export HIP_VISIBLE_DEVICES=4,5,6,7
 
 vllm serve Qwen/Qwen3-235B-A22B-FP8 \
   -tp 4 \
   --port 40005 \
-  --gpu-memory-utilization 0.9 \
   --kv-transfer-config '{
     "kv_connector": "MoRIIOConnector",
     "kv_role": "kv_consumer",
     "kv_connector_extra_config": {
       "proxy_ip": "127.0.0.1",
+      "host_ip": "127.0.0.1",
       "http_port": "40005",
       "proxy_ping_port": "36367",
       "handshake_port": "7301",
@@ -125,16 +127,49 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 
 **Control-plane configuration:** MoRI moves KV bytes over RDMA/xGMI, but producers and consumers also need out-of-band TCP channels for handshake, block id exchange, liveness, and completion signaling. These keys live under `kv_connector_extra_config`:
 
-- `proxy_ip`: IP address of the disaggregation proxy/router that fronts the prefiller and decoder. Each vLLM instance uses it to register itself and to send heartbeats so the proxy knows where to route incoming requests.
-- `proxy_ping_port`: TCP port on `proxy_ip` where the proxy listens for instance heartbeats and registration messages. Used to detect dead vLLM instances and keep routing tables fresh.
-- `http_port`: HTTP port that this vLLM instance exposes its OpenAI-compatible API on. The proxy registers this port, and forwards user requests to this port once it has picked an instance.
+- `proxy_ip`: IP address of the disaggregation proxy/router. For normal multi-container or multi-node deployments, use a real node/container IP reachable from the vLLM instances. `127.0.0.1` is only for local tests where the proxy and vLLM instances share the same network namespace.
+- `host_ip`: Optional local IP address advertised by this vLLM instance. In most deployments, leave this unset. vLLM will infer it from the route to `proxy_ip`. Set it explicitly only when you need to force a specific address, such as local-only `127.0.0.1` tests.
+- `proxy_ping_port`: TCP port on `proxy_ip` where the proxy listens for instance heartbeats and registration messages. It must match the router's `--vllm-discovery-address` port.
+- `http_port`: HTTP port that this vLLM instance exposes its OpenAI-compatible API on. It must match this instance's `vllm serve --port`; vLLM does not infer it from the CLI argument.
 - `handshake_port`: TCP port used for the one-time MoRI engine handshake between a prefiller and a decoder. The two sides exchange RDMA engine descriptors here before any KV transfer can happen.
 - `notify_port`: TCP port used for control and synchronization messages between prefiller and decoder. Used differently in the two modes:
     - WRITE mode: **Block allocation:** the decoder notifies the prefiller about its block ids, so the prefiller can push its computed KV blocks into the correct place on the decoder instance. **Completion:** once all blocks have been transferred, the prefiller notifies the decoder that it's safe to use its blocks.
     - READ mode: **Completion:** once the decoder has read all blocks from the prefiller, it notifies the prefiller so it can free its KV cache blocks.
 
 !!! note
-    `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
+    `handshake_port` and `notify_port` are *base* ports. Each (DP rank, TP rank) pair within an instance uses `base + dp_rank * tp_size + tp_rank`, so a TP4 instance needs four monotonically increasing ports for each base. Make sure both ranges are free on the host.
+
+If `host_ip` is unset and the route to `proxy_ip` uses loopback, vLLM warns and falls back to `get_ip()`. If auto configuration still resolves to loopback or `0.0.0.0`, startup fails and `host_ip` must be set explicitly.
+
+If `MORI_SOCKET_IFNAME` is unset, vLLM sets it to the interface that owns the selected `host_ip`. If it is already set, vLLM does not override it.
+
+For separate Docker containers without `--network host`, put the containers on the same Docker network and set `proxy_ip` to the proxy container's reachable address:
+
+- Create a user-defined network:
+
+```bash
+docker network create moriio-net
+```
+
+- Start the proxy container on that network with a stable name, for example `moriio-proxy`.
+
+- Use the proxy container name or IP as `proxy_ip` and omit `host_ip`:
+
+```json
+"kv_connector_extra_config": {
+  "proxy_ip": "moriio-proxy",
+  "proxy_ping_port": "36367",
+  "http_port": "8100",
+  "handshake_port": "6301",
+  "notify_port": "61005"
+}
+```
+
+- To use the container IP directly, find it with:
+
+```bash
+docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' moriio-proxy
+```
 
 ### Transport configuration
 
@@ -150,29 +185,25 @@ The configuration options for each backend are as follows.
 
 Advanced users can also configure MoRI itself using environment variables such as `MORI_IO_QP_MAX_SEND_WR`, `MORI_IO_QP_MAX_CQE`, etc. These are MoRI library variables and are separate from vLLM's own `VLLM_MORIIO_*` settings. Refer to the [MoRI repository](https://github.com/rocm/mori) for more information.
 
+`MORI_RDMA_DEVICES` and `MORI_IB_GID_INDEX` are optional MoRI environment variables. If unset, MoRI uses its own defaults. vLLM does not infer or modify them. On multi-NIC hosts, set `MORI_RDMA_DEVICES` explicitly if the default active-device set includes a NIC that should not carry KV RDMA traffic; otherwise MoRI may choose that NIC and fail with RDMA registration or QP connection errors.
+
 #### xGMI backend
 
-Use xGMI when the prefiller and decoder run on the same physical host so transfers go over the AMD GPU fabric and skip the NIC entirely. Currently only configured using MoRI-specific environment variables; see the [MoRI repository](https://github.com/rocm/mori).
+Use xGMI when the prefiller and decoder run on the same physical host so transfers go over AMD Infinity Fabric/xGMI and skip the NIC entirely. Currently only configured using MoRI-specific environment variables; see the [MoRI repository](https://github.com/rocm/mori).
 
 ## Multi-node deployment
 
-The example below shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.
+### Docker container flags for RDMA
 
-### On both nodes
+When running RDMA inside the ROCm vLLM container, launch the prefill and decode containers with host networking plus GPU/RDMA device access. The important container settings are:
 
-```bash
-# Set on both nodes before running any command
-export PREFILL_IP=<node1-ip>
-export DECODE_IP=<node2-ip>
-```
-
-### On node 1
-
-Start the proxy first as described in [Proxy server](#proxy-server), then start the prefill instance:
+- `--network host`: lets vLLM infer `host_ip` and `MORI_SOCKET_IFNAME` from host routes.
+- `--device /dev/kfd --device /dev/dri`: exposes AMD GPU devices.
+- `--device /dev/infiniband`: exposes RDMA verbs devices.
+- `--ulimit memlock=-1`: allows RDMA memory registration.
 
 ```bash
 docker run \
-  --name moriio-prefill \
   --init --network host --ipc host --privileged \
   --security-opt seccomp=unconfined \
   --ulimit memlock=-1 --ulimit stack=67108864 --shm-size 256G \
@@ -180,57 +211,240 @@ docker run \
   --device /dev/kfd --device /dev/dri --device /dev/infiniband \
   -e VLLM_ROCM_USE_AITER=1 \
   vllm/vllm-openai-rocm:nightly \
-  deepseek-ai/DeepSeek-R1-0528 \
-    --port 8100 \
-    --tensor-parallel-size 8 \
-    --enable-expert-parallel \
-    --gpu-memory-utilization 0.8 \
-    --trust-remote-code \
-    --kv-transfer-config '{
-      "kv_connector": "MoRIIOConnector",
-      "kv_role": "kv_producer",
-      "kv_connector_extra_config": {
-        "proxy_ip": "'"${PREFILL_IP}"'",
-        "proxy_ping_port": "36367",
-        "http_port": "8100",
-        "handshake_port": "6301",
-        "notify_port": "61005"
-      }
-    }'
+  <model-and-vllm-args>
 ```
 
-### On node 2
+Use the same MoRIIO configuration shown in the host-network example below. If you do not use `--network host`, set `proxy_ip` to a reachable container name or container IP.
 
-Decode instance:
+### Host-network MiniMax M3 RDMA examples
+
+The following examples use MiniMax M3 with MoRIIO READ mode over RDMA. The router runs on the prefill node. `proxy_ip` is a real control-plane IP, `host_ip` is omitted, and vLLM infers each instance's advertised IP and `MORI_SOCKET_IFNAME` from the route to the router.
+
+Set shared environment on every node:
 
 ```bash
-docker run \
-  --name moriio-decode \
-  --init --network host --ipc host --privileged \
-  --security-opt seccomp=unconfined \
-  --ulimit memlock=-1 --ulimit stack=67108864 --shm-size 256G \
-  --group-add video --group-add render \
-  --device /dev/kfd --device /dev/dri --device /dev/infiniband \
-  -e VLLM_ROCM_USE_AITER=1 \
-  vllm/vllm-openai-rocm:nightly \
-  deepseek-ai/DeepSeek-R1-0528 \
-    --port 8200 \
-    --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.8 \
-    --trust-remote-code \
-    --enable-expert-parallel \
-    --kv-transfer-config '{
-      "kv_connector": "MoRIIOConnector",
-      "kv_role": "kv_consumer",
-      "kv_connector_extra_config": {
-        "proxy_ip": "'"${PREFILL_IP}"'",
-        "proxy_ping_port": "36367",
-        "http_port": "8200",
-        "handshake_port": "6301",
-        "notify_port": "61005"
-      }
-    }'
+export ROUTER_IP=<prefill-node-control-ip>
+export VLLM_ROCM_USE_AITER=1
+export VLLM_USE_BREAKABLE_CUDAGRAPH=0
+export VLLM_ENGINE_READY_TIMEOUT_S=3600
+export HSA_ENABLE_SDMA=1
 ```
+
+Set `MORI_RDMA_DEVICES` only when MoRI's default active-device set is not correct for the host:
+
+```bash
+# export MORI_RDMA_DEVICES=<comma-separated-rdma-devices>
+```
+
+Start the router on the prefill node:
+
+```bash
+podman run --rm --network host docker.io/vllm/vllm-router:nightly \
+  vllm-router \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --vllm-pd-disaggregation \
+    --kv-connector moriio \
+    --vllm-discovery-address 0.0.0.0:36367 \
+    --policy consistent_hash \
+    --prefill-policy consistent_hash \
+    --decode-policy consistent_hash \
+    --log-level info
+```
+
+#### 1P1D: TP8 prefill + TP8 decode
+
+Start the TP8 prefill instance on node 1:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --block-size 128 \
+  --language-model-only \
+  --kv-cache-dtype fp8 \
+  --attention-backend TRITON_ATTN \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.90 \
+  --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --kv-transfer-config '{
+    "kv_connector": "MoRIIOConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "proxy_ip": "'"${ROUTER_IP}"'",
+      "proxy_ping_port": 36367,
+      "http_port": 8100,
+      "handshake_port": 6301,
+      "notify_port": 61005,
+      "read_mode": true,
+      "backend": "rdma",
+      "qp_per_transfer": 4,
+      "num_workers": 4
+    }
+  }'
+```
+
+Start the TP8 decode instance on node 2:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --host 0.0.0.0 \
+  --port 8200 \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --block-size 128 \
+  --language-model-only \
+  --kv-cache-dtype fp8 \
+  --attention-backend TRITON_ATTN \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.90 \
+  --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --kv-transfer-config '{
+    "kv_connector": "MoRIIOConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+      "proxy_ip": "'"${ROUTER_IP}"'",
+      "proxy_ping_port": 36367,
+      "http_port": 8200,
+      "handshake_port": 7301,
+      "notify_port": 7501,
+      "read_mode": true,
+      "backend": "rdma",
+      "qp_per_transfer": 4,
+      "num_workers": 4
+    }
+  }'
+```
+
+#### 2P1D: two TP4 prefills + one TP8 decode
+
+Run each vLLM command in a separate terminal or process. The two prefill instances share node 1, so they use different GPU sets and non-overlapping `handshake_port` / `notify_port` ranges.
+
+This topology uses heterogeneous TP sizes.
+
+Start the first TP4 prefill instance on node 1:
+
+```bash
+export HIP_VISIBLE_DEVICES=0,1,2,3
+
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --host 0.0.0.0 \
+  --port 8100 \
+  --trust-remote-code \
+  --tensor-parallel-size 4 \
+  --block-size 128 \
+  --language-model-only \
+  --kv-cache-dtype fp8 \
+  --attention-backend TRITON_ATTN \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.90 \
+  --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --kv-transfer-config '{
+    "kv_connector": "MoRIIOConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "proxy_ip": "'"${ROUTER_IP}"'",
+      "proxy_ping_port": 36367,
+      "http_port": 8100,
+      "handshake_port": 6301,
+      "notify_port": 61005,
+      "read_mode": true,
+      "backend": "rdma",
+      "qp_per_transfer": 4,
+      "num_workers": 4
+    }
+  }'
+```
+
+Start the second TP4 prefill instance on node 1:
+
+```bash
+export HIP_VISIBLE_DEVICES=4,5,6,7
+
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --host 0.0.0.0 \
+  --port 8101 \
+  --trust-remote-code \
+  --tensor-parallel-size 4 \
+  --block-size 128 \
+  --language-model-only \
+  --kv-cache-dtype fp8 \
+  --attention-backend TRITON_ATTN \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.90 \
+  --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --kv-transfer-config '{
+    "kv_connector": "MoRIIOConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "proxy_ip": "'"${ROUTER_IP}"'",
+      "proxy_ping_port": 36367,
+      "http_port": 8101,
+      "handshake_port": 6305,
+      "notify_port": 61009,
+      "read_mode": true,
+      "backend": "rdma",
+      "qp_per_transfer": 4,
+      "num_workers": 4
+    }
+  }'
+```
+
+Start the TP8 decode instance on node 2:
+
+```bash
+export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --host 0.0.0.0 \
+  --port 8200 \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --block-size 128 \
+  --language-model-only \
+  --kv-cache-dtype fp8 \
+  --attention-backend TRITON_ATTN \
+  --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.90 \
+  --tool-call-parser minimax_m3 \
+  --reasoning-parser minimax_m3 \
+  --enable-auto-tool-choice \
+  --kv-transfer-config '{
+    "kv_connector": "MoRIIOConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+      "proxy_ip": "'"${ROUTER_IP}"'",
+      "proxy_ping_port": 36367,
+      "http_port": 8200,
+      "handshake_port": 7301,
+      "notify_port": 7501,
+      "read_mode": true,
+      "backend": "rdma",
+      "qp_per_transfer": 4,
+      "num_workers": 4
+    }
+  }'
+```
+
+For these examples:
+
+- vLLM infers `host_ip` and `MORI_SOCKET_IFNAME`.
+- MoRI chooses `MORI_IB_GID_INDEX` when it is unset.
+- `proxy_ping_port` must match the port in the router's `--vllm-discovery-address`.
+- `http_port` must match this instance's `vllm serve --port`.
+- In 2P1D, each prefill on the same host needs a unique `--port` / `http_port` pair and non-overlapping `handshake_port` / `notify_port` ranges.
+- You choose `ROUTER_IP`, `MORI_RDMA_DEVICES` if needed, ports, roles, model, and any model/runtime options.
+- `read_mode` is set inside `kv_connector_extra_config`; the old `VLLM_MORIIO_CONNECTOR_READ_MODE` environment variable is deprecated.
 
 ## Troubleshooting
 
