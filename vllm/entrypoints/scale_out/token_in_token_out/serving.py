@@ -383,7 +383,7 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids and output.routed_experts is None:
+                    if not delta_token_ids:
                         continue
 
                     if sampling_params.logprobs is not None:

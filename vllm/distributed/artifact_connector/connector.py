@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,8 +11,6 @@ import numpy as np
 
 from vllm.distributed.artifact_connector.buffer import RoutedExpertsArtifactBuffer
 from vllm.distributed.artifact_connector.request_core import (
-    ArtifactCommit,
-    ArtifactFinalize,
     RoutedExpertsRequestCore,
     get_routing_shape_and_dtype,
     materialize_routed_experts,
@@ -23,12 +20,6 @@ from vllm.distributed.artifact_connector.shm import (
     LocalSharedMemoryArtifactStore,
 )
 from vllm.distributed.artifact_connector.store import BackgroundArtifactStore
-from vllm.utils import random_uuid
-from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.v1.core.kv_cache_utils import (
-    generate_block_hash_extra_keys,
-    hash_block_tokens,
-)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -42,8 +33,6 @@ if TYPE_CHECKING:
 class _RequestState:
     next_full_end: int
     emit_cursor: int
-    artifact_namespace: str
-    private_block_hashes: list[bytes]
 
 
 class ArtifactSchedulerConnector:
@@ -93,16 +82,15 @@ class ArtifactSchedulerConnector:
             ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
-        self._buffer = RoutedExpertsArtifactBuffer(self._dtype, shape_per_token)
+        self._buffer = RoutedExpertsArtifactBuffer(
+            self._dtype, shape_per_token, block_size
+        )
         self._request_core = RoutedExpertsRequestCore(self._store, self._buffer)
         self._states: dict[str, _RequestState] = {}
         self._resume_emit_cursors: dict[str, int] = {}
-        self._session_id = random_uuid()
+        self._step_rows: dict[str, tuple[int, np.ndarray]] = {}
         self._kv_cache_generation = 0
         self._reuse_kv_hashes = vllm_config.cache_config.enable_prefix_caching
-        self._hash_fn = get_hash_fn_by_name(
-            vllm_config.cache_config.prefix_caching_hash_algo
-        )
 
     def _state(self, request_id: str) -> _RequestState:
         try:
@@ -133,8 +121,6 @@ class ArtifactSchedulerConnector:
             if sampling_params is not None
             else 0
         )
-        if prompt_start is None:
-            prompt_start = 0
         if prompt_start < 0 or prompt_start >= request.num_prompt_tokens:
             raise ValueError(
                 "routed_experts_prompt_start "
@@ -154,13 +140,10 @@ class ArtifactSchedulerConnector:
         self._states[request.request_id] = _RequestState(
             next_full_end=cached_token_end,
             emit_cursor=emit_cursor,
-            artifact_namespace=self._artifact_namespace,
-            private_block_hashes=[],
         )
 
     def _block_hashes(
         self,
-        state: _RequestState,
         request: Request,
         block_end: int,
     ) -> list[bytes]:
@@ -172,9 +155,10 @@ class ArtifactSchedulerConnector:
                 )
             return list(block_hashes)
 
-        while len(state.private_block_hashes) < block_end:
-            state.private_block_hashes.append(os.urandom(32))
-        return state.private_block_hashes[:block_end]
+        return [
+            f"{request.request_id}:{block_index}".encode()
+            for block_index in range(block_end)
+        ]
 
     def capture_step(
         self,
@@ -199,6 +183,7 @@ class ArtifactSchedulerConnector:
         )
 
         stale_request_ids = stale_request_ids or set()
+        self._step_rows.clear()
         offset = 0
         for request_id in request_ids:
             num_tokens = scheduler_output.num_scheduled_tokens[request_id]
@@ -210,11 +195,13 @@ class ArtifactSchedulerConnector:
                     f"artifact token start is missing for request {request_id}"
                 ) from error
             if request_id in self._states and request_id not in stale_request_ids:
+                request_rows = routed_experts[offset:end]
                 self._buffer.capture(
                     request_id,
                     token_start,
-                    routed_experts[offset:end],
+                    request_rows,
                 )
+                self._step_rows[request_id] = (token_start, request_rows)
             offset = end
         if offset != len(routed_experts):
             raise RuntimeError("artifact capture output has an invalid row count")
@@ -232,17 +219,13 @@ class ArtifactSchedulerConnector:
             return
         first_block = state.next_full_end // hash_block_size
         last_block = full_end // hash_block_size
-        block_hashes = self._block_hashes(state, request, last_block)[first_block:]
+        block_hashes = self._block_hashes(request, last_block)[first_block:]
         self._request_core.commit(
-            [
-                ArtifactCommit(
-                    request_id=request.request_id,
-                    artifact_namespace=state.artifact_namespace,
-                    block_hashes=block_hashes,
-                    block_start=state.next_full_end,
-                    hash_block_size=hash_block_size,
-                )
-            ]
+            request_id=request.request_id,
+            artifact_namespace=self._artifact_namespace,
+            block_hashes=block_hashes,
+            block_start=state.next_full_end,
+            block_size=hash_block_size,
         )
         state.next_full_end = full_end
 
@@ -259,24 +242,29 @@ class ArtifactSchedulerConnector:
         if token_end <= token_start:
             return None
 
+        step = self._step_rows.get(request.request_id)
+        if step is not None:
+            step_start, step_rows = step
+            if step_start <= token_start and token_end <= step_start + len(step_rows):
+                state.emit_cursor = token_end
+                return step_rows[token_start - step_start : token_end - step_start]
+
         chunks: list[np.ndarray] = []
         stored_end = min(state.next_full_end, token_end)
         if token_start < stored_end:
             first_block = token_start // hash_block_size
             last_block = stored_end // hash_block_size
-            block_hashes = self._block_hashes(state, request, last_block)[first_block:]
+            block_hashes = self._block_hashes(request, last_block)[first_block:]
             object_start = first_block * hash_block_size
             stored = materialize_routed_experts(
                 self._store,
                 [
-                    routed_experts_key(block_hash, state.artifact_namespace)
+                    routed_experts_key(block_hash, self._artifact_namespace)
                     for block_hash in block_hashes
                 ],
-                expected_shape_per_token=self._shape_per_token,
-                expected_dtype=self._dtype,
-                expected_token_start=object_start,
-                expected_token_end=stored_end,
-                hash_block_size=hash_block_size,
+                shape_per_token=self._shape_per_token,
+                dtype=self._dtype,
+                rows_per_object=hash_block_size,
             )
             chunks.append(stored[token_start - object_start :])
 
@@ -294,58 +282,10 @@ class ArtifactSchedulerConnector:
 
     def request_finished(
         self,
-        *,
-        request: Request,
-        token_end: int,
-        hash_block_size: int,
-    ) -> list[str]:
-        state = self._state(request.request_id)
-        full_end = token_end // hash_block_size * hash_block_size
-        tail_block_hash = None
-        if full_end < token_end:
-            if token_end > request.num_tokens:
-                raise RuntimeError(
-                    "artifact token boundary exceeds the request token count"
-                )
-            if self._reuse_kv_hashes:
-                block_hashes = self._block_hashes(
-                    state,
-                    request,
-                    full_end // hash_block_size,
-                )
-                parent_hash = block_hashes[-1] if block_hashes else None
-                extra_keys, _ = generate_block_hash_extra_keys(
-                    request,
-                    full_end,
-                    token_end,
-                    -1 if full_end else 0,
-                )
-                tail_block_hash = hash_block_tokens(
-                    self._hash_fn,
-                    parent_hash,
-                    request.all_token_ids[full_end:token_end],
-                    extra_keys,
-                )
-            else:
-                tail_block_hash = os.urandom(32)
-
-        block_hashes = self._block_hashes(
-            state,
-            request,
-            full_end // hash_block_size,
-        )
-
-        finalize = ArtifactFinalize(
-            request_id=request.request_id,
-            artifact_namespace=state.artifact_namespace,
-            block_hashes=block_hashes,
-            tail_block_hash=tail_block_hash,
-            token_end=token_end,
-            hash_block_size=hash_block_size,
-        )
-        keys = self._request_core.finalize(finalize)
-        self._states.pop(request.request_id)
-        return keys
+        request_id: str,
+    ) -> None:
+        self._states.pop(request_id)
+        self._buffer.discard(request_id)
 
     def request_aborted(self, request_id: str) -> None:
         self._states.pop(request_id, None)
@@ -354,7 +294,7 @@ class ArtifactSchedulerConnector:
 
     @property
     def _artifact_namespace(self) -> str:
-        return f"{self._session_id}:{self._kv_cache_generation}"
+        return str(self._kv_cache_generation)
 
     def reset(self) -> None:
         """Reset artifact state after a successful KV cache reset."""

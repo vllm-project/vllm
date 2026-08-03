@@ -290,23 +290,53 @@ def test_model_runner_initializes_capture(monkeypatch):
     pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
     import vllm.v1.worker.gpu.model_runner as model_runner
 
-    capturer = Mock()
-    constructor = Mock(return_value=capturer)
-    bind = Mock()
-    monkeypatch.setattr(model_runner, "RoutedExpertsCapturer", constructor)
-    monkeypatch.setattr(model_runner, "bind_routed_experts_capturer", bind)
+    connector = Mock()
+    constructor = Mock(return_value=connector)
+    monkeypatch.setattr(model_runner, "ArtifactWorkerConnector", constructor)
 
     runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
     runner.max_num_tokens = 32
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=0))
     runner.model = Mock()
 
-    runner.init_routed_experts_capturer()
+    runner.init_artifact_connector()
 
     constructor.assert_called_once_with(
-        max_num_batched_tokens=32, vllm_config=runner.vllm_config
+        model=runner.model,
+        max_num_batched_tokens=32,
+        vllm_config=runner.vllm_config,
     )
-    bind.assert_called_once_with(runner.model, capturer)
+    assert runner.artifact_connector is connector
+
+
+def test_artifact_worker_connector_owns_capture(monkeypatch):
+    import vllm.distributed.artifact_connector.worker as artifact_worker
+
+    snapshot = torch.tensor([1, 2, 3])
+    capturer = Mock()
+    capturer.get_routing_data.return_value = snapshot
+    constructor = Mock(return_value=capturer)
+    bind = Mock()
+    monkeypatch.setattr(artifact_worker, "RoutedExpertsCapturer", constructor)
+    monkeypatch.setattr(artifact_worker, "bind_routed_experts_capturer", bind)
+
+    config = SimpleNamespace(
+        artifact_config=SimpleNamespace(enable_return_routed_experts=True)
+    )
+    model = Mock()
+    connector = artifact_worker.ArtifactWorkerConnector(
+        vllm_config=config,
+        model=model,
+        max_num_batched_tokens=32,
+    )
+
+    constructor.assert_called_once_with(
+        max_num_batched_tokens=32,
+        vllm_config=config,
+    )
+    bind.assert_called_once_with(model, capturer)
+    assert connector.capture_routed_experts(3) is snapshot
+    capturer.get_routing_data.assert_called_once_with(3)
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):

@@ -50,11 +50,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.routed_experts_cpu = (
-                routed_experts.to("cpu", non_blocking=True)
-                if routed_experts is not None
-                else None
-            )
+            self.routed_experts_cpu: np.ndarray | None = None
+            if routed_experts is not None:
+                self.routed_experts_cpu = async_copy_to_np(routed_experts)
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
@@ -86,7 +84,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         if self.routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self.routed_experts_cpu.numpy()
+            self.model_runner_output.routed_experts = self.routed_experts_cpu
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

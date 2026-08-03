@@ -8,14 +8,14 @@ import errno
 import fcntl
 import hashlib
 import os
-import re
 import stat
 import threading
 import time
 import uuid
 from collections import OrderedDict
-from contextlib import suppress
 from pathlib import Path
+
+import regex as re
 
 from vllm.distributed.artifact_connector.store import (
     ArtifactCapacityError,
@@ -35,15 +35,8 @@ def make_shm_store_id(instance_id: str, dp_rank: int) -> str:
     return hashlib.sha256(f"{instance_id}:{dp_rank}".encode()).hexdigest()[:32]
 
 
-class LocalSharedMemoryArtifactReader:
-    """Read self-describing artifact objects from a local SHM store."""
-
-    def __init__(self, root: str, store_id: str) -> None:
-        if not _SAFE_STORE_ID.fullmatch(store_id):
-            raise ValueError(f"invalid artifact store id: {store_id!r}")
-        self.root = Path(root) / store_id
-        self.store_id = store_id
-        self.objects_dir = self.root / "objects"
+class LocalSharedMemoryArtifactStore:
+    """Single-writer immutable artifact store in `/dev/shm`."""
 
     @staticmethod
     def _object_id(key: str) -> str:
@@ -52,7 +45,10 @@ class LocalSharedMemoryArtifactReader:
         return hashlib.sha256(key.encode()).hexdigest()
 
     def _path(self, key: str) -> Path:
-        return self.objects_dir / f"{self._object_id(key)}.bin"
+        return self._path_from_object_id(self._object_id(key))
+
+    def _path_from_object_id(self, object_id: str) -> Path:
+        return self.objects_dir / f"{object_id}.bin"
 
     @staticmethod
     def _open_regular_file(path: Path) -> int:
@@ -67,7 +63,7 @@ class LocalSharedMemoryArtifactReader:
             raise ArtifactCorruptionError(f"invalid artifact mode: {path}")
         return fd
 
-    def get(self, keys: list[str]) -> list[bytes]:
+    def _read(self, keys: list[str]) -> list[bytes]:
         payloads: list[bytes] = []
         for key in keys:
             path = self._path(key)
@@ -85,13 +81,6 @@ class LocalSharedMemoryArtifactReader:
             payloads.append(payload)
         return payloads
 
-    def close(self) -> None:
-        """Readers own no external resources."""
-
-
-class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
-    """Single-writer immutable artifact store in `/dev/shm`."""
-
     def __init__(
         self,
         root: str,
@@ -101,7 +90,9 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
         max_bytes: int,
         ttl_seconds: int,
     ) -> None:
-        super().__init__(root, make_shm_store_id(instance_id, dp_rank))
+        self.store_id = make_shm_store_id(instance_id, dp_rank)
+        self.root = Path(root) / self.store_id
+        self.objects_dir = self.root / "objects"
         self.max_bytes = max_bytes
         self.ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
@@ -263,9 +254,7 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
         additional_bytes: int,
         protected: set[str],
     ) -> None:
-        protected_bytes = sum(
-            size for object_id, size in self._lru.items() if object_id in protected
-        )
+        protected_bytes = sum(self._lru.get(object_id, 0) for object_id in protected)
         if protected_bytes + additional_bytes > self.max_bytes:
             raise ArtifactCapacityError(
                 "artifact SHM cannot retain the requested batch: "
@@ -317,12 +306,11 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
                 os.close(fd)
             temporary.unlink(missing_ok=True)
 
-    def _put_one(self, obj: ArtifactObject) -> None:
-        path = self._path(obj.key)
-        object_id = self._object_id(obj.key)
-        if path.exists():
+    def _put_one(self, object_id: str, obj: ArtifactObject) -> None:
+        if object_id in self._lru:
             self._touch(object_id)
             return
+        path = self._path_from_object_id(object_id)
         created = self._write_immutable(path, obj.payload)
         if created:
             self._used_bytes += len(obj.payload)
@@ -342,13 +330,13 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
                 if object_id not in self._lru
             )
             self._evict_to_fit(additional_bytes, protected)
-            for obj in unique.values():
-                self._put_one(obj)
+            for object_id, obj in unique.items():
+                self._put_one(object_id, obj)
 
     def get(self, keys: list[str]) -> list[bytes]:
         with self._lock:
             try:
-                payloads = super().get(keys)
+                payloads = self._read(keys)
             except ArtifactNotFoundError as error:
                 raise ArtifactNotFoundError(
                     f"{error}; the object may have been evicted from SHM "
@@ -370,7 +358,3 @@ class LocalSharedMemoryArtifactStore(LocalSharedMemoryArtifactReader):
         if fd is not None:
             self._writer_lock_fd = None
             os.close(fd)
-
-    def __del__(self) -> None:
-        with suppress(Exception):
-            self.close()

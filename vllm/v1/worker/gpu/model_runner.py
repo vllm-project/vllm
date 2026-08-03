@@ -31,6 +31,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -39,10 +40,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-    bind_routed_experts_capturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -286,20 +283,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
+        self.artifact_connector: ArtifactWorkerConnector | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
 
-    def init_routed_experts_capturer(self) -> None:
-        """Initialize target-model capture on the output worker."""
-        capturer = RoutedExpertsCapturer(
+    def init_artifact_connector(self) -> None:
+        self.artifact_connector = ArtifactWorkerConnector(
+            model=self.model,
             max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
         )
-        bind_routed_experts_capturer(self.model, capturer)
-        self.routed_experts_capturer = capturer
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1455,8 +1450,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         routed_experts = None
-        if not dummy_run and self.routed_experts_capturer is not None:
-            routed_experts = self.routed_experts_capturer.get_routing_data(num_toks)
+        if not dummy_run and self.artifact_connector is not None:
+            routed_experts = self.artifact_connector.capture_routed_experts(num_toks)
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(

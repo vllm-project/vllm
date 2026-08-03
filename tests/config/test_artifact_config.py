@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -60,8 +60,9 @@ def test_artifact_config_defaults_to_shm():
 
 
 def test_kimi_k3_experts_per_token_config_name():
-    model_config = SimpleNamespace(
-        hf_text_config=SimpleNamespace(num_experts_per_token=16)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(hf_text_config=SimpleNamespace(num_experts_per_token=16)),
     )
 
     assert ModelConfig.get_num_experts_per_token(model_config) == 16
@@ -76,10 +77,8 @@ def test_legacy_routed_experts_flag_updates_artifact_config():
 
 def test_legacy_prompt_start_is_accepted():
     params = SamplingParams(routed_experts_prompt_start=3)
-    full_prompt = SamplingParams(routed_experts_prompt_start=None)
 
     assert params.routed_experts_prompt_start == 3
-    assert full_prompt.routed_experts_prompt_start is None
 
 
 def test_artifact_connector_requires_model_runner_v2():

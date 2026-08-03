@@ -9,7 +9,7 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
-from vllm.distributed.artifact_connector import ArtifactSchedulerConnector
+from vllm.distributed.artifact_connector.connector import ArtifactSchedulerConnector
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -1861,11 +1861,7 @@ class Scheduler(SchedulerInterface):
                         if finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
                             self.artifact_connector.request_aborted(request.request_id)
                         else:
-                            self.artifact_connector.request_finished(
-                                request=request,
-                                token_end=request.num_tokens - 1,
-                                hash_block_size=self.hash_block_size,
-                            )
+                            self.artifact_connector.request_finished(request.request_id)
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:

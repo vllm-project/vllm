@@ -330,7 +330,7 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
-    routed_experts_prompt_start: int | None = 0
+    routed_experts_prompt_start: int = 0
     """When routed-experts artifacts are enabled, skip this many prompt
     tokens from the returned routing data. The stored artifact remains
     unchanged."""

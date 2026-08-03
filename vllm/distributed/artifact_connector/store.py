@@ -68,15 +68,26 @@ class BackgroundArtifactStore:
     def _run(self) -> None:
         while True:
             objects = self._queue.get()
+            num_batches = 1
             try:
                 if objects is None:
                     return
+                pending = list(objects)
+                while True:
+                    try:
+                        next_objects = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    assert next_objects is not None
+                    pending.extend(next_objects)
+                    num_batches += 1
                 if self._error is None:
-                    self._store.put(objects)
+                    self._store.put(pending)
             except BaseException as error:
                 self._error = error
             finally:
-                self._queue.task_done()
+                for _ in range(num_batches):
+                    self._queue.task_done()
 
     def _raise_if_failed(self) -> None:
         if self._error is not None:
