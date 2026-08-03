@@ -3543,9 +3543,14 @@ class MMVUDataset(HuggingFaceDataset):
                 break
 
             prompt = parser_fn(item)
-            mm_content = process_video(
-                item["video"].replace(self._remote_path_root, self._local_path_root)
+            video_path = item["video"].replace(
+                self._remote_path_root, self._local_path_root
             )
+            # Benchmark datasets are downloaded to a local Hugging Face cache.
+            # Load the video bytes so vLLM does not require users to allow that
+            # cache directory via --allowed-local-media-path.
+            with open(video_path, "rb") as video_file:
+                mm_content = process_video({"bytes": video_file.read()})
             prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
