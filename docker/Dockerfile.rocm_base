@@ -137,11 +137,7 @@ RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
 ###
 FROM base AS build_pytorch
 ARG PYTORCH_BRANCH
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_AUDIO_BRANCH
 ARG PYTORCH_REPO
-ARG PYTORCH_VISION_REPO
-ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
 RUN apt-get update && apt-get install -y pkg-config liblzma-dev
@@ -159,6 +155,25 @@ RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
+RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
+
+
+###
+### Shared PyTorch runtime for dependent builds
+###
+FROM base AS build_pytorch_runtime
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install,ro \
+    pip install /install/*.whl
+
+
+###
+### TorchVision build
+###
+FROM build_pytorch_runtime AS build_torchvision
+ARG PYTORCH_VISION_BRANCH
+ARG PYTORCH_VISION_REPO
+ARG USE_SCCACHE
+
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
@@ -169,10 +184,22 @@ RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
+RUN mkdir -p /app/install && cp /app/vision/dist/*.whl /app/install
+
+
+###
+### TorchAudio build
+###
+FROM build_pytorch_runtime AS build_torchaudio
+ARG PYTORCH_AUDIO_BRANCH
+ARG PYTORCH_AUDIO_REPO
+ARG USE_SCCACHE
+
 RUN git clone ${PYTORCH_AUDIO_REPO} audio
 RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt \
+    && git submodule update --init --recursive
+RUN cd audio && pip install -r requirements.txt
+RUN cd audio \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && export CMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -181,9 +208,7 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
-RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install \
-    && cp /app/audio/dist/*.whl /app/install
+RUN mkdir -p /app/install && cp /app/audio/dist/*.whl /app/install
 
 
 ###
@@ -264,6 +289,10 @@ RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_torchvision,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_torchaudio,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
@@ -277,6 +306,10 @@ RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_torchvision,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_torchaudio,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs

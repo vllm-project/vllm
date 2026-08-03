@@ -13,12 +13,14 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_BAKE = REPO_ROOT / ".buildkite/scripts/ci-bake-rocm.sh"
 BUILD_TEST_IMAGE = REPO_ROOT / ".buildkite/scripts/rocm/build-test-image.sh"
+ROCM_BASE_REFRESH = REPO_ROOT / ".buildkite/scripts/rocm/refresh-base-image.sh"
+ROCM_BASE_DOCKERFILE = REPO_ROOT / "docker/Dockerfile.rocm_base"
 AMD_PIPELINE = REPO_ROOT / ".buildkite/hardware_tests/amd.yaml"
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 ISOLATED_ENV_VARS = frozenset(
-    "BASE_IMAGE FORCE_BUILD IMAGE_TAG NIGHTLY REMOTE_VLLM TARGET "  # noqa: SIM905
-    "VLLM_BAKE_FILE VLLM_BRANCH VLLM_REPO".split()
+    "BASE_IMAGE DOCKERHUB_CACHE_REPO FORCE_BUILD IMAGE_TAG NIGHTLY "  # noqa: SIM905
+    "REMOTE_VLLM TARGET USE_SCCACHE VLLM_BAKE_FILE VLLM_BRANCH VLLM_REPO".split()
 )
 
 
@@ -73,6 +75,124 @@ def run_sourced(
         cwd=cwd,
         check=check,
     )
+
+
+def docker_stage(dockerfile: str, stage_name: str) -> str:
+    header = re.search(
+        rf"^FROM(?:\s+--\S+)*\s+\S+\s+AS\s+{re.escape(stage_name)}\s*$",
+        dockerfile,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    assert header is not None, f"missing Docker stage: {stage_name}"
+    next_header = re.search(
+        r"^FROM(?:\s+--\S+)*\s+\S+(?:\s+AS\s+\S+)?\s*$",
+        dockerfile[header.end() :],
+        re.IGNORECASE | re.MULTILINE,
+    )
+    end = header.end() + next_header.start() if next_header else len(dockerfile)
+    return dockerfile[header.start() : end]
+
+
+def test_rocm_base_component_stages_are_independently_cacheable() -> None:
+    dockerfile = ROCM_BASE_DOCKERFILE.read_text()
+    pytorch = docker_stage(dockerfile, "build_pytorch")
+    pytorch_runtime = docker_stage(dockerfile, "build_pytorch_runtime")
+    torchvision = docker_stage(dockerfile, "build_torchvision")
+    torchaudio = docker_stage(dockerfile, "build_torchaudio")
+
+    assert "PYTORCH_VISION" not in pytorch
+    assert "PYTORCH_AUDIO" not in pytorch
+    assert "cp /app/pytorch/dist/*.whl /app/install" in pytorch
+    assert "from=build_pytorch" in pytorch_runtime
+    assert "pip install /install/*.whl" in pytorch_runtime
+    assert "FROM build_pytorch_runtime AS build_torchvision" in torchvision
+    assert "FROM build_pytorch_runtime AS build_torchaudio" in torchaudio
+    assert "pip install /install/*.whl" not in torchvision
+    assert "pip install /install/*.whl" not in torchaudio
+    assert "cp /app/vision/dist/*.whl /app/install" in torchvision
+    assert "cp /app/audio/dist/*.whl /app/install" in torchaudio
+
+    for aggregate in ("debs_wheel_release", "debs"):
+        stage = docker_stage(dockerfile, aggregate)
+        assert "from=build_pytorch" in stage
+        assert "from=build_torchvision" in stage
+        assert "from=build_torchaudio" in stage
+
+
+def configured_rocm_base_cache(env: Mapping[str, str]) -> tuple[str, list[str]]:
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        "configure_rocm_base_layer_cache\n"
+        'printf "ref=%s\\n" "$ROCM_BASE_LAYER_CACHE_REF"\n'
+        'printf "arg=%s\\n" "${ROCM_BASE_CACHE_ARGS[@]}"',
+        env={"ROCM_BASE_CACHE_REPO": "example/cache"} | dict(env),
+    )
+    lines = result.stdout.splitlines()
+    return lines[0].removeprefix("ref="), [
+        line.removeprefix("arg=") for line in lines[1:]
+    ]
+
+
+def test_rocm_base_registry_cache_is_scoped_by_trust() -> None:
+    trusted_ref, trusted_args = configured_rocm_base_cache(
+        {
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_PULL_REQUEST": "false",
+            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+        }
+    )
+    assert trusted_ref == "example/cache:rocm-base-main"
+    assert trusted_args == [
+        "--cache-from",
+        "type=registry,ref=example/cache:rocm-base-main",
+        "--cache-to",
+        "type=registry,ref=example/cache:rocm-base-main,mode=max,ignore-error=true",
+    ]
+
+    pr_ref, pr_args = configured_rocm_base_cache(
+        {
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_PULL_REQUEST": "48646",
+            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+        }
+    )
+    assert re.fullmatch(r"example/cache:rocm-base-pr-48646-[0-9a-f]{12}", pr_ref)
+    assert pr_args == [
+        "--cache-from",
+        f"type=registry,ref={pr_ref}",
+        "--cache-from",
+        "type=registry,ref=example/cache:rocm-base-main",
+        "--cache-to",
+        f"type=registry,ref={pr_ref},mode=max,ignore-error=true",
+    ]
+
+    preview_ref, preview_args = configured_rocm_base_cache(
+        {
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_PULL_REQUEST": "false",
+            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+        }
+    )
+    assert preview_ref.startswith("example/cache:rocm-base-preview-main-")
+    assert "type=registry,ref=example/cache:rocm-base-main" in preview_args
+    assert preview_args[-1].startswith(
+        f"type=registry,ref={preview_ref},mode=max,ignore-error=true"
+    )
+
+
+def test_rocm_base_registry_cache_can_be_disabled() -> None:
+    cache_ref, cache_args = configured_rocm_base_cache({"ROCM_BASE_NO_CACHE": "1"})
+    assert cache_ref == "disabled"
+    assert cache_args == ["--no-cache"]
+
+    forced_ref, forced_args = configured_rocm_base_cache(
+        {"ROCM_BASE_REFRESH_FORCE": "1"}
+    )
+    assert forced_ref == "disabled"
+    assert forced_args == ["--no-cache"]
 
 
 def test_ci_base_contract() -> None:

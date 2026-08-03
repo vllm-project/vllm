@@ -10,10 +10,15 @@ set -euo pipefail
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CI_IMAGE_REPO="${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}"
+CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="1"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
 DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE"
+
+ROCM_BASE_LAYER_CACHE_REF=""
+ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
+declare -a ROCM_BASE_CACHE_ARGS=()
 
 metadata_set() {
     local key="$1"
@@ -54,6 +59,83 @@ tag_component() {
     local max_chars="${2:-24}"
 
     clean_docker_tag "${input:-unknown}" | cut -c1-"${max_chars}"
+}
+
+normalize_repo_slug() {
+    local repo_slug="${1:-}"
+
+    repo_slug="${repo_slug%/}"
+    repo_slug="${repo_slug%.git}"
+    repo_slug="${repo_slug#https://github.com/}"
+    repo_slug="${repo_slug#http://github.com/}"
+    repo_slug="${repo_slug#ssh://git@github.com/}"
+    repo_slug="${repo_slug#git@github.com:}"
+    repo_slug="${repo_slug#github.com/}"
+    printf '%s\n' "${repo_slug}"
+}
+
+is_trusted_main_build() {
+    local actual_repo=""
+    local trusted_repo=""
+
+    [[ "${BUILDKITE:-false}" == "true" ]] || return 1
+    [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]] || return 1
+    [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] || return 1
+    actual_repo=$(normalize_repo_slug "${BUILDKITE_REPO:-}")
+    trusted_repo=$(normalize_repo_slug \
+        "${ROCM_BASE_STABLE_REPO_SLUG:-vllm-project/vllm}")
+    [[ -n "${actual_repo}" && "${actual_repo}" == "${trusted_repo}" ]]
+}
+
+rocm_base_layer_cache_scope() {
+    local pull_request="${BUILDKITE_PULL_REQUEST:-false}"
+    local branch="${BUILDKITE_PULL_REQUEST_HEAD_BRANCH:-${BUILDKITE_BRANCH:-local}}"
+    local identity=""
+    local repo_slug=""
+
+    if is_trusted_main_build; then
+        printf 'main\n'
+        return 0
+    fi
+    if [[ "${pull_request}" != "false" && -n "${pull_request}" ]]; then
+        repo_slug=$(normalize_repo_slug "${BUILDKITE_REPO:-local}")
+        identity=$(printf '%s\n' "${repo_slug:-local}" | sha256sum | cut -c1-12)
+        printf 'pr-%s-%s\n' \
+            "$(tag_component "${pull_request}" 32)" "${identity}"
+        return 0
+    fi
+
+    identity=$(printf '%s\n%s\n' "${BUILDKITE_REPO:-local}" "${branch}" \
+        | sha256sum | cut -c1-12)
+    printf 'preview-%s-%s\n' "$(tag_component "${branch}" 24)" "${identity}"
+}
+
+configure_rocm_base_layer_cache() {
+    local scope=""
+
+    ROCM_BASE_CACHE_ARGS=()
+    if [[ "${ROCM_BASE_NO_CACHE:-0}" == "1" \
+        || "${ROCM_BASE_REFRESH_FORCE:-0}" == "1" ]]; then
+        ROCM_BASE_CACHE_ARGS+=(--no-cache)
+        ROCM_BASE_LAYER_CACHE_REF="disabled"
+        return 0
+    fi
+
+    scope=$(rocm_base_layer_cache_scope)
+    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-${scope}"
+    ROCM_BASE_CACHE_ARGS+=(
+        --cache-from "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF}"
+    )
+    if [[ "${ROCM_BASE_LAYER_CACHE_REF}" != \
+        "${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}" ]]; then
+        ROCM_BASE_CACHE_ARGS+=(
+            --cache-from "type=registry,ref=${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}"
+        )
+    fi
+    ROCM_BASE_CACHE_ARGS+=(
+        --cache-to \
+        "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF},mode=max,ignore-error=true"
+    )
 }
 
 extract_arg_default() {
@@ -361,7 +443,6 @@ build_base_image() {
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
     local -a tags=()
-    local -a no_cache_args=()
     local -a sccache_args=()
     local -a content_paths=()
 
@@ -406,9 +487,7 @@ build_base_image() {
         metadata_set "rocm-base-push-stable-tag" "0"
     fi
 
-    if [[ "${ROCM_BASE_NO_CACHE:-1}" == "1" ]]; then
-        no_cache_args=(--no-cache)
-    fi
+    configure_rocm_base_layer_cache
 
     for env_name in \
         SCCACHE_DOWNLOAD_URL \
@@ -428,9 +507,10 @@ build_base_image() {
     echo "Content hash: ${base_hash}"
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
+    echo "BuildKit layer cache: ${ROCM_BASE_LAYER_CACHE_REF}"
 
     docker buildx build \
-        "${no_cache_args[@]}" \
+        "${ROCM_BASE_CACHE_ARGS[@]}" \
         --pull \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         --file "${DOCKERFILE}" \
@@ -510,4 +590,6 @@ main() {
     build_base_image
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
