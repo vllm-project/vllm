@@ -474,6 +474,28 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
+    """Config handler for Jina Embeddings V5 embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Enable the bidirectional encoder backbone for -nano checkpoints.
+
+        The V5 family ships more than one backbone under a single
+        `architectures` entry: the `-small` variants are Qwen3 decoders, while
+        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
+        `configuration_*.py` per repository, so the config carries no backbone
+        field and the encoder variants are only identifiable by
+        `is_decoder=False`. For encoder checkpoints, set `is_causal=False` so the
+        Llama backbone uses EncoderOnlyAttention; `JinaEmbeddingsV5Model` then
+        dispatches to its encoder implementation.
+        """
+        if getattr(model_config.hf_config, "is_decoder", True):
+            return
+
+        model_config.hf_config.is_causal = False
+
+
 class JinaForRankingConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -915,6 +937,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
