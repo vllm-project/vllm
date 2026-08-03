@@ -124,6 +124,9 @@ pub struct EngineCoreRequest {
     /// standard `request_finished` hook.
     #[serde(default)]
     pub abort_immediately: bool,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl EngineCoreRequest {
@@ -175,6 +178,7 @@ mod tests {
             }),
             arrival_time: 1234.5,
             client_index: 7,
+            session_id: Some("session-1".to_string()),
             ..EngineCoreRequest::default()
         };
 
@@ -185,12 +189,13 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 20);
+        assert_eq!(array.len(), 21);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
+        assert_eq!(array[20], Value::from("session-1"));
     }
 
     #[test]
