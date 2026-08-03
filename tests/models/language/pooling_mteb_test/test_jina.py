@@ -38,6 +38,14 @@ EMBEDDING_MODELS = [
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
     ),
+    EmbedModelInfo(
+        "jinaai/jina-embeddings-v5-text-nano",
+        architecture="JinaEmbeddingsV5Model",
+        seq_pooling_type="LAST",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
+    ),
 ]
 
 RERANK_MODELS = [
