@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compares the outputs of gptq vs gptq_marlin.
+"""Tests AutoGPTQ (GPTQ with Marlin kernels) output correctness.
 
-Note: GPTQ and Marlin do not have bitwise correctness.
-As a result, in this test, we just confirm that the top selected tokens of the
-Marlin/GPTQ models are in the top 5 selections of each other.
 Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
@@ -36,10 +33,10 @@ MODELS = [
 
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(
-    not is_quant_method_supported("gptq_marlin")
+    not is_quant_method_supported("auto_gptq")
     or current_platform.is_rocm()
     or not current_platform.is_cuda(),
-    reason="gptq_marlin is not supported on this GPU type.",
+    reason="auto_gptq is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])

@@ -17,7 +17,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "cuda_vec_utils.cuh"
+#include "../../cuda_vec_utils.cuh"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
@@ -26,7 +26,7 @@
 
 #include "cuda_utils.h"
 #include "nvfp4_utils.cuh"
-#include "launch_bounds_utils.h"
+#include "libtorch_stable/launch_bounds_utils.h"
 
 namespace vllm {
 
@@ -277,7 +277,9 @@ void quant_impl(void* output, void* output_scale, void* input,
       (totalWorkSize + block.x * grid.x - 1) / (block.x * grid.x);
   if (blockRepeat > 1) {
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
-    if (n_experts >= 4) {
+    // The shared-memory vectorized offset load only handles full 4-expert
+    // chunks. Use the scalar specialization for the remainder cases.
+    if (n_experts >= 4 && n_experts % 4 == 0) {
       cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, false>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
@@ -299,7 +301,9 @@ void quant_impl(void* output, void* output_scale, void* input,
               n_experts);
     }
   } else {
-    if (n_experts >= 16) {
+    // The low-latency vectorized expert lookup only handles full 16-expert
+    // chunks. Fall back to the scalar lookup path for the remainder cases.
+    if (n_experts >= 16 && n_experts % 16 == 0) {
       cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, false>
           <<<grid, block, 0, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),

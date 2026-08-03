@@ -34,6 +34,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -56,6 +57,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
+from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
@@ -108,12 +113,41 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
+        processor_cls = KimiK25FusedVisionProcessor if is_numba_available() else None
+        logger.info_once(
+            "Using %s image preprocessing for Kimi-K2.5/K2.6 vision chunks.",
+            "fused CPU" if processor_cls is not None else "remote HF",
+        )
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=processor_cls,
         )
 
-        self.media_token_id = media_token_id = hf_config.media_placeholder_token_id
+        # Resolve token ID from the tokenizer because transformers v5
+        # may remap token IDs vs config.json.
+        config_token_id = hf_config.media_placeholder_token_id
+        resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
+        is_valid_resolved = isinstance(resolved_token_id, int) and (
+            tokenizer.unk_token_id is None
+            or resolved_token_id != tokenizer.unk_token_id
+        )
+        if is_valid_resolved and resolved_token_id != config_token_id:
+            logger.warning_once(
+                "Kimi-K2.5 config.media_placeholder_token_id (%d) disagrees "
+                "with tokenizer mapping for <|media_pad|> (%d). "
+                "Using tokenizer value.",
+                config_token_id,
+                resolved_token_id,
+            )
+            media_token_id = resolved_token_id
+            # Patch config so downstream code also sees the correct ID.
+            hf_config.media_placeholder_token_id = resolved_token_id
+        else:
+            media_token_id = config_token_id
+
+        self.media_token_id = media_token_id
         self.media_token = tokenizer.decode(media_token_id)
 
         self.image_processor = image_processor
@@ -212,7 +246,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "vision_chunk", grid_sizes
             ),
-            grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
+            grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
 
     def _call_hf_processor(
@@ -232,8 +266,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
-        media_token_id = hf_config.media_placeholder_token_id
+        media_token_id = self.info.media_token_id
 
         def get_replacement(item_idx: int):
             media = mm_items.get_items("vision_chunk", (VisionChunkProcessorItems,))
@@ -304,9 +337,8 @@ class KimiK25ForConditionalGeneration(
         self.config = config
         quant_config = vllm_config.quant_config
 
-        # Check for MoonViT config compatibility
-        self.use_data_parallel = (
-            model_config.multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = is_vit_use_data_parallel(
+            config.vision_config.num_attention_heads
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = current_platform.current_device()
@@ -317,9 +349,12 @@ class KimiK25ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            self.vision_tower = self.vision_tower.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if self._maybe_ignore_quant_config(quant_config) is not None:
+                self.vision_tower = self.vision_tower.to(device=self.device)
+            else:
+                self.vision_tower = self.vision_tower.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,

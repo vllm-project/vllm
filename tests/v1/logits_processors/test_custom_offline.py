@@ -16,8 +16,8 @@ from tests.v1.logits_processors.utils import (
     DummyLogitsProcessor,
     WrappedPerReqLogitsProcessor,
     prompts,
+    setup_fake_entrypoint,
 )
-from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
@@ -145,13 +145,9 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
-        # To that end, mock a dummy logitproc entrypoint
-        import importlib.metadata
-
-        importlib.metadata.entry_points = fake_entry_points  # type: ignore
-
-        # fork is required for workers to see entrypoint patch
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        # To that end, register a real dist-info package so spawned
+        # workers can discover the entrypoint via PYTHONPATH
+        setup_fake_entrypoint(monkeypatch)
         _run_test({}, logitproc_loaded=True)
         return
 
@@ -266,14 +262,9 @@ def test_rejects_custom_logitsprocs(
         # Scenario: vLLM loads a model and ignores a logitproc that is
         # available at a preconfigured entrypoint
 
-        # Patch in dummy logitproc entrypoint
-        import importlib.metadata
-
-        importlib.metadata.entry_points = fake_entry_points  # type: ignore
-
-        # fork is required for entrypoint patch to be visible to workers,
-        # although they should ignore the entrypoint patch anyway
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        # Register real dist-info package so spawned workers can
+        # discover the entrypoint via PYTHONPATH (spawn-compatible)
+        setup_fake_entrypoint(monkeypatch)
 
         llm = LLM(**llm_kwargs)
         # Require that no custom logitsprocs have been loaded

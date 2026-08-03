@@ -7,6 +7,9 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.hf import (
+    _consolidate_system_messages,
+    _convert_developer_to_system,
+    _detect_developer_role_support,
     _get_hf_base_chat_template_params,
     _try_extract_ast,
     resolve_chat_template,
@@ -363,6 +366,7 @@ def test_resolve_chat_template_kwargs_with_template_name():
         ("microsoft/Phi-3.5-vision-instruct", "string"),
         ("Qwen/Qwen2-VL-2B-Instruct", "openai"),
         ("Qwen/Qwen2.5-VL-3B-Instruct", "openai"),
+        ("Qwen/Qwen3.5-4B", "openai"),
         ("fixie-ai/ultravox-v0_5-llama-3_2-1b", "string"),
         ("Qwen/Qwen2-Audio-7B-Instruct", "openai"),
         ("meta-llama/Llama-Guard-3-1B", "openai"),
@@ -422,10 +426,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         ("Salesforce/blip2-opt-2.7b", "string"),
         ("facebook/chameleon-7b", "string"),
         ("deepseek-ai/deepseek-vl2-tiny", "string"),
-        ("adept/fuyu-8b", "string"),
         ("google/paligemma-3b-mix-224", "string"),
-        ("Qwen/Qwen-VL", "string"),
-        ("Qwen/Qwen-VL-Chat", "string"),
     ],
 )
 def test_resolve_content_format_fallbacks(model, expected_format):
@@ -480,7 +481,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     ("template_path", "expected_format"),
     [
         ("template_alpaca.jinja", "string"),
-        ("template_baichuan.jinja", "string"),
         ("template_chatglm.jinja", "string"),
         ("template_chatglm2.jinja", "string"),
         ("template_chatml.jinja", "string"),
@@ -591,3 +591,322 @@ def test_get_gen_prompt(
         f"The generated prompt does not match the expected output for "
         f"model {model} and template {template}"
     )
+
+
+class TestConvertDeveloperToSystem:
+    def test_converts_role(self):
+        conversation = [
+            {"role": "developer", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = _convert_developer_to_system(conversation)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "You are helpful."
+        assert result[1]["role"] == "user"
+
+    def test_removes_tools_key(self):
+        conversation = [
+            {
+                "role": "developer",
+                "content": "Instructions",
+                "tools": [{"type": "function"}],
+            },
+        ]
+        result = _convert_developer_to_system(conversation)
+        assert "tools" not in result[0]
+
+    def test_no_developer_messages_unchanged(self):
+        conversation = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = _convert_developer_to_system(conversation)
+        assert result[0]["role"] == "system"
+        assert result[1]["role"] == "user"
+
+    def test_does_not_mutate_original(self):
+        original = {
+            "role": "developer",
+            "content": "Instructions",
+            "tools": [{"type": "function"}],
+        }
+        conversation = [original]
+        _convert_developer_to_system(conversation)
+        assert original["role"] == "developer"
+        assert "tools" in original
+
+
+# --- Developer role detection and conversion tests ---
+
+CHATML_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}"
+    "{% if (loop.last and add_generation_prompt) or not loop.last %}"
+    "{{ '<|im_end|>' + '\\n'}}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{% endif %}"
+)
+
+TEMPLATE_WITH_DEVELOPER = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'developer' %}"
+    "{{'<|im_start|>developer\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'system' %}"
+    "{{'<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'user' %}"
+    "{{'<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{'<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{% endif %}"
+)
+
+STRICT_ROLE_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'system' %}"
+    "{{'<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'user' %}"
+    "{{'<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{'<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% else %}"
+    "{{ raise_exception('Unexpected message role: ' + message['role']) }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{% endif %}"
+)
+
+
+class TestDetectDeveloperRoleSupport:
+    def test_absent_in_chatml(self):
+        assert _detect_developer_role_support(CHATML_TEMPLATE) is False
+
+    def test_present_double_quotes(self):
+        assert _detect_developer_role_support(TEMPLATE_WITH_DEVELOPER) is True
+
+    def test_present_single_quotes(self):
+        template = TEMPLATE_WITH_DEVELOPER.replace('"developer"', "'developer'")
+        assert _detect_developer_role_support(template) is True
+
+    def test_absent_in_strict_template(self):
+        assert _detect_developer_role_support(STRICT_ROLE_TEMPLATE) is False
+
+
+class TestSafeApplyChatTemplateDeveloperRole:
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig(
+            "facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="float16",
+        )
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    def test_developer_converted_to_system_for_chatml(self, model_config, tokenizer):
+        conversation = [
+            {"role": "developer", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=CHATML_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>system" in result
+        assert "You are a helpful assistant." in result
+        assert "<|im_start|>developer" not in result
+
+    def test_developer_preserved_when_template_supports_it(
+        self, model_config, tokenizer
+    ):
+        conversation = [
+            {"role": "developer", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=TEMPLATE_WITH_DEVELOPER,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>developer" in result
+        assert "You are a helpful assistant." in result
+
+    def test_developer_does_not_crash_strict_template(self, model_config, tokenizer):
+        conversation = [
+            {"role": "developer", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=STRICT_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>system" in result
+        assert "You are a helpful assistant." in result
+
+    def test_no_developer_messages_no_overhead(self, model_config, tokenizer):
+        conversation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=CHATML_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>system" in result
+        assert "You are helpful." in result
+
+    def test_developer_at_non_first_position_consolidated(
+        self, model_config, tokenizer
+    ):
+        conversation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+            {"role": "developer", "content": "Be concise."},
+            {"role": "user", "content": "What is 2+2?"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=SYSTEM_FIRST_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>system" in result
+        assert "You are helpful." in result
+        assert "Be concise." in result
+        assert "What is 2+2?" in result
+
+    def test_developer_only_no_prior_system(self, model_config, tokenizer):
+        conversation = [
+            {"role": "user", "content": "Hello"},
+            {"role": "developer", "content": "Be concise."},
+            {"role": "user", "content": "What is 2+2?"},
+        ]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=SYSTEM_FIRST_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "<|im_start|>system" in result
+        assert "Be concise." in result
+
+
+SYSTEM_FIRST_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'system' %}"
+    "{% if not loop.first %}"
+    "{{ raise_exception('System message must be at the beginning.') }}"
+    "{% endif %}"
+    "{{'<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'user' %}"
+    "{{'<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{'<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% else %}"
+    "{{ raise_exception('Unexpected message role: ' + message['role']) }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{% endif %}"
+)
+
+
+class TestConsolidateSystemMessages:
+    def test_no_system_messages_unchanged(self):
+        conversation = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        result = _consolidate_system_messages(conversation)
+        assert result == conversation
+
+    def test_single_system_at_start_unchanged(self):
+        conversation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = _consolidate_system_messages(conversation)
+        assert result == conversation
+
+    def test_system_at_non_first_position_moved(self):
+        conversation = [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "You are helpful."},
+        ]
+        result = _consolidate_system_messages(conversation)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "You are helpful."
+        assert result[1]["role"] == "user"
+        assert result[1]["content"] == "Hello"
+
+    def test_multiple_system_messages_merged(self):
+        conversation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Be concise."},
+        ]
+        result = _consolidate_system_messages(conversation)
+        assert len(result) == 2
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "You are helpful.\n\nBe concise."
+        assert result[1]["role"] == "user"
+
+    def test_list_content_handled(self):
+        conversation = [
+            {"role": "user", "content": "Hello"},
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "Rule 1."},
+                    {"type": "text", "text": "Rule 2."},
+                ],
+            },
+        ]
+        result = _consolidate_system_messages(conversation)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "Rule 1.\nRule 2."
+        assert result[1]["role"] == "user"
+
+    def test_does_not_mutate_original(self):
+        conversation = [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "You are helpful."},
+        ]
+        original_len = len(conversation)
+        _consolidate_system_messages(conversation)
+        assert len(conversation) == original_len
+        assert conversation[0]["role"] == "user"
+        assert conversation[1]["role"] == "system"

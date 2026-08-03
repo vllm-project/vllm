@@ -11,7 +11,7 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 ## How It Works
 
 1. The trainer and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction).
-2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads weights incrementally.
+2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
 ## Initialization
@@ -84,11 +84,18 @@ Both the trainer (`NCCLTrainerSendWeightsArgs`) and inference side (`NCCLWeightT
 
 ## Receiving Weights (Inference Side)
 
-The inference side triggers weight reception by calling `update_weights`:
+The inference side triggers weight reception using the four-phase protocol:
+`init_weight_transfer_engine`, `start_weight_update`, `update_weights`,
+`finish_weight_update`. The init phase is shown [above](#initialization). The
+remaining three steps are:
 
 ```python
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
+# 1. Start the weight update
+llm.start_weight_update()
+
+# 2. Receive weights (can be called multiple times for chunked transfers)
 llm.update_weights(
     WeightTransferUpdateRequest(
         update_info=dict(
@@ -99,12 +106,32 @@ llm.update_weights(
         )
     )
 )
+
+# 3. Finish the weight update
+llm.finish_weight_update()
 ```
 
-The `names`, `dtype_names`, and `shapes` lists describe each parameter. These must match the order in which the trainer iterates over its parameters.
+The `names`, `dtype_names`, and `shapes` lists describe each parameter. These
+must match the order in which the trainer iterates over its parameters.
+
+`start_weight_update` must be called before `update_weights`, and
+`finish_weight_update` must be called after all weight chunks have been
+transferred. The NCCL engine receives checkpoint-format weights and applies
+layerwise reload processing automatically inside `start_weight_update` /
+`finish_weight_update`.
+
+## Sparse NCCL
+
+Sparse, flat-index weight patches use a separate backend,
+`WeightTransferConfig(backend="sparse_nccl")`, implemented by
+`SparseNCCLWeightTransferEngine`. It shares only NCCL process-group
+initialization with the dense engine; patches are applied directly in place to
+existing parameters (no layerwise reload). The current sparse MVP requires
+`TP=1` and `PP=1`. See the example below.
 
 ## Examples
 
-- [RLHF with NCCL weight syncing (offline, Ray)](../../examples/rl/rlhf_nccl.md) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
-- [RLHF with async weight syncing (offline, Ray)](../../examples/rl/rlhf_async_new_apis.md) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
-- [RLHF with NCCL weight syncing (online serving, HTTP)](../../examples/rl/rlhf_http_nccl.md) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane
+- [RLHF with NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_nccl.py) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
+- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Dense-vs-sparse equivalence demo with a real model on a 2-GPU trainer/inference setup; sparse patches use `backend="sparse_nccl"` and currently require `TP=1` and `PP=1`
+- [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
+- [RLHF with NCCL weight syncing (online serving, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane

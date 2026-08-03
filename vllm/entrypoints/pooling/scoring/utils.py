@@ -25,6 +25,37 @@ from .typing import (
 )
 
 
+def get_num_special_tokens_for_pair(tokenizer) -> int:
+    """Get number of special tokens added for a text pair encoding."""
+    method = getattr(tokenizer, "num_special_tokens_to_add", None)
+    if method is not None:
+        try:
+            return method(pair=True)
+        except TypeError:
+            pass
+    # Fallback: compute by tokenizing empty strings
+    empty_encoding = tokenizer("", text_pair="", add_special_tokens=True)
+    return len(empty_encoding["input_ids"])
+
+
+def truncate_text_to_tokens(
+    text: str,
+    tokenizer,
+    max_tokens: int,
+) -> str:
+    """Truncate text to a maximum number of content tokens.
+
+    Uses offset_mapping to slice the original text at the exact character
+    boundary, avoiding lossy encode→decode round-trips that can shift
+    the token count by 1-3 tokens due to BPE merge boundary changes.
+    """
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    if len(encoding["input_ids"]) <= max_tokens:
+        return text
+    char_end = encoding["offset_mapping"][max_tokens - 1][1]
+    return text[:char_end]
+
+
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
     """
     Compute ColBERT MaxSim score.

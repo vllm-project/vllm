@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -15,8 +16,8 @@ from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
@@ -48,15 +49,20 @@ class QuarkW8A8Fp8(QuarkScheme):
         per_token_activation = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
-        per_token_weight = self.weight_qscheme == "per_channel"
+        per_channel_weight = self.weight_qscheme == "per_channel"
 
         self.activation_quant_key = (
             kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
         )
+        # A per-output-channel weight scale is one fp32 value per weight row
+        # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
+        # canonical compressed-tensors CHANNEL strategy, so kernel selection
+        # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
         self.weight_quant_key = (
-            kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
+            kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
         )
         self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -118,6 +124,8 @@ class QuarkW8A8Fp8(QuarkScheme):
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -175,7 +183,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            out_dtype=torch.get_default_dtype(),
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
 

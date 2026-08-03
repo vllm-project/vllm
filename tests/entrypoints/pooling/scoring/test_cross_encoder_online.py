@@ -453,26 +453,79 @@ async def test_pooling_classify(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_pooling_token_classify(server: RemoteOpenAIServer):
-    response = requests.post(
-        server.url_for("pooling"),
+async def test_rerank_max_tokens_per_doc(
+    server: RemoteOpenAIServer,
+):
+    """Test that max_tokens_per_doc actually reduces the token count."""
+    query = "What is the capital of France?"
+    # Use a doc that fits within max_model_len=100 (query ~8 tokens + 4 special)
+    long_doc = "The capital of France is Paris. " * 10  # ~70 tokens
+
+    # Without max_tokens_per_doc
+    response_no_limit = requests.post(
+        server.url_for("rerank"),
         json={
             "model": MODEL_NAME,
-            "task": "token_classify",
-            "input": input_text,
-            "encoding_format": "float",
+            "query": query,
+            "documents": [long_doc],
+            "truncate_prompt_tokens": 99,
         },
     )
+    response_no_limit.raise_for_status()
+    rerank_no_limit = RerankResponse.model_validate(response_no_limit.json())
 
-    poolings = PoolingResponse.model_validate(response.json())
+    # With max_tokens_per_doc
+    response_with_limit = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": [long_doc],
+            "max_tokens_per_doc": 10,
+        },
+    )
+    response_with_limit.raise_for_status()
+    rerank_with_limit = RerankResponse.model_validate(response_with_limit.json())
 
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 1
+    assert rerank_with_limit.usage.prompt_tokens < rerank_no_limit.usage.prompt_tokens
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+async def test_rerank_max_tokens_per_doc_validation(
+    server: RemoteOpenAIServer,
+):
+    """Test that max_tokens_per_doc validation works correctly."""
+    query = "What is the capital of France?"
+    documents = ["The capital of France is Paris."]
+
+    # Test with max_tokens_per_doc=0 (should succeed — means no truncation)
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": documents,
+            "max_tokens_per_doc": 0,
+        },
+    )
+    response.raise_for_status()
+
+    # Test with invalid max_tokens_per_doc (negative)
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": documents,
+            "max_tokens_per_doc": -5,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_tokens_per_doc must be a non-negative integer" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
     response = requests.post(
         server.url_for("pooling"),
@@ -484,4 +537,10 @@ async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

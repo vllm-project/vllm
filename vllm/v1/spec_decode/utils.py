@@ -11,6 +11,20 @@ from vllm.v1.attention.backends.utils import (
 PADDING_SLOT_ID = -1
 
 
+def next_power_of_2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    return n + 1
+
+
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
     positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
@@ -102,8 +116,8 @@ def eagle_step_update_slot_mapping_and_metadata(
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
         input_batch_size = batch_size
-    n_blocks_per_req = block_table_tensor.shape[1]
 
+    n_blocks_per_req = block_table_tensor.shape[1]
     eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
         positions_1d,
         block_table_tensor,
@@ -142,7 +156,6 @@ def eagle_prepare_inputs_padded_kernel(
     # cumulative sum (first entry is the first value, not zero).
     cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
 
-    num_draft_tokens = 0
     if req_idx == 0:
         num_draft_tokens = cu_draft_curr
     else:
@@ -580,3 +593,9 @@ def update_num_computed_tokens_for_batch_change(
     num_accepted_tokens.copy_(
         torch.where(participating, valid_counts, num_accepted_tokens)
     )
+
+
+def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
+    """Convert per-position unconditional rates to per-position conditional
+    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
+    return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]

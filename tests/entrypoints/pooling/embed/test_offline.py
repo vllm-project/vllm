@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 import weakref
 
 import pytest
@@ -38,11 +37,11 @@ def llm():
         seed=0,
         attention_config=attention_config,
     )
+    assert embedding_size == llm.model_config.embedding_size
 
     yield weakref.proxy(llm)
 
     del llm
-
     cleanup_dist_env_and_memory()
 
 
@@ -75,16 +74,6 @@ def test_list_prompts(llm: LLM):
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_embed(llm: LLM, caplog_vllm):
-    with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
-        outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
-        assert "deprecated" in caplog_vllm.text
-
-    multi_vector = outputs[0].outputs.data
-    assert multi_vector.shape == (11, 384)
-
-
-@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
@@ -107,8 +96,15 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize("task", ["token_classify", "classify"])
+@pytest.mark.parametrize(
+    "task", ["token_classify", "classify", "token_embed", "plugin"]
+)
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = "Classification API is not supported by this model.+"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via.+"
+    else:
+        err_msg = "Classification API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

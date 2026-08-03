@@ -19,6 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
@@ -28,9 +29,11 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
 FP8_DTYPE = current_platform.fp8_dtype()
 
 prompts = [
@@ -232,8 +235,20 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         TestAGMMModel,
         TestScaledMMRSModel,
         TestAGScaledMMModel,
-        TestCutlassScaledMMRSModel,
-        TestAGCutlassScaledMMModel,
+        pytest.param(
+            TestCutlassScaledMMRSModel,
+            marks=pytest.mark.skipif(
+                not hasattr(torch.ops._C, "cutlass_scaled_mm"),
+                reason="Requires cutlass_scaled_mm",
+            ),
+        ),
+        pytest.param(
+            TestAGCutlassScaledMMModel,
+            marks=pytest.mark.skipif(
+                not hasattr(torch.ops._C, "cutlass_scaled_mm"),
+                reason="Requires cutlass_scaled_mm",
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
@@ -266,6 +281,7 @@ def test_async_tp_pass_replace(
         )
 
     num_processes = 2
+    master_port = str(get_open_port())
 
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
@@ -280,11 +296,28 @@ def test_async_tp_pass_replace(
                 hidden_size,
                 dtype,
                 dynamic,
+                master_port,
             ),
             nprocs=nprocs,
         )
 
     run_torch_spawn(async_tp_pass_on_test_model, num_processes)
+
+
+def test_async_tp_pass_requires_full_graph_compilation():
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.use_inductor_graph_partition = False
+    vllm_config.compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output"
+    ]
+
+    async_tp_pass = object.__new__(AsyncTPPass)
+    async_tp_pass.compilation_config = vllm_config.compilation_config
+
+    with pytest.raises(
+        AssertionError, match="AsyncTPPass requires full-graph compilation"
+    ):
+        async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
 
 
 def async_tp_pass_on_test_model(
@@ -296,10 +329,11 @@ def async_tp_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     dynamic: bool,
+    master_port: str = "0",
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -310,7 +344,7 @@ def async_tp_pass_on_test_model(
             "LOCAL_RANK": str(local_rank),
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
-            "MASTER_PORT": "12345",
+            "MASTER_PORT": master_port,
         }
     )
 
@@ -324,7 +358,7 @@ def async_tp_pass_on_test_model(
             fuse_gemm_comms=True,
         ),
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
