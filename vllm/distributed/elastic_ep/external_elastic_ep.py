@@ -396,9 +396,7 @@ class ExternalElasticEPScaleCoordinator:
         """Wait until every rank in the new DP group is ready to commit."""
         loop = asyncio.get_running_loop()
         start = loop.time()
-        ready_keys = [
-            f"eep_ready/{rank}" for rank in range(new_data_parallel_size)
-        ]
+        ready_keys = [f"eep_ready/{rank}" for rank in range(new_data_parallel_size)]
 
         backoff_step = 0
         while True:
@@ -580,9 +578,7 @@ class ExternalElasticEPScaleCoordinator:
                     control_store, new_data_parallel_size
                 )
                 num_redundant_experts = int(
-                    control_store.get(
-                        self.key(epoch, "num_redundant_experts")
-                    ).decode()
+                    control_store.get(self.key(epoch, "num_redundant_experts")).decode()
                 )
 
             assert epoch is not None
@@ -603,9 +599,7 @@ class ExternalElasticEPScaleCoordinator:
                     new_data_parallel_rank_local=(
                         ReconfigureRankType.KEEP_CURRENT_RANK
                     ),
-                    new_data_parallel_master_ip=(
-                        bootstrap.new_data_parallel_master_ip
-                    ),
+                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
                     new_data_parallel_master_port=(
                         bootstrap.new_data_parallel_master_port
                     ),
@@ -667,15 +661,11 @@ class ExternalElasticEPScaleCoordinator:
             else:
                 reconfig_request = ReconfigureDistributedRequest(
                     new_data_parallel_size=bootstrap.new_data_parallel_size,
-                    new_data_parallel_rank=(
-                        ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-                    ),
+                    new_data_parallel_rank=(ReconfigureRankType.SHUTDOWN_CURRENT_RANK),
                     new_data_parallel_rank_local=(
                         ReconfigureRankType.KEEP_CURRENT_RANK
                     ),
-                    new_data_parallel_master_ip=(
-                        bootstrap.new_data_parallel_master_ip
-                    ),
+                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
                     new_data_parallel_master_port=(
                         bootstrap.new_data_parallel_master_port
                     ),
@@ -703,18 +693,14 @@ class ExternalElasticEPScaleCoordinator:
                 prepared.reconfig_store.set(completed_key, b"1")
 
             if remaining:
-                self._update_parallel_config(
-                    bootstrap, prepared.num_redundant_experts
-                )
+                self._update_parallel_config(bootstrap, prepared.num_redundant_experts)
                 await self.client.resume_scheduler_async()
             self._stop_handshake_server(
                 prepared.handshake_server, suppress_errors=False
             )
         except Exception as e:
             self._publish_error(prepared, e)
-            self._stop_handshake_server(
-                prepared.handshake_server, suppress_errors=True
-            )
+            self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
             raise
         finally:
             self.prepared_scale = None
