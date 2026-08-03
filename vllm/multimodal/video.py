@@ -92,6 +92,10 @@ class VideoLoaderRegistry(ExtensionManager):
 
         return self.processor2backend.get(video_processor)
 
+    def register_gpu_codec(self, name: str) -> None:
+        """Mark a codec name as requiring GPU without registering a loader."""
+        self._requires_gpu[name] = True
+
     def backend_requires_gpu(self, name: str) -> bool:
         return self._requires_gpu.get(name, False)
 
@@ -208,6 +212,7 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 
 PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 # Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
@@ -1136,6 +1141,7 @@ class VideoBackend(
             from nvidia.deepstream_videodecode import probe_metadata
 
             total_frames, original_fps, duration, _w, _h, codec = probe_metadata(data)
+            _check_frame_pixel_limit(_w, _h)
             source = cls._prepare_source(
                 VideoSourceMetadata(
                     total_frames_num=total_frames,
