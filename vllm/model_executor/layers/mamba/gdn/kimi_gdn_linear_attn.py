@@ -564,6 +564,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
                 if split_non_spec:
+                    assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
                     core_attn_out_decode, _ = fused_recurrent_kda(
                         q=q_ns[:, :nd_tok],
