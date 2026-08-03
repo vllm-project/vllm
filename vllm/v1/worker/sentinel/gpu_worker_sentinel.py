@@ -9,8 +9,6 @@ from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     reinit_gloo_group,
-    stateless_destroy_torch_distributed_process_group,
-    stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -67,16 +65,14 @@ class WorkerSentinel:
         self._reset_eplb_async_state()
         if self.dp_size > 1:
             get_ep_all2all_manager().clean_buffers()
-            old_cpu_group = get_dp_group().cpu_group
-            stateless_destroy_torch_distributed_process_group(old_cpu_group)
             world_size = self.worker.parallel_config.world_size
             port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-            get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
+            reinit_gloo_group(
+                get_dp_group(),
                 self.data_parallel_master_ip,
                 port,
                 self.dp_rank,
                 self.dp_size,
-                backend="gloo",
             )
             reinit_eplb_gloo_groups(params, self.data_parallel_master_ip)
             refresh_eplb_communicator_group(self.worker.model_runner)
@@ -150,13 +146,6 @@ class WorkerSentinel:
         ep_world_size = get_ep_group().world_size
         num_local_experts = p2l.shape[1] // ep_world_size
 
-        surviving_slots = (ep_world_size - len(dead_ep_ranks)) * num_local_experts
-        if surviving_slots < num_logical:
-            raise RuntimeError(
-                f"[FT] Cannot redistribute: {surviving_slots} surviving slots "
-                f"< {num_logical} logical experts. "
-            )
-
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
         reassignments = redistribute_expert_placement(
             p2l, num_logical, num_local_experts
@@ -188,11 +177,10 @@ class WorkerSentinel:
 
         ep_rank = get_ep_group().rank_in_group
         for layer_idx, layer in enumerate(moe_layers):
-            expert_map = getattr(layer, "_expert_map", None)
-            if expert_map is None:
-                routed = getattr(layer, "routed_experts", None)
-                if routed is not None:
-                    expert_map = getattr(routed, "_expert_map", None)
+            # v2 runner wraps FusedMoE in MoERunner; the expert map lives on
+            # routed_experts there, on the layer itself otherwise.
+            routed = getattr(layer, "routed_experts", layer)
+            expert_map = getattr(routed, "_expert_map", None)
             if expert_map is None:
                 continue
             num_local = p2l.shape[1] // layer.moe_config.moe_parallel_config.ep_size
@@ -207,32 +195,13 @@ class WorkerSentinel:
             expert_map.copy_(new_map)
 
     def _sync_num_dispatchers_for_nixl_ep(self, dead_ep_ranks: set[int]) -> None:
-        """Realign vLLM's cached dispatch count with the nixl_ep kernel after
-        dead EP ranks are masked during scale_down.
+        """Rewrite each MoE layer's num_dispatchers to the nixl_ep kernel's
+        active_rank_bound (= highest surviving EP rank + 1) after masking.
 
-        Both sides of the all2all cache how many ranks still take part:
-
-        - The kernel caches `active_rank_bound` = highest surviving EP rank
-          index + 1, refreshed only when the rank mask changes. Masking the
-          highest rank shrinks it; masking a lower rank just leaves a hole and
-          keeps it unchanged.
-        - Each MoE layer caches `num_dispatchers` (set to the original EP
-          world size) and uses it to size the expert output it hands back:
-          width `max_tokens * num_dispatchers`. When those results are
-          combined back across ranks, the kernel asserts the width equals
-          `active_rank_bound * max_tokens` and aborts on mismatch.
-
-        So masking the highest EP rank makes the two cached values disagree.
-        This method rewrites each layer's `num_dispatchers` to the kernel's
-        new bound so the shapes agree again.
-
-        nixl_ep only: DeepEP low-latency keeps a fixed num_ranks-wide layout
-        and skips masked ranks in-kernel, so its num_dispatchers must stay at
-        num_ranks.
-
-        NOTE: this hardcodes nixl_ep's "bound = highest surviving rank + 1"
-        convention. If nixl changes it, update here (better: expose a getter
-        and read it).
+        The kernel sizes combine output as active_rank_bound * max_tokens and
+        asserts the width matches; vLLM cache num_dispatchers as the
+        original EP world size, so masking the highest rank desyncs the two.
+        DeepEP-LL keeps a fixed num_ranks-wide layout and needs no sync.
         """
         if self.worker.parallel_config.all2all_backend != "nixl_ep":
             return
@@ -247,12 +216,7 @@ class WorkerSentinel:
         if moe_layers is None:
             return
 
-        patched = 0
-        old_vals = set()
         for layer in moe_layers:
-            # moe_layers holds MoERunner objects whose quant_method lives on
-            # routed_experts (exposed via the private _quant_method property);
-            # plain FusedMoE layers carry it directly.
             routed = getattr(layer, "routed_experts", layer)
             quant_method = getattr(routed, "quant_method", None)
             moe_kernel = getattr(quant_method, "moe_kernel", None)
@@ -261,20 +225,13 @@ class WorkerSentinel:
             pf = moe_kernel.prepare_finalize
             experts = moe_kernel.fused_experts
             if hasattr(pf, "num_dispatchers_"):
-                old_vals.add(pf.num_dispatchers_)
                 pf.num_dispatchers_ = active_rank_bound
             if getattr(experts, "num_dispatchers", None) is not None:
-                old_vals.add(experts.num_dispatchers)
                 experts.num_dispatchers = active_rank_bound
-            patched += 1
 
         logger.info(
-            "[FT] Synced num_dispatchers to active_rank_bound=%d across %d layers "
-            "(old=%s, ep_world_size=%d, dead_ep_ranks=%s)",
+            "[FT] Synced num_dispatchers to active_rank_bound=%d, dead_ep_ranks=%s",
             active_rank_bound,
-            patched,
-            sorted(old_vals),
-            ep_world_size,
             sorted(dead_ep_ranks),
         )
 

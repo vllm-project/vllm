@@ -31,8 +31,9 @@ FAULT_DETECTION_DEADLINE_S = 45
 
 NUM_REDUNDANT_EXPERTS = 32
 
-# scale_down reloads reassigned expert weights from disk before signaling
-# recovery; the busy-loop wrapper only waits engine_recovery_timeout_sec (120s).
+# Recovery after scale_down (mask + expert redistribution + weight reload)
+# is expected to finish well within this deadline; the busy-loop wrapper
+# itself waits engine_recovery_timeout_sec (120s) before giving up.
 SCALE_DOWN_DEADLINE_S = 20
 
 
