@@ -796,17 +796,28 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        # NOTE: DP idle-rank dummy batches are made NON-uniform (uniform_decode=
-        # False). Combined with the uniform_decode DP-sync in
-        # coordinate_batch_across_dp, any engine step in which some rank is idle
-        # resolves to PIECEWISE across all ranks, so the cross-DP MoE collective
-        # (reduce_scatter) runs eagerly (split out of the graph) instead of being
-        # captured inside a FULL cudagraph. This avoids the DP FULL-cudagraph
-        # replay deadlock under speculative decoding (MTP), where a busy rank and
-        # an idle rank would otherwise replay mismatched FULL graphs. When ALL
-        # ranks are busy (the throughput-critical case) there are no dummy
-        # batches, so FULL cudagraphs are still used at full speed.
-        self.model_runner._dummy_run(1, uniform_decode=False)
+        # NOTE: DP idle-rank dummy batches are made OPTIMISTICALLY UNIFORM
+        # (uniform_decode=True) so that they can JOIN the same FULL decode
+        # cudagraph the busy ranks are replaying. The final mode is still decided
+        # collectively by the uniform_decode / cudagraph_mode DP-sync in
+        # coordinate_batch_across_dp (both take the MIN across ranks):
+        #   - all busy ranks doing uniform decode + this idle dummy(=uniform)
+        #     -> synced uniform_decode=True, synced mode=FULL. The dummy is
+        #     DP-padded up to the busy ranks' num_tokens and replays the SAME
+        #     captured FULL decode graph, so its cross-DP MoE reduce_scatter is
+        #     issued with the SAME sizes and PAIRS with the busy ranks' captured
+        #     collective (no size/mode mismatch, no deadlock).
+        #   - any busy rank doing prefill/mixed (uniform_decode=False) -> the MIN
+        #     forces synced uniform_decode=False / mode<=PIECEWISE on ALL ranks,
+        #     so the collective runs the (non-FULL-replayed) piecewise way
+        #     everywhere. Safe, same as before.
+        # Passing uniform_decode=True here (vs the old False) is what lets decode
+        # steps use FULL cudagraphs even while a peer DP rank is idle -- the
+        # throughput-critical case for DP + EP + MTP. Requires the eagle/MTP
+        # dummy_run coordinate-count fix (see EagleProposer.dummy_run) so the MTP
+        # draft path issues the same number of DP coordinate all-reduces as the
+        # real _propose_mtp_chained path.
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

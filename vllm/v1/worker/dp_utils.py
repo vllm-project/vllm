@@ -35,6 +35,25 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     return device, group
 
 
+def dp_all_reduce_flag_and(flag: bool, parallel_config: ParallelConfig) -> bool:
+    """AND-reduce a boolean across DP ranks (result True only if EVERY rank is True).
+
+    Used to keep the MTP/eagle drafter run-vs-skip decision (input_fits_in_drafter)
+    IDENTICAL on every DP rank. Under chunked prefill of long context each rank's
+    max_seq_len climbs independently, so input_fits_in_drafter can diverge per rank;
+    if one rank then skips the draft forward while peers run it, the draft-model
+    cross-DP collectives (eagle _pad_batch_across_dp all_reduce + draft MoE all2all)
+    lose a peer and the ranks deadlock. Forcing all ranks to agree (skip if ANY
+    rank cannot fit) keeps them in lockstep.
+    """
+    if parallel_config.data_parallel_size <= 1:
+        return flag
+    device, group = _get_device_and_group(parallel_config)
+    tensor = torch.tensor([1 if flag else 0], device=device, dtype=torch.int32)
+    dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=group)
+    return bool(int(tensor.item()) == 1)
+
+
 def _run_ar(
     should_ubatch: bool,
     should_dp_pad: bool,

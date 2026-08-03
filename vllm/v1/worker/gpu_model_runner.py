@@ -171,7 +171,10 @@ from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import (
+    coordinate_batch_across_dp,
+    dp_all_reduce_flag_and,
+)
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -4016,6 +4019,15 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
+            # DP lockstep: input_fits_in_drafter is computed from THIS rank's own
+            # max_seq_len, so under chunked prefill of long context it can diverge
+            # across DP ranks. If ranks disagree, some run the draft forward (with
+            # its cross-DP collectives) while others skip it -> deadlock. AND-reduce
+            # so every DP rank runs OR skips the drafter together. The idle-rank
+            # path in _dummy_run issues the matching all_reduce. (See dp_utils.)
+            input_fits_in_drafter = dp_all_reduce_flag_and(
+                input_fits_in_drafter, self.parallel_config
+            )
             use_gpu_toks = (
                 spec_config.use_eagle() or spec_config.uses_draft_model()
             ) and not spec_config.disable_padded_drafter_batch
@@ -5266,12 +5278,23 @@ class GPUModelRunner(
                 ):
                     use_cudagraphs = False
 
-                self.drafter.dummy_run(
-                    num_tokens,
-                    use_cudagraphs=use_cudagraphs,
-                    is_graph_capturing=is_graph_capturing,
-                    slot_mappings=slot_mappings,
-                )
+                # DP lockstep with execute_model's input_fits_in_drafter AND-reduce.
+                # At runtime a busy peer may skip the drafter (its long chunked-
+                # prefill seq exceeds effective_drafter_max_model_len); this idle
+                # rank must issue the SAME all_reduce and run/skip the draft dummy
+                # TOGETHER with peers, or the draft cross-DP collectives deadlock.
+                # During capture/profile all DP ranks run _dummy_run symmetrically,
+                # so no coordination is needed.
+                run_draft = True
+                if not is_graph_capturing and not is_profile:
+                    run_draft = dp_all_reduce_flag_and(True, self.parallel_config)
+                if run_draft:
+                    self.drafter.dummy_run(
+                        num_tokens,
+                        use_cudagraphs=use_cudagraphs,
+                        is_graph_capturing=is_graph_capturing,
+                        slot_mappings=slot_mappings,
+                    )
 
         # We register layerwise NVTX hooks here after the first dynamo tracing is
         # done to avoid nvtx operations in hook functions being traced by
