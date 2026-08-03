@@ -9,7 +9,7 @@ sparse engine does not have to subclass the dense one.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -17,17 +17,49 @@ if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
+from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
+    WeightTransferInitInfo,
+)
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+)
 
 
 @dataclass
 class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NCCL-based weight transfer backends."""
+    """Worker-side initialization info for NCCL-based weight transfer backends."""
 
     master_address: str
     master_port: int
     rank_offset: int
     world_size: int
+    packed: bool = False
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+
+
+@dataclass
+class NCCLTrainerInitInfo(TrainerInitInfo):
+    """Trainer-side init info for the dense NCCL weight transfer backend.
+
+    The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
+    `world_size` is the full trainer+worker NCCL group size. `rank` (from
+    `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+
+    `packed` / buffer sizes are the transfer's wire params. The trainer
+    propagates them to the worker at `trainer_init` so the two sides cannot
+    disagree. `backend` is the factory dispatch key."""
+
+    backend: ClassVar[str] = "nccl"
+
+    master_address: str
+    master_port: int
+    world_size: int
+    packed: bool = True
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
 
 
 def stateless_init_process_group(
@@ -83,7 +115,7 @@ def worker_init_process_group(
 
 
 def trainer_init(
-    init_info: NCCLWeightTransferInitInfo | dict,
+    init_info: NCCLTrainerInitInfo | NCCLWeightTransferInitInfo | dict,
 ) -> "PyNcclCommunicator":
     """
     Initialize NCCL process group for trainer-side weight transfer.
@@ -92,7 +124,8 @@ def trainer_init(
     CUDA device (torch.accelerator.current_device_index()).
 
     Args:
-        init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
+        init_info: An NCCLTrainerInitInfo / NCCLWeightTransferInitInfo object,
+            or a dict with keys:
             - master_address: str
             - master_port: int
             - world_size: int

@@ -4,69 +4,78 @@
 RLHF with FSDP2 training (4 GPUs) and vLLM expert-parallel inference (4 GPUs).
 
 8-GPU layout:
-  Training  — 4 GPUs, PyTorch FSDP2 (fully_shard)
-  Inference — 4 GPUs, vLLM AsyncLLMEngine with expert parallelism +
+  Training  — 4 GPUs, PyTorch FSDP2 (fully_shard), as Ray actors
+  Inference — 4 GPUs, a `vllm serve` HTTP server with expert parallelism +
               data parallelism (TP=1, DP=4, enable_expert_parallel
               → EP_SIZE = TP×DP = 4)
 
-FSDP workers are Ray actors that form a single FSDP2 process group.
-Rank 0 gathers full parameters via DTensor.full_tensor() and broadcasts
-them to the vLLM inference engine through the NCCL weight-transfer API.
+The inference side is a standalone HTTP server (spawned by this script with
+`vllm serve`), so both the weight-sync control plane (HTTP) and the NCCL data
+plane run inside the rank-0 FSDP Ray actor. That lets the trainer use the
+unified `TrainerWeightTransferEngine.send_weights()` with an
+`HTTPVLLMWeightSyncClient` — one call drives start/update/finish on the server
+concurrently with the NCCL broadcast. The 4 FSDP ranks all participate in the
+incremental `full_tensor()` all-gather; only rank 0 holds the engine and
+broadcasts (rank 0 is the only trainer rank in the NCCL group).
 
-The inference engine uses AsyncLLMEngine which automatically spawns
-DP worker processes (no manual placement group needed).  Weight sync
-uses pause_generation / resume_generation.
+GPU split (single node): the server takes GPUs 0-3 (CUDA_VISIBLE_DEVICES), and
+Ray (training) is restricted to GPUs 4-7.
 
 Steps:
-  1. Launch 4 FSDP training workers.
-  2. Launch AsyncLLMEngine with EP+DP (dummy weights).
-  3. Generate from prompts → gibberish (random weights).
-  4. Pause generation, transfer weights from FSDP, resume.
+  1. Launch the vLLM HTTP server (EP+DP, dummy weights) on GPUs 0-3.
+  2. Launch 4 FSDP training workers (Ray) on GPUs 4-7.
+  3. Generate from prompts over HTTP → gibberish (random weights).
+  4. Pause generation, transfer weights FSDP → server over NCCL, resume.
   5. Generate from prompts → sensible output (synced weights).
 
 Assumes a single-node cluster with 8 GPUs.
 """
 
-import asyncio
+import json
 import os
-import uuid
-from dataclasses import asdict
+import subprocess
+import sys
+import time
 
 import ray
+import requests
 import torch
 import torch.distributed as dist
 from huggingface_hub import snapshot_download
+from openai import OpenAI
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM
 
-import vllm
-from vllm import SamplingParams
-from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
-    NCCLWeightTransferInitInfo,
-    NCCLWeightTransferUpdateInfo,
-)
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
-from vllm.v1.executor import Executor
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+SERVED_MODEL_NAME = "policy"
 
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
 INFERENCE_DP_SIZE = 4
+
+# Training (FSDP) GPUs are reserved through Ray; the inference server then runs
+# on the complementary GPUs (see main()). We do NOT hard-code the split via
+# CUDA_VISIBLE_DEVICES before ray.init(): that only restricts Ray when ray.init()
+# *starts* a local cluster, and is silently ignored when it connects to an
+# existing one (e.g. a shared/managed Ray cluster), causing training and the
+# server to collide on the same physical GPUs.
+SERVER_PORT = 8000
+BASE_URL = f"http://localhost:{SERVER_PORT}"
 
 
 @ray.remote(num_gpus=1)
 class FSDPTrainWorker:
     """
     One FSDP2 training worker per GPU.  Four of these form the FSDP group.
-    Rank 0 additionally handles weight transfer to the vLLM engine.
+    Rank 0 additionally drives weight transfer to the vLLM server.
     """
 
     def __init__(
@@ -78,6 +87,7 @@ class FSDPTrainWorker:
         fsdp_master_port: int,
     ):
         self.rank = rank
+        self.engine = None
 
         os.environ["MASTER_ADDR"] = fsdp_master_addr
         os.environ["MASTER_PORT"] = str(fsdp_master_port)
@@ -89,12 +99,6 @@ class FSDPTrainWorker:
             model_name, torch_dtype=torch.bfloat16
         )
 
-        self.weight_names = [n for n, _ in model.named_parameters()]
-        self.weight_dtype_names = [
-            str(p.dtype).split(".")[-1] for _, p in model.named_parameters()
-        ]
-        self.weight_shapes = [list(p.shape) for _, p in model.named_parameters()]
-
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
@@ -103,10 +107,13 @@ class FSDPTrainWorker:
 
         self.transfer_port = None
         self.transfer_master_address = None
-        self.model_update_group = None
 
     def get_rank(self):
         return self.rank
+
+    def get_gpu_ids(self):
+        """Physical GPU id(s) Ray assigned to this worker (for server/train split)."""
+        return ray.get_gpu_ids()
 
     # ---- weight-transfer setup (rank 0 only) ----
 
@@ -117,95 +124,130 @@ class FSDPTrainWorker:
         self.transfer_master_address = get_ip()
         return self.transfer_master_address, self.transfer_port
 
-    def init_weight_transfer_group(self, transfer_world_size: int):
-        """Join the weight-transfer NCCL group as rank 0 (the source)."""
-        assert self.rank == 0
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
-                master_address=self.transfer_master_address,
-                master_port=self.transfer_port,
-                world_size=transfer_world_size,
-            ),
-        )
+    def setup_engine(
+        self,
+        base_url: str,
+        transfer_master_address: str,
+        transfer_port: int,
+        transfer_world_size: int,
+    ):
+        """Build the trainer engine on every FSDP rank.
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes captured before FSDP wrapping."""
-        return self.weight_names, self.weight_dtype_names, self.weight_shapes
+        Called on all ranks with the shared rendezvous endpoint. Rank 0 is the
+        sender: `trainer_init` opens its rank-0 NCCL endpoint and, on a worker
+        thread, calls the server's `init_weight_transfer_engine` over HTTP so
+        both ends rendezvous together. The other ranks skip the rendezvous and
+        only join the FSDP all-gather during send_weights.
+        """
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=NCCLTrainerInitInfo(
+                master_address=transfer_master_address,
+                master_port=transfer_port,
+                world_size=transfer_world_size,
+                rank=self.rank,  # FSDP rank; sender is rank 0
+                packed=True,
+            ),
+            client=HTTPVLLMWeightSyncClient(base_url),
+            # Yields sharded DTensors; the engine reads global shape/dtype for
+            # metadata (no gather) and calls full_tensor() at broadcast time.
+            source=ModuleSource(self.model),
+        )
 
     # ---- collective ops (ALL FSDP ranks must call concurrently) ----
 
-    def gather_and_broadcast_weights(self, packed: bool = True):
+    def gather_and_broadcast_weights(self):
+        """All-gather full parameters and broadcast them to the vLLM server.
+
+        Called on all FSDP ranks. `send_weights` gathers each param via
+        `full_tensor()` (a collective every rank must enter in the same order);
+        only rank 0 (the sender) drives the server-side update_weights
+        concurrently with the NCCL broadcast — the other ranks only gather.
         """
-        All-gather full parameters and broadcast them to vLLM.
-        Only rank 0 performs the actual NCCL broadcast; others just
-        participate in the FSDP all-gather.
-
-        full_tensor() is a collective — all FSDP ranks must call it
-        for each parameter in the same order.  Rank 0 additionally
-        feeds each gathered tensor to the weight-transfer engine.
-        """
-        if self.rank == 0:
-
-            def _full_param_iter():
-                for name, param in self.model.named_parameters():
-                    yield name, param.full_tensor()
-
-            trainer_args = NCCLTrainerSendWeightsArgs(
-                group=self.model_update_group,
-                packed=packed,
-            )
-            NCCLWeightTransferEngine.trainer_send_weights(
-                iterator=_full_param_iter(),
-                trainer_args=trainer_args,
-            )
-        else:
-            for _, param in self.model.named_parameters():
-                param.full_tensor()
+        self.engine.send_weights()
 
 
-def create_async_engine(**kwargs):
-    """Create an AsyncLLMEngine directly (no subclass needed)."""
-    engine_args = vllm.AsyncEngineArgs(**kwargs)
-    vllm_config = engine_args.create_engine_config()
-    executor_class = Executor.get_class(vllm_config)
-    return vllm.AsyncLLMEngine(
-        vllm_config=vllm_config,
-        executor_class=executor_class,
-        log_requests=engine_args.enable_log_requests,
-        log_stats=not engine_args.disable_log_stats,
+def start_vllm_server(server_gpus: str) -> subprocess.Popen:
+    """Spawn a `vllm serve` HTTP server (EP+DP) on `server_gpus` and wait for it."""
+    serve_args = [
+        "vllm",
+        "serve",
+        MODEL_NAME,
+        "--served-model-name",
+        SERVED_MODEL_NAME,
+        "--tensor-parallel-size",
+        str(INFERENCE_TP_SIZE),
+        "--data-parallel-size",
+        str(INFERENCE_DP_SIZE),
+        "--enable-expert-parallel",
+        "--enforce-eager",
+        "--load-format",
+        "dummy",
+        "--gpu-memory-utilization",
+        "0.7",
+        "--port",
+        str(SERVER_PORT),
+        "--weight-transfer-config",
+        json.dumps({"backend": "nccl"}),
+    ]
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = server_gpus
+    env["VLLM_SERVER_DEV_MODE"] = "1"  # exposes the weight-transfer endpoints
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    print(f"[server] Launching: {' '.join(serve_args)} (GPUs {server_gpus})")
+    proc = subprocess.Popen(
+        serve_args,
+        env=env,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        start_new_session=True,
     )
 
+    # Wait for the server to come up (model load can take a while).
+    deadline = time.monotonic() + 1800
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError("vLLM server exited before becoming ready.")
+        try:
+            if requests.get(f"{BASE_URL}/health", timeout=5).status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+        if time.monotonic() > deadline:
+            raise RuntimeError("vLLM server failed to start in time.")
+        time.sleep(2)
+    print("[server] Ready.")
+    return proc
 
-async def generate_batch(engine, prompts, sampling_params):
-    """Generate completions for a batch of prompts."""
 
-    async def gen_one(prompt):
-        output = None
-        async for request_output in engine.generate(
-            {"prompt": prompt},
-            sampling_params,
-            request_id=str(uuid.uuid4()),
-        ):
-            output = request_output
-        return output
+def generate_completions(client: OpenAI, prompts: list[str]) -> list[str]:
+    """Generate completions for a batch of prompts via the OpenAI HTTP API."""
+    results = []
+    for prompt in prompts:
+        response = client.completions.create(
+            model=SERVED_MODEL_NAME,
+            prompt=prompt,
+            max_tokens=32,
+            temperature=0,
+        )
+        results.append(response.choices[0].text)
+    return results
 
-    return await asyncio.gather(*[gen_one(p) for p in prompts])
 
-
-async def main():
-    ray.init()
-
+def main():
     # Download model weights to local/shared disk once.
     local_model_path = snapshot_download(MODEL_NAME)
     print(f"[init] Model downloaded to {local_model_path}")
 
-    # FSDP rendezvous address (single-node)
+    ray.init()
+
+    # FSDP rendezvous address (single-node).
     fsdp_master_addr = get_ip()
     fsdp_master_port = get_open_port()
 
-    # Launch 4 FSDP training workers.
-    # Ray allocates 1 GPU per worker; AsyncLLMEngine's internal DP
-    # placement groups will land on the remaining 4 GPUs.
+    # Launch the FSDP training workers first so Ray reserves their GPUs, then
+    # place the inference server on the GPUs Ray did NOT use. This keeps the two
+    # on disjoint physical GPUs whether ray.init() started a fresh cluster or
+    # connected to an existing one.
     fsdp_workers = [
         FSDPTrainWorker.remote(
             local_model_path,
@@ -219,126 +261,109 @@ async def main():
     ray.get([w.get_rank.remote() for w in fsdp_workers])
     print(f"[init] {FSDP_WORLD_SIZE} FSDP training workers ready.")
 
-    # Launch vLLM with expert parallelism + data parallelism.
-    # AsyncLLMEngine with data_parallel_backend="ray" creates its own
-    # placement groups internally — no manual placement group needed.
-    print("[engine] Creating AsyncLLMEngine...")
-    engine = create_async_engine(
-        model=local_model_path,
-        enforce_eager=True,
-        tensor_parallel_size=INFERENCE_TP_SIZE,
-        data_parallel_size=INFERENCE_DP_SIZE,
-        enable_expert_parallel=True,
-        distributed_executor_backend="ray",
-        data_parallel_backend="ray",
-        weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        load_format="dummy",
-        gpu_memory_utilization=0.7,
-    )
-    print("[engine] AsyncLLMEngine created.")
-
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
+    # Discover the physical GPUs Ray assigned to training; run the server on the
+    # complementary GPUs.
+    training_gpus = {
+        int(g)
+        for ids in ray.get([w.get_gpu_ids.remote() for w in fsdp_workers])
+        for g in ids
+    }
+    num_gpus = int(ray.cluster_resources().get("GPU", 0))
+    num_server_gpus = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE
+    server_gpu_ids = [g for g in range(num_gpus) if g not in training_gpus][
+        :num_server_gpus
     ]
-    sampling_params = SamplingParams(temperature=0)
-
-    # Generate with dummy weights — expect gibberish.
-    print("[generate] Starting generation with dummy weights...")
-    outputs = await generate_batch(engine, prompts, sampling_params)
-    print("[generate] Generation complete.")
-
-    print("-" * 60)
-    print("BEFORE weight sync (dummy weights):")
-    print("-" * 60)
-    for output in outputs:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
-        print("-" * 60)
-
-    # --- Weight-transfer setup ---
-    print("[transfer] Setting up weight-transfer endpoint...")
-    transfer_addr, transfer_port = ray.get(
-        fsdp_workers[0].setup_transfer_endpoint.remote()
-    )
-    print(f"[transfer] Endpoint ready at {transfer_addr}:{transfer_port}")
-
-    transfer_world_size = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE + 1
-    print(
-        f"[transfer] World size: {transfer_world_size} "
-        f"(1 trainer + {INFERENCE_TP_SIZE * INFERENCE_DP_SIZE} vLLM workers)"
-    )
-
-    print("[transfer] Initializing NCCL groups...")
-    train_handle = fsdp_workers[0].init_weight_transfer_group.remote(
-        transfer_world_size
-    )
-    await engine.init_weight_transfer_engine(
-        WeightTransferInitRequest(
-            init_info=asdict(
-                NCCLWeightTransferInitInfo(
-                    master_address=transfer_addr,
-                    master_port=transfer_port,
-                    rank_offset=1,
-                    world_size=transfer_world_size,
-                )
-            )
+    if len(server_gpu_ids) < num_server_gpus:
+        raise RuntimeError(
+            f"Need {num_server_gpus} free GPUs for the inference server but only "
+            f"found {server_gpu_ids} (training uses {sorted(training_gpus)} of "
+            f"{num_gpus} cluster GPUs)."
         )
-    )
-    ray.get(train_handle)
-    print("[transfer] NCCL groups initialized.")
+    server_gpus = ",".join(str(g) for g in server_gpu_ids)
+    print(f"[init] Training GPUs {sorted(training_gpus)}; server GPUs [{server_gpus}].")
 
-    # --- Pause, transfer weights, resume ---
-    print("[sync] Pausing generation...")
-    await engine.pause_generation(mode="abort")
-    print("[sync] Generation paused.")
+    # Start the inference server on the complementary GPUs.
+    server_proc = start_vllm_server(server_gpus)
+    try:
+        client = OpenAI(base_url=f"{BASE_URL}/v1", api_key="EMPTY")
 
-    names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
-    print(f"[sync] Got metadata for {len(names)} parameters.")
+        prompts = [
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+        ]
 
-    print("[sync] Starting weight update...")
-    await engine.start_weight_update()
-
-    print("[sync] Broadcasting weights from FSDP → vLLM...")
-    broadcast_handles = [
-        w.gather_and_broadcast_weights.remote(packed=True) for w in fsdp_workers
-    ]
-    await engine.update_weights(
-        WeightTransferUpdateRequest(
-            update_info=asdict(
-                NCCLWeightTransferUpdateInfo(
-                    names=names,
-                    dtype_names=dtype_names,
-                    shapes=shapes,
-                    packed=True,
-                )
-            )
-        )
-    )
-    ray.get(broadcast_handles)
-
-    await engine.finish_weight_update()
-    print("[sync] Weight broadcast complete.")
-
-    print("[sync] Resuming generation...")
-    await engine.resume_generation()
-    print("[sync] Generation resumed.")
-
-    # Generate with synced weights — expect sensible output.
-    print("[generate] Starting generation with synced weights...")
-    outputs_updated = await generate_batch(engine, prompts, sampling_params)
-    print("[generate] Generation complete.")
-
-    print("-" * 60)
-    print("AFTER weight sync (real weights):")
-    print("-" * 60)
-    for output in outputs_updated:
-        print(f"Prompt: {output.prompt!r}")
-        print(f"Generated: {output.outputs[0].text!r}")
+        # Generate with dummy weights — expect gibberish.
+        print("[generate] Generating with dummy weights...")
+        outputs = generate_completions(client, prompts)
         print("-" * 60)
+        print("BEFORE weight sync (dummy weights):")
+        print("-" * 60)
+        for prompt, text in zip(prompts, outputs):
+            print(f"Prompt: {prompt!r}")
+            print(f"Generated: {text!r}")
+            print("-" * 60)
+
+        # --- Weight-transfer setup ---
+        print("[transfer] Setting up weight-transfer endpoint...")
+        transfer_addr, transfer_port = ray.get(
+            fsdp_workers[0].setup_transfer_endpoint.remote()
+        )
+        print(f"[transfer] Endpoint ready at {transfer_addr}:{transfer_port}")
+
+        transfer_world_size = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE + 1
+        print(
+            f"[transfer] World size: {transfer_world_size} "
+            f"(1 trainer + {INFERENCE_TP_SIZE * INFERENCE_DP_SIZE} vLLM workers)"
+        )
+
+        # Build the trainer engine on all FSDP ranks (rank 0 is the sender). The
+        # sender drives the server's init_weight_transfer_engine (HTTP) while
+        # opening the trainer NCCL endpoint, so both ends rendezvous together;
+        # the other ranks build a null-client engine that only gathers.
+        print("[transfer] Initializing NCCL groups (all FSDP ranks)...")
+        ray.get(
+            [
+                w.setup_engine.remote(
+                    BASE_URL, transfer_addr, transfer_port, transfer_world_size
+                )
+                for w in fsdp_workers
+            ]
+        )
+        print("[transfer] NCCL groups initialized.")
+
+        # --- Pause, transfer weights, resume ---
+        print("[sync] Pausing generation...")
+        requests.post(f"{BASE_URL}/pause", timeout=60).raise_for_status()
+
+        # All ranks participate in the FSDP all-gather; rank 0 additionally
+        # drives start/update/finish on the server and the NCCL broadcast.
+        print("[sync] Broadcasting weights from FSDP → vLLM...")
+        ray.get([w.gather_and_broadcast_weights.remote() for w in fsdp_workers])
+        print("[sync] Weight broadcast complete.")
+
+        print("[sync] Resuming generation...")
+        requests.post(f"{BASE_URL}/resume", timeout=60).raise_for_status()
+
+        # Generate with synced weights — expect sensible output.
+        print("[generate] Generating with synced weights...")
+        outputs_updated = generate_completions(client, prompts)
+        print("-" * 60)
+        print("AFTER weight sync (real weights):")
+        print("-" * 60)
+        for prompt, text in zip(prompts, outputs_updated):
+            print(f"Prompt: {prompt!r}")
+            print(f"Generated: {text!r}")
+            print("-" * 60)
+    finally:
+        print("[server] Shutting down...")
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
