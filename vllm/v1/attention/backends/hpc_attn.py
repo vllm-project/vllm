@@ -33,7 +33,7 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -158,7 +158,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
     def get_cudagraph_support(
         cls: type["HpcAttnMetadataBuilder"],
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         spec_config = vllm_config.speculative_config
         if (

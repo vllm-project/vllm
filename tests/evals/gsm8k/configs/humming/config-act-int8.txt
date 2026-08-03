@@ -2,3 +2,4 @@ Qwen3-30B-A3B-Instruct-2507-quantized.w8a8-humming-act-int8.yaml
 Qwen3-30B-A3B-GPTQ-Int4-humming-act-int8.yaml
 Qwen3-30B-A3B-AWQ-humming.yaml
 Qwen3.5-35B-A3B-experts-int8-humming-act-int8.yaml
+Qwen3-4B-mixed-quant-RTN-humming.yaml

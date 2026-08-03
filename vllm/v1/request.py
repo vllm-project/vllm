@@ -149,7 +149,12 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        self.async_tokens_to_discard = 0
+        # Tokens of output in flight when the request was preempted: delivered
+        # on return, but must not mutate the reset counters.
+        self.num_stale_output_tokens = 0
+        # Drop the stale output instead, for same-step preempt + resume
+        # (reset_prefix_cache).
+        self.drop_stale_output = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
@@ -181,6 +186,11 @@ class Request:
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+
+        # Block-aligned token position of a proven shared prefix worth pinning
+        # in the (sparse) prefix cache; 0 means none. Set at admission for
+        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
+        self.shared_prefix_boundary = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

@@ -81,6 +81,18 @@ class MambaStateDtypeCalculator:
         )
 
     @classmethod
+    def append_replayssm_ring(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
+        ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -187,6 +199,28 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
+    def append_replayssm_ring(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        n_groups: int,
+        tp_world_size: int,
+        replayssm_buffer_len: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the ReplaySSM ring shapes (x_cache, dt_cache, B_cache) to a
+        base ``(conv, ssm)`` tuple. ``base_shapes[1]`` is the ssm shape
+        ``(nheads // tp, head_dim, state_size)``; B_cache uses the un-extended
+        ``n_groups``.
+        """
+        local_nheads, head_dim, state_size = base_shapes[1]
+        local_ngroups = divide(n_groups, tp_world_size)
+        return (
+            *base_shapes,
+            (local_nheads, replayssm_buffer_len, head_dim),
+            (local_nheads, replayssm_buffer_len),
+            (local_ngroups, replayssm_buffer_len, state_size),
+        )
+
+    @classmethod
     def short_conv_state_shape(
         cls,
         tp_world_size: int,
@@ -254,7 +288,7 @@ class MambaStateShapeCalculator:
 
         conv_dim = proj_size + 2 * proj_k_size
         conv_state_shape = cls._orient_conv_shape(
-            divide(conv_dim, tp_world_size), conv_kernel_size - 1
+            divide(conv_dim, tp_world_size), conv_kernel_size - 1 + num_spec
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)

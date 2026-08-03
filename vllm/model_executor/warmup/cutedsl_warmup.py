@@ -2,15 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Run registered CuTeDSL warmup compile units."""
 
+# TODO(roberto): Remove this compatibility registry after registered CuTeDSL
+# warmups are migrated to the shared JIT warmup infrastructure.
+# https://github.com/vllm-project/vllm/pull/47451
+
 from __future__ import annotations
 
-import time
 import weakref
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
 
 import torch
+from tqdm import tqdm
 
+from vllm.distributed import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -76,6 +81,8 @@ def _compile_cutedsl_warmup_units(
     compile_units: Iterable[CuTeDSLCompileUnit],
 ) -> int:
     compiled = 0
+    if is_global_first_rank():
+        compile_units = tqdm(compile_units, desc="Compiling CuTeDSL kernels")
     with torch.inference_mode():
         for unit in compile_units:
             unit.compile()
@@ -89,25 +96,17 @@ def _compile_cutedsl_warmup_units(
 def cutedsl_warmup() -> None:
     """Run CuTeDSL compile providers before serving."""
     if not current_platform.is_cuda():
-        logger.info("Skipping CuTeDSL warmup on non-CUDA platform.")
+        logger.debug("Skipping CuTeDSL warmup on non-CUDA platform.")
         return
 
     compile_units = _collect_unique_compile_units(_iter_cutedsl_warmup_compile_units())
     if not compile_units:
-        logger.info("Skipping CuTeDSL warmup because no compile units were requested.")
+        logger.debug("Skipping CuTeDSL warmup because no compile units were requested.")
         return
 
-    unit_names = list(dict.fromkeys(unit.name for unit in compile_units))
-    logger.info(
+    logger.info_once(
         "Warming up CuTeDSL compile_units=%d names=%s.",
         len(compile_units),
-        unit_names,
+        tuple(dict.fromkeys(unit.name for unit in compile_units)),
     )
-
-    start_time = time.perf_counter()
-    compiled_count = _compile_cutedsl_warmup_units(compile_units)
-    logger.info(
-        "CuTeDSL warmup compiled %d units in %.2f s.",
-        compiled_count,
-        time.perf_counter() - start_time,
-    )
+    _compile_cutedsl_warmup_units(compile_units)

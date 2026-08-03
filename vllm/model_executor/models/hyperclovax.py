@@ -459,7 +459,7 @@ class HyperCLOVAXForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         *,
-        intermediate_tensors: IntermediateTensors | None,
+        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         model_output = self.model(
