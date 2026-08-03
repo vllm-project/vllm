@@ -5,7 +5,6 @@ from threading import Lock
 import pytest
 import torch
 
-import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
@@ -22,6 +21,59 @@ def reset_device(reset_default_device):
     pass
 
 
+@pytest.fixture(autouse=True)
+def cleanup_fixture():
+    """Override conftest's cleanup_fixture— not needed for punica tests."""
+    yield
+
+
+@pytest.fixture(autouse=True)
+def dynamo_reset():
+    """Override conftest's dynamo_reset — not needed for punica tests."""
+    yield
+
+
+def _cpu_bgmv_shrink(
+    inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
+):
+    """Memory-efficient shrink reference: per-LoRA matmul loop on CPU.
+    output[mask] = scaling * inputs[mask] @ weight.T"""
+    exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
+    for lid in exploded.unique():
+        if lid < 0:
+            continue
+        mask = exploded == lid
+        inp = inputs[mask].to(output.dtype)
+        w = lora_weight[lid].to(output.dtype)
+        output[mask] = scaling * (inp @ w.T)
+
+
+def _cpu_bgmv_expand(
+    inputs,
+    lora_weight,
+    output,
+    seq_len_tensor,
+    lora_indices,
+    offset=0,
+    add_inputs=False,
+):
+    """Memory-efficient expand reference: per-LoRA matmul loop on CPU.
+    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T"""
+    exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
+    for lid in exploded.unique():
+        if lid < 0:
+            continue
+        mask = exploded == lid
+        inp = inputs[mask].to(output.dtype)
+        w = lora_weight[lid].to(output.dtype)
+        n = w.shape[0]
+        result = inp @ w.T
+        if add_inputs:
+            output[mask, offset : offset + n] += result
+        else:
+            output[mask, offset : offset + n] = result
+
+
 # Utility shrink and expand operations used as reference implementations.
 def sgmv_shrink_for_nslices(
     nslices: int,
@@ -36,22 +88,21 @@ def sgmv_shrink_for_nslices(
     num_tokens: int,
     scaling: float,
 ):
-    """
-    Wrapper around torch_ops.sgmv_shrink that handles any nslices.
-    """
+    """CPU reference for sgmv_shrink using per-LoRA matmul loop."""
+    inp_cpu = inputs_tensor.cpu()
+    seq_cpu = seq_len_tensor.cpu()
+    idx_cpu = prompt_lora_mapping.cpu()
+    out_cpu = out_tensor.cpu()
     for index in range(nslices):
-        torch_ops.sgmv_shrink(
-            inputs_tensor,
-            lora_weights_lst[index],
-            out_tensor[index],
-            b_seq_start_loc,
-            seq_len_tensor,
-            prompt_lora_mapping,
-            batches,
-            max_seq_length,
-            num_tokens,
-            scaling,
+        _cpu_bgmv_shrink(
+            inp_cpu,
+            lora_weights_lst[index].cpu(),
+            out_cpu[index],
+            seq_cpu,
+            idx_cpu,
+            scaling=scaling,
         )
+    out_tensor.copy_(out_cpu)
 
 
 def sgmv_expand_for_nslices(
@@ -68,42 +119,21 @@ def sgmv_expand_for_nslices(
     num_tokens: int,
     add_inputs: bool,
 ) -> None:
-    """
-    Wrapper around torch_ops.sgmv_expand that handles any nslices.
-    """
-    if nslices == 1:
-        # Verify the torch's sgmv_expand op
-        torch_ops.sgmv_expand(
-            inputs_tensor[0],
-            lora_weights_lst[0],
-            out_tensor,
-            b_seq_start_loc,
-            seq_len_tensor,
-            prompt_lora_mapping,
-            batches,
-            max_seq_length,
-            num_tokens,
+    """CPU reference for sgmv_expand using per-LoRA matmul loop."""
+    seq_cpu = seq_len_tensor.cpu()
+    idx_cpu = prompt_lora_mapping.cpu()
+    out_cpu = out_tensor.cpu()
+    for index in range(nslices):
+        _cpu_bgmv_expand(
+            inputs_tensor[index].cpu(),
+            lora_weights_lst[index].cpu(),
+            out_cpu,
+            seq_cpu,
+            idx_cpu,
+            offset=hidden_size * index,
             add_inputs=add_inputs,
         )
-    else:
-        slice_offset = 0
-        for index in range(nslices):
-            lora_weights = lora_weights_lst[index]
-            torch_ops.sgmv_expand_slice(
-                inputs_tensor[index],
-                lora_weights,
-                out_tensor,
-                b_seq_start_loc,
-                seq_len_tensor,
-                prompt_lora_mapping,
-                batches,
-                max_seq_length,
-                num_tokens,
-                slice_offset,
-                hidden_size,
-                add_inputs=add_inputs,
-            )
-            slice_offset += hidden_size
+    out_tensor.copy_(out_cpu)
 
 
 _dict_lock = Lock()

@@ -45,6 +45,35 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     return workspace
 
 
+def _packed_block_span(pool: torch.Tensor) -> int:
+    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
+    block_size for unpacked KV, larger when packed (#44577). Raises if not
+    token-aligned."""
+    block_stride = pool.stride(0)
+    token_stride = pool.stride(-2)
+    if block_stride % token_stride != 0:
+        raise NotImplementedError(
+            "FLASHINFER_MLA_SPARSE_DSV4 packed KV requires the per-block stride "
+            f"({block_stride}) to be a multiple of the per-token stride "
+            f"({token_stride}); this layout is not supported yet."
+        )
+    return block_stride // token_stride
+
+
+# Sparse MLA h_q counts accepted natively (flashinfer>=0.6.14, #3545).
+_SPARSE_MLA_SUPPORTED_Q_HEADS = (8, 16, 32, 64, 128)
+
+
+def _pad_to_supported_q_heads(num_heads: int) -> int:
+    for supported in _SPARSE_MLA_SUPPORTED_Q_HEADS:
+        if num_heads <= supported:
+            return supported
+    raise ValueError(
+        f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
+        "(sparse MLA kernel requires h_q in {8, 16, 32, 64, 128})."
+    )
+
+
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
@@ -149,13 +178,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        # FP8 decode kernel only supports h_q = 64 or 128.
-        if num_heads > 128:
-            raise ValueError(
-                f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-                "(FP8 decode kernel requires h_q in {64, 128})."
-            )
-        return 64 if num_heads <= 64 else 128
+        return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -368,6 +391,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         )
         cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
         if cached_sparse is None:
+            swa_block_span = _packed_block_span(swa_k_cache)
+            compressed_block_span = _packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -385,6 +410,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 top_k,
                 decode_compressed_indices_are_local=decode_compressed_indices_are_local,
                 decode_is_valid_token=decode_is_valid_token,
+                swa_block_span=swa_block_span,
+                compressed_block_span=compressed_block_span,
             )
             if cache_key != "c4a":
                 swa_metadata.flashinfer_sparse_index_cache[cache_key] = (
@@ -526,18 +553,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        if num_heads <= 16:
-            return 16
-        if num_heads <= 32:
-            return 32
-        if num_heads <= 64:
-            return 64
-        if num_heads <= 128:
-            return 128
-        raise ValueError(
-            f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-            "(SM120 kernel requires h_q in {16, 32, 64, 128})."
-        )
+        return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -729,6 +745,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                         attn_metadata.block_table[:num_decodes],
                         block_size,
                         is_valid,
+                        output_buffers=self._global_topk_output_buffers(
+                            self.topk_indices_buffer[:num_decode_tokens]
+                        ),
                     )
                 )
                 extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
@@ -818,6 +837,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     attn_metadata.block_table,
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
+                    output_buffers=self._global_topk_output_buffers(local_topk_indices),
                 )
             )
 

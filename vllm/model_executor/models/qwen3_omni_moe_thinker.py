@@ -63,7 +63,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -319,6 +318,14 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
 class Qwen3OmniMoeAudioEncoder(nn.Module):
     """vLLM-native Qwen3-Omni Audio Encoder."""
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".self_attn.q_proj.": (".self_attn.qkv.", "q"),
+            ".self_attn.k_proj.": (".self_attn.qkv.", "k"),
+            ".self_attn.v_proj.": (".self_attn.qkv.", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
@@ -531,35 +538,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         return lengths
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights with mapping from HuggingFace format."""
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("self_attn.qkv.", "self_attn.q_proj.", "q"),
-            ("self_attn.qkv.", "self_attn.k_proj.", "k"),
-            ("self_attn.qkv.", "self_attn.v_proj.", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict.get(name)
-                if param is not None:
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -737,6 +717,14 @@ class Qwen3_VisionPatchMerger(nn.Module):
 
 
 class Qwen3Omni_VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".attn.q.": (".attn.qkv.", "q"),
+            ".attn.k.": (".attn.qkv.", "k"),
+            ".attn.v.": (".attn.qkv.", "v"),
+        }
+    )
+
     def __init__(
         self,
         vision_config,
@@ -1044,31 +1032,8 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(
@@ -1259,6 +1224,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             tok_kwargs = dict(tok_kwargs)
             mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
             mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
+        elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
+            # mm_data can be empty on a multimodal-processor-cache hit, where
+            # there's nothing to (re-)process this call and the real result
+            # comes from the cache — not a genuine "no audio" case.
+            raise ValueError(
+                "Video doesn't have audio track with `audio_in_video=True`"
+            )
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -1565,52 +1537,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         result_placeholders["audio"] = audio_placeholders
         return result_placeholders
 
-    def _get_raw_input_ids(
-        self,
-        token_ids: list[int],
-        use_audio_in_video: bool = False,
-    ) -> list[int]:
-        tokenizer = self.info.get_tokenizer()
-        vision_bos_token = tokenizer.encode(tokenizer.vision_bos_token)[0]
-        vision_eos_token = tokenizer.encode(tokenizer.vision_eos_token)[0]
-        audio_bos_token = tokenizer.encode(tokenizer.audio_bos_token)[0]
-        audio_eos_token = tokenizer.encode(tokenizer.audio_eos_token)[0]
-        audio_token = tokenizer.encode("<|audio_pad|>")[0]
-        image_token = tokenizer.encode("<|image_pad|>")[0]
-        video_token = tokenizer.encode("<|video_pad|>")[0]
-
-        result = token_ids[:]
-        if use_audio_in_video:
-            while True:
-                start = None
-                for i in range(len(result) - 1):
-                    if result[i : i + 2] == [vision_bos_token, audio_bos_token]:
-                        start = i
-                        break
-                if start is not None:
-                    end = None
-                    for i in range(start + 2, len(result) - 1):
-                        if result[i : i + 2] == [audio_eos_token, vision_eos_token]:
-                            end = i
-                            break
-                    if end is not None:
-                        result = (
-                            result[:start]
-                            + [vision_bos_token, video_token, vision_eos_token]
-                            + result[end + 2 :]
-                        )
-                else:
-                    break
-
-        for mm_token in [audio_token, image_token, video_token]:
-            compressed = []
-            for x in result:
-                if x != mm_token or (not compressed or compressed[-1] != mm_token):
-                    compressed.append(x)
-            result = compressed
-
-        return result
-
 
 class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMixin):
     def _process_audio_input(
@@ -1868,9 +1794,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
+        image_token_id = self.config.image_token_id
         input_ids_cpu = input_ids.cpu()
         is_video = is_multimodal & (input_ids_cpu == video_token_id)
         is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        is_image = is_multimodal & (input_ids_cpu == image_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
@@ -1891,9 +1819,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             multimodal_embeddings_multiscale = []
 
             if is_interleaved:
-                # Use input_ids-based mask for correct vision positions
-                # when audio and video tokens are interleaved.
-                is_vision = is_video.clone()
+                # Use input_ids-based mask for all vision positions when
+                # audio and video tokens are interleaved.
+                is_vision = is_video | is_image
             else:
                 is_vision = torch.zeros_like(is_multimodal)
                 mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
@@ -1952,8 +1880,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 is_video,
                 is_audio,
                 is_multimodal,
-                num_video,
-                num_audio,
             )
 
         # Default: standard merge (no interleaving), same as parent class.

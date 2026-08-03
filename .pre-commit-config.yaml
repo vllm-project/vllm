@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'vllm/third_party/.*'
+exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -30,7 +30,7 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--fix]
-    exclude: ^CLAUDE\.md$
+    exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -132,6 +132,19 @@ repos:
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
     - id: pip-compile
+      alias: pip-compile-cpu
+      name: pip-compile-cpu
+      args: [
+        requirements/test/cuda.in,
+        -o, requirements/test/cpu.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cpu,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      exclude: ^requirements/test/cuda\.txt$
+    - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
       args: [
@@ -141,6 +154,11 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/docs\.(in|txt)$
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  hooks:
+  - id: check-json
+    files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
@@ -197,7 +215,7 @@ repos:
     name: Check SPDX headers
     entry: python tools/pre_commit/check_spdx_header.py
     language: python
-    types: [python]
+    types_or: [python, rust, proto]
   - id: check-root-lazy-imports
     name: Check root lazy imports
     entry: python tools/pre_commit/check_init_lazy_imports.py
@@ -247,10 +265,6 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
-  - id: attention-backend-docs
-    name: Check attention backend documentation is up to date
-    entry: python tools/pre_commit/generate_attention_backend_docs.py --check
-    language: python
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py

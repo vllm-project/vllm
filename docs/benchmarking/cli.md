@@ -111,6 +111,45 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+#### Understanding the Latency Metrics
+
+`vllm bench serve` measures latency at the benchmark client:
+
+!!! note
+    Metric terminology is not standardized across benchmarking tools. When
+    comparing results, use the measurement points and formulas rather than the
+    metric names alone. This section explains how we refer to them in vLLM.
+
+- **Time to first token (TTFT)** is the time from sending a request to receiving
+  its first streamed output.
+- **Inter-token latency (ITL)** records the time between consecutive streamed
+  outputs. The reported ITL statistics aggregate these individual gaps across
+  all successful requests.
+- **Time per output token (TPOT)** is calculated once per request, excluding the
+  first token, and then aggregated across requests:
+
+    $$
+    \text{TPOT} =
+    \frac{\text{end-to-end latency} - \text{TTFT}}
+    {\text{number of output tokens} - 1}
+    $$
+
+With standard decoding, each streamed output usually contains one token, so ITL
+and TPOT are typically similar.
+
+With speculative decoding, one streamed output can contain multiple tokens,
+such as several accepted draft tokens within a single engine tstep. ITL records
+only the gaps between streamed outputs; it does not add zero-duration gaps for
+tokens in the same output. TPOT instead amortizes the request's decoding time
+over every output token.
+
+![Latency metrics with bundled tokens (light theme)](../assets/benchmarking/latency-metrics-speculative-decoding-light.svg#only-light)
+![Latency metrics with bundled tokens (dark theme)](../assets/benchmarking/latency-metrics-speculative-decoding-dark.svg#only-dark)
+
+In this example, the benchmark observes two 40 ms ITL samples. The three tokens
+in the second streamed output do not create additional ITL samples, so mean ITL
+is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
+
 #### Results Visualization
 
 The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
@@ -582,6 +621,31 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+
+#### Probe Requests
+
+The benchmark tool also supports sending probe requests alongside the main
+workload. This can be useful for measuring how the main workload affects
+unrelated traffic sharing the server, e.g. a few requests with large images
+stalling a concurrent lightweight request while their multimodal preprocessing
+occupies the frontend.
+
+Setting `--probe-request-rate` to a positive value sends single-token text-only
+probe requests at that rate (requests per second) alongside the main workload.
+Probes bypass `--max-concurrency` and their latency is reported separately, so
+the probe percentiles directly measure the interference that the main workload
+inflicts on unrelated requests.
+
+```bash
+vllm bench serve \
+    --model Qwen/Qwen2.5-VL-3B-Instruct \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --dataset-name random-mm \
+    --random-mm-bucket-config '{(2048, 2048, 1): 1.0}' \
+    --request-rate 4 \
+    --probe-request-rate 20
+```
 
 #### Load Pattern Configuration
 
@@ -1337,7 +1401,7 @@ Serve and benchmark VLM2Vec:
 # Run this in another process
 vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
   --trust-remote-code \
-  --chat-template examples/template_vlm2vec_phi3v.jinja
+  --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
 
 # Run these one by one after the server is up
 # download dataset
