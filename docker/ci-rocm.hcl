@@ -274,10 +274,6 @@ function "get_cache_to_rocm_deepep" {
 # CI targets
 
 target "_ci-rocm" {
-  annotations = [
-    "manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
-    "manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
-  ]
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
@@ -287,6 +283,10 @@ target "_ci-rocm" {
 
 target "test-rocm-ci" {
   inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
+  annotations = [
+    "manifest:vllm.buildkite.build_number=${BUILDKITE_BUILD_NUMBER}",
+    "manifest:vllm.buildkite.build_id=${BUILDKITE_BUILD_ID}",
+  ]
   target     = "test"
   cache-from = get_cache_from_rocm()
   cache-to   = get_cache_to_rocm()
@@ -346,10 +346,10 @@ group "test-rocm-ci-with-wheel" {
 
 # Image tags for the ci_base build. ci-bake-rocm.sh rewrites CI_BASE_IMAGE_TAG
 # to the primary tag for this build. Builds always publish a content-scoped tag
-# when the ci_base content hash is available. Builds with BUILDKITE_COMMIT also
-# publish a commit-scoped tag, either as the primary tag or an additional alias.
-# NIGHTLY=1 builds on the stable branch can additionally set
-# CI_BASE_IMAGE_TAG_STABLE to refresh rocm/vllm-dev:ci_base.
+# when the ci_base content hash is available. Buildkite builds also publish
+# commit- and build-scoped discovery aliases when those identifiers are present.
+# Long builds never publish the mutable stable alias. The serialized promotion
+# step is the only writer of rocm/vllm-dev:ci_base.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
@@ -357,6 +357,10 @@ variable "CI_BASE_IMAGE_TAG" {
 # Supplemental tags only. ci-bake-rocm.sh leaves these empty when the same ref
 # is already the primary CI_BASE_IMAGE_TAG.
 variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
+  default = ""
+}
+
+variable "CI_BASE_IMAGE_TAG_BUILD_EXTRA" {
   default = ""
 }
 
@@ -405,7 +409,7 @@ target "deepep-rocm-ci" {
 # Uses inline cache metadata on the ci_base image itself instead of exporting a
 # separate registry cache artifact.
 target "ci-base-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
+  inherits   = ["_common-rocm", "_ci-rocm", "_labels-common"]
   target     = "ci_base"
   cache-from = concat(
     compact([
@@ -418,7 +422,12 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA, CI_BASE_IMAGE_TAG_STABLE])
+  tags     = compact([
+    CI_BASE_IMAGE_TAG,
+    CI_BASE_IMAGE_TAG_COMMIT_EXTRA,
+    CI_BASE_IMAGE_TAG_BUILD_EXTRA,
+    CI_BASE_IMAGE_TAG_STABLE,
+  ])
   output   = ["type=registry"]
 }
 

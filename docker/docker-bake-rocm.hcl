@@ -85,13 +85,19 @@ target "_common-rocm" {
   }
 }
 
-target "_labels" {
+target "_labels-common" {
   labels = {
     "org.opencontainers.image.source"      = "https://github.com/vllm-project/vllm"
     "org.opencontainers.image.vendor"      = "vLLM"
     "org.opencontainers.image.title"       = "vLLM ROCm"
     "org.opencontainers.image.description" = "vLLM: A high-throughput and memory-efficient inference and serving engine for LLMs (ROCm)"
     "org.opencontainers.image.licenses"    = "Apache-2.0"
+  }
+}
+
+target "_labels" {
+  inherits = ["_labels-common"]
+  labels = {
     "org.opencontainers.image.revision"    = COMMIT
   }
   annotations = [
@@ -110,7 +116,7 @@ target "test-rocm" {
 # torchcodec, requirements, etc.). Used by the weekly scheduled build and
 # the auto-rebuild trigger when requirements change in a PR.
 target "ci-base-rocm" {
-  inherits = ["_common-rocm", "_labels"]
+  inherits = ["_common-rocm", "_labels-common"]
   target   = "ci_base"
   labels   = {
     "vllm.ci_base.content_hash" = CI_BASE_CONTENT_HASH

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the ROCm ci_base image, optionally from a freshly rebuilt ROCm base.
+# Build the ROCm ci_base image from the immutable base selected earlier in the
+# pipeline. Stable aliases are written only by the serialized promotion step.
 
 set -euo pipefail
 
@@ -10,23 +11,31 @@ metadata_get() {
     fi
 }
 
+is_digest_pinned_image() {
+    local image_ref="${1:-}"
+    [[ "${image_ref}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+}
+
 main() {
-    local base_refreshed=""
+    local base_image=""
 
-    base_refreshed="$(metadata_get rocm-base-refresh)"
-    if [[ "${base_refreshed}" == "1" ]]; then
-        export BASE_IMAGE
-        export CI_BASE_PUSH_STABLE_TAG
-
-        BASE_IMAGE="$(metadata_get rocm-base-image)"
-        CI_BASE_PUSH_STABLE_TAG="$(metadata_get rocm-base-push-stable-tag)"
-        CI_BASE_PUSH_STABLE_TAG="${CI_BASE_PUSH_STABLE_TAG:-0}"
-
-        echo "Using refreshed ROCm base image for ci_base: ${BASE_IMAGE}"
-        echo "Push stable ci_base tag: ${CI_BASE_PUSH_STABLE_TAG}"
+    base_image="$(metadata_get rocm-base-image)"
+    if is_digest_pinned_image "${base_image}"; then
+        export BASE_IMAGE="${base_image}"
+        echo "Using selected ROCm base image for ci_base: ${BASE_IMAGE}"
+    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
+        echo "Required ROCm base image handoff metadata is missing or invalid: ${base_image:-<empty>}" >&2
+        return 1
+    else
+        echo "No digest-pinned ROCm base image handoff found; using the local default"
     fi
 
+    # The long build publishes content and commit tags only. Mutable aliases
+    # are updated after freshness validation by promote-stable-images.sh.
+    export CI_BASE_PUSH_STABLE_TAG=0
     bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

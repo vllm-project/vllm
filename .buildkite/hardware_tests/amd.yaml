@@ -1,9 +1,10 @@
 group: Hardware - AMD Build
 
 # ROCm image flow:
-# 1. Refresh the long-lived ROCm base image only when Dockerfile.rocm_base changes.
-# 2. Build ci_base from either the stable base or the freshly refreshed base.
-# 3. Build the per-commit ROCm CI image and smoke-test it before GPU jobs run.
+# 1. Select or build an immutable, content-addressed ROCm base image.
+# 2. Select or build an immutable, content-addressed ci_base image.
+# 3. Build the per-commit ROCm CI image and smoke-test it.
+# 4. Serialize stable-tag promotion for smoke-tested candidates matching latest main.
 steps:
   - label: "AMD: :docker: refresh ROCm base"
     key: refresh-rocm-base-amd
@@ -73,6 +74,31 @@ steps:
       IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
       REMOTE_VLLM: "1"
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  # Stable aliases are the only mutable part of the image flow. Keep their
+  # updates in one global critical section, after the downstream image smoke
+  # test, and re-check latest-main content before changing either tag.
+  - label: "AMD: :docker: promote stable ROCm images"
+    key: promote-stable-rocm-images-amd
+    soft_fail: false
+    depends_on:
+      - image-build-amd
+    device: amd_cpu
+    no_plugin: true
+    if_condition: build.branch == pipeline.default_branch && build.pull_request.id == null
+    concurrency: 1
+    concurrency_group: "vllm/rocm/stable-image-promotion"
+    timeout_in_minutes: 30
+    commands:
+      - bash .buildkite/scripts/rocm/promote-stable-images.sh
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure

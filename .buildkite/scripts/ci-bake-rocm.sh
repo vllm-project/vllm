@@ -533,7 +533,15 @@ set_buildkite_metadata() {
 
     [[ -n "${value}" ]] || return 0
     if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent meta-data set "${key}" "${value}" || true
+        if ! buildkite-agent meta-data set "${key}" "${value}"; then
+            if [[ "${BUILDKITE:-false}" == "true" ]]; then
+                echo "Could not publish required Buildkite metadata: ${key}" >&2
+                return 1
+            fi
+        fi
+    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
+        echo "buildkite-agent not found; cannot publish ${key}" >&2
+        return 1
     fi
 }
 
@@ -643,9 +651,10 @@ try:
 
     labels = config_blob.get("config", {}).get("Labels", {})
     print(labels.get(label_key, ""))
-except Exception:
-    print("")
-' "${image_ref}" "${label_key}" 2>/dev/null || echo ""
+except Exception as error:
+    print(f"image metadata lookup failed: {error}", file=sys.stderr)
+    raise SystemExit(2)
+' "${image_ref}" "${label_key}"
 }
 
 get_remote_image_label_with_retry() {
@@ -654,11 +663,14 @@ get_remote_image_label_with_retry() {
     local attempts="${3:-6}"
     local delay_secs="${4:-5}"
     local label_value=""
+    local lookup_status=0
     local attempt
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
-        label_value=$(get_remote_image_label "${image_ref}" "${label_key}")
-        if [[ -n "${label_value}" ]]; then
+        lookup_status=0
+        label_value=$(get_remote_image_label \
+            "${image_ref}" "${label_key}") || lookup_status=$?
+        if ((lookup_status == 0)) && [[ -n "${label_value}" ]]; then
             printf '%s\n' "${label_value}"
             return 0
         fi
@@ -667,14 +679,19 @@ get_remote_image_label_with_retry() {
         fi
     done
 
-    return 0
+    if ((lookup_status != 0)); then
+        echo "Failed to inspect ${label_key} on ${image_ref}" >&2
+        return 2
+    fi
+    printf '%s\n' "${label_value}"
 }
 
 remote_ci_base_metadata_is_current() {
     local image_ref="$1"
     local metadata_version=""
 
-    metadata_version=$(get_remote_image_label "${image_ref}" "vllm.ci_base.metadata_version")
+    metadata_version=$(get_remote_image_label \
+        "${image_ref}" "vllm.ci_base.metadata_version") || return 2
     [[ "${metadata_version}" == "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}" ]]
 }
 
@@ -682,13 +699,43 @@ remote_ci_base_metadata_is_current_with_retry() {
     local image_ref="$1"
     local metadata_version=""
 
-    metadata_version=$(get_remote_image_label_with_retry "${image_ref}" "vllm.ci_base.metadata_version")
+    metadata_version=$(get_remote_image_label_with_retry \
+        "${image_ref}" "vllm.ci_base.metadata_version") || return 2
     [[ "${metadata_version}" == "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}" ]]
 }
 
 remote_image_exists() {
     local image_ref="$1"
-    docker manifest inspect "${image_ref}" >/dev/null 2>&1
+    local attempts="${ROCM_IMAGE_LOOKUP_ATTEMPTS:-4}"
+    local delay_secs="${ROCM_IMAGE_LOOKUP_RETRY_DELAY:-2}"
+    local output=""
+    local status=0
+    local attempt=0
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid image lookup retry configuration" >&2
+        return 2
+    fi
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        status=0
+        output=$(docker manifest inspect "${image_ref}" 2>&1) || status=$?
+        if ((status == 0)); then
+            return 0
+        fi
+        if grep -Eqi \
+            'manifest unknown|name unknown|no such manifest|(^|[^0-9])404([^0-9]|$)|(^|[[:space:]])[^[:space:]]+/[^[:space:]]+:[^[:space:]]+:[[:space:]]+not found([[:space:]]|$)' \
+            <<< "${output}"; then
+            return 1
+        fi
+        if ((attempt < attempts)); then
+            echo "Image lookup failed for ${image_ref} (${attempt}/${attempts}); retrying" >&2
+            sleep "${delay_secs}"
+        fi
+    done
+
+    printf 'Registry lookup failed for %s (status %d)\n%s\n' \
+        "${image_ref}" "${status}" "${output:-<no output>}" >&2
+    return 2
 }
 
 use_existing_builder() {
@@ -817,18 +864,8 @@ compute_ci_base_hash_if_needed() {
 }
 
 should_push_stable_ci_base_tag() {
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        return 1
-    fi
-
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "1" ]]; then
-        return 0
-    fi
-    if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "0" ]]; then
-        return 1
-    fi
-
-    [[ "${NIGHTLY:-0}" == "1" && "${BUILDKITE_BRANCH:-}" == "${CI_BASE_STABLE_BRANCH:-main}" ]]
+    # Mutable aliases are written only by the serialized promotion step.
+    return 1
 }
 
 ci_base_tag_with_suffix() {
@@ -842,6 +879,7 @@ configure_ci_base_image_refs() {
     local stable_tag="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
     local content_tag=""
     local commit_tag=""
+    local build_tag=""
 
     CI_BASE_STABLE_CACHE_REF="${CI_BASE_STABLE_CACHE_REF:-${stable_tag}}"
     export CI_BASE_STABLE_CACHE_REF
@@ -861,7 +899,11 @@ configure_ci_base_image_refs() {
     if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
         commit_tag=$(ci_base_tag_with_suffix "${stable_tag}" "${BUILDKITE_COMMIT}")
     fi
+    if [[ -n "${BUILDKITE_BUILD_ID:-}" ]]; then
+        build_tag=$(ci_base_tag_with_suffix "${stable_tag}" "build-${BUILDKITE_BUILD_ID}")
+    fi
     CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
+    CI_BASE_IMAGE_TAG_BUILD_REF="${build_tag}"
 
     # The content tag is canonical. Commit and stable tags are discovery aliases.
     if should_push_stable_ci_base_tag; then
@@ -875,10 +917,17 @@ configure_ci_base_image_refs() {
     else
         CI_BASE_IMAGE_TAG_COMMIT_EXTRA=""
     fi
+    if [[ -n "${build_tag}" && "${build_tag}" != "${content_tag}" ]]; then
+        CI_BASE_IMAGE_TAG_BUILD_EXTRA="${build_tag}"
+    else
+        CI_BASE_IMAGE_TAG_BUILD_EXTRA=""
+    fi
     export CI_BASE_IMAGE_TAG
     export CI_BASE_IMAGE_TAG_COMMIT_EXTRA
+    export CI_BASE_IMAGE_TAG_BUILD_EXTRA
     export CI_BASE_IMAGE_TAG_CONTENT_REF
     export CI_BASE_IMAGE_TAG_COMMIT_REF
+    export CI_BASE_IMAGE_TAG_BUILD_REF
     export CI_BASE_IMAGE_TAG_STABLE
 
     if is_ci_base_target; then
@@ -891,16 +940,20 @@ configure_ci_base_image_refs() {
         if [[ -n "${commit_tag}" ]]; then
             echo "ci_base commit image tag: ${commit_tag}"
         fi
+        if [[ -n "${build_tag}" ]]; then
+            echo "ci_base build image tag: ${build_tag}"
+        fi
         echo "ci_base content image tag: ${content_tag}"
         echo "ci_base stable cache source: ${CI_BASE_STABLE_CACHE_REF}"
         if [[ -n "${CI_BASE_IMAGE_TAG_STABLE}" ]]; then
             echo "ci_base stable alias will also be pushed: ${CI_BASE_IMAGE_TAG_STABLE}"
         else
             echo "ci_base stable alias will not be pushed for this build"
-            echo "Set NIGHTLY=1 on ${CI_BASE_STABLE_BRANCH:-main} to refresh ${stable_tag}"
+            echo "The serialized promotion step owns ${stable_tag}"
         fi
         set_buildkite_metadata "rocm-ci-base-image-content" "${content_tag}"
         set_buildkite_metadata "rocm-ci-base-image-commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-}"
+        set_buildkite_metadata "rocm-ci-base-image-build" "${CI_BASE_IMAGE_TAG_BUILD_REF:-}"
         set_buildkite_metadata "rocm-ci-base-image-stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
         return 0
     fi
@@ -915,7 +968,7 @@ configure_ci_base_image_refs() {
 }
 
 publish_ci_base_handoff_ref() {
-    local source_ref="${1:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}"
+    local source_ref="${1:-${CI_BASE_IMAGE_TAG_BUILD_REF:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}}"
     local content_ref="${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
     local digest=""
     local handoff_ref=""
@@ -950,6 +1003,7 @@ publish_ci_base_handoff_ref() {
 
 ci_base_output_refs() {
     printf '%s\n' \
+        "${CI_BASE_IMAGE_TAG_BUILD_EXTRA:-}" \
         "${IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}" \
@@ -968,24 +1022,43 @@ find_matching_ci_base_ref() {
     local candidate=""
     local candidate_digest=""
     local candidate_hash=""
+    local exists_status=0
     local immutable_candidate=""
+    local metadata_status=0
 
     while IFS= read -r candidate; do
         [[ -n "${candidate}" ]] || continue
-        remote_image_exists "${candidate}" || continue
+        exists_status=0
+        remote_image_exists "${candidate}" || exists_status=$?
+        case "${exists_status}" in
+            0) ;;
+            1) continue ;;
+            *) return 2 ;;
+        esac
         if ! candidate_digest=$(resolve_image_digest "${candidate}"); then
             echo "Could not pin ci_base candidate: ${candidate}" >&2
-            continue
+            return 2
         fi
         immutable_candidate="${candidate%@*}@${candidate_digest}"
-        candidate_hash=$(get_remote_image_label "${immutable_candidate}" "vllm.ci_base.content_hash")
+        if ! candidate_hash=$(get_remote_image_label_with_retry \
+            "${immutable_candidate}" "vllm.ci_base.content_hash"); then
+            return 2
+        fi
         if [[ "${candidate_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
-            if ! remote_ci_base_metadata_is_current "${immutable_candidate}"; then
-                echo "Found matching ci_base content hash but stale metadata: ${immutable_candidate}" >&2
-                continue
-            fi
-            printf '%s\n' "${immutable_candidate}"
-            return 0
+            metadata_status=0
+            remote_ci_base_metadata_is_current_with_retry "${immutable_candidate}" \
+                || metadata_status=$?
+            case "${metadata_status}" in
+                0)
+                    printf '%s\n' "${immutable_candidate}"
+                    return 0
+                    ;;
+                1)
+                    echo "Found matching ci_base content hash but stale metadata: ${immutable_candidate}" >&2
+                    continue
+                    ;;
+                *) return 2 ;;
+            esac
         fi
     done < <(ci_base_candidate_refs)
 
@@ -995,47 +1068,87 @@ find_matching_ci_base_ref() {
 refresh_ci_base_tags_from_ref() {
     local source_ref="$1"
     local tag=""
+    local tag_digest=""
+    local tag_exists_status=0
     local tag_hash=""
+    local tag_metadata_status=0
+    local immutable_tag=""
 
     while IFS= read -r tag; do
         [[ -n "${tag}" ]] || continue
         [[ "${tag}" != "${source_ref}" ]] || continue
-        tag_hash=$(get_remote_image_label "${tag}" "vllm.ci_base.content_hash")
-        if [[ "${tag_hash}" == "${CI_BASE_CONTENT_HASH}" ]] \
-            && remote_ci_base_metadata_is_current "${tag}"; then
-            echo "ci_base tag is already current: ${tag}"
-            continue
+        tag_exists_status=0
+        remote_image_exists "${tag}" || tag_exists_status=$?
+        case "${tag_exists_status}" in
+            0)
+                if ! tag_digest=$(resolve_image_digest "${tag}"); then
+                    echo "Could not pin existing ci_base tag: ${tag}" >&2
+                    return 2
+                fi
+                immutable_tag="${tag%@*}@${tag_digest}"
+                if ! tag_hash=$(get_remote_image_label_with_retry \
+                    "${immutable_tag}" "vllm.ci_base.content_hash"); then
+                    return 2
+                fi
+                if [[ "${tag_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
+                    tag_metadata_status=0
+                    remote_ci_base_metadata_is_current_with_retry "${immutable_tag}" \
+                        || tag_metadata_status=$?
+                    case "${tag_metadata_status}" in
+                        0)
+                            echo "ci_base tag is already current: ${tag}"
+                            continue
+                            ;;
+                        1) ;;
+                        *) return 2 ;;
+                    esac
+                fi
+                ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+        if [[ "${tag}" == "${source_ref%@*}" ]]; then
+            echo "ci_base source tag requires refresh: ${tag}" >&2
         fi
         echo "Updating ci_base tag ${tag} -> ${source_ref}"
         if ! docker buildx imagetools create -t "${tag}" "${source_ref}"; then
             echo "Failed to update ci_base tag ${tag} from ${source_ref}" >&2
-            return 1
+            return 2
         fi
     done < <(ci_base_output_refs)
 }
 
 maybe_reuse_matching_ci_base_ref() {
     local matching_ref=""
+    local match_status=0
 
-    matching_ref=$(find_matching_ci_base_ref || true)
-    [[ -n "${matching_ref}" ]] || return 1
+    matching_ref=$(find_matching_ci_base_ref) || match_status=$?
+    case "${match_status}" in
+        0) ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+    [[ -n "${matching_ref}" ]] || return 2
 
     echo "Found existing ci_base image with matching content hash: ${matching_ref}"
     if ! refresh_ci_base_tags_from_ref "${matching_ref}"; then
-        echo "ci_base tag refresh failed; rebuilding to push expected tags"
-        return 1
+        echo "ci_base tag refresh failed; refusing to treat the lookup as a cache miss" >&2
+        return 2
     fi
     if ! publish_ci_base_handoff_ref "${matching_ref}"; then
-        echo "ci_base handoff validation failed; rebuilding to push expected tags"
-        return 1
+        echo "ci_base handoff validation failed; refusing to rebuild over an operational error" >&2
+        return 2
     fi
+    set_buildkite_metadata "rocm-ci-base-build-required" "0" || return 2
     echo "Content hashes match -- ci_base is current"
     echo "Skipping build"
     exit 0
 }
 
 maybe_skip_existing_image() {
+    local image_lookup_status=0
     local remote_revision=""
+    local reuse_status=0
 
     if [[ -z "${IMAGE_TAG:-}" ]]; then
         return 0
@@ -1049,9 +1162,18 @@ maybe_skip_existing_image() {
     echo "--- :mag: Checking image tag"
     echo "Image tag: ${IMAGE_TAG}"
 
-    if ! remote_image_exists "${IMAGE_TAG}"; then
+    remote_image_exists "${IMAGE_TAG}" || image_lookup_status=$?
+    if ((image_lookup_status != 0)); then
+        if ((image_lookup_status != 1)); then
+            echo "Could not determine whether ${IMAGE_TAG} exists" >&2
+            return 2
+        fi
         if is_ci_base_target && [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
-            maybe_reuse_matching_ci_base_ref || true
+            reuse_status=0
+            maybe_reuse_matching_ci_base_ref || reuse_status=$?
+            if ((reuse_status == 2)); then
+                return 2
+            fi
         fi
         echo "Image not found, proceeding with build"
         return 0
@@ -1066,14 +1188,21 @@ maybe_skip_existing_image() {
             exit 0
         fi
 
-        maybe_reuse_matching_ci_base_ref || true
+        reuse_status=0
+        maybe_reuse_matching_ci_base_ref || reuse_status=$?
+        if ((reuse_status == 2)); then
+            return 2
+        fi
         echo "No current ci_base image matched the expected content hash"
         echo "Proceeding with build"
         return 0
     fi
 
     if is_commit_image_target; then
-        remote_revision=$(get_remote_image_label "${IMAGE_TAG}" "org.opencontainers.image.revision")
+        if ! remote_revision=$(get_remote_image_label_with_retry \
+            "${IMAGE_TAG}" "org.opencontainers.image.revision"); then
+            return 2
+        fi
         if [[ -n "${remote_revision}" && "${remote_revision}" != "${BUILDKITE_COMMIT}" ]]; then
             echo "Existing image revision does not match ${BUILDKITE_COMMIT}"
             echo "  found revision: ${remote_revision}"
@@ -1248,7 +1377,6 @@ ci_base_metadata_pairs() {
     local content_files_hash=""
     local base_image=""
     local base_image_digest=""
-    local git_branch=""
     local -a content_paths=()
     local -a content_args=()
 
@@ -1270,8 +1398,6 @@ ci_base_metadata_pairs() {
             return 1
         fi
     fi
-    git_branch="${BUILDKITE_BRANCH:-${VLLM_BRANCH:-}}"
-
     metadata_pair "vllm.ci_base.metadata_version" "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
     metadata_pair "vllm.ci_base.content_hash" "${CI_BASE_CONTENT_HASH:-}"
     metadata_pair "vllm.ci_base.content_files_hash" "${content_files_hash}"
@@ -1281,12 +1407,7 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
     metadata_pair "vllm.ci_base.image.primary" "${CI_BASE_IMAGE_TAG:-}"
     metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
-    metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}}"
     metadata_pair "vllm.ci_base.image.stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
-    metadata_pair "vllm.ci_base.git_commit" "${BUILDKITE_COMMIT:-}"
-    metadata_pair "vllm.ci_base.git_branch" "${git_branch}"
-    metadata_pair "vllm.ci_base.vllm_branch" "${VLLM_BRANCH:-}"
-    metadata_pair "vllm.ci_base.stable_branch" "${CI_BASE_STABLE_BRANCH:-main}"
 
     metadata_pair "vllm.rocm.base_image" "${base_image}"
     metadata_pair "vllm.rocm.base_image_digest" "${base_image_digest}"
@@ -1308,8 +1429,6 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
 
-    metadata_pair "vllm.buildkite.build_number" "${BUILDKITE_BUILD_NUMBER:-}"
-    metadata_pair "vllm.buildkite.build_id" "${BUILDKITE_BUILD_ID:-}"
 }
 
 write_ci_base_metadata_annotations() {
@@ -1367,13 +1486,11 @@ write_ci_base_label_override() {
         cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
 target "${target_name}" {
   annotations = [
-    "manifest:org.opencontainers.image.revision=",
 EOF
         write_ci_base_metadata_annotations "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
         cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
   ]
   labels = {
-    "org.opencontainers.image.revision" = ""
 EOF
         write_ci_base_metadata_labels "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
         cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
@@ -2061,7 +2178,10 @@ confirm_remote_image_push() {
             return 0
         fi
 
-        remote_hash=$(get_remote_image_label_with_retry "${image_ref}" "vllm.ci_base.content_hash")
+        if ! remote_hash=$(get_remote_image_label_with_retry \
+            "${image_ref}" "vllm.ci_base.content_hash"); then
+            return 1
+        fi
         if [[ -n "${remote_hash}" && "${remote_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
             if remote_ci_base_metadata_is_current_with_retry "${image_ref}"; then
                 return 0
@@ -2079,7 +2199,10 @@ confirm_remote_image_push() {
     fi
 
     if is_commit_image_target; then
-        remote_revision=$(get_remote_image_label_with_retry "${image_ref}" "org.opencontainers.image.revision")
+        if ! remote_revision=$(get_remote_image_label_with_retry \
+            "${image_ref}" "org.opencontainers.image.revision"); then
+            return 1
+        fi
         if [[ -n "${remote_revision}" && "${remote_revision}" == "${BUILDKITE_COMMIT}" ]]; then
             return 0
         fi
@@ -2154,6 +2277,7 @@ seed_dependency_caches_if_needed() {
 
 annotate_cache_export_warning() {
     local build_rc="$1"
+    local image_ref="${2:-${IMAGE_TAG:-}}"
 
     if ! command -v buildkite-agent >/dev/null 2>&1; then
         return 0
@@ -2164,7 +2288,7 @@ annotate_cache_export_warning() {
         --context "cache-export-warning" \
         "### :warning: Docker cache export failed (non-fatal)
 
-Image was pushed successfully: \`${IMAGE_TAG}\`
+Image was pushed successfully: \`${image_ref}\`
 
 The BuildKit build returned exit code ${build_rc}, but the expected image
 is present in the registry. Treating this as a registry cache export failure
@@ -2173,6 +2297,7 @@ so tests can continue with the pushed image." 2>/dev/null || true
 
 run_bake() {
     local build_rc=0
+    local confirmation_ref="${IMAGE_TAG:-}"
 
     echo "--- :docker: Building ${TARGET}"
     docker buildx bake \
@@ -2188,23 +2313,26 @@ run_bake() {
     echo ""
     echo "WARNING: docker buildx bake exited with code ${build_rc}"
 
-    if [[ -n "${IMAGE_TAG:-}" ]]; then
+    if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
+        confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
+    fi
+    if [[ -n "${confirmation_ref}" ]]; then
         echo "Checking if image was pushed successfully..."
-        if confirm_remote_image_push "${IMAGE_TAG}"; then
+        if confirm_remote_image_push "${confirmation_ref}"; then
             echo ""
             echo "WARNING: Build reported failure (rc=${build_rc}) but the"
-            echo "         image was pushed successfully: ${IMAGE_TAG}"
+            echo "         image was pushed successfully: ${confirmation_ref}"
             echo ""
             echo "         Treating this as a non-fatal registry cache export failure."
             echo "         The image is usable, but registry cache may be cold on the next build."
             echo ""
-            annotate_cache_export_warning "${build_rc}"
+            annotate_cache_export_warning "${build_rc}" "${confirmation_ref}"
             echo "--- :white_check_mark: Build complete"
             return 0
         fi
 
         echo ""
-        echo "ERROR: Build failed and image was NOT confirmed: ${IMAGE_TAG}"
+        echo "ERROR: Build failed and image was NOT confirmed: ${confirmation_ref}"
         echo "       This is a real build failure, not a cache export warning."
         echo ""
     fi
@@ -2282,7 +2410,12 @@ main() {
     init_bake_files
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
-    maybe_skip_existing_image
+    if ! maybe_skip_existing_image; then
+        # Internal lookup helpers use distinct statuses for miss vs operational
+        # failure. Expose a normal failure to Buildkite so the step retry policy
+        # covers an exhausted registry lookup.
+        return 1
+    fi
     setup_builder
     prepare_git_cache_metadata
     extract_dependency_pins
@@ -2302,6 +2435,9 @@ main() {
         # wheel-export is an output directory, not a BuildKit cache. Starting
         # clean prevents a failed/retried export from packaging a stale wheel.
         rm -rf ./wheel-export
+    fi
+    if is_ci_base_target; then
+        set_buildkite_metadata "rocm-ci-base-build-required" "1"
     fi
     seed_dependency_caches_if_needed
     run_bake
