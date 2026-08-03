@@ -852,9 +852,9 @@ class MambaSpecDecodeGPUContext:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
 
-        ``num_accepted_tokens_gpu`` is updated with the aid of a scratch tensor
-        (reset to 1 when the accepted position stays in the running block) to
-        avoid races in the `postprocess_mamba_fused_kernel`.
+        ``num_accepted_tokens_gpu`` is updated in place while the kernel reads
+        from a snapshot to avoid cross-program races when the accepted position
+        stays in the running block and the count is reset to 1.
         ``new_num_computed_tokens`` already holds the post-step computed count
         (PRECOMPUTED_NEW_COMPUTED).
         ``idx_mapping`` maps batch row -> req-state slot (HAS_IDX_MAPPING).
@@ -862,15 +862,15 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
 
-        # Seed the whole scratch tensor: the kernel writes at idx_mapping
-        # positions which are not contiguous in [0:num_reqs] under V2.
-        self.num_accepted_tokens_out.copy_(num_accepted_tokens_gpu)
+        # V2 reads non-contiguous idx_mapping positions, so snapshot the whole
+        # decision buffer rather than only [:num_reqs].
+        num_accepted_tokens_snapshot = self.num_accepted_tokens_out
+        num_accepted_tokens_snapshot.copy_(num_accepted_tokens_gpu)
 
         total_states = self.num_layers * self.num_state_types
         grid = (num_reqs, total_states)
-
         postprocess_mamba_fused_kernel[grid](
-            num_accepted_tokens_gpu,
+            num_accepted_tokens_snapshot,
             state_idx_gpu,
             None,  # num_scheduled: unused under PRECOMPUTED_NEW_COMPUTED
             new_num_computed_tokens_gpu,
@@ -885,7 +885,7 @@ class MambaSpecDecodeGPUContext:
             self.state_group_indices,
             self.state_dim_row_count,
             self.state_dim_row_stride,
-            self.num_accepted_tokens_out,
+            num_accepted_tokens_gpu,
             idx_mapping,
             num_reqs,
             block_size=self.block_size,
@@ -894,8 +894,6 @@ class MambaSpecDecodeGPUContext:
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
         )
-
-        num_accepted_tokens_gpu.copy_(self.num_accepted_tokens_out)
 
 
 @dataclasses.dataclass
