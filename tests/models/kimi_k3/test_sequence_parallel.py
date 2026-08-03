@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,9 +10,9 @@ import torch
 from torch import nn
 
 from vllm.config import ParallelConfig
+from vllm.models.common.ops import sequence_parallel as sp_ops
 from vllm.models.kimi_k3.nvidia import model as kimi_model
 from vllm.models.kimi_k3.nvidia import mtp as kimi_mtp
-from vllm.models.kimi_k3.nvidia.ops import sequence_parallel as sp_ops
 from vllm.platforms import current_platform
 
 
@@ -314,6 +315,23 @@ def test_sp_reduce_scatter_uses_custom_kernel_after_padding(monkeypatch):
     torch.testing.assert_close(padded[:3], hidden_states)
     torch.testing.assert_close(padded[3], torch.zeros(2))
     fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("shape", [(3,), (3, 2, 2)])
+def test_sp_shard_pads_only_the_token_axis(monkeypatch, shape):
+    hidden_states = torch.arange(math.prod(shape), dtype=torch.float32).view(shape)
+    monkeypatch.setattr(
+        sp_ops,
+        "get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_rank", lambda: 1)
+
+    output = sp_ops.sp_shard(hidden_states)
+
+    padding = hidden_states.new_zeros((1, *shape[1:]))
+    expected = torch.cat([hidden_states, padding])[2:]
+    torch.testing.assert_close(output, expected)
 
 
 def test_sp_collectives_fall_back_without_custom_kernel(monkeypatch):
