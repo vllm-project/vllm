@@ -5,10 +5,8 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
-import huggingface_hub
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -48,7 +46,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
-from vllm.transformers_utils.repo_utils import hf_api
+from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -76,41 +74,6 @@ else:
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
-
-
-def _resolve_hf_revision(
-    repo_id: str,
-    revision: str | None,
-    token: bool | str | None,
-) -> str | None:
-    """Best-effort attempt to resolve HF revision to a commit hash.
-
-    Resolving commit hash once prevent multiple HTTP calls downstream
-    while avoid concurrency issues while loading models.
-
-    `resolve_revision` returns a `ResolvedRevision`: a `str` equal to the
-    requested revision that also carries the commit hash, so downstream error
-    messages stay readable and offline loads reuse the cached `refs/` entry.
-    """
-    if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
-        return revision
-
-    try:
-        return hf_api().resolve_revision(
-            repo_id,
-            revision=revision,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-            token=token,
-        )
-    except Exception:
-        logger.debug(
-            "Failed to resolve revision for %s; falling back to %s.",
-            repo_id,
-            revision,
-            exc_info=True,
-        )
-        return revision
-
 
 # Process-local record of which (arch, target) model-class overrides have been
 # registered in *this* process. Must not live on ModelConfig: that instance is
@@ -596,7 +559,7 @@ class ModelConfig:
             self.hf_config_path is None or self.hf_config_path == self.model
         )
         if can_resolve_model_revision:
-            self.revision = _resolve_hf_revision(
+            self.revision = resolve_revision(
                 self.model,
                 self.revision,
                 self.hf_token,
@@ -609,7 +572,7 @@ class ModelConfig:
         ):
             self.tokenizer_revision = self.revision
         else:
-            self.tokenizer_revision = _resolve_hf_revision(
+            self.tokenizer_revision = resolve_revision(
                 self.tokenizer,
                 self.tokenizer_revision,
                 self.hf_token,
