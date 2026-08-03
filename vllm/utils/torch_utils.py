@@ -782,22 +782,7 @@ def get_accelerator_view_from_cpu_tensor(
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
-        view = torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
-        if require_live_view and cpu_tensor.numel() > 0:
-            # Verify the view is a live alias by checking that a CPU-side write
-            # is visible through the device view (single-element probe).
-            sentinel = int(cpu_tensor.flatten()[0].item()) ^ 0x5A5A
-            cpu_tensor.flatten()[0] = sentinel
-            if int(view.flatten()[0].item()) != sentinel:
-                raise RuntimeError(
-                    "get_accelerator_view_from_cpu_tensor returned a "
-                    "detached copy instead of a live zero-copy alias.  "
-                    "This indicates the host memory is not properly "
-                    "registered for UVA.  Under GPU Confidential "
-                    "Computing this may require a driver update."
-                )
-            cpu_tensor.flatten()[0] = sentinel ^ 0x5A5A  # restore
-        return view
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor, require_live_view)
     else:
         raise ValueError(
             f"`get_accelerator_view_from_cpu_tensor` is currently "

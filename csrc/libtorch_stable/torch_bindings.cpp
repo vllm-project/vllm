@@ -29,7 +29,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "()");
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+  ops.def(
+      "get_cuda_view_from_cpu_tensor(Tensor cpu_tensor, bool "
+      "require_live_view=False) -> Tensor");
 
 #ifndef USE_ROCM
 

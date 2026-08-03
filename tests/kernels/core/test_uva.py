@@ -80,3 +80,47 @@ def test_write_after_map_coherence(device):
     assert torch.equal(readback, pattern), (
         f"UVA coherence broken: expected {pattern.tolist()}, got {readback.tolist()}"
     )
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_require_live_view_raises_on_unregistered_memory(device):
+    """When require_live_view=True is passed and the CPU tensor is not pinned
+    (i.e. the host memory is not registered for zero-copy), the C++ op should
+    raise before entering the detached alloc+copy fallback."""
+    torch.set_default_device(device)
+    cpu_tensor = torch.zeros(8, dtype=torch.int32, device="cpu")
+    assert not cpu_tensor.is_pinned()
+
+    with pytest.raises(RuntimeError, match="require_live_view"):
+        get_accelerator_view_from_cpu_tensor(cpu_tensor, require_live_view=True)
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_require_live_view_succeeds_on_pinned_memory(device):
+    """When require_live_view=True is passed and the CPU tensor IS pinned,
+    the call should succeed and return a live alias."""
+    torch.set_default_device(device)
+    cpu_tensor = torch.zeros(8, dtype=torch.int32, device="cpu", pin_memory=True)
+
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor, require_live_view=True)
+    assert gpu_view.device.type == "cuda"
+
+    cpu_tensor[0] = 42
+    assert int(gpu_view[0].item()) == 42
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_detached_fallback_without_require_live_view(device):
+    """Without require_live_view, an unregistered tensor should still produce
+    a valid (detached) CUDA tensor via the alloc+copy path."""
+    torch.set_default_device(device)
+    cpu_tensor = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device="cpu")
+    assert not cpu_tensor.is_pinned()
+
+    cuda_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    assert cuda_view.device.type == "cuda"
+    expected = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device="cpu")
+    assert torch.equal(cuda_view.cpu(), expected)
