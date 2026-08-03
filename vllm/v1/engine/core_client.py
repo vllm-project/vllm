@@ -1775,7 +1775,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine_identities.discard(identity)
             self._apply_ready_response(payload)
 
-    def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
         from vllm.distributed.utils import create_tcp_store
         from vllm.utils.network_utils import get_open_ports_list
 
@@ -1795,6 +1795,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         parallel_config._coord_store_port = store.port
         self._coord_store = store
+        return ip, store.port
 
     def _make_reconfig_request(
         self,
