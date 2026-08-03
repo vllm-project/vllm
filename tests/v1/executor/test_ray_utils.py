@@ -8,7 +8,6 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
 )
 
 
@@ -63,10 +62,7 @@ def test_detach_zero_copy_routed_experts_without_logprobs():
     output = ModelRunnerOutput(
         req_ids=["req-0"],
         req_id_to_index={"req-0": 0},
-        routed_experts=RoutedExpertsLists(
-            routing_data=_make_readonly(np.arange(12, dtype=np.int32).reshape(2, 3, 2)),
-            slot_mapping=_make_readonly(np.array([7, 8], dtype=np.int64)),
-        ),
+        routed_experts=_make_readonly(np.arange(12, dtype=np.int32).reshape(2, 3, 2)),
     )
     original = output.routed_experts
     assert output.logprobs is None
@@ -76,9 +72,5 @@ def test_detach_zero_copy_routed_experts_without_logprobs():
     detached = output.routed_experts
     assert detached is not None
     assert detached is not original
-    assert detached.routing_data is not original.routing_data
-    assert detached.slot_mapping is not original.slot_mapping
-    assert detached.routing_data.flags.writeable
-    assert detached.slot_mapping.flags.writeable
-    np.testing.assert_array_equal(detached.routing_data, original.routing_data)
-    np.testing.assert_array_equal(detached.slot_mapping, original.slot_mapping)
+    assert detached.flags.writeable
+    np.testing.assert_array_equal(detached, original)

@@ -11,7 +11,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -25,7 +24,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool = False,
-        routed_experts: RoutedExpertsTensors | None = None,
+        routed_experts: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -52,7 +51,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
             self._routed_experts_cpu = (
-                routed_experts.to_cpu_nonblocking()
+                routed_experts.to("cpu", non_blocking=True)
                 if routed_experts is not None
                 else None
             )
@@ -87,7 +86,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         if self._routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self._routed_experts_cpu.tolists()
+            self.model_runner_output.routed_experts = self._routed_experts_cpu.numpy()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

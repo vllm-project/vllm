@@ -34,6 +34,7 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (
+    ArtifactConfig,
     AttentionConfig,
     CacheConfig,
     CompilationConfig,
@@ -423,7 +424,9 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
-    enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    # Public compatibility argument. Canonical runtime state lives in
+    # ArtifactConfig.
+    enable_return_routed_experts: bool = False
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -631,6 +634,7 @@ class EngineArgs:
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
     )
+    artifact_config: ArtifactConfig = get_field(VllmConfig, "artifact_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
@@ -759,6 +763,10 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.artifact_config, dict):
+            self.artifact_config = ArtifactConfig(**self.artifact_config)
+        if self.enable_return_routed_experts:
+            self.artifact_config.enable_return_routed_experts = True
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -824,6 +832,7 @@ class EngineArgs:
 
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
+        artifact_kwargs = get_kwargs(ArtifactConfig)
         model_group = parser.add_argument_group(
             title="ModelConfig",
             description=ModelConfig.__doc__,
@@ -863,7 +872,7 @@ class EngineArgs:
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument(
             "--enable-return-routed-experts",
-            **model_kwargs["enable_return_routed_experts"],
+            **artifact_kwargs["enable_return_routed_experts"],
         )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
@@ -1604,6 +1613,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
+        vllm_group.add_argument("--artifact-config", **vllm_kwargs["artifact_config"])
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
@@ -1703,7 +1713,6 @@ class EngineArgs:
             quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
-            enable_return_routed_experts=self.enable_return_routed_experts,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
@@ -2463,6 +2472,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            artifact_config=self.artifact_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,

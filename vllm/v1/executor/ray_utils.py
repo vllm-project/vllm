@@ -238,13 +238,7 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
             )
 
     if output.routed_experts is not None:
-        routing_data, slot_mapping = output.routed_experts
-        routing_data_c = _copy_if_readonly(routing_data)
-        slot_mapping_c = _copy_if_readonly(slot_mapping)
-        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
-            output.routed_experts = type(output.routed_experts)(
-                routing_data_c, slot_mapping_c
-            )
+        output.routed_experts = _copy_if_readonly(output.routed_experts)
 
 
 class FutureWrapper(Future):

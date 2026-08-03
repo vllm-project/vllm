@@ -664,7 +664,10 @@ class Worker(WorkerBase):
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-        if self.model_config.enable_return_routed_experts:
+        if (
+            self.is_driver_worker
+            and self.vllm_config.artifact_config.enable_return_routed_experts
+        ):
             self.model_runner.init_routed_experts_capturer()
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping

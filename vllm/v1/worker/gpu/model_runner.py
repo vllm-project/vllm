@@ -42,7 +42,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
-    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -63,7 +62,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -295,14 +293,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.req_states.max_model_len = max_model_len
 
     def init_routed_experts_capturer(self) -> None:
-        """Initialize target-model capture on every participating worker."""
+        """Initialize target-model capture on the output worker."""
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
         )
         bind_routed_experts_capturer(self.model, capturer)
         self.routed_experts_capturer = capturer
-        self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1459,15 +1456,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         routed_experts = None
         if self.routed_experts_capturer is not None and not dummy_run:
-            assert slot_mappings is not None
-            routed_experts = RoutedExpertsTensors(
-                routing_data=self.routed_experts_capturer.get_device_buffer()[
-                    :num_toks
-                ].clone(),
-                slot_mapping=slot_mappings[
-                    self.routed_experts_attn_gid, :num_toks
-                ].clone(),
-            )
+            routed_experts = self.routed_experts_capturer.device_buffer[
+                :num_toks
+            ].clone()
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
@@ -1747,7 +1738,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
-    routed_experts: RoutedExpertsTensors | None
+    routed_experts: torch.Tensor | None
 
 
 def sort_batch_req_ids(

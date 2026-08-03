@@ -1224,6 +1224,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.artifact_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1240,10 +1241,12 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.artifact_connector.advance_kv_cache_generation.assert_not_called()
 
     # Reset prefix cache with reset_running_requests=True. All running requests
     # Should be pushed back to the waiting queue and kv cache should be freed
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.artifact_connector.advance_kv_cache_generation.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -3246,10 +3249,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler.artifact_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
