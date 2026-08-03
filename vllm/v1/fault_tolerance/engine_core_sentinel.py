@@ -257,12 +257,7 @@ class EngineCoreSentinel:
         surviving = [r for r in range(old_dp_size) if r not in removed_set]
         new_dp_rank = surviving.index(old_dp_rank)
 
-        parallel_config.data_parallel_size = new_dp_size
-        parallel_config.data_parallel_rank = new_dp_rank
-        engine.dp_rank = new_dp_rank
-        engine.dp_size = new_dp_size
-        self.engine_index = new_dp_rank
-
+        master_ip = parallel_config.data_parallel_master_ip
         # Rank 0 hosts the TCPStore master; rebuild if it was removed.
         if 0 in removed_set:
             dp_store_port = ft_request.params.get("dp_store_port")
@@ -271,10 +266,8 @@ class EngineCoreSentinel:
                 raise ValueError(
                     "dp_store_port and dp_master_ip required when rank 0 is removed"
                 )
-            parallel_config.data_parallel_master_ip = new_master_ip
-            self._rebuild_dp_store(
-                new_master_ip, dp_store_port, new_dp_rank, new_dp_size
-            )
+            master_ip = new_master_ip
+            self._rebuild_dp_store(master_ip, dp_store_port, new_dp_rank, new_dp_size)
 
         ft_request.params.update(
             {
@@ -282,7 +275,12 @@ class EngineCoreSentinel:
                 "new_dp_rank": new_dp_rank,
             }
         )
-        result = self._reinit_dp_and_dispatch_command(ft_request)
+        result = self._reinit_dp_and_dispatch_command(
+            ft_request,
+            dp_size=new_dp_size,
+            dp_rank=new_dp_rank,
+            master_ip=master_ip,
+        )
         logger.info(
             "[FT] Engine %d scale_down complete: dp_size %d->%d, "
             "dp_rank %d->%d, removed %s",
@@ -296,12 +294,34 @@ class EngineCoreSentinel:
         return result
 
     def _reinit_dp_and_dispatch_command(
-        self, ft_request: FaultToleranceRequest
+        self,
+        ft_request: FaultToleranceRequest,
+        dp_size: int | None = None,
+        dp_rank: int | None = None,
+        master_ip: str | None = None,
     ) -> FaultToleranceResult:
-        """Reinit the DP group, dispatch the command to workers, mark healthy."""
+        """Reinit the DP group, commit the topology, dispatch to workers."""
         engine = self.engine
+        parallel_config = engine.vllm_config.parallel_config
+        if dp_size is None:
+            dp_size = parallel_config.data_parallel_size
+        if dp_rank is None:
+            dp_rank = parallel_config.data_parallel_rank
+        if master_ip is None:
+            master_ip = parallel_config.data_parallel_master_ip
+
         with set_current_vllm_config(engine.vllm_config):
-            ft_request.params.update(self._reinit_dp_group())
+            ft_request.params.update(self._reinit_dp_group(master_ip, dp_rank, dp_size))
+        ft_request.params["dp_master_ip"] = master_ip
+
+        # Commit the topology only after the group reinit succeeded, so a
+        # failed recovery leaves a consistent state that can be retried.
+        parallel_config.data_parallel_size = dp_size
+        parallel_config.data_parallel_rank = dp_rank
+        parallel_config.data_parallel_master_ip = master_ip
+        engine.dp_size = dp_size
+        engine.dp_rank = dp_rank
+
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
@@ -329,7 +349,7 @@ class EngineCoreSentinel:
             timeout=timedelta(seconds=self.engine_recovery_timeout_sec),
         )
 
-    def _reinit_dp_group(self) -> dict:
+    def _reinit_dp_group(self, master_ip: str, dp_rank: int, dp_size: int) -> dict:
         """Reinit the DP process group. Returns worker params."""
         engine = self.engine
         parallel_config = engine.vllm_config.parallel_config
@@ -337,7 +357,7 @@ class EngineCoreSentinel:
         engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
         enable_eplb = parallel_config.enable_eplb
 
-        if parallel_config.data_parallel_rank == 0:
+        if dp_rank == 0:
             worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
             engine_port = get_open_port()
             engine.dp_store.set(worker_key, json.dumps(worker_ports).encode())
@@ -348,29 +368,33 @@ class EngineCoreSentinel:
 
         result: dict[str, Any] = {"new_stateless_dp_group_ports": worker_ports}
         if enable_eplb:
-            result["new_ep_group_port"] = self._coordinate_port("ft_worker_ep_port")
-            result["new_eplb_group_port"] = self._coordinate_port("ft_worker_eplb_port")
+            result["new_ep_group_port"] = self._coordinate_port(
+                "ft_worker_ep_port", dp_rank
+            )
+            result["new_eplb_group_port"] = self._coordinate_port(
+                "ft_worker_eplb_port", dp_rank
+            )
         self._dp_reinit_epoch += 1
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
         engine.dp_group, engine.dp_store = (
             stateless_init_torch_distributed_process_group(
-                parallel_config.data_parallel_master_ip,
+                master_ip,
                 engine_port,
-                parallel_config.data_parallel_rank,
-                parallel_config.data_parallel_size,
+                dp_rank,
+                dp_size,
                 backend="gloo",
                 return_store=True,
             )
         )
         return result
 
-    def _coordinate_port(self, key_prefix: str) -> int:
+    def _coordinate_port(self, key_prefix: str, dp_rank: int) -> int:
         """Rank 0 picks a fresh port and publishes it via dp_store;
         other ranks block-read it."""
         key = f"{key_prefix}_{self._dp_reinit_epoch}"
         engine = self.engine
-        if engine.vllm_config.parallel_config.data_parallel_rank == 0:
+        if dp_rank == 0:
             port = get_open_port()
             engine.dp_store.set(key, str(port).encode())
         else:
