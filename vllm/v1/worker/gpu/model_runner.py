@@ -62,9 +62,6 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
-from vllm.v1.worker.ec_connector_model_runner_mixin import (
-    ECConnectorModelRunnerMixin,
-)
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -85,6 +82,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -131,7 +129,7 @@ from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 logger = init_logger(__name__)
 
 
-class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
+class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -146,7 +144,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
-        self.is_ec_producer_only = vllm_config.is_ec_producer_only
         self.is_encoder_only = vllm_config.is_encoder_only
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
@@ -206,6 +203,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
+        self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
         # Speculative decoding.
         self.speculator = None
@@ -1372,11 +1370,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
 
-                with self.maybe_get_ec_connector_output(
-                    scheduler_output,
-                    encoder_cache=self.encoder_cache.encoder_outputs,
-                    enabled=not self.is_encoder_decoder,
-                    save_new_caches=self.is_ec_producer_only,
+                with self.ec_connector.maybe_get_output(
+                    scheduler_output
                 ) as ec_connector_output:
                     inputs_embeds = self.model_state.get_mm_embeddings(
                         scheduled_encoder_inputs, input_batch, self.req_states
