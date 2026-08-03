@@ -50,8 +50,10 @@ def make_inputs(num_tokens: int, num_heads: int):
 
 
 def run(kwargs, *, cutedsl: bool):
-    # _can_use_fused_q_cutedsl gates the dispatch inside fused_q.
-    with patch.object(K, "_can_use_fused_q_cutedsl", lambda: cutedsl):
+    # is_fused_q_cutedsl_supported gates the dispatch inside fused_q.
+    from vllm.models.deepseek_v32.nvidia.ops import fused_q_cutedsl as C
+
+    with patch.object(C, "is_fused_q_cutedsl_supported", lambda *_, **__: cutedsl):
         K.fused_q(**kwargs)
 
 
