@@ -273,25 +273,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 num_prefills,
                 prefill_query_lens_cpu,
             )
-            workspace = self.topk_mask_workspace
-            masked_mha_workspace_fits = workspace is not None and (
-                _masked_mha_workspace_fits(
-                    batch_size=num_prefills,
-                    max_query_len=prefill_max_query_len,
-                    context_chunk_max_seq_lens=(
-                        None
-                        if chunked_context is None
-                        else chunked_context.max_seq_lens
-                    ),
-                    workspace_numel=workspace.numel(),
-                )
-            )
-            if workspace is not None and not masked_mha_workspace_fits:
-                logger.warning_once(
-                    "Sparse MLA top-k mask workspace (%d MiB) is too small for "
-                    "some prefill batches; those fall back to slower sparse MQA.",
-                    workspace.numel() * torch.int32.itemsize // (1024 * 1024),
-                )
             prefill = MLACommonPrefillMetadata(
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
@@ -305,8 +286,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
                 ),
-                topk_mask_workspace=workspace,
-                masked_mha_workspace_fits=masked_mha_workspace_fits,
+                topk_mask_workspace=self.topk_mask_workspace,
             )
             self._prefill_backend.prepare_metadata(prefill)
 
@@ -556,6 +536,30 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             v_head_dim=v_head_dim,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+    @staticmethod
+    def masked_mha_workspace_fits(prefill: MLACommonPrefillMetadata) -> bool:
+        """Whether this prefill batch's top-k masks fit the workspace."""
+        workspace = prefill.topk_mask_workspace
+        if workspace is None or prefill.query_lens_cpu is None:
+            return False
+        fits = _masked_mha_workspace_fits(
+            batch_size=len(prefill.query_lens_cpu),
+            max_query_len=prefill.max_query_len,
+            context_chunk_max_seq_lens=(
+                None
+                if prefill.chunked_context is None
+                else prefill.chunked_context.max_seq_lens
+            ),
+            workspace_numel=workspace.numel(),
+        )
+        if not fits:
+            logger.warning_once(
+                "Sparse MLA top-k mask workspace (%d MiB) is too small for some "
+                "prefill batches; those fall back to slower sparse MQA.",
+                workspace.numel() * torch.int32.itemsize // (1024 * 1024),
+            )
+        return fits
 
     @staticmethod
     def _slice_topk_per_req(
