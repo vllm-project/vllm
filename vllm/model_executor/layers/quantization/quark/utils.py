@@ -155,9 +155,6 @@ def parse_w4a16_int4_weight_config(
     return group_size, is_symmetric
 
 
-_AWQ_PACK_ORDER = (0, 4, 1, 5, 2, 6, 3, 7)
-
-
 def canonicalize_quark_packed_int4(
     packed_weight: torch.Tensor,
     *,
@@ -166,16 +163,20 @@ def canonicalize_quark_packed_int4(
     pack_factor: int = 8,
 ) -> torch.Tensor:
     """Convert Quark export nibble layout to AWQ checkpoint layout."""
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        _REVERSE_AWQ_PACK_ORDER,
+    )
+
     if pack_reorder:
         source_order = torch.tensor(
-            _AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
+            _REVERSE_AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
         )
     else:
         source_order = torch.arange(
             pack_factor, device=packed_weight.device, dtype=torch.int32
         )
     target_order = torch.tensor(
-        _AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
+        _REVERSE_AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
     )
     source_shifts = source_order * 4
     target_shifts = target_order * 4
