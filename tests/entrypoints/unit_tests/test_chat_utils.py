@@ -2772,6 +2772,115 @@ def test_postprocess_messages_null_arguments_string():
     assert tool_calls[0]["function"]["arguments"] == {}
 
 
+def test_postprocess_messages_list_arguments_string():
+    """arguments="[]" must be coerced to {} since downstream expects a dict."""
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "[]"},
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["arguments"] == {}
+
+
+def test_postprocess_messages_invalid_json_arguments():
+    """Non-JSON arguments string must raise VLLMValidationError (400)."""
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "do_thing", "arguments": "{invalid"},
+                }
+            ],
+        }
+    ]
+    with pytest.raises(VLLMValidationError, match="not valid JSON"):
+        _postprocess_messages(messages)
+
+
+def test_postprocess_messages_non_dict_parsed_arguments():
+    """arguments that parse to a non-dict JSON value (int, string, true)
+    must be coerced to {}."""
+    for args_str in ['"hello"', "42", "true"]:
+        messages: list[ConversationMessage] = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "fn", "arguments": args_str},
+                    }
+                ],
+            }
+        ]
+        _postprocess_messages(messages)
+        tool_calls = messages[0]["tool_calls"]
+        assert tool_calls is not None
+        assert tool_calls[0]["function"]["arguments"] == {}, (
+            f"arguments={args_str!r} should be coerced to {{}}"
+        )
+
+
+def test_postprocess_messages_dict_arguments_passthrough():
+    """arguments already a dict should be left unchanged."""
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "fn",
+                        "arguments": {"key": "value"},
+                    },
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    assert messages[0]["tool_calls"][0]["function"]["arguments"] == {"key": "value"}
+
+
+def test_postprocess_messages_valid_json_dict_string():
+    """arguments='{"a":1}' should be parsed into a dict."""
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "fn",
+                        "arguments": '{"a": 1}',
+                    },
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    assert messages[0]["tool_calls"][0]["function"]["arguments"] == {"a": 1}
+
+
 @pytest.mark.asyncio
 async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
     """Regression test: one failing media fetch must not abandon the other

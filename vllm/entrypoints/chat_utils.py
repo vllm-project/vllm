@@ -1942,11 +1942,20 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                         parameter="tool_calls",
                     )
 
-                # if arguments is None or empty string, set to {}
-                if content := function.get("arguments"):
-                    if not isinstance(content, (dict, list)):
-                        parsed = json.loads(content)
-                        function["arguments"] = parsed if parsed is not None else {}
+                # normalize arguments to a dict
+                arguments = function.get("arguments")
+                if isinstance(arguments, dict):
+                    pass
+                elif isinstance(arguments, str) and arguments:
+                    try:
+                        parsed = json.loads(arguments)
+                    except json.JSONDecodeError as e:
+                        raise VLLMValidationError(
+                            "assistant tool_calls function arguments is not "
+                            "valid JSON.",
+                            parameter="tool_calls",
+                        ) from e
+                    function["arguments"] = parsed if isinstance(parsed, dict) else {}
                 else:
                     function["arguments"] = {}
 
