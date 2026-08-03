@@ -35,6 +35,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    fp8_paged_mqa_logits_torch,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -323,6 +326,12 @@ def sparse_attn_indexer(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    from vllm.models.deepseek_v4.turing.indexer_fallback import (
+        supports_turing_indexer_fallback,
+    )
+
+    use_turing_fallback = supports_turing_indexer_fallback()
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -496,6 +505,26 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                     )
+                elif use_turing_fallback:
+                    # DeepGEMM's fp8 kernels are unimplemented below SM90.
+                    # The Turing fallback only supports the FP8 cache path
+                    # (q_scale folded into weights); MXFP4 Q/K is not handled.
+                    assert not use_fp4_cache, (
+                        "Turing indexer fallback does not support FP4 cache"
+                    )
+                    assert q_scale_slice is None
+                    from vllm.models.deepseek_v4.turing.indexer_logits import (
+                        fp8_mqa_logits_triton,
+                    )
+
+                    logits = fp8_mqa_logits_triton(
+                        q_slice_cast,
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                    )
                 else:
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
@@ -597,6 +626,23 @@ def sparse_attn_indexer(
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
+                max_model_len,
+            )
+        elif use_turing_fallback:
+            # DeepGEMM's paged fp8 kernels are unimplemented below SM90. The
+            # portable torch fallback matches the DeepGEMM paged contract and
+            # only supports the FP8 cache path (FP8 Q scale folded into
+            # weights).
+            assert not use_fp4_cache, (
+                "Turing indexer fallback does not support FP4 cache"
+            )
+            assert padded_q_scale is None
+            logits = fp8_paged_mqa_logits_torch(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
                 max_model_len,
             )
         else:
@@ -771,10 +817,15 @@ class SparseAttnIndexer(CustomOp):
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         if current_platform.is_cuda() and not has_deep_gemm():
-            raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+            from vllm.models.deepseek_v4.turing.indexer_fallback import (
+                supports_turing_indexer_fallback,
             )
+
+            if not supports_turing_indexer_fallback():
+                raise RuntimeError(
+                    "Sparse Attention Indexer CUDA op requires DeepGEMM or the "
+                    "Turing Triton fallback (SM75)."
+                )
 
     def forward_native(
         self,
