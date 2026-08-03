@@ -503,6 +503,45 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     )
 
 
+def setup_k3_situ_aiter_weights(layer: RoutedExperts) -> None:
+    """Preshuffle K3 SiTU MXFP4 weights for AITER SiTUv2 kernels.
+
+    AITER's A8W4 SiTUv2 path uses an interleaved gate/up layout, while its
+    A16W4 path keeps gate and up blocks separated. Both consume the original
+    checkpoint's packed MXFP4 weights and E8M0 scales.
+    """
+    from aiter.utility.fp4_utils import e8m0_shuffle
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    fp4_dtype = torch.float4_e2m1fn_x2
+    e8m0_dtype = torch.float8_e8m0fnu
+    num_experts = layer.w13_weight.shape[0]
+    guinterleave = envs.AITER_SITUV2_A8W4
+
+    w13 = rocm_aiter_ops.shuffle_weight_a16w4(
+        layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
+    )
+    w2 = rocm_aiter_ops.shuffle_weight_a16w4(
+        layer.w2_weight.data.view(fp4_dtype), 16, False
+    )
+    w13_scale_raw = layer.w13_weight_scale.data.view(e8m0_dtype)
+    w2_scale_raw = layer.w2_weight_scale.data.view(e8m0_dtype)
+    w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+        w13_scale_raw.view(-1, w13_scale_raw.shape[-1]),
+        num_experts,
+        guinterleave,
+    )
+    w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+
+    replace_parameter(layer, "w13_weight", w13)
+    replace_parameter(layer, "w2_weight", w2)
+    replace_parameter(layer, "w13_weight_scale", w13_scale)
+    replace_parameter(layer, "w2_weight_scale", w2_scale)
+    layer.w13_weight.is_shuffled = True
+    layer.w2_weight.is_shuffled = True
+
+
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
@@ -775,40 +814,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
 
     def _setup_kernel_k3_situ(self, layer: RoutedExperts) -> None:
-        # K3's AITER A16W4 kernel wants the separated ([gate_all, up_all])
-        # stage-1 layout, unlike the interleaved gpt-oss/DeepSeek path in
-        # convert_weight_to_mxfp4_moe_kernel_format. Preshuffle once here.
-        from aiter.utility.fp4_utils import e8m0_shuffle
-
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        fp4_dtype = torch.float4_e2m1fn_x2
-        e8m0_dtype = torch.float8_e8m0fnu
-        num_experts = layer.w13_weight.shape[0]
-
-        # a8w4 (AITER_SITUV2_A8W4=1) uses the gate/up-interleaved (_gui_) fp8
-        # flydsl kernels, which need w13 weight+scale in interleave layout.
-        # Default a16w4 keeps the separated layout.
-        guinterleave = envs.AITER_SITUV2_A8W4
-        w13 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
-        )
-        w2 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w2_weight.data.view(fp4_dtype), 16, False
-        )
-        w13_scale_raw = layer.w13_weight_scale.data.view(e8m0_dtype)
-        w2_scale_raw = layer.w2_weight_scale.data.view(e8m0_dtype)
-        w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
-        )
-        w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
-
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
+        setup_k3_situ_aiter_weights(layer)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
