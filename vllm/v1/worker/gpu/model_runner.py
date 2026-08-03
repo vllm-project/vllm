@@ -1350,7 +1350,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         inputs_embeds = None
         ec_connector_output = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
-            assert self.encoder_cache is not None
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
             if dummy_run:
