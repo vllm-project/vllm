@@ -12,8 +12,8 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
-from vllm.utils.vmm_driver import get_vmm_driver, vmm_unavailable_reason
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers, granule_size
+from vllm.utils.vmm_driver import HipVmmDriver, vmm_unavailable_reason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -122,7 +122,7 @@ def test_extensible_allocation_and_growth(layout):
     assert buffers.num_blocks_committed == 1
     # Physical commit is granule-rounded per segment: one committed block
     # maps at most one granule in each segment.
-    granule = get_vmm_driver().granularity(0)
+    granule = granule_size(0)
     num_segments = 2 if layout is KVCacheLayout.LBHNC else 1
     assert 0 < buffers.physical_bytes <= num_segments * granule
 
@@ -140,8 +140,34 @@ def test_extensible_allocation_and_growth(layout):
         view[NUM_BLOCKS - 1].fill_(2.0)
         # Earlier contents survive the grow; new blocks were zeroed.
         assert view[0].eq(1.0).all()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     buffers.free()
+
+
+@requires_vmm
+def test_commit_at_or_below_committed_preserves_data():
+    """A non-growing commit must not touch the mapping, even with defragment.
+
+    Elastic EP re-runs warmup (and hence `ensure_blocks`) while the KV cache
+    holds live data; releasing there would silently discard it.
+    """
+    config = _single_group_config(_attn_spec())
+    kv_caches, buffers = _allocate_and_reshape_kv_cache(
+        config, torch.device("cuda:0"), layout=KVCacheLayout.LBHNC, extensible=True
+    )
+    try:
+        buffers.commit(NUM_BLOCKS)
+        view = kv_caches["layer.0"]
+        view.fill_(7.0)
+        torch.accelerator.synchronize()
+
+        buffers.ensure_blocks(1)
+        buffers.commit(NUM_BLOCKS, defragment=True)
+        assert buffers.num_blocks_committed == NUM_BLOCKS
+        torch.accelerator.synchronize()
+        assert view.eq(7.0).all()
+    finally:
+        buffers.free()
 
 
 @requires_vmm
@@ -204,3 +230,29 @@ def test_narrow_skips_out_of_range_groups():
         {"layer.0": full}, groups, [BLOCK_SIZE], 3
     )
     assert narrowed["layer.0"] is full
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        (70253211, (7, 2)),  # legacy packaging line: defective
+        (71160850, (7, 11)),  # TheRock preview: defective
+        (71260850, (7, 12)),  # first runtime with ROCm/rocm-systems#2451
+        (71460850, (7, 14)),  # first production TheRock release
+        (100060850, (10, 0)),
+    ],
+)
+def test_hip_runtime_version_gate(version, expected, monkeypatch):
+    """hipRuntimeGetVersion decoding, and which runtimes are ruled out.
+
+    The extensible KV cache is disabled below 7.12: earlier HIP runtimes fail
+    hipMemSetAccess non-deterministically (ROCm/rocm-systems#2516).
+    """
+    driver = object.__new__(HipVmmDriver)
+    monkeypatch.setattr(HipVmmDriver, "runtime_version", lambda self: expected)
+    assert driver.runtime_version() == expected
+    reason = driver.unusable_runtime_reason()
+    if expected >= (7, 12):
+        assert reason is None
+    else:
+        assert reason is not None and "2516" in reason

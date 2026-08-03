@@ -19,6 +19,22 @@ def _round_up(value: int, multiple: int) -> int:
     return ((value + multiple - 1) // multiple) * multiple
 
 
+# Floor for the commit granule. ROCm reports a 4 KiB allocation granularity
+# (CUDA reports 2 MiB), which would put tens of millions of granules in the
+# bookkeeping below for a large KV cache. Commit in larger units instead.
+_MIN_GRANULARITY = 2 << 20
+
+
+def granule_size(device_index: int) -> int:
+    """Size of the units physical memory is committed in, for `device_index`.
+
+    At least `_MIN_GRANULARITY`, and always a multiple of what the driver
+    requires.
+    """
+    driver_granularity = get_vmm_driver().granularity(device_index)
+    return _round_up(max(driver_granularity, _MIN_GRANULARITY), driver_granularity)
+
+
 class _VirtualBuffer:
     """Own one device VA reservation and the physical chunks mapped into it.
 
@@ -36,7 +52,7 @@ class _VirtualBuffer:
         self.device_index = device_index
         self._shareable = shareable
 
-        self.granularity: int = self._driver.granularity(device_index)
+        self.granularity: int = granule_size(device_index)
         self.reserved_size: int = _round_up(max(max_bytes, 1), self.granularity)
         self.base_ptr: int = self._driver.reserve(self.reserved_size)
 
@@ -74,6 +90,7 @@ class _VirtualBuffer:
             return
         first = start // self.granularity
         last = (end + self.granularity - 1) // self.granularity  # exclusive
+        mapped: list[tuple[int, int]] = []
         run_start: int | None = None
         for g in range(first, last + 1):
             unmapped = g < last and g not in self._mapped_granules
@@ -84,7 +101,34 @@ class _VirtualBuffer:
                     run_start * self.granularity, (g - run_start) * self.granularity
                 )
                 self._mapped_granules.update(range(run_start, g))
+                mapped.append((run_start, g))
                 run_start = None
+
+        for chunk_first, chunk_last in mapped:
+            self._grant_access(*self._run_bounds(chunk_first, chunk_last))
+
+    def _run_bounds(self, first: int, last: int) -> tuple[int, int]:
+        """Granule bounds of the maximal contiguous mapped run covering the
+        granules `[first, last)`."""
+        while first - 1 in self._mapped_granules:
+            first -= 1
+        while last in self._mapped_granules:
+            last += 1
+        return first, last
+
+    def _grant_access(self, first: int, last: int) -> None:
+        """Grant device access over the whole granule run `[first, last)`.
+
+        Access is granted per contiguous *run* rather than per newly mapped
+        chunk: ROCm rejects a set-access range that starts partway into an
+        already-mapped region. Re-granting over the earlier part of the run is
+        a no-op, and cheap -- the driver call is flat in the range size.
+        """
+        self._driver.set_access(
+            self.base_ptr + first * self.granularity,
+            (last - first) * self.granularity,
+            self.device_index,
+        )
 
     def _map_chunk_at(self, offset: int, size: int) -> None:
         """Create one physical chunk of `size` bytes and map it at `offset`."""
@@ -111,8 +155,7 @@ class _VirtualBuffer:
         except RuntimeError:
             driver.release(handle)
             raise
-        driver.set_access(addr, size, self.device_index)
-
+        # Access is granted by the caller, per contiguous run.
         self._handles.append((handle, offset, size))
 
     def release_physical(self) -> None:
@@ -410,11 +453,15 @@ class ExtensibleKVCacheBuffers:
         before real KV data exists (e.g. right after warmup). It is required
         before KV-transfer registration: UCX cannot transfer memory regions
         that span multiple VMM allocation handles.
+
+        A request at or below the committed size returns without touching the
+        mapping, so a non-growing call cannot discard live data -- elastic EP
+        re-runs warmup, and hence `ensure_blocks`, while KV data is live.
         """
-        if defragment and self.num_blocks_committed > 0:
-            self.release_physical()
         if num_blocks <= self.num_blocks_committed:
             return
+        if defragment and self.num_blocks_committed > 0:
+            self._release()
         for buffer, bytes_per_block_per_segment in self.buffers:
             # Zero only the freshly committed blocks; existing ones are left
             # intact.
@@ -447,12 +494,15 @@ class ExtensibleKVCacheBuffers:
     def physical_bytes(self) -> int:
         return sum(buffer.physical_bytes for buffer, _ in self.buffers)
 
-    def release_physical(self) -> None:
-        """Discard all physical memory (sleep), keeping VA and views valid."""
-        self._num_blocks_to_recommit = self.num_blocks_committed
+    def _release(self) -> None:
         for buffer, _ in self.buffers:
             buffer.release_physical()
         self.num_blocks_committed = 0
+
+    def release_physical(self) -> None:
+        """Discard all physical memory (sleep), keeping VA and views valid."""
+        self._num_blocks_to_recommit = self.num_blocks_committed
+        self._release()
 
     def recommit(self) -> None:
         """Re-commit the pre-release block count with freshly zeroed pages."""

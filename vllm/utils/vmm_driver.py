@@ -27,6 +27,13 @@ _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
 _MEM_HANDLE_TYPE_POSIX_FD = 1
 
+# First HIP runtime carrying ROCm/rocm-systems#2451. Earlier runtimes fail
+# hipMemSetAccess non-deterministically once a reservation holds several
+# differently-sized allocations, which is exactly how a growable KV cache is
+# committed. The fix landed on TheRock release branches (7.12+) and is absent
+# from every release/rocm-rel-7.x branch.
+_HIP_MEM_SET_ACCESS_FIXED_IN = (7, 12)
+
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
 _Context = ctypes.c_void_p
@@ -149,6 +156,14 @@ class VmmDriver:
 
     def error_string(self, code: int) -> str:
         raise NotImplementedError
+
+    def unusable_runtime_reason(self) -> str | None:
+        """Why this driver's runtime cannot back a growable allocation, if so.
+
+        Overridden where a known runtime defect rules the driver out; `None`
+        means no such constraint applies.
+        """
+        return None
 
     def ensure_context(self, device_index: int) -> None:
         """Make sure a driver context for `device_index` is current."""
@@ -305,6 +320,28 @@ class HipVmmDriver(VmmDriver):
         lib.hipGetDevice.restype = ctypes.c_int
         lib.hipSetDevice.argtypes = [ctypes.c_int]
         lib.hipSetDevice.restype = ctypes.c_int
+        lib.hipRuntimeGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        lib.hipRuntimeGetVersion.restype = ctypes.c_int
+
+    def runtime_version(self) -> tuple[int, int]:
+        """(major, minor) of the loaded HIP runtime."""
+        version = ctypes.c_int()
+        self._check(self._lib.hipRuntimeGetVersion(ctypes.byref(version)))
+        return divmod(version.value // 100000, 100)
+
+    def unusable_runtime_reason(self) -> str | None:
+        version = self.runtime_version()
+        if version >= _HIP_MEM_SET_ACCESS_FIXED_IN:
+            return None
+        major, minor = version
+        return (
+            f"the HIP runtime is {major}.{minor}, which rejects "
+            "hipMemSetAccess for a validly mapped range once several "
+            "allocations share a virtual-address reservation "
+            "(ROCm/rocm-systems#2516, fixed by ROCm/rocm-systems#2451 in "
+            f"ROCm {_HIP_MEM_SET_ACCESS_FIXED_IN[0]}."
+            f"{_HIP_MEM_SET_ACCESS_FIXED_IN[1]})"
+        )
 
     def error_string(self, code: int) -> str:
         msg = self._lib.hipGetErrorString(code)
@@ -332,10 +369,11 @@ def get_vmm_driver() -> VmmDriver:
 def vmm_unavailable_reason() -> str | None:
     """Probe VMM support; returns None if usable, else a reason string.
 
-    Checks that the driver library loads, exposes the VMM entry points, and
-    can actually reserve (and release) a virtual address range on the current
-    device. Notably returns a reason on platforms whose driver lacks VMM
-    support (e.g. WSL2) and on non-CUDA/ROCm builds.
+    Checks that the driver library loads, exposes the VMM entry points, can
+    actually reserve (and release) a virtual address range on the current
+    device, and is not a runtime with a known defect that rules it out.
+    Notably returns a reason on platforms whose driver lacks VMM support
+    (e.g. WSL2) and on non-CUDA/ROCm builds.
     """
     try:
         import torch
@@ -346,6 +384,12 @@ def vmm_unavailable_reason() -> str | None:
         driver = get_vmm_driver()
         device_index = torch.accelerator.current_device_index()
         driver.ensure_context(device_index)
+        # Known-defective runtimes are rejected by version rather than by
+        # probing. Probing cannot substitute here: the ROCm defect below is
+        # order-dependent, and a probe small enough to be cheap passes on
+        # affected runtimes anyway (measured on ROCm 7.2.2).
+        if reason := driver.unusable_runtime_reason():
+            return reason
         granularity = driver.granularity(device_index)
         ptr = driver.reserve(granularity)
         driver.free_reserved(ptr, granularity)
