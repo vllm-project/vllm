@@ -16,9 +16,9 @@
 #   - OOB-mask correctness fix: present (all tl.load use mask=..., other=0).
 # Validated on gfx950: no core-dump, gsm8k 94.1%.
 #
-# AMD-specific deltas vs the NVIDIA copy: NONE yet (byte-identical). Keep in sync
-# with the NVIDIA copy on FLA updates; any divergence should be an intentional,
-# documented gfx950-specific change (a #869-style AMD-only fix).
+# AMD-specific deltas vs the NVIDIA copy: chunk KDA can write final recurrent
+# states directly to indexed cache rows for all-fresh ROCm prefills. Keep other
+# FLA updates in sync; divergence should remain intentional and documented.
 
 from .chunk import (
     chunk_kda,

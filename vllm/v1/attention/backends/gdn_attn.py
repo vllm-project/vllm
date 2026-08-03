@@ -393,15 +393,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
             has_initial_state_cpu = m._num_computed_tokens_cpu
+            non_spec_query_lens_cpu = query_start_loc_cpu.diff()
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 if has_initial_state_cpu is not None:
                     has_initial_state_cpu = has_initial_state_cpu[
                         ~spec_sequence_masks_cpu
                     ]
+                non_spec_query_lens_cpu = non_spec_query_lens_cpu[
+                    ~spec_sequence_masks_cpu
+                ]
                 assert non_spec_query_start_loc_cpu is not None
             if has_initial_state_cpu is not None:
-                all_initial_states_fresh = not has_initial_state_cpu.any().item()
+                all_initial_states_fresh = bool(
+                    non_spec_query_lens_cpu.numel() > 0
+                    and (non_spec_query_lens_cpu > 0).all().item()
+                    and not has_initial_state_cpu.any().item()
+                )
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,

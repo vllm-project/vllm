@@ -201,6 +201,11 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
             False,
             id="one-resumed",
         ),
+        pytest.param(
+            BatchSpec(seq_lens=[16, 0], query_lens=[16, 0]),
+            False,
+            id="zero-length-padding",
+        ),
     ],
 )
 @pytest.mark.parametrize(

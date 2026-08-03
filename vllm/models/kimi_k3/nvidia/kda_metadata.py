@@ -407,15 +407,23 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if num_prefills > 0:
             has_initial_state = m.compute_num_computed_tokens() > 0
             has_initial_state_cpu = m._num_computed_tokens_cpu
+            non_spec_query_lens_for_fresh_cpu = query_start_loc_cpu.diff()
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[active_non_spec_mask_cpu]
                 if has_initial_state_cpu is not None:
                     has_initial_state_cpu = has_initial_state_cpu[
                         active_non_spec_mask_cpu
                     ]
+                non_spec_query_lens_for_fresh_cpu = (
+                    non_spec_query_lens_for_fresh_cpu[~spec_sequence_masks_cpu]
+                )
                 assert non_spec_query_start_loc_cpu is not None
             if has_initial_state_cpu is not None:
-                all_initial_states_fresh = not has_initial_state_cpu.any().item()
+                all_initial_states_fresh = bool(
+                    non_spec_query_lens_for_fresh_cpu.numel() > 0
+                    and (non_spec_query_lens_for_fresh_cpu > 0).all().item()
+                    and not has_initial_state_cpu.any().item()
+                )
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
