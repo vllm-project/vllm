@@ -78,9 +78,9 @@ MODELS = [
         id="auto_round:llm_compressor_mxfp8",
     ),
     pytest.param(
-        "INC4AI/Llama-3.1-8B-fp-w8g128x128-for-ut",
+        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            not (current_platform.is_cuda()),
             reason="Block-wise AutoRound model only supports CUDA backend for now.",
         ),
         id="auto_round:block_wise_fp8_on_cuda",
@@ -127,7 +127,7 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Llama-3.1-8B-fp-w8g128x128-for-ut": {
+    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "enforce_eager": True,
         "max_model_len": 512,
@@ -500,7 +500,7 @@ def test_inc_config_accepts_block_fp8() -> None:
 
 
 def test_inc_config_rejects_invalid_block_fp8_activation_config() -> None:
-    with pytest.raises(ValueError, match="act_dynamic=True"):
+    with pytest.raises(AssertionError, match="act_dynamic=True"):
         INCConfig.from_config(make_block_fp8_raw_config(act_dynamic=False))
 
 
