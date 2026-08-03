@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CacheConfig, DeviceConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
     solve_lloyd_max,
@@ -298,6 +299,55 @@ class TestTurboQuantKVCacheSpec:
 
         assert isinstance(spec, TQFullAttentionSpec)
         assert spec.kv_quant_mode == KVQuantMode.TURBOQUANT
+
+
+class TestTurboQuantKVCacheShape:
+    """``cache_dtype_str`` is only a hint, so the backend must not depend on it.
+
+    ``get_kv_cache_block_dim`` defaults it to ``"auto"``, the KV-connector
+    layout probes omit it, and both model runners downgrade to ``"auto"`` for
+    any group whose spec reports ``KVQuantMode.NONE`` — which on hybrid models
+    reached TurboQuant and aborted startup with "Unknown TurboQuant cache
+    dtype: 'auto'" (issue #50709).
+    """
+
+    @staticmethod
+    def _vllm_config(cache_dtype: str):
+        return VllmConfig(
+            cache_config=CacheConfig(cache_dtype=cache_dtype),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+    @pytest.mark.parametrize("preset", ALL_PRESETS)
+    def test_shape_without_dtype_hint_matches_configured_preset(self, preset):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        expected = TurboQuantAttentionBackend.get_kv_cache_shape(
+            4, 16, 8, 128, cache_dtype_str=preset
+        )
+        with set_current_vllm_config(self._vllm_config(preset)):
+            assert (
+                TurboQuantAttentionBackend.get_kv_cache_shape(
+                    4, 16, 8, 128, cache_dtype_str="auto"
+                )
+                == expected
+            )
+            assert TurboQuantAttentionBackend.get_kv_cache_block_dim(16, 8, 128) == 0
+
+    def test_shape_still_rejects_auto_outside_a_turboquant_run(self):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        with (
+            set_current_vllm_config(self._vllm_config("auto")),
+            pytest.raises(ValueError, match="Unknown TurboQuant"),
+        ):
+            TurboQuantAttentionBackend.get_kv_cache_shape(
+                4, 16, 8, 128, cache_dtype_str="auto"
+            )
 
 
 class TestTurboQuantWorkspaceReservation:
