@@ -610,7 +610,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -743,11 +749,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
+        if self.parser is not None:
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
 
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)

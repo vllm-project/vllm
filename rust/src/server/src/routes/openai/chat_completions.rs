@@ -35,7 +35,7 @@ use crate::routes::openai::chat_completions::types::{
     ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
-    decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
+    decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
@@ -131,6 +131,7 @@ async fn collect_chat_completion(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
+        is_named_tool_choice,
     }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
@@ -157,7 +158,9 @@ async fn collect_chat_completion(
     // When reasoning is hidden, omit them rather than leaking hidden reasoning
     // tokens through per-token metadata.
     let include_output_metadata = include_reasoning || reasoning.is_none();
-    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
+    let finish_reason =
+        chat_finish_reason_to_openai(&finish_reason, saw_tool_calls && !is_named_tool_choice)?
+            .to_string();
     let tool_calls = message
         .tool_calls()
         .map(|call| ToolCall {
@@ -181,14 +184,11 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(decoded_prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref().ok_or_else(|| {
-                server_error!(
-                    "chat response requested prompt_logprobs but generation returned none"
-                )
-            })?,
+        Some(prompt_logprobs_to_maps(
+            prompt_logprobs.as_ref(),
+            &prompt_token_ids,
             return_tokens_as_token_ids,
-        ))
+        )?)
     } else {
         None
     };
@@ -257,6 +257,7 @@ async fn chat_completion_chunk_stream(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
+        is_named_tool_choice,
     }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
@@ -457,7 +458,7 @@ async fn chat_completion_chunk_stream(
                     &response_model,
                     created,
                     finish_reason,
-                    saw_tool_calls,
+                    saw_tool_calls && !is_named_tool_choice,
                 ) {
                     Ok(chunk) => yield_chunk!(chunk),
                     Err(error) => {
@@ -790,10 +791,10 @@ fn final_chunk(
     response_model: &str,
     created: u64,
     finish_reason: FinishReason,
-    saw_tool_calls: bool,
+    use_tool_calls_finish_reason: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
-    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?;
+    let finish_reason = chat_finish_reason_to_openai(&finish_reason, use_tool_calls_finish_reason)?;
 
     debug!(
         finish_reason = %finish_reason,
@@ -812,10 +813,10 @@ fn final_chunk(
 
 fn chat_finish_reason_to_openai(
     finish_reason: &FinishReason,
-    saw_tool_calls: bool,
+    use_tool_calls_finish_reason: bool,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
-        FinishReason::Stop(_) if saw_tool_calls => Ok("tool_calls"),
+        FinishReason::Stop(_) if use_tool_calls_finish_reason => Ok("tool_calls"),
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),

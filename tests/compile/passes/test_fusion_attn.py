@@ -290,12 +290,9 @@ def test_attention_quant_pattern(
     model_class: type[AttentionQuantPatternModel],
     backend: AttentionBackendEnum,
     dist_init,
-    monkeypatch,
-    use_fresh_inductor_cache,
+    disable_vllm_compile_cache,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
     if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
