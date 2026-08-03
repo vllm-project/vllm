@@ -496,5 +496,5 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert "pool_size" not in result
 
-    def test_unknown_backend_treated_as_gpu(self):
-        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
+    def test_unknown_backend_not_treated_as_gpu(self):
+        assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")

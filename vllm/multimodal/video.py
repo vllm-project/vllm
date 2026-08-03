@@ -97,7 +97,7 @@ class VideoLoaderRegistry(ExtensionManager):
         self._requires_gpu[name] = True
 
     def backend_requires_gpu(self, name: str) -> bool:
-        return self._requires_gpu.get(name, True)
+        return self._requires_gpu.get(name, False)
 
 
 def get_video_loader_backend_for_processor(
