@@ -9,8 +9,10 @@ Marlin-based quantization config (awq_marlin, auto_gptq, compressed_tensors,
 ...) calls, so the check covers all Marlin usage from a single place.
 """
 
+from typing import Any
+
 import vllm.model_executor.layers.quantization.utils.marlin_utils as marlin_utils
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -91,20 +93,37 @@ def test_no_warning_when_driver_newer(monkeypatch):
 
 def _force_awq_marlin_compatible(monkeypatch):
     monkeypatch.setattr(
-        AWQMarlinConfig,
+        AutoAWQConfig,
         "is_awq_marlin_compatible",
         classmethod(lambda cls, _: True),
     )
+    # override_quantization_method short-circuits on CPU platforms; make the
+    # selection path proceed so the driver-mismatch guard is what is tested.
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq
+
+    monkeypatch.setattr(auto_awq.current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(auto_awq.current_platform, "is_xpu", lambda: False)
+
+
+def _awq_config_dict() -> dict[str, Any]:
+    return {
+        "quant_method": "awq",
+        "bits": 4,
+        "group_size": 128,
+        "zero_point": True,
+    }
 
 
 def test_awq_marlin_selected_despite_driver_mismatch(monkeypatch):
-    """awq_marlin should still be returned even when driver < toolkit."""
+    """AWQ should still be selected even when driver < toolkit."""
     _reset_warn_cache()
     _force_awq_marlin_compatible(monkeypatch)
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=False)
 
-    result = AWQMarlinConfig.override_quantization_method({}, user_quant=None)
-    assert result == "awq_marlin"
+    result = AutoAWQConfig.override_quantization_method(
+        _awq_config_dict(), user_quant=None
+    )
+    assert result == "auto_awq"
 
 
 def test_awq_marlin_selected_with_compat_enabled(monkeypatch):
@@ -112,8 +131,10 @@ def test_awq_marlin_selected_with_compat_enabled(monkeypatch):
     _force_awq_marlin_compatible(monkeypatch)
     _patch_mismatch(monkeypatch, driver=(12, 8), toolkit=(12, 9), compat=True)
 
-    result = AWQMarlinConfig.override_quantization_method({}, user_quant=None)
-    assert result == "awq_marlin"
+    result = AutoAWQConfig.override_quantization_method(
+        _awq_config_dict(), user_quant=None
+    )
+    assert result == "auto_awq"
 
 
 # ---------------------------------------------------------------------------
