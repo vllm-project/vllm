@@ -6,7 +6,6 @@ Reasoning models return an additional `reasoning` field in their outputs, which 
 
 !!! warning
     `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
-    
     It is important that you also update your client code. Otherwise, your client code could silently read an empty `reasoning_content`, even when `reasoning` is populated.
 
 ## Supported Models
