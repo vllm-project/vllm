@@ -110,7 +110,7 @@ steps:
     pytest -v -s v1/distributed/test_pp_dp_v2.py || true'
 - label: Model Runner V2 Spec Decode
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   working_dir: .
   no_plugin: true
   env:
@@ -123,17 +123,17 @@ steps:
   _raw_old_commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
-  # v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10] skipped due to OOM on Intel GPU and will hang
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
+  - pytest -v -s v1/e2e/spec_decode/speculators/
   source_file_dependencies:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
-  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  - tests/v1/e2e/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -142,4 +142,5 @@ steps:
     pytest -v -s v1/spec_decode/test_max_len.py -k eagle or mtp --deselect="tests/v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]" --deselect="tests/v1/spec_decode/test_max_len.py::test_eagle_max_len[TRITON_ATTN-10]" || true &&
     pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py || true &&
     pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py || true &&
-    pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k eagle or mtp || true'
+    pytest -v -s v1/e2e/spec_decode/eagle/ || true &&
+    pytest -v -s v1/e2e/spec_decode/speculators/ || true'

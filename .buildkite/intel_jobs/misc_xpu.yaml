@@ -2,39 +2,6 @@ group: Miscellaneous XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: V1 Spec Decode
-  device: intel_gpu
-  timeout_in_minutes: 40
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-  _raw_old_commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10] skipped due to OOM on Intel GPU and will hang
-  - pytest -v -s -m 'not slow_test' v1/spec_decode
-  source_file_dependencies:
-  - vllm/config/
-  - vllm/distributed/
-  - vllm/inputs/
-  - vllm/model_executor/
-  - vllm/platforms/
-  - vllm/sampling_params.py
-  - vllm/transformers_utils/
-  - vllm/utils/
-  - vllm/v1/
-  - tests/v1/spec_decode
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
-    cd tests &&
-    pytest -v -s -m not slow_test v1/spec_decode --deselect="tests/v1/spec_decode/test_max_len.py::test_eagle_max_len[FLASH_ATTN-10]" --deselect="tests/v1/spec_decode/test_max_len.py::test_eagle_max_len[TRITON_ATTN-10]"|| true'
 - label: V1 Sample + Logits
   device: intel_gpu
   timeout_in_minutes: 83

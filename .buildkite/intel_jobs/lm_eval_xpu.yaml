@@ -315,6 +315,33 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt || true'
+- label: LM Eval Humming Act fp8/int8 (B200 - TEMPORARY)
+  device: intel_gpu
+  timeout_in_minutes: 50
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
