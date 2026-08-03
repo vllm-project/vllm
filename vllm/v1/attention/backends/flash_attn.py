@@ -29,7 +29,10 @@ from vllm.v1.attention.backends.fa_utils import (
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    fill_mm_prefix_query_ranges,
+    get_dcp_local_seq_lens,
+)
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -713,24 +716,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         # Compute mm_prefix range tensor if the batch contains
-        # multimodal tokens with bidirectional ranges.
+        # multimodal tokens with bidirectional ranges.  Built for every FA
+        # group; Gemma4 nulls the field for its non-sliding layers.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
-            from vllm.v1.attention.backends.utils import fill_mm_prefix_query_ranges
-
             # The upper bound is exact for prefill rows, which is where
             # mm_prefix ranges live; decode rows only ever get an optimistic
             # (larger) context, moving them further past every range.
-            mm_seq_lens_cpu = (
-                common_attn_metadata.seq_lens_cpu_upper_bound
-                if common_attn_metadata.seq_lens_cpu_upper_bound is not None
-                else common_attn_metadata.seq_lens_cpu
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None, (
+                "mm_prefix requires seq_lens_cpu_upper_bound"
             )
             num_mm_tokens = fill_mm_prefix_query_ranges(
                 self.mm_prefix_query_ranges_np,
                 mm_ranges,
                 common_attn_metadata.query_start_loc_cpu,
-                mm_seq_lens_cpu,
+                common_attn_metadata.seq_lens_cpu_upper_bound,
             )
             if num_mm_tokens > 0:
                 assert self.mm_prefix_query_ranges_cpu is not None
@@ -1454,16 +1454,16 @@ def _make_mm_prefix_mask_mod(
         """Load the mm_prefix range bounds for this query row.
 
         Both loads depend only on the query index, so they hoist out of the
-        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, which
-        is correct only while this mask_mod runs unvectorized (no
-        ``__vec_size__`` attribute → FA4 uses ``vec_size=1``).
+        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, so one
+        call must not span query rows (hence the ``__vec_size__`` pin below).
+        Clamping keeps ``token_idx`` in bounds for partial tiles and padded
+        (``seqlen_q == 0``) rows; neither produces output.
         """
         q_ranges = aux_tensors[0]
         cu_seqlens_q = aux_tensors[1]
         b = batch_idx[0]
-        last_q_idx = cutlass.max(seqlen_info.seqlen_q - Int32(1), Int32(0))
-        q_local = cutlass.min(ssa_to_scalar(q_idx), last_q_idx)
-        token_idx = cu_seqlens_q[b] + q_local
+        q_local = cutlass.min(ssa_to_scalar(q_idx), seqlen_info.seqlen_q - Int32(1))
+        token_idx = cutlass.max(cu_seqlens_q[b] + q_local, Int32(0))
         return (
             scalar_to_ssa(q_ranges[token_idx, 0], Int32),
             scalar_to_ssa(q_ranges[token_idx, 1], Int32),
@@ -1510,6 +1510,7 @@ def _make_mm_prefix_mask_mod(
             return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True
+    mm_prefix_mask_mod.__vec_size__ = 1  # _load_q_range takes lane 0 of q_idx
     return mm_prefix_mask_mod
 
 
