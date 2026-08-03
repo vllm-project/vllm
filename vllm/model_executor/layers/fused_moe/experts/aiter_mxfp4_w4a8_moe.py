@@ -102,7 +102,7 @@ def aiter_triton_kernel_w4a8_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    # See context in XXX.
+    # See context in #50859.
     # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
     # AITER released, and AITER pin in vLLM increased from 0.1.19.
     gating_output = patch_gating_output(gating_output, global_num_experts)
@@ -486,7 +486,7 @@ def aiter_triton_kernel_w4a16_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    # See context in XXX.
+    # See context in #50859.
     # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
     # AITER released, and AITER pin in vLLM increased from 0.1.19.
     gating_output = patch_gating_output(gating_output, global_num_experts)
