@@ -188,11 +188,291 @@ def test_rocm_base_registry_cache_can_be_disabled() -> None:
     assert cache_ref == "disabled"
     assert cache_args == ["--no-cache"]
 
+
+def test_rocm_base_force_preserves_layer_cache() -> None:
     forced_ref, forced_args = configured_rocm_base_cache(
         {"ROCM_BASE_REFRESH_FORCE": "1"}
     )
-    assert forced_ref == "disabled"
-    assert forced_args == ["--no-cache"]
+    assert forced_ref.startswith("example/cache:rocm-base-preview-local-")
+    assert "--no-cache" not in forced_args
+
+
+def test_rocm_base_content_refs_are_trust_scoped() -> None:
+    command = (
+        'printf "trusted=%s\\n" "$(trusted_base_content_ref content 2)"\n'
+        'printf "scoped=%s\\n" "$(scoped_base_content_ref content 2)"'
+    )
+    common = {"ROCM_BASE_IMAGE_REPO": "example/base"}
+    trusted = run_sourced(
+        ROCM_BASE_REFRESH,
+        command,
+        env=common
+        | {
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_PULL_REQUEST": "false",
+            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+        },
+    ).stdout.splitlines()
+    pull_request = run_sourced(
+        ROCM_BASE_REFRESH,
+        command,
+        env=common
+        | {
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_PULL_REQUEST": "48646",
+            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+        },
+    ).stdout.splitlines()
+
+    assert trusted == [
+        "trusted=example/base:base-v2-content",
+        "scoped=example/base:base-v2-main-content",
+    ]
+    assert pull_request[0] == "trusted=example/base:base-v2-content"
+    assert re.fullmatch(
+        r"scoped=example/base:base-v2-pr-48646-[0-9a-f]{12}-content",
+        pull_request[1],
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_calls"),
+    [("transient", 0, 4), ("transport", 1, 4), ("mismatch", 2, 4)],
+)
+def test_rocm_base_identity_label_lookup_retries(
+    tmp_path: Path, mode: str, expected_status: int, expected_calls: int
+) -> None:
+    calls = tmp_path / "label-calls"
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        """
+resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
+get_remote_base_label() {
+  printf 'call\n' >> "$LABEL_CALLS"
+  count=$(wc -l < "$LABEL_CALLS")
+  if [[ "$MODE" == "transport" || ("$MODE" == "transient" && "$count" == 1) ]]; then
+    return 42
+  fi
+  case "$2" in
+    vllm.rocm_base.content_hash)
+      [[ "$MODE" == "mismatch" ]] && printf 'wrong\n' || printf 'content\n'
+      ;;
+    vllm.rocm_base.metadata_version) printf '2\n' ;;
+  esac
+}
+validate_base_content_ref example/base:content content 2
+""",
+        env={
+            "DIGEST_A": DIGEST_A,
+            "LABEL_CALLS": str(calls),
+            "MODE": mode,
+            "ROCM_IMAGE_LABEL_ATTEMPTS": "2",
+            "ROCM_IMAGE_LABEL_RETRY_DELAY": "0",
+        },
+        check=False,
+    )
+    assert result.returncode == expected_status
+    assert len(calls.read_text().splitlines()) == expected_calls
+    if expected_status == 0:
+        assert result.stdout.strip() == f"example/base:content@{DIGEST_A}"
+
+
+@pytest.mark.parametrize(
+    ("env", "authorized"),
+    [
+        (
+            {
+                "BUILDKITE": "true",
+                "BUILDKITE_BRANCH": "main",
+                "BUILDKITE_PULL_REQUEST": "false",
+                "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+            },
+            True,
+        ),
+        (
+            {
+                "BUILDKITE": "true",
+                "BUILDKITE_BRANCH": "main",
+                "BUILDKITE_PULL_REQUEST": "false",
+                "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+                "ROCM_BASE_PUSH_STABLE_TAG": "1",
+            },
+            False,
+        ),
+        (
+            {
+                "BUILDKITE": "true",
+                "BUILDKITE_BRANCH": "feature",
+                "BUILDKITE_PULL_REQUEST": "48646",
+                "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+                "ROCM_BASE_PUSH_STABLE_TAG": "1",
+            },
+            False,
+        ),
+    ],
+)
+def test_rocm_base_stable_alias_requires_trusted_main(
+    env: dict[str, str], authorized: bool
+) -> None:
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        "should_push_stable_tag",
+        env=env,
+        check=False,
+    )
+    assert (result.returncode == 0) is authorized
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_rocm_base_stable_alias_requires_current_main_tip(matches: bool) -> None:
+    commit = "a" * 40
+    remote_tip = commit if matches else "b" * 40
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        """
+git() { printf '%s\trefs/heads/main\n' "$REMOTE_TIP"; }
+trusted_main_tip_matches_build
+""",
+        env={
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_COMMIT": commit,
+            "BUILDKITE_PULL_REQUEST": "false",
+            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+            "REMOTE_TIP": remote_tip,
+        },
+        check=False,
+    )
+    assert (result.returncode == 0) is matches
+
+
+def test_rocm_base_metadata_publish_is_strict_in_buildkite() -> None:
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        "buildkite-agent() { return 42; }\nmetadata_set required value",
+        env={"BUILDKITE": "true"},
+        check=False,
+    )
+    assert result.returncode == 42
+
+
+def test_rocm_base_reuses_content_image_and_pins_handoff(tmp_path: Path) -> None:
+    trace = tmp_path / "trace"
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        """
+resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
+validate_base_content_ref() { printf '%s@%s\n' "$1" "$DIGEST_A"; }
+docker() { printf 'docker:%s\n' "$*" >> "$TRACE"; }
+metadata_set() { printf 'metadata:%s=%s\n' "$1" "$2" >> "$TRACE"; }
+build_base_image
+""",
+        env={
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_BUILD_NUMBER": "123",
+            "BUILDKITE_COMMIT": "deadbeef",
+            "BUILDKITE_PULL_REQUEST": "48646",
+            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+            "DIGEST_A": DIGEST_A,
+            "ROCM_BASE_IMAGE_REPO": "example/base",
+            "TRACE": str(trace),
+        },
+    )
+    events = trace.read_text().splitlines()
+
+    assert "Reusing ROCm base image with matching content" in result.stdout
+    assert not any("buildx build" in event for event in events)
+    assert any("buildx imagetools create" in event for event in events)
+    handoff = next(
+        event.removeprefix("metadata:rocm-base-image=")
+        for event in events
+        if event.startswith("metadata:rocm-base-image=")
+    )
+    assert handoff.endswith(f"@{DIGEST_A}")
+    assert events.index(f"metadata:rocm-base-image={handoff}") < events.index(
+        "metadata:rocm-base-refresh=1"
+    )
+
+
+def test_rocm_base_content_build_omits_per_build_labels(tmp_path: Path) -> None:
+    trace = tmp_path / "trace"
+    run_sourced(
+        ROCM_BASE_REFRESH,
+        """
+resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
+find_matching_base_content_ref() { return 1; }
+validate_base_content_ref() { printf '%s@%s\n' "$1" "$DIGEST_A"; }
+docker() { printf 'docker:%s\n' "$*" >> "$TRACE"; }
+metadata_set() { :; }
+build_base_image
+""",
+        env={
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_BUILD_NUMBER": "123",
+            "BUILDKITE_COMMIT": "deadbeef",
+            "BUILDKITE_PULL_REQUEST": "48646",
+            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
+            "DIGEST_A": DIGEST_A,
+            "ROCM_BASE_IMAGE_REPO": "example/base",
+            "TRACE": str(trace),
+        },
+    )
+    build = next(
+        event for event in trace.read_text().splitlines() if "buildx build" in event
+    )
+
+    assert re.search(r"-t example/base:base-v2-pr-48646-[0-9a-f]{12}-", build)
+    assert (
+        f"--build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete@{DIGEST_A}"
+        in build
+    )
+    assert "org.opencontainers.image.revision" not in build
+    assert "vllm.rocm_base.image.descriptive" not in build
+    assert "vllm.rocm_base.git_commit" not in build
+    assert "vllm.rocm_base.descriptor" not in build
+    assert "deadbeef" not in build
+
+
+def test_rocm_base_content_hash_tracks_sccache_inputs() -> None:
+    command = 'compute_base_content_hash 1 "$DIGEST_A"'
+    common = {"DIGEST_A": DIGEST_A}
+    first = run_sourced(
+        ROCM_BASE_REFRESH,
+        command,
+        env=common
+        | {
+            "SCCACHE_DOWNLOAD_URL": "https://example.com/sccache-a.tar.gz",
+            "SCCACHE_BUCKET_NAME": "bucket-a",
+        },
+    ).stdout.strip()
+    second = run_sourced(
+        ROCM_BASE_REFRESH,
+        command,
+        env=common
+        | {
+            "SCCACHE_DOWNLOAD_URL": "https://example.com/sccache-b.tar.gz",
+            "SCCACHE_BUCKET_NAME": "bucket-b",
+        },
+    ).stdout.strip()
+
+    assert re.fullmatch(r"[0-9a-f]{64}", first)
+    assert re.fullmatch(r"[0-9a-f]{64}", second)
+    assert first != second
+
+
+def test_rocm_base_metadata_version_is_bounded() -> None:
+    result = run_sourced(
+        ROCM_BASE_REFRESH,
+        "build_base_image",
+        env={"ROCM_BASE_METADATA_VERSION": "x" * 17},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Invalid ROCm base metadata version" in result.stderr
 
 
 def test_ci_base_contract() -> None:
@@ -249,6 +529,55 @@ def test_ci_base_contract() -> None:
     )
     assert missing_hash.returncode != 0
     assert "ci_base builds require a content hash" in missing_hash.stderr
+
+
+def test_rocm_native_content_contract() -> None:
+    csrc_files, rust_files = run_sourced(
+        CI_BAKE,
+        'printf "%s\\n%s\\n" "$DEFAULT_ROCM_CSRC_CONTENT_FILES" '
+        '"$DEFAULT_ROCM_RUST_CONTENT_FILES"',
+    ).stdout.splitlines()
+
+    assert {".dockerignore", "tools/build_rust.py"} <= set(csrc_files.split())
+    assert {".dockerignore", "tools/build_rust.py", "tools/install_protoc.sh"} <= set(
+        rust_files.split()
+    )
+
+
+def test_rocm_rust_content_hash_scopes_remote_source_transport() -> None:
+    result = run_sourced(
+        CI_BAKE,
+        """
+docker() { printf 'Digest: %s\n' "$DIGEST_A"; }
+VLLM_BAKE_FILE="docker/docker-bake-rocm.hcl"
+REMOTE_VLLM=0
+VLLM_REPO="https://example.com/fork-a.git"
+VLLM_BRANCH="commit-a"
+compute_rocm_rust_content_hash
+REMOTE_VLLM=0
+VLLM_REPO="https://example.com/fork-b.git"
+VLLM_BRANCH="commit-b"
+compute_rocm_rust_content_hash
+REMOTE_VLLM=1
+VLLM_REPO="https://example.com/fork-a.git"
+VLLM_BRANCH="commit-a"
+compute_rocm_rust_content_hash
+REMOTE_VLLM=1
+VLLM_REPO="https://example.com/fork-b.git"
+VLLM_BRANCH="commit-b"
+compute_rocm_rust_content_hash
+""",
+        env={"DIGEST_A": DIGEST_A},
+    )
+    hashes = [
+        line
+        for line in result.stdout.splitlines()
+        if re.fullmatch(r"[0-9a-f]{64}", line)
+    ]
+
+    assert len(hashes) == 4
+    assert hashes[0] == hashes[1]
+    assert hashes[2] != hashes[3]
 
 
 def test_content_hash_tracks_git_content(tmp_path: Path) -> None:
@@ -371,8 +700,9 @@ printf 'pinned=%s\n' "$BASE_IMAGE"
     ("mode", "attempts", "succeeds"),
     [("retry", "2", True), ("malformed", "1", False), ("nonzero", "1", False)],
 )
+@pytest.mark.parametrize("script", [CI_BAKE, ROCM_BASE_REFRESH])
 def test_digest_lookup_retries_and_rejects_invalid_output(
-    tmp_path: Path, mode: str, attempts: str, succeeds: bool
+    tmp_path: Path, script: Path, mode: str, attempts: str, succeeds: bool
 ) -> None:
     calls = tmp_path / "docker-calls"
     docker_stub = """
@@ -388,7 +718,7 @@ docker() {
 resolve_image_digest "rocm/example:base"
 """
     result = run_sourced(
-        CI_BAKE,
+        script,
         docker_stub,
         env={
             "DIGEST_A": DIGEST_A,
@@ -505,13 +835,16 @@ fi
         assert not any(event.startswith("metadata:") for event in events)
 
 
-def test_amd_pipeline_uses_local_checkout_for_ci_base() -> None:
+def test_amd_pipeline_uses_local_checkout() -> None:
     steps = {
         step["key"]: step for step in yaml.safe_load(AMD_PIPELINE.read_text())["steps"]
     }
     ensure_env = steps["ensure-ci-base-amd"]["env"]
     assert ensure_env["REMOTE_VLLM"] == "0"
     assert "VLLM_BRANCH" not in ensure_env
+    image_env = steps["image-build-amd"]["env"]
+    assert image_env["REMOTE_VLLM"] == "0"
+    assert "VLLM_BRANCH" not in image_env
 
     remote = run_sourced(
         CI_BAKE,

@@ -42,6 +42,10 @@ use_refreshed_base_if_present() {
 
     BASE_IMAGE="$(metadata_get rocm-base-image)"
     IMAGE_TAG_LATEST="$(metadata_get rocm-ci-image-descriptive)"
+    if [[ ! "${BASE_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+        echo "Refreshed ROCm base handoff is missing or not digest-pinned: ${BASE_IMAGE:-<empty>}" >&2
+        return 2
+    fi
 
     echo "Using refreshed ROCm base image for test image: ${BASE_IMAGE}"
     if [[ -n "${IMAGE_TAG_LATEST}" ]]; then
@@ -53,6 +57,7 @@ use_refreshed_base_if_present() {
 
 main() {
     local base_refreshed=0
+    local refreshed_status=0
 
     if ! use_ci_base_if_present; then
         if [[ "${BUILDKITE:-false}" == "true" ]]; then
@@ -64,6 +69,11 @@ main() {
 
     if use_refreshed_base_if_present; then
         base_refreshed=1
+    else
+        refreshed_status=$?
+        if [[ ${refreshed_status} -gt 1 ]]; then
+            return "${refreshed_status}"
+        fi
     fi
 
     if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" && "${base_refreshed}" != "1" ]]; then
