@@ -77,6 +77,30 @@ steps:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/worker/worker_base.py
+      - vllm/v1/engine/
+      - vllm/v1/worker/
+      - tests/compile/fullgraph/test_basic_correctness.py
+      - tests/compile/test_wrapper.py
+      - tests/entrypoints/llm/test_collective_rpc.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s entrypoints/llm/test_collective_rpc.py
+      - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
+      - pytest -v -s ./compile/test_wrapper.py
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
   key: distributed-torchrun-shutdown-tests-2-gpus

@@ -153,6 +153,38 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'distributed' v1/kv_connector/extract_hidden_states_integration
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 20
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/speculative.py
+      - vllm/distributed/kv_transfer/kv_connector/
+      - vllm/model_executor/layers/attention/
+      - vllm/model_executor/layers/mamba/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/model_executor/models/registry.py
+      - vllm/transformers_utils/configs/extract_hidden_states.py
+      - vllm/transformers_utils/configs/qwen3_5.py
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/v1/kv_cache_interface.py
+      - vllm/v1/spec_decode/extract_hidden_states.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/_aiter_ops.py
+      - tests/v1/kv_connector/extract_hidden_states_integration/
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
 - label: Regression
   key: regression
