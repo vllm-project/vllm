@@ -174,6 +174,19 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             raise NotImplementedError
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+            # Models that own key remapping (e.g. Gemma4
+            # model.language_model.* -> language_model.model.*) never match
+            # the generic "" / "model." probe below. Running that probe would
+            # clone the entire checkpoint into host memory before falling
+            # through to the parent loader. Skip it and let the mapper handle
+            # remapping.
+            parent_load_weights = getattr(super(), "load_weights", None)
+            if (
+                parent_load_weights is not None
+                and getattr(self, "hf_to_vllm_mapper", None) is not None
+            ):
+                return parent_load_weights(weights)
+
             params_dict = dict(self.named_parameters())
 
             # We support loading from both `*ForCausalLM` and `*Model`
