@@ -11,9 +11,8 @@ into a flat FP16 workspace for decode.
 
 import torch
 
+from vllm.models.deepseek_v4.turing.constants import HEAD_DIM
 from vllm.triton_utils import tl, triton
-
-HEAD_DIM = 512
 
 
 @triton.jit

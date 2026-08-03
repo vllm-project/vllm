@@ -10,7 +10,8 @@ the FP16 ``triton_mla_sparse_interface``.
 
 import torch
 
-from vllm.models.deepseek_v4.turing.gather import HEAD_DIM, gather_fp16_slots
+from vllm.models.deepseek_v4.turing.constants import HEAD_DIM
+from vllm.models.deepseek_v4.turing.gather import gather_fp16_slots
 from vllm.models.deepseek_v4.turing.sparse import triton_mla_sparse_interface
 
 _BLOCK_N = 16
@@ -126,6 +127,8 @@ def turing_sparse_decode(
         indices=combined_indices.unsqueeze(1),
         sm_scale=softmax_scale,
         d_v=q.shape[-1],
-        block_dpe=64,
+        # q and KV are fully RoPE'd on insert, so the full-dim dot product is
+        # equivalent and keeps BLOCK_DMODEL (= 512) a power of two.
+        block_dpe=0,
     )
     out.copy_(out_attn)

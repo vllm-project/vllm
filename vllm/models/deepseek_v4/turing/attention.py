@@ -213,6 +213,7 @@ class TuringMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
+                assert swa_metadata.token_to_req_indices is not None
                 global_indices, topk_lens = compute_global_topk_indices_and_lens(
                     self.topk_indices_buffer[:num_decode_tokens],
                     swa_metadata.token_to_req_indices,
@@ -279,6 +280,7 @@ class TuringMLAAttention(DeepseekV4Attention):
             else:
                 # C128A: pre-computed during metadata build.
                 assert attn_metadata is not None
+                assert attn_metadata.c128a_prefill_topk_indices is not None
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
             top_k = topk_indices.shape[-1]
             N = (self.max_model_len + self.compress_ratio - 1) // self.compress_ratio
@@ -303,6 +305,7 @@ class TuringMLAAttention(DeepseekV4Attention):
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
+                assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
                 gather_fp16_k_rows(
                     kv[:chunk_size],
@@ -354,6 +357,8 @@ class TuringMLAAttention(DeepseekV4Attention):
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
                 d_v=q.shape[-1],
-                block_dpe=self.rope_head_dim,
+                # q and KV are fully RoPE'd on insert, so the full-dim dot
+                # product is equivalent and keeps BLOCK_DMODEL a power of two.
+                block_dpe=0,
             )
             output[query_start:query_end] = out

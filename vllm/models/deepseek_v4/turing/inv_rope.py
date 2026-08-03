@@ -10,6 +10,7 @@ FP8 tensor cores, so this plain FP16 inverse-RoPE kernel inverts the RoPE that
 
 import torch
 
+from vllm.models.deepseek_v4.turing.constants import NOPE_DIM, ROPE_DIM
 from vllm.triton_utils import tl, triton
 
 
@@ -57,8 +58,8 @@ def inverse_rope(
     o: torch.Tensor,  # [num_tokens, num_heads, head_dim] fp16, in place
     positions: torch.Tensor,  # [num_tokens] int64
     cos_sin_cache: torch.Tensor,  # [max_pos, ROPE_DIM] fp32
-    nope_dim: int = 448,
-    rope_dim: int = 64,
+    nope_dim: int = NOPE_DIM,
+    rope_dim: int = ROPE_DIM,
 ) -> torch.Tensor:
     """Invert the GPT-J RoPE on the rope tail of each head, in place."""
     num_tokens, num_heads, head_dim = o.shape

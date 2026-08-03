@@ -11,12 +11,13 @@ branch writes the RoPE'd row straight into the paged cache.
 
 import torch
 
+from vllm.models.deepseek_v4.turing.constants import (
+    HALF_ROPE,
+    HEAD_DIM,
+    NOPE_DIM,
+    ROPE_DIM,
+)
 from vllm.triton_utils import tl, triton
-
-HEAD_DIM = 512
-ROPE_DIM = 64
-NOPE_DIM = HEAD_DIM - ROPE_DIM
-HALF_ROPE = ROPE_DIM // 2
 
 
 @triton.jit
@@ -118,7 +119,7 @@ def turing_qnorm_rope_kv_fp16_insert(
     """Q-norm/RoPE + RoPE/KV plain FP16 paged insert for the Turing backend."""
     num_tokens = q.shape[0]
     num_heads = q.shape[1]
-    cache_3d = swa_kv_cache.view(-1, block_size, HEAD_DIM)
+    cache_3d = swa_kv_cache.view(-1, block_size, -1)
     grid = (num_tokens, num_heads + 1)
     _qnorm_rope_kv_fp16_insert_kernel[grid](
         q,
