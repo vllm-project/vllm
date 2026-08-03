@@ -145,7 +145,7 @@ steps:
       - tests/distributed/test_torchrun_example.py
       - tests/distributed/test_torchrun_example_moe.py
       - examples/rl/
-      - tests/examples/features/data_parallel/data_parallel_offline.py
+      - examples/features/data_parallel/data_parallel_offline.py
       - vllm/platforms/rocm.py
       commands:
       - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
