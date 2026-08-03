@@ -831,16 +831,23 @@ def test_mm_prompt_tokens_details():
     assert counts == {"image": 600, "video": 1200}
 
     # Gated off, or nothing to report -> no details.
-    assert _make_prompt_tokens_details(False, 5, counts) is None
-    assert _make_prompt_tokens_details(True, None, None) is None
+    assert _make_prompt_tokens_details(False, 5, 0, counts) is None
+    assert _make_prompt_tokens_details(True, None, None, None) is None
 
     # Zero cached_tokens is still reported (not None), matching the cached-only
     # behavior; multimodal counts ride alongside even when cached_tokens is None.
-    assert _make_prompt_tokens_details(True, 0, None).cached_tokens == 0
-    details = _make_prompt_tokens_details(True, None, counts)
+    details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details.cached_tokens == 0
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens is None
+    details = _make_prompt_tokens_details(True, None, None, counts)
     assert details.cached_tokens is None
+    assert details.created_cache_tokens is None
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
-    assert _make_prompt_tokens_details(True, 3, counts).cached_tokens == 3
+    details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details.cached_tokens == 3
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
 
 
 @pytest.mark.asyncio
@@ -2124,6 +2131,13 @@ async def test_tool_choice_validation_without_parser():
     assert isinstance(response_named, ErrorResponse)
     assert "tool_choice" in response_named.error.message
     assert "--tool-call-parser" in response_named.error.message
+    # The function name should appear in a clean, readable form -
+    # guards against leaking Pydantic's internal repr of the
+    # ChatCompletionNamedToolChoiceParam/ChatCompletionNamedFunction
+    # objects directly into the client-facing error message.
+    assert "get_weather" in response_named.error.message
+    assert "ChatCompletionNamedFunction" not in response_named.error.message
+    assert "ChatCompletionNamedToolChoiceParam" not in response_named.error.message
 
 
 @pytest.mark.asyncio
@@ -2300,3 +2314,34 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+def test_make_request_with_harmony_reuses_kv_transfer_prompt_token_ids():
+    """The Harmony reuse branch honors ids forwarded in kv_transfer_params.
+
+    A GPT-OSS server is impractical to stand up here, so this exercises the
+    branch directly on a harmony-configured renderer.
+    """
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+    assert online_renderer.use_harmony
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    conversation, engine_inputs = online_renderer._make_request_with_harmony(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    engine_input = engine_inputs[0]
+    assert engine_input["type"] == "token"
+    assert engine_input["prompt_token_ids"] == [10, 20, 30]
+    # The reuse key is consumed and other kv_transfer_params are preserved.
+    assert request.kv_transfer_params == {"do_remote_prefill": True}

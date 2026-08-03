@@ -139,11 +139,23 @@ def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     return num_heads * round_up(head_dim, 16)
 
 
-def is_vit_use_data_parallel():
+def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
     """
     Get the tensor parallel type for Vision Transformer.
     """
     mm_cfg = get_multimodal_config()
+    can_split = (
+        num_heads % get_tensor_model_parallel_world_size() == 0
+        if num_heads is not None
+        else None
+    )
+    if num_heads is not None and not can_split:
+        logger.warning_once(
+            "The number of vision attention heads is not divisible by "
+            "the tensor parallel size. Falling back to data parallelism "
+            "for the vision encoder."
+        )
+        return True
     return mm_cfg is not None and mm_cfg.mm_encoder_tp_mode == "data"
 
 
