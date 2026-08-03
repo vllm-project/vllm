@@ -467,6 +467,7 @@ steps:
   - .buildkite/scripts/ci-bake-rocm.sh
   - .buildkite/scripts/rocm/build-ci-base.sh
   - .buildkite/scripts/rocm/build-test-image.sh
+  - .buildkite/scripts/rocm/refresh-base-image.sh
   - docker/Dockerfile
   - docker/Dockerfile.cpu
   - docker/Dockerfile.rocm
