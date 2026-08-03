@@ -45,13 +45,17 @@ def _get_padding_mask() -> torch.Tensor | None:
 
     # model runner v1.
     slot_mapping = forward_context.slot_mapping
-    if isinstance(slot_mapping, list):
-        slot_mapping = slot_mapping[0]
-    if isinstance(slot_mapping, dict):
-        slot_mapping = next(iter(slot_mapping.values()), None)
 
-    if isinstance(slot_mapping, torch.Tensor):
-        return slot_mapping < 0
+    if isinstance(slot_mapping, list):
+        slot_mapping_dict = slot_mapping[0]
+    else:
+        slot_mapping_dict = slot_mapping
+
+    if isinstance(slot_mapping_dict, dict):
+        slot_mapping_sample = next(iter(slot_mapping_dict.values()), None)
+
+    if isinstance(slot_mapping_sample, torch.Tensor):
+        return slot_mapping_sample < 0
     else:
         return None
 
