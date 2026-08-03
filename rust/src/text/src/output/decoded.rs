@@ -126,14 +126,12 @@ pub async fn decoded_text_event_stream(
                 // when streaming the outputs.
                 match decode_options.include_stop_str_in_output {
                     true => 0,
-                    false => {
-                        decode_options
-                            .stop_strings
-                            .as_ref()
-                            .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                            .unwrap_or(1)
-                            - 1
-                    }
+                    false => decode_options
+                        .stop_strings
+                        .as_ref()
+                        .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                        .unwrap_or(1)
+                        .saturating_sub(1),
                 },
             );
             decoder = Some(dec);
@@ -321,6 +319,9 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .map(|ss| (ss.as_bytes(), ss.len(), next_off.saturating_sub(ss.len())))
         .enumerate()
         .filter_map(|(ss_idx, (ss, len, start_off))| {
+            if len == 0 {
+                return None;
+            }
             output[start_off..]
                 .windows(len)
                 .position(|w| w == ss)
@@ -455,6 +456,13 @@ mod tests {
     #[tokio::test]
     async fn stream_stop_string_no_match_runs_to_completion() {
         let output = run_to_completion(ascii_tokens("hello"), opts(&["z"], 0)).await;
+        assert_eq!(output.text, "hello");
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn stream_empty_stop_string_does_not_underflow_buffer() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&[""], 0)).await;
         assert_eq!(output.text, "hello");
         assert_eq!(output.finish_reason, FinishReason::Length);
     }
@@ -632,6 +640,13 @@ mod tests {
     #[test]
     fn stop_string_empty_list() {
         let stops: Vec<String> = vec![];
+        let result = matches_stop_string(&stops, "hello", 1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn empty_stop_string_is_ignored_by_matcher() {
+        let stops = vec!["".to_string(), "world".to_string()];
         let result = matches_stop_string(&stops, "hello", 1);
         assert_eq!(result, None);
     }
