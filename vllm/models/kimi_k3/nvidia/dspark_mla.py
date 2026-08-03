@@ -27,6 +27,7 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 class K3DSparkDecoderLayer(nn.Module):
@@ -268,11 +269,6 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_positions_repeated = torch.empty(
-            self._num_context_layers * self._max_num_context_tokens,
-            dtype=torch.int64,
-            device=self._fused_context_kv_weight.device,
-        )
         self._context_kv_fusion_available = True
 
     def _build_quantized_context_kv_buffers(self) -> bool:
@@ -330,11 +326,6 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_positions_repeated = torch.empty(
-            self._num_context_layers * self._max_num_context_tokens,
-            dtype=torch.int64,
-            device=self._fused_context_kv_weight.device,
-        )
         return True
 
     def _precompute_fused_context_kv(
@@ -379,7 +370,10 @@ class K3DSparkModel(nn.Module):
 
         all_k_pe = all_k_pe.permute(1, 0, 2).contiguous()
         all_k_pe_flat = all_k_pe.view(num_layers * num_ctx, 1, self._context_rope_dim)
-        repeated_positions = self._context_positions_repeated[: num_layers * num_ctx]
+        (repeated_positions,) = current_workspace_manager().get_simultaneous(
+            ((num_layers * self._max_num_context_tokens,), torch.int64),
+        )
+        repeated_positions = repeated_positions[: num_layers * num_ctx]
         repeated_positions.view(num_layers, num_ctx).copy_(context_positions)
         # Keep the single-tensor context RoPE on vLLM's optimized CUDA op;
         # DeepSeek YaRN's FlashInfer wrapper assumes a non-null key tensor.
