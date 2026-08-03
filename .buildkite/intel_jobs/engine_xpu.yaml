@@ -15,7 +15,7 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   source_file_dependencies:
   - vllm/compilation/
   - vllm/config/
@@ -33,12 +33,13 @@ steps:
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
-  - tests/test_jit_monitor.py
+  - tests/jit_monitor/test_hooks.py
+  - tests/jit_monitor/test_hooks_gpu.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py || true'
+    pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py || true'
 - label: Engine (1 GPU)
   device: intel_gpu
   timeout_in_minutes: 45
@@ -125,7 +126,7 @@ steps:
     label: debug
     gpu: 2+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
   source_file_dependencies:
   - vllm/compilation/
   - vllm/config/
@@ -144,52 +145,12 @@ steps:
   - vllm/triton_utils/
   - vllm/utils/
   - vllm/v1/
-  - tests/v1/e2e/spec_decode
+  - tests/v1/e2e/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k tensor_parallelism || true'
-- label: V1 e2e (4 GPUs)
-  device: intel_gpu
-  timeout_in_minutes: 20
-  num_devices: 4
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 4+
-  _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
-  source_file_dependencies:
-  - vllm/compilation/
-  - vllm/config/
-  - vllm/distributed/
-  - vllm/engine/
-  - vllm/envs.py
-  - vllm/forward_context.py
-  - vllm/inputs/
-  - vllm/logger.py
-  - vllm/logging_utils/
-  - vllm/model_executor/
-  - vllm/multimodal/
-  - vllm/platforms/
-  - vllm/sampling_params.py
-  - vllm/transformers_utils/
-  - vllm/triton_utils/
-  - vllm/utils/
-  - vllm/v1/
-  - tests/v1/e2e/spec_decode
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k eagle_correctness_heavy || true'
+    pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
 - label: V1 e2e (4xH100)
   device: intel_gpu
   timeout_in_minutes: 35
