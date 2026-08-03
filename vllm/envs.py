@@ -240,6 +240,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -1760,6 +1761,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``.
+    # Default off
+    "VLLM_ENABLE_COHERE_API": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
