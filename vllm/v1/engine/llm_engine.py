@@ -219,6 +219,24 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
+        if request_ids:
+            self._drain_stats_if_idle()
+
+    def _drain_stats_if_idle(self) -> None:
+        if (
+            self.logger_manager is None
+            or self.dp_group is not None
+            or self.output_processor.has_unfinished_requests()
+            or self.engine_core.dp_engines_running()
+        ):
+            return
+        for stats in self.engine_core.drain_stats():
+            self.output_processor.update_scheduler_stats(stats)
+            self.logger_manager.record(
+                scheduler_stats=stats,
+                iteration_stats=None,
+                mm_cache_stats=self.renderer.stat_mm_cache(),
+            )
 
     def add_request(
         self,
@@ -338,6 +356,8 @@ class LLMEngine:
                     iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
+                if processed_outputs.request_outputs:
+                    self._drain_stats_if_idle()
                 if outputs.outputs:
                     self.do_log_stats_with_interval()
 

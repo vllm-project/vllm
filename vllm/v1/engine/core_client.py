@@ -65,6 +65,7 @@ from vllm.v1.fault_tolerance.utils import (
     FaultToleranceRequest,
     FaultToleranceResult,
 )
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -173,6 +174,10 @@ class EngineCoreClient(ABC):
     def shutdown(self, timeout: float | None = None) -> None: ...
 
     def get_output(self) -> EngineCoreOutputs:
+        raise NotImplementedError
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        """Collect final stats after all frontend requests have terminated."""
         raise NotImplementedError
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -376,6 +381,9 @@ class InprocClient(EngineCoreClient):
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        return self.engine_core.drain_stats()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
@@ -989,6 +997,17 @@ class SyncMPClient(MPClient):
         if outputs.wave_complete is not None:
             self.engines_running = False
         return outputs
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        # The utility response follows all pending stats on the output socket.
+        self.call_utility("flush_stats")
+        stats = []
+        # Remote cleanup may keep producing outputs; consume the buffered prefix.
+        for _ in range(self.outputs_queue.qsize()):
+            output = self.get_output()
+            if output.scheduler_stats is not None:
+                stats.append(output.scheduler_stats)
+        return stats
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()

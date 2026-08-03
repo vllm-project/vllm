@@ -8,6 +8,11 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.metrics.external import (
+    register_external_metrics_provider,
+    unregister_external_metrics_provider,
+)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -143,6 +148,46 @@ def test_abort():
     for i, req in enumerate(requests):
         assert req.status == RequestStatus.FINISHED_ABORTED
         assert req.num_output_tokens == abort_order_copy.index(i)
+
+
+def test_external_metrics_refresh_after_deferred_blocks_are_freed(monkeypatch):
+    scheduler: Scheduler
+    monkeypatch.setattr("vllm.v1.metrics.external.time.monotonic", lambda: 10.0)
+    register_external_metrics_provider(
+        "example.plugin", lambda: {"cache_usage": scheduler.get_kv_cache_usage()}
+    )
+    try:
+        scheduler = create_scheduler(
+            async_scheduling=True,
+            pipeline_parallel_size=2,
+            use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+            kv_role="kv_consumer",
+        )
+        (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=20)
+        scheduler.add_request(request)
+        pending = [scheduler.schedule(), scheduler.schedule()]
+        busy = scheduler.make_stats()
+        assert busy.external_metrics["example.plugin"]["cache_usage"] > 0
+
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+        scheduler.schedule()
+        assert scheduler.deferred_frees
+        assert not scheduler.has_requests()
+
+        first = scheduler.update_from_output(
+            pending[0], _make_model_runner_output(pending[0])
+        )
+        assert first[0].scheduler_stats.external_metrics is None
+        last = scheduler.update_from_output(
+            pending[1], _make_model_runner_output(pending[1])
+        )
+        assert not scheduler.deferred_frees
+        assert last[0].scheduler_stats.external_metrics == {
+            "example.plugin": {"cache_usage": 0.0}
+        }
+        assert scheduler.make_stats().external_metrics is None
+    finally:
+        unregister_external_metrics_provider("example.plugin")
 
 
 def test_connector_metadata_precedes_async_placeholder_advance(monkeypatch):
