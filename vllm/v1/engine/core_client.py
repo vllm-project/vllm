@@ -68,6 +68,7 @@ from vllm.v1.fault_tolerance.utils import (
     FaultToleranceRequest,
     FaultToleranceResult,
 )
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -176,6 +177,10 @@ class EngineCoreClient(ABC):
     def shutdown(self, timeout: float | None = None) -> None: ...
 
     def get_output(self) -> EngineCoreOutputs:
+        raise NotImplementedError
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        """Collect final stats after all frontend requests have terminated."""
         raise NotImplementedError
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -397,6 +402,9 @@ class InprocClient(EngineCoreClient):
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        return self.engine_core.drain_stats()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
@@ -958,12 +966,15 @@ class SyncMPClient(MPClient):
         executor_class: type[Executor],
         log_stats: bool,
         renderer: BaseRenderer | None = None,
+        *,
+        client_addresses: dict[str, Any] | None = None,
     ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=log_stats,
+            client_addresses=client_addresses,
             renderer=renderer,
         )
 
@@ -1008,6 +1019,12 @@ class SyncMPClient(MPClient):
             except Exception as e:
                 outputs_queue.put_nowait(e)
             finally:
+                resources.engine_dead = True
+                # A caller may be waiting for a utility reply, not get_output().
+                while utility_results:
+                    _, future = utility_results.popitem()
+                    if not future.done():
+                        future.set_exception(EngineDeadError())
                 # Close sockets.
                 shutdown_socket.close(linger=0)
                 out_socket.close(linger=0)
@@ -1022,6 +1039,9 @@ class SyncMPClient(MPClient):
 
         # The thread takes on responsibility for closing the socket.
         self.resources.output_socket = None
+        self._external_metrics_enabled = log_stats and self.call_utility(
+            "has_external_metrics_providers"
+        )
 
     def get_output(self) -> EngineCoreOutputs:
         # If an exception arises in process_outputs_socket task,
@@ -1034,6 +1054,19 @@ class SyncMPClient(MPClient):
         if outputs.wave_complete is not None:
             self.engines_running = False
         return outputs
+
+    def drain_stats(self) -> list[SchedulerStats]:
+        if not self._external_metrics_enabled:
+            return []
+        # The utility response follows all pending stats on the output socket.
+        self.call_utility("flush_stats")
+        stats = []
+        # Remote cleanup may keep producing outputs; consume the buffered prefix.
+        for _ in range(self.outputs_queue.qsize()):
+            output = self.get_output()
+            if output.scheduler_stats is not None:
+                stats.append(output.scheduler_stats)
+        return stats
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
