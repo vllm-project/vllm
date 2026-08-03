@@ -359,15 +359,20 @@ class FlashInferAllReduce:
                 self.world_size,
             )
             return
-        self.max_workspace_size = max_workspace_size * MiB
+        self.max_workspace_size = int(max_workspace_size * MiB)
         self.max_num_tokens = 0
+        self.workspace: Any = None
         self.disabled = False
 
     def _ensure_workspace(self, hidden_dim: int, dtype: torch.dtype) -> bool:
         """Ensure the all reduce workspace is initialized."""
         if self.max_num_tokens == 0:
-            element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
-            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+            self.max_num_tokens = self.max_workspace_size // (
+                hidden_dim * dtype.itemsize
+            )
+        # Always go through the accessor rather than caching only on first use:
+        # the workspaces are process-wide singletons that destroy_fi_ar_workspace()
+        # can clear underneath us.
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
@@ -379,6 +384,7 @@ class FlashInferAllReduce:
         if workspace is None:
             self.disabled = True
             return False
+        self.workspace = workspace
         return True
 
     def should_use_fi_ar(self, input_tensor: torch.Tensor) -> bool:
@@ -396,27 +402,39 @@ class FlashInferAllReduce:
 
         num_tokens, hidden_dim = input_tensor.shape
         if not self.max_num_tokens:
-            element_size = torch.tensor([], dtype=input_tensor.dtype).element_size()
-            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+            self.max_num_tokens = self.max_workspace_size // (
+                hidden_dim * input_tensor.dtype.itemsize
+            )
 
+        # Cheap upper bound: no workspace can hold more than the whole size
+        # budget, so reject obviously over-sized tensors before paying for
+        # workspace creation. Not authoritative -- see below.
         if num_tokens > self.max_num_tokens:
             return False
 
-        return self._ensure_workspace(hidden_dim, input_tensor.dtype)
+        if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
+            return False
 
-    def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = input_tensor.shape
-        workspace = get_fi_ar_workspace(
-            world_size=self.world_size,
-            rank=self.rank,
-            max_token_num=self.max_num_tokens,
+        # Authoritative capacity check. max_workspace_size budgets the whole
+        # *allocation*, but a backend may only devote a fraction of it to any one
+        # all-reduce: mnnvl is Lamport-based and splits its allocation into three
+        # buffers, so only about a third of the budget is usable per call. Ask the
+        # workspace instead of reimplementing that arithmetic -- otherwise tensors
+        # sized between the real capacity and the budget pass this gate and then
+        # abort the engine inside flashinfer with "The buffer size in the given
+        # workspace is insufficient for the given problem size".
+        return self.workspace.is_buffer_size_sufficient(
+            tp_size=self.world_size,
+            num_tokens=num_tokens,
             hidden_dim=hidden_dim,
             dtype=input_tensor.dtype,
-            group=self.group,
         )
+
+    def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        num_tokens = input_tensor.shape[0]
         return flashinfer_comm.allreduce_fusion(
             input=input_tensor,
-            workspace=workspace,
+            workspace=self.workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
             launch_with_pdl=True,
             trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
@@ -425,3 +443,4 @@ class FlashInferAllReduce:
     def destroy(self):
         if not self.disabled:
             destroy_fi_ar_workspace()
+        self.workspace = None
