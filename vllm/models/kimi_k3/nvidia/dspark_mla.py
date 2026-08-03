@@ -290,7 +290,7 @@ class K3DSparkModel(nn.Module):
         kv_scales = []
         for attn in attentions:
             proj = attn.fused_qkv_a_proj
-            if proj is None or attn.q_lora_rank is None:
+            if proj is None or attn.q_lora_rank is None or not hasattr(proj, "weight"):
                 return False
             output_width = attn.q_lora_rank + kv_width
             weight = proj.weight.detach()
