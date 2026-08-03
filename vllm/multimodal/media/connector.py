@@ -23,6 +23,10 @@ from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.entrypoints.metrics.mm_preprocessing import (
+    observe_media_decode,
+    observe_media_download,
+)
 from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
@@ -314,7 +318,11 @@ class MediaConnector:
             raise NotImplementedError(msg)
 
         media_type = media_type.partition(";")[0]
-        return media_io.load_base64(media_type, data)
+        io_type = media_io.__class__.__name__
+        decode_start = time.monotonic()
+        result = media_io.load_base64(media_type, data)
+        observe_media_decode(io_type, time.monotonic() - decode_start)
+        return result
 
     def _load_file_url(
         self,
@@ -336,7 +344,11 @@ class MediaConnector:
                 f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
-        return media_io.load_file(filepath)
+        io_type = media_io.__class__.__name__
+        decode_start = time.monotonic()
+        result = media_io.load_file(filepath)
+        observe_media_decode(io_type, time.monotonic() - decode_start)
+        return result
 
     def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
@@ -366,14 +378,23 @@ class MediaConnector:
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
-                return media_io.load_bytes(cached)
+                io_type = media_io.__class__.__name__
+                decode_start = time.monotonic()
+                result = media_io.load_bytes(cached)
+                observe_media_decode(io_type, time.monotonic() - decode_start)
+                return result
 
             connection = self.connection
+            io_type = media_io.__class__.__name__
             try:
+                download_start = time.monotonic()
                 data = connection.get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+                observe_media_download(
+                    io_type, time.monotonic() - download_start, len(data)
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -382,7 +403,10 @@ class MediaConnector:
                 raise
 
             self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+            decode_start = time.monotonic()
+            result = media_io.load_bytes(data)
+            observe_media_decode(io_type, time.monotonic() - decode_start)
+            return result
 
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
@@ -414,17 +438,30 @@ class MediaConnector:
                 global_thread_pool, self._get_cached_bytes, url
             )
             if cached is not None:
+                io_type = media_io.__class__.__name__
+
+                def decode_with_timing(raw: bytes) -> _M:
+                    start = time.monotonic()
+                    result = media_io.load_bytes(raw)
+                    observe_media_decode(io_type, time.monotonic() - start)
+                    return result
+
                 future = loop.run_in_executor(
-                    global_thread_pool, media_io.load_bytes, cached
+                    global_thread_pool, decode_with_timing, cached
                 )
                 return await future
 
             connection = self.connection
+            io_type = media_io.__class__.__name__
             try:
+                download_start = time.monotonic()
                 data = await connection.async_get_bytes(
                     url_spec.url,
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+                observe_media_download(
+                    io_type, time.monotonic() - download_start, len(data)
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -435,7 +472,14 @@ class MediaConnector:
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
             )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
+
+            def decode_with_timing(raw: bytes) -> _M:
+                start = time.monotonic()
+                result = media_io.load_bytes(raw)
+                observe_media_decode(io_type, time.monotonic() - start)
+                return result
+
+            future = loop.run_in_executor(global_thread_pool, decode_with_timing, data)
             return await future
 
         if url_spec.scheme == "file":
