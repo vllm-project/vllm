@@ -1531,13 +1531,6 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
 class LlavaOnevision2MultiModalProcessor(
     BaseMultiModalProcessor[LlavaOnevision2ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Retained for symmetry; vLLM actually fetches the parser via
-        # info.get_data_parser() (see ProcessingInfo override above).
-        return LlavaOnevision2MultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,

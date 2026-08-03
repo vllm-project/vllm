@@ -1595,14 +1595,6 @@ class AttModule(nn.Module):
         return x, memory, pos_emb, att_mask
 
 
-class AttBlock(BlockBase, AttModule):
-    """Attention Block module to support both Attention and Block module."""
-
-    def memory_dims(self, max_len: bool = False) -> tuple[int, int]:
-        """memory dimensions"""
-        return (1, self.input_size)
-
-
 def masked_softmax(
     scores: Tensor,
     mask: Tensor | None,

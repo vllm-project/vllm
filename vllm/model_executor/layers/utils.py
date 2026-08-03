@@ -25,12 +25,6 @@ MOE_LAYER_ROUTER_GATE_SUFFIXES = {
 }
 
 
-def is_layer_moe_router_gate(prefix: str) -> bool:
-    if not prefix:
-        return False
-    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
-
-
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
