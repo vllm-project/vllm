@@ -367,6 +367,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
+        # Keep the indexer, not just the buffer the base class snapshots from it:
+        # under MTP+PP the indexer swaps its buffer between the target and draft
+        # passes, so forward_mqa has to re-read it rather than use the snapshot.
+        self._indexer = indexer
 
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
@@ -389,8 +393,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         num_actual_toks = q.shape[0]
 
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        buf = (
+            self._indexer.topk_indices_buffer
+            if self._indexer is not None
+            else self.topk_indices_buffer
+        )
+        assert buf is not None, "topk_indices_buffer required for sparse MLA"
+        topk_indices = buf[:num_actual_toks]
 
         if self.dcp_world_size > 1:
             topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(

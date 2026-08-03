@@ -550,6 +550,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
+        # Keep the indexer, not just the buffer the base class snapshots from it:
+        # under MTP+PP the indexer swaps its buffer between the target and draft
+        # passes, so forward_mqa has to re-read it rather than use the snapshot.
+        self._indexer = indexer
         self.softmax_scale = scale
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
@@ -854,8 +858,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         num_actual_toks = q.shape[0]
 
         # Get topk indices
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        buf = (
+            self._indexer.topk_indices_buffer
+            if self._indexer is not None
+            else self.topk_indices_buffer
+        )
+        assert buf is not None, "topk_indices_buffer required for sparse MLA"
+        topk_indices = buf[:num_actual_toks]
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
