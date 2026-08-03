@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
+import math
 from shutil import which
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
@@ -43,25 +44,34 @@ T = TypeVar("T", bound=AttentionMetadata)
 GLOBAL_TOPK_MASK_MAX_BYTES = 128 * 1024 * 1024  # 128 MiB
 
 
+def _topk_mask_shape(
+    batch_size: int,
+    max_query_len: int,
+    max_key_len: int,
+    reserve_key_starts_word: bool = False,
+) -> tuple[int, int, int]:
+    """Shape of a bit-packed top-k mask, shared by every site that builds one."""
+    tile_m = 128 if max_query_len <= 128 else 256
+    padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
+    num_words = triton.cdiv(max_key_len, 32) + int(reserve_key_starts_word)
+    return batch_size, padded_q_len, num_words
+
+
 def _masked_mha_workspace_fits(
     batch_size: int,
     max_query_len: int,
     context_chunk_max_seq_lens: list[int] | None,
     workspace_numel: int,
 ) -> bool:
-    """Return whether every required per-run mask fits the workspace.
+    """Return whether the suffix and per-context-chunk masks fit the workspace.
 
-    The optional full-sequence mask has its own capacity check and falls back
-    to suffix and per-context-chunk masks when it is too large.
+    The global mask is excluded: it always needs more, and has its own check.
     """
     max_key_len = max(
         max_query_len,
         max(context_chunk_max_seq_lens or (), default=0),
     )
-    tile_m = 128 if max_query_len <= 128 else 256
-    padded_q_len = (max_query_len + tile_m - 1) // tile_m * tile_m
-    num_words = (max_key_len + 31) // 32
-    needed = batch_size * padded_q_len * num_words
+    needed = math.prod(_topk_mask_shape(batch_size, max_query_len, max_key_len))
     return needed <= workspace_numel
 
 
@@ -276,6 +286,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     workspace_numel=workspace.numel(),
                 )
             )
+            if workspace is not None and not masked_mha_workspace_fits:
+                logger.warning_once(
+                    "Sparse MLA top-k mask workspace (%d MiB) is too small for "
+                    "some prefill batches; those fall back to slower sparse MQA.",
+                    workspace.numel() * torch.int32.itemsize // (1024 * 1024),
+                )
             prefill = MLACommonPrefillMetadata(
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
@@ -591,12 +607,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         mask is too large, signalling the caller to fall back to per-chunk
         index remapping.
         """
-        batch_size = len(q_lens)
-        tile_m = 128 if max_query_len <= 128 else 256
-        padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
-        num_words_padded = (max_seq_len + 31) // 32 + 1
+        batch_size, padded_q_len, num_words_padded = _topk_mask_shape(
+            len(q_lens),
+            max_query_len,
+            max_seq_len,
+            reserve_key_starts_word=True,
+        )
         needed = batch_size * padded_q_len * num_words_padded
-        if needed * torch.int32.itemsize > GLOBAL_TOPK_MASK_MAX_BYTES:
+        if needed > topk_mask_workspace.numel():
             return None
 
         mask = topk_mask_workspace[:needed].view(
@@ -634,15 +652,21 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         )
         from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-        tile_m = 128 if max_seqlen_q <= 128 else 256
-        padded_q_len = triton.cdiv(max_seqlen_q, tile_m) * tile_m
         if dense_mask is None:
-            batch_size = len(q_lens)
-            num_words = (max_seqlen_k + 31) // 32
             assert topk_mask_workspace is not None
-            workspace_3d = topk_mask_workspace[
-                : batch_size * padded_q_len * num_words
-            ].view(batch_size, padded_q_len, num_words)
+            batch_size, padded_q_len, num_words = _topk_mask_shape(
+                len(q_lens), max_seqlen_q, max_seqlen_k
+            )
+            words_needed = batch_size * padded_q_len * num_words
+            if words_needed > topk_mask_workspace.numel():
+                raise ValueError(
+                    f"Sparse MLA top-k mask needs {words_needed} int32 words (batch="
+                    f"{len(q_lens)}, q={max_seqlen_q}, k={max_seqlen_k}) but the "
+                    f"workspace holds {topk_mask_workspace.numel()}."
+                )
+            workspace_3d = topk_mask_workspace[:words_needed].view(
+                batch_size, padded_q_len, num_words
+            )
             dense_mask = _build_topk_mask(
                 topk_per_req,
                 q_lens,

@@ -22,7 +22,9 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    GLOBAL_TOPK_MASK_MAX_BYTES,
     _masked_mha_workspace_fits,
+    _topk_mask_shape,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
@@ -862,64 +864,38 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
+DEFAULT_TOPK_MASK_WORKSPACE_NUMEL = GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize
+
+
 @pytest.mark.parametrize(
-    (
-        "batch_size",
-        "max_query_len",
-        "context_chunk_max_seq_lens",
-        "workspace_numel",
-        "expected",
-    ),
-    [
-        pytest.param(
-            1,
-            32768,
-            None,
-            128 * 1024 * 1024 // torch.int32.itemsize,
-            True,
-            id="single-32k-fits-128-mib",
-        ),
-        pytest.param(
-            5,
-            16384,
-            None,
-            128 * 1024 * 1024 // torch.int32.itemsize,
-            False,
-            id="mixed-prefill-exceeds-128-mib",
-        ),
-        pytest.param(
-            1,
-            16,
-            [16],
-            128,
-            True,
-            id="per-chunk-mask-fits-when-global-mask-does-not",
-        ),
-        pytest.param(
-            2,
-            256,
-            [512],
-            7000,
-            False,
-            id="context-chunk-mask-exceeds-workspace",
-        ),
-    ],
+    ("max_query_len", "expected"),
+    [(32768, True), (33024, False)],
 )
-def test_masked_mha_workspace_fits(
-    batch_size,
-    max_query_len,
-    context_chunk_max_seq_lens,
-    workspace_numel,
-    expected,
-):
+def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expected):
+    """A 32K prefill needs the default workspace exactly; shrinking it would
+    push a supported request onto MQA."""
     assert (
         _masked_mha_workspace_fits(
-            batch_size=batch_size,
+            batch_size=1,
             max_query_len=max_query_len,
-            context_chunk_max_seq_lens=context_chunk_max_seq_lens,
-            workspace_numel=workspace_numel,
+            context_chunk_max_seq_lens=None,
+            workspace_numel=DEFAULT_TOPK_MASK_WORKSPACE_NUMEL,
         )
         is expected
+    )
+
+
+def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
+    """Request count and context chunk length are independent multipliers."""
+    base = dict(batch_size=2, max_query_len=2048, context_chunk_max_seq_lens=[2048])
+    exact = math.prod(_topk_mask_shape(2, 2048, 2048))
+
+    assert _masked_mha_workspace_fits(**base, workspace_numel=exact)
+    assert not _masked_mha_workspace_fits(
+        **{**base, "batch_size": 3}, workspace_numel=exact
+    )
+    assert not _masked_mha_workspace_fits(
+        **{**base, "context_chunk_max_seq_lens": [4096]}, workspace_numel=exact
     )
 
 
