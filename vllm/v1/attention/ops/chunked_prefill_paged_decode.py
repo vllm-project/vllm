@@ -162,8 +162,16 @@ def kernel_paged_attention_2d(
         # them from the K/V loads too.
         kv_load_mask = abs_token_idx < seq_len
         l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
-        # Vectorized loading of physical block IDs
-        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+        # The last Triton tile can index logical blocks at or past seq_len.
+        # Clamp and mask block-table loads: on gfx950/HIP, unguarded gathers
+        # fault even when K/V loads are masked (#48043).
+        num_logical_blocks = cdiv_fn(seq_len, PHYSICAL_BLOCK_SIZE)
+        l_block_idx = tl.minimum(l_block_idx, num_logical_blocks - 1)
+        p_block_idx = tl.load(
+            block_tables_ptr + block_table_offset + l_block_idx,
+            mask=kv_load_mask,
+            other=0,
+        )
         internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
         # 5D addressing logic of K
