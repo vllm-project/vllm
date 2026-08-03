@@ -10,7 +10,7 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_kv_cache_split_views, set_random_seed
+from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -255,10 +255,8 @@ def test_reshape_and_cache_flash(
     nvfp4_key_data = None
     nvfp4_value_data = None
     if kv_cache_dtype == "nvfp4":
-        (nvfp4_key_data,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
-        (nvfp4_value_data,), (value_scale_cache,) = nvfp4_kv_cache_split_views(
-            value_cache
-        )
+        nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
+        nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
     if kv_cache_dtype == "nvfp4":
         # Global scale = amax / 448 (per-tensor)
@@ -426,6 +424,43 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
+@pytest.mark.parametrize("implementation", RESHAPE_FLASH_IMPLEMENTATIONS)
+@torch.inference_mode()
+def test_reshape_and_cache_flash_unaligned_rows(
+    kv_cache_factory_flashinfer,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    kv_cache_layout: str,
+    implementation: str,
+) -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/41257.
+
+    head_size=46 with num_heads=13 places KV-cache rows at byte offsets
+    that are not a multiple of the vector width (NHD row pitch
+    13*46*itemsize, HND head pitch 46*itemsize), unlike HEAD_SIZES above
+    which are all 16-byte multiples. The CUDA kernel used to issue
+    vectorized stores to those rows -> CUDA misaligned address.
+    """
+    test_reshape_and_cache_flash(
+        kv_cache_factory_flashinfer,
+        num_tokens=42,
+        num_heads=13,
+        head_size=46,
+        block_size=16,
+        num_blocks=128,
+        dtype=dtype,
+        seed=0,
+        device=CUDA_DEVICES[0],
+        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_layout=kv_cache_layout,
+        kv_scale_type="tensor",
+        implementation=implementation,
+    )
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
@@ -974,6 +1009,78 @@ def test_gather_and_maybe_dequant_cache_mla(
         kv_cache_dtype,
         scale,
         None,
+    )
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [64])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_blocks", [128])
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_gather_and_maybe_dequant_cache_mla_with_seq_starts(
+    kv_lora_rank,
+    qk_rope_head_dim,
+    block_size,
+    num_blocks,
+    dtype,
+    kv_cache_dtype,
+    device,
+):
+    entry_size = kv_lora_rank + qk_rope_head_dim
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    src_cache = _create_mla_cache(
+        num_blocks, block_size, entry_size, dtype, kv_cache_dtype, device
+    )
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    seq_starts = torch.tensor([3, 17, 5], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([20, 10, 16], dtype=torch.int32, device=device)
+    batch_size = seq_lens.shape[0]
+    total_tokens = seq_lens.sum().item()
+    cu_seq_lens = torch.empty((batch_size + 1), dtype=torch.int32, device=device)
+    cu_seq_lens[0] = 0
+    cu_seq_lens[1:] = seq_lens.cumsum(dim=0)
+    token_to_seq = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.int32, device=device), seq_lens
+    )
+
+    block_table = torch.empty(
+        (batch_size, num_blocks), dtype=torch.int32, device=device
+    )
+    for b in range(batch_size):
+        block_table[b, :] = torch.randperm(num_blocks, device=device)
+
+    if kv_cache_dtype == "fp8":
+        dequant_src_cache = torch.empty_like(src_cache, dtype=dtype)
+        ops.convert_fp8(dequant_src_cache, src_cache, scale.item())
+    else:
+        dequant_src_cache = src_cache
+
+    expected_rows = []
+    for b in range(batch_size):
+        start = seq_starts[b].item()
+        length = seq_lens[b].item()
+        for offset in range(start, start + length):
+            block_id = block_table[b, offset // block_size]
+            slot = offset % block_size
+            expected_rows.append(dequant_src_cache[block_id, slot])
+    expected = torch.stack(expected_rows)
+
+    dst = torch.zeros((total_tokens, entry_size), dtype=dtype, device=device)
+    ops.gather_and_maybe_dequant_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        token_to_seq,
+        total_tokens,
+        kv_cache_dtype,
+        scale,
+        seq_starts,
     )
     torch.testing.assert_close(dst, expected)
 

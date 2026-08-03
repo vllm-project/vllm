@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for FusedMoE weight loading with padded hidden dimensions.
+"""Tests for FusedMoEFactory weight loading with padded hidden dimensions.
 
 When using DeepEP backends or NIXL EP with models like nemotron_h,
 hidden_size may be rounded up (e.g., 2688 -> 3072) for backend requirements.
@@ -12,7 +12,7 @@ correctly handles this mismatch.
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 
 class TestGetHiddenDim:
@@ -20,45 +20,94 @@ class TestGetHiddenDim:
 
     def test_2d_non_transposed_w2(self):
         # w2: shard_dim=1 (intermediate), hidden=0
-        assert FusedMoE._get_hidden_dim(shard_dim=1, ndim=2) == 0
+        assert RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2) == 0
 
     def test_2d_non_transposed_w13(self):
         # w1/w3: shard_dim=0 (intermediate), hidden=1
-        assert FusedMoE._get_hidden_dim(shard_dim=0, ndim=2) == 1
+        assert RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2) == 1
 
     def test_2d_transposed_w2(self):
         # transposed w2: shard_dim=0, hidden=1
-        assert FusedMoE._get_hidden_dim(shard_dim=0, ndim=2) == 1
+        assert RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2) == 1
 
     def test_2d_transposed_w13(self):
         # transposed w1/w3: shard_dim=1, hidden=0
-        assert FusedMoE._get_hidden_dim(shard_dim=1, ndim=2) == 0
+        assert RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2) == 0
 
     def test_3d_non_transposed_w2(self):
         # 3D w2: shard_dim=2, hidden=1
-        assert FusedMoE._get_hidden_dim(shard_dim=2, ndim=3) == 1
+        assert RoutedExperts._get_hidden_dim(shard_dim=2, ndim=3) == 1
 
     def test_3d_non_transposed_w13(self):
         # 3D w1/w3: shard_dim=1, hidden=2
-        assert FusedMoE._get_hidden_dim(shard_dim=1, ndim=3) == 2
+        assert RoutedExperts._get_hidden_dim(shard_dim=1, ndim=3) == 2
 
     def test_3d_transposed_w2(self):
         # transposed 3D w2: shard_dim=1, hidden=2
-        assert FusedMoE._get_hidden_dim(shard_dim=1, ndim=3) == 2
+        assert RoutedExperts._get_hidden_dim(shard_dim=1, ndim=3) == 2
 
     def test_3d_transposed_w13(self):
         # transposed 3D w1/w3: shard_dim=2, hidden=1
-        assert FusedMoE._get_hidden_dim(shard_dim=2, ndim=3) == 1
+        assert RoutedExperts._get_hidden_dim(shard_dim=2, ndim=3) == 1
 
     def test_1d_returns_zero(self):
         # 1D per-channel scales: always returns 0
-        assert FusedMoE._get_hidden_dim(shard_dim=0, ndim=1) == 0
-        assert FusedMoE._get_hidden_dim(shard_dim=1, ndim=1) == 0
+        assert RoutedExperts._get_hidden_dim(shard_dim=0, ndim=1) == 0
+        assert RoutedExperts._get_hidden_dim(shard_dim=1, ndim=1) == 0
 
     def test_invalid_shard_dim_raises(self):
         # shard_dim outside the data dimensions should raise
         with pytest.raises(ValueError, match="not a valid data dimension"):
-            FusedMoE._get_hidden_dim(shard_dim=0, ndim=3)
+            RoutedExperts._get_hidden_dim(shard_dim=0, ndim=3)
+
+
+class TestOrientFusedWeight:
+    """Unit tests for _orient_fused_weight.
+
+    E=8 experts, hidden=3072, intermediate=1024.
+    """
+
+    HIDDEN = 3072
+
+    def test_w13_standard_orientation_is_untouched(self):
+        weight = torch.randn(8, 2048, self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, "w1", self.HIDDEN)
+        assert result.shape == (8, 2048, self.HIDDEN)
+
+    def test_w13_transposed_checkpoint_is_normalised(self):
+        # e.g. Qwen3 VL MoE stores [experts, hidden, 2 * intermediate]
+        weight = torch.randn(8, self.HIDDEN, 2048)
+        result = RoutedExperts._orient_fused_weight(weight, "w3", self.HIDDEN)
+        assert result.shape == (8, 2048, self.HIDDEN)
+
+    def test_w2_standard_orientation_is_untouched(self):
+        weight = torch.randn(8, self.HIDDEN, 1024)
+        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1024)
+
+    def test_w2_transposed_checkpoint_is_normalised(self):
+        weight = torch.randn(8, 1024, self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1024)
+
+    def test_w13_per_channel_scale_is_untouched(self):
+        # A fused per-channel scale has no hidden dim, so transposing it would
+        # leave chunk()/TP sharding operating on the wrong axis.
+        scale = torch.randn(8, 2048, 1)
+        result = RoutedExperts._orient_fused_weight(scale, "w1", self.HIDDEN)
+        assert result.shape == (8, 2048, 1)
+        assert result.chunk(2, dim=1)[0].shape == (8, 1024, 1)
+
+    def test_w2_per_channel_scale_is_untouched(self):
+        scale = torch.randn(8, self.HIDDEN, 1)
+        result = RoutedExperts._orient_fused_weight(scale, "w2", self.HIDDEN)
+        assert result.shape == (8, self.HIDDEN, 1)
+
+    def test_block_scale_is_untouched(self):
+        # Block scales are [experts, 2 * intermediate / block, hidden / block]
+        scale = torch.randn(8, 16, 24)
+        result = RoutedExperts._orient_fused_weight(scale, "w1", self.HIDDEN)
+        assert result.shape == (8, 16, 24)
 
 
 class TestNarrowExpertDataForPadding:
@@ -67,7 +116,7 @@ class TestNarrowExpertDataForPadding:
     def test_no_narrowing_when_shapes_match(self):
         expert_data = torch.zeros(1024, 1024)
         loaded_weight = torch.randn(1024, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         assert result.shape == loaded_weight.shape
@@ -77,7 +126,7 @@ class TestNarrowExpertDataForPadding:
         # w2: (hidden_size, intermediate_size) - hidden_size padded at dim 0
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         assert result.shape == (2688, 1024)
@@ -86,7 +135,7 @@ class TestNarrowExpertDataForPadding:
         # w1/w3: (intermediate_size, hidden_size) - hidden_size padded at dim 1
         expert_data = torch.zeros(2048, 3072)
         loaded_weight = torch.randn(2048, 2688)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=1
         )
         assert result.shape == (2048, 2688)
@@ -95,8 +144,8 @@ class TestNarrowExpertDataForPadding:
         # transposed w2: (intermediate_size, hidden_size) - hidden at dim 1
         expert_data = torch.zeros(1024, 3072)
         loaded_weight = torch.randn(1024, 2688)
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=0, ndim=2)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=hidden_dim
         )
         assert result.shape == (1024, 2688)
@@ -105,7 +154,7 @@ class TestNarrowExpertDataForPadding:
         # 3D tensor for full_load path: w2 (num_experts, hidden_size, intermediate)
         expert_data = torch.zeros(8, 3072, 1024)
         loaded_weight = torch.randn(8, 2688, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=1
         )
         assert result.shape == (8, 2688, 1024)
@@ -114,7 +163,7 @@ class TestNarrowExpertDataForPadding:
         # 1D scale tensor: per-channel w2 scale (hidden_size,)
         expert_data = torch.zeros(3072)
         loaded_weight = torch.randn(2688)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         assert result.shape == (2688,)
@@ -123,7 +172,7 @@ class TestNarrowExpertDataForPadding:
         # 0-dim tensor should be a no-op
         expert_data = torch.zeros(3072)
         loaded_weight = torch.tensor(1.0)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         # ndim == 0, so no narrowing
@@ -133,7 +182,7 @@ class TestNarrowExpertDataForPadding:
         # Guard: don't narrow if loaded_weight is larger than expert_data
         expert_data = torch.zeros(2688, 1024)
         loaded_weight = torch.randn(3072, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         assert result.shape == (2688, 1024)
@@ -143,7 +192,7 @@ class TestNarrowExpertDataForPadding:
         # Negative hidden_dim should be a safe no-op (0 <= check)
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=-1
         )
         # -1 fails the 0 <= check, so no narrowing
@@ -155,7 +204,7 @@ class TestNarrowExpertDataForPadding:
         # even when other dimensions also differ
         expert_data = torch.zeros(3072, 2048)
         loaded_weight = torch.randn(2688, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         # Only dim 0 (hidden) should be narrowed; dim 1 stays at 2048
@@ -165,7 +214,7 @@ class TestNarrowExpertDataForPadding:
         # Verify narrowing returns a view (writes go to original tensor)
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = FusedMoE._narrow_expert_data_for_padding(
+        result = RoutedExperts._narrow_expert_data_for_padding(
             expert_data, loaded_weight, hidden_dim=0
         )
         result.copy_(loaded_weight)
@@ -188,8 +237,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
         loaded_weight = torch.randn(original_hidden, intermediate)
 
         # w2 non-transposed: shard_dim=1, hidden_dim=0
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=1, ndim=2)
-        expert_data = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2)
+        expert_data = RoutedExperts._narrow_expert_data_for_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
         )
         expert_data.copy_(loaded_weight)
@@ -211,8 +260,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
         loaded_weight = torch.randn(intermediate, original_hidden)
 
         # w1 non-transposed: shard_dim=0, hidden_dim=1
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=0, ndim=2)
-        expert_data = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
+        expert_data = RoutedExperts._narrow_expert_data_for_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
         )
         expert_data.copy_(loaded_weight)
@@ -233,8 +282,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
         expert_data_full = torch.zeros(intermediate, padded_hidden)
         loaded_weight = torch.randn(intermediate, original_hidden)
 
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=0, ndim=2)
-        expert_data = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
+        expert_data = RoutedExperts._narrow_expert_data_for_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
         )
         expert_data.copy_(loaded_weight)
@@ -249,8 +298,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
         expert_data_full = torch.zeros(hidden, intermediate)
         loaded_weight = torch.randn(hidden, intermediate)
 
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=1, ndim=2)
-        expert_data = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2)
+        expert_data = RoutedExperts._narrow_expert_data_for_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
         )
         expert_data.copy_(loaded_weight)
@@ -270,8 +319,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
         loaded_weight = torch.randn(original_hidden, original_intermediate)
 
         shard_dim = 1
-        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=shard_dim, ndim=2)
-        expert_data = FusedMoE._narrow_expert_data_for_padding(
+        hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=shard_dim, ndim=2)
+        expert_data = RoutedExperts._narrow_expert_data_for_padding(
             expert_data_full,
             loaded_weight,
             hidden_dim=hidden_dim,
@@ -307,8 +356,8 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         loaded_weight = torch.randint(0, 255, (original_packed, 1), dtype=torch.uint8)
 
-        # Minimal FusedMoE mock so weight_loader reaches the BnB path.
-        moe = MagicMock(spec=FusedMoE)
+        # Minimal RoutedExperts mock so weight_loader reaches the BnB path.
+        moe = MagicMock(spec=RoutedExperts)
         moe.quant_config = None
         moe.quant_method = MagicMock()
         moe.quant_method.__class__.__name__ = "BitsAndBytesMethod"
@@ -317,7 +366,7 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         # Call the real weight_loader (unbound) with our mock as self.
         with pytest.raises(ValueError, match="BitsAndBytes"):
-            FusedMoE.weight_loader(
+            RoutedExperts.weight_loader(
                 moe,
                 param,
                 loaded_weight,
@@ -325,3 +374,24 @@ class TestWeightLoadingWithPaddedHiddenSize:
                 shard_id="w2",
                 expert_id=0,
             )
+
+
+class TestPerTensorScaleCoercion:
+    """Regression test for shape-(1,) per-tensor scales (issue #43297).
+
+    llm-compressor NVFP4 emits per-tensor weight and input scales as
+    shape-(1,) tensors. `_to_scalar` collapses them to a 0-D scalar so the
+    scalar-slot assignments in the weight loader neither broadcast nor raise.
+    """
+
+    def test_collapses_to_scalar(self):
+        # shape-(1,) and 0-D both reduce to a 0-D scalar.
+        for loaded_weight in (torch.tensor([0.5]), torch.tensor(0.5)):
+            scalar = RoutedExperts._to_scalar(loaded_weight)
+            assert scalar.shape == ()
+            assert scalar.item() == pytest.approx(0.5)
+
+    def test_rejects_non_scalar(self):
+        # numel > 1 must fail loudly instead of silently picking an element.
+        with pytest.raises(RuntimeError):
+            RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))

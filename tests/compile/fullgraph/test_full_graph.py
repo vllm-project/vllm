@@ -39,12 +39,6 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             ]
         )
 
-        # TODO: figure out why this fails.
-        if False and is_quant_method_supported("gguf"):  # noqa: SIM223
-            TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {"quantization": "gguf"})
-            )
-
         if is_quant_method_supported("gptq"):
             TEST_MODELS.append(
                 ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {"quantization": "gptq"})
@@ -81,7 +75,7 @@ def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
     model_kwargs: dict[str, Any],
-    compilation_mode: int,
+    compilation_mode: CompilationMode,
 ):
     if (
         "w8a8" in model
@@ -203,7 +197,7 @@ def test_custom_compile_config(
     ],
 )
 def test_fp8_kv_scale_compile(
-    compilation_mode: int,
+    compilation_mode: CompilationMode,
     model: str,
     backend: AttentionBackendEnum | None,
 ):
@@ -219,7 +213,9 @@ def test_fp8_kv_scale_compile(
     run_model(compilation_mode, model, **model_kwargs)
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)

@@ -16,10 +16,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
-    Attention,
-    MLAAttention,
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -30,6 +30,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
+from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -109,17 +110,41 @@ def process_weights_after_loading(
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            # process_weights_after_loading may swap in freshly-created
+            # Parameters (e.g. FP8 requantization), which are stamped with the
+            # global rank in BasevLLMParameter.__init__. Re-reconcile their TP
+            # state to the layer so a later weight reload / RL weight-refit
+            # narrows replicated (disable_tp) weights at the correct offset.
+            if hasattr(module, "update_param_tp_status"):
+                module.update_param_tp_status()
+            # Repacking transients above can leave large amounts of memory in
+            # the caching allocator, which starves the OS on UMA devices.
+            release_device_memory_under_pressure(target_device)
 
-    # Initialize post-load attention weights for Attention, MLA, and MM encoder.
-    # NOTE: Happens after other modules so we can easily decompress weights.
+    # Initialize post-load attention weights for any attention layer and MM
+    # encoder. NOTE: Happens after other modules so we can easily decompress
+    # weights.
     for _, module in model.named_modules():
-        if isinstance(
-            module, (Attention, MLAAttention, MMEncoderAttention)
-        ) and hasattr(module, "process_weights_after_loading"):
+        if isinstance(module, (AttentionLayerBase, MMEncoderAttention)) and hasattr(
+            module, "process_weights_after_loading"
+        ):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
+
+    # Process HPC modules (HpcRopeNorm, etc.) that rely on
+    # process_weights_after_loading being called from the model's
+    # load_weights(). When using DummyModelLoader (e.g. profiling or
+    # sleep/wake_up reload), the model's load_weights() is not called, so we
+    # must handle HPC modules here generically.
+    for _, module in model.named_modules():
+        if isinstance(module, HpcModule):
+            module.process_weights_after_loading(model)
+
+    # Model-level post-load hook, after the per-layer quant finalize.
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
@@ -225,9 +250,9 @@ def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], 
     if key in _MODEL_ARCH_BY_HASH:
         return _MODEL_ARCH_BY_HASH[key]
 
-    model_arch = _get_model_architecture(model_config)
-    _MODEL_ARCH_BY_HASH[key] = model_arch
-    return model_arch
+    model_cls_and_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_cls_and_arch
+    return model_cls_and_arch
 
 
 def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
@@ -286,6 +311,6 @@ def configure_quant_config(
 
         # pass mappings by reference to quant_config
         if hf_to_vllm_mapper is not None:
-            quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping

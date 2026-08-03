@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -16,6 +16,13 @@ if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
 logger = init_logger(__name__)
+
+
+def _skip_aiter_sampler_on_gfx1250() -> bool:
+    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -87,7 +94,7 @@ class TopKTopPSampler(nn.Module):
             # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
             # so it can't be used when the configured mode requires them.
             can_use_flashinfer = (
-                logprobs_mode not in ("processed_logits", "processed_logprobs")
+                logprobs_mode not in PROCESSED_LOGPROBS_MODES
                 and flashinfer_sampler_supported()
             )
             self.forward = (
@@ -108,23 +115,16 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_native
         elif (
-            logprobs_mode not in ("processed_logits", "processed_logprobs")
+            logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
+            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
-            try:
-                import aiter.ops.sampling  # noqa: F401
-
-                self.aiter_ops = torch.ops.aiter
-                logger.info_once(
-                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
-                )
-                self.forward = self.forward_hip
-            except ImportError:
-                logger.warning_once(
-                    "aiter.ops.sampling is not available on ROCm. "
-                    "Falling back to forward_native implementation."
-                )
-                self.forward = self.forward_native
+            self.aiter_ops = None
+            self._aiter_ops_import_failed = False
+            logger.info_once(
+                "Using aiter sampler on ROCm (lazy import, sampling-only)."
+            )
+            self.forward = self.forward_hip
         else:
             self.forward = self.forward_native
 
@@ -173,7 +173,7 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
             "FlashInfer does not support returning logits/logprobs"
         )
         # flashinfer sampling functions expect contiguous logits.
@@ -211,6 +211,22 @@ class TopKTopPSampler(nn.Module):
 
         return sample_with_exponential_noise(probs, q), logits_to_return
 
+    def _init_aiter_ops(self) -> bool:
+        if self._aiter_ops_import_failed:
+            return False
+        try:
+            import aiter.ops.sampling  # noqa: F401
+        except ImportError:
+            self._aiter_ops_import_failed = True
+            self.forward = self.forward_native
+            logger.warning_once(
+                "aiter.ops.sampling is not available on ROCm. "
+                "Falling back to PyTorch-native implementation."
+            )
+            return False
+        self.aiter_ops = torch.ops.aiter
+        return True
+
     def forward_hip(
         self,
         logits: torch.Tensor,
@@ -228,10 +244,11 @@ class TopKTopPSampler(nn.Module):
             return self.forward_native(logits, generators, k, p)
         if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in (
-            "processed_logits",
-            "processed_logprobs",
-        ), "aiter sampler does not support returning logits/logprobs."
+        assert self.logprobs_mode not in PROCESSED_LOGPROBS_MODES, (
+            "aiter sampler does not support returning logits/logprobs."
+        )
+        if self.aiter_ops is None and not self._init_aiter_ops():
+            return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(
@@ -242,6 +259,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
     ) -> torch.Tensor:
         """Sample from logits using aiter ops."""
+        assert self.aiter_ops is not None
         use_top_k = k is not None
         use_top_p = p is not None
         # Joint k+p path
@@ -289,10 +307,7 @@ class TopKTopPSampler(nn.Module):
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
         logits_to_return = None
-        if (
-            self.logprobs_mode == "processed_logits"
-            or self.logprobs_mode == "processed_logprobs"
-        ):
+        if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
             logits_to_return = torch.empty_like(logits)
 
         assert len(generators) != logits.shape[0], (

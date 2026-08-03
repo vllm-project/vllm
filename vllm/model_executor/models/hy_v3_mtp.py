@@ -32,7 +32,9 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -49,8 +51,12 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from .hy_v3 import HYV3DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .hy_v3 import HYV3DecoderLayer
+from .utils import (
+    get_spec_layer_idx_from_weight_name,
+    is_pp_missing_parameter,
+    maybe_prefix,
+)
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -294,7 +300,7 @@ class HYV3MTP(nn.Module):
         ]
 
         if _is_moe(self.config):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
