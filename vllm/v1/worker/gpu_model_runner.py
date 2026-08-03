@@ -6708,10 +6708,7 @@ class GPUModelRunner(
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with (
-                self._freeze_gc(),
-                graph_capture(device=self.device, graph_capture_context=cap_ctx),
-            ):
+            with self._freeze_gc():
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
@@ -6720,20 +6717,48 @@ class GPUModelRunner(
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
-                        mem_before = torch.accelerator.get_memory_info()[0]
-                        self._warmup_and_capture(
-                            desc,
-                            cudagraph_runtime_mode=mode,
-                            profile_seq_lens=(
-                                min(
-                                    self.max_model_len,
-                                    self.max_num_tokens // desc.num_tokens,
-                                )
-                                if mode == CUDAGraphMode.FULL and i == 0
-                                else None
-                            ),
+                        profile_seq_lens = (
+                            min(
+                                self.max_model_len,
+                                self.max_num_tokens // desc.num_tokens,
+                            )
+                            if mode == CUDAGraphMode.FULL and i == 0
+                            else None
                         )
+                        with graph_capture(
+                            device=self.device,
+                            graph_capture_context=cap_ctx,
+                        ):
+                            for _ in range(
+                                self.compilation_config.cudagraph_num_of_warmups
+                            ):
+                                self._dummy_run(
+                                    desc.num_tokens,
+                                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                                    force_attention=mode == CUDAGraphMode.FULL,
+                                    uniform_decode=desc.uniform,
+                                    allow_microbatching=False,
+                                    skip_eplb=True,
+                                    remove_lora=False,
+                                    num_active_loras=desc.num_active_loras,
+                                    profile_seq_lens=profile_seq_lens,
+                                )
                         torch.accelerator.synchronize()
+                        torch.accelerator.empty_cache()
+                        mem_before = torch.accelerator.get_memory_info()[0]
+                        with graph_capture(
+                            device=self.device,
+                            graph_capture_context=cap_ctx,
+                        ):
+                            self._warmup_and_capture(
+                                desc,
+                                cudagraph_runtime_mode=mode,
+                                num_warmups=0,
+                            )
+                        torch.accelerator.synchronize()
+                        # The capture stream must be restored before the cache
+                        # can release capture-only allocator blocks.
+                        torch.accelerator.empty_cache()
                         free_after = torch.accelerator.get_memory_info()[0]
                         mem_samples.append(mem_before - free_after)
 
@@ -6757,8 +6782,15 @@ class GPUModelRunner(
 
                 if encoder_cudagraph_manager is not None:
                     mem_before = torch.accelerator.get_memory_info()[0]
-                    encoder_cudagraph_manager.capture(graph_pool=encoder_profiling_pool)
+                    with graph_capture(
+                        device=self.device,
+                        graph_capture_context=cap_ctx,
+                    ):
+                        encoder_cudagraph_manager.capture(
+                            graph_pool=encoder_profiling_pool
+                        )
                     torch.accelerator.synchronize()
+                    torch.accelerator.empty_cache()
                     free_after = torch.accelerator.get_memory_info()[0]
                     encoder_memory_estimate = max(mem_before - free_after, 0)
 
@@ -6882,7 +6914,6 @@ class GPUModelRunner(
                 self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
-            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -6892,7 +6923,10 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(False)
 
         torch.accelerator.synchronize()
+        # Measure only memory retained by runtime graph pools, not freed
+        # allocator blocks from warmups and capture setup.
         torch.accelerator.empty_cache()
+        end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         # Lock workspace to prevent resizing during execution.
         # Max workspace sizes should have been captured during warmup/profiling.
@@ -6913,7 +6947,6 @@ class GPUModelRunner(
         self,
         desc: BatchDescriptor,
         cudagraph_runtime_mode: CUDAGraphMode,
-        profile_seq_lens: int | None = None,
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
         profiler: AbstractContextManager[Any] | None = None,
@@ -6933,7 +6966,6 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
-                profile_seq_lens=profile_seq_lens,
             )
         if num_warmups > 0:
             # Warmups may use auxiliary streams. Ensure all of their work has
@@ -6954,7 +6986,6 @@ class GPUModelRunner(
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
                 is_graph_capturing=True,
-                profile_seq_lens=profile_seq_lens,
             )
 
     def _capture_cudagraphs(
