@@ -1581,6 +1581,7 @@ steps:
   - vllm/models/kimi_k3/nvidia/kda.py
   - vllm/models/kimi_k3/nvidia/kda_metadata.py
   - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - vllm/models/kimi_k3/amd/ops/third_party/kda/
   - tests/models/kimi_k3/test_kda.py
   - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py

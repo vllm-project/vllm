@@ -36,6 +36,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+    use_aiter_mxfp4_triton_moe,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -354,7 +358,11 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
+        )
+        if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -365,8 +373,11 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        # AITER's CK kernel requires weights to be marked as shuffled.
+        if (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and not uses_triton_weight_format
+        ):
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
 
@@ -407,7 +418,10 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
@@ -484,7 +498,9 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     """Whether Kimi-K3's SiTU MXFP4 MoE should use the AITER A16W4 kernel.
 
     K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
-    MXFP4 backend selector does not cover; route it to AITER on gfx950.
+    MXFP4 backend selector does not cover; route it to AITER on MI3xx. gfx950
+    fuses SiTU into the CK kernel, gfx942 applies it between the two Triton
+    a16w4 GEMMs.
     """
     from vllm.platforms import current_platform
 
@@ -492,11 +508,11 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
         return False
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_mi3xx
 
     return (
         rocm_aiter_ops.is_fused_moe_enabled()
-        and on_gfx950()
+        and on_mi3xx()
         and moe.activation == MoEActivation.SITU
         and moe.activation_situ_linear_beta is not None
         and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
@@ -513,8 +529,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.experts_cls: type[mk.FusedMoEExperts] | None
         if self.is_k3_situ_aiter:
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
+            ck_experts, triton_experts = backend_to_kernel_cls(self.mxfp4_backend)
+            self.experts_cls = (
+                triton_experts if use_aiter_mxfp4_triton_moe() else ck_experts
+            )
+            logger.info_once(
+                "Using AITER_MXFP4_BF16 (%s) for Kimi-K3 SiTU MXFP4 MoE.",
+                self.experts_cls.__name__,
+            )
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
@@ -732,10 +754,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        from vllm.platforms.rocm import on_gfx1250
-
         uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
@@ -778,6 +799,32 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # K3's AITER A16W4 kernel wants the separated ([gate_all, up_all])
         # stage-1 layout, unlike the interleaved gpt-oss/DeepSeek path in
         # convert_weight_to_mxfp4_moe_kernel_format. Preshuffle once here.
+        if use_aiter_mxfp4_triton_moe():
+            # The Triton a16w4 kernel takes the plain (unswizzled) layout and
+            # its scales through a PrecisionConfig, not the CK shuffle below.
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
+            w13, w13_flex, w13_scale = _swizzle_mxfp4(
+                layer.w13_weight, layer.w13_weight_scale
+            )
+            w2, w2_flex, w2_scale = _swizzle_mxfp4(
+                layer.w2_weight, layer.w2_weight_scale
+            )
+            # The swizzled tensors are triton_kernels wrappers, not Parameters,
+            # so the registered parameters have to go before rebinding.
+            del layer.w13_weight
+            del layer.w2_weight
+            layer.w13_weight = w13
+            layer.w2_weight = w2
+            self.w13_precision_config = PrecisionConfig(
+                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+            )
+            self.w2_precision_config = PrecisionConfig(
+                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+            )
+            self._finalize_k3_situ_kernel(layer)
+            return
+
         from aiter.utility.fp4_utils import e8m0_shuffle
 
         from vllm._aiter_ops import rocm_aiter_ops
@@ -810,6 +857,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
 
+        self._finalize_k3_situ_kernel(layer)
+
+    def _finalize_k3_situ_kernel(self, layer: RoutedExperts) -> None:
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
@@ -846,10 +896,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        from vllm.platforms.rocm import on_gfx1250
-
         if self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and use_aiter_mxfp4_triton_moe()
         ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.

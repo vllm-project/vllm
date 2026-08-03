@@ -29,13 +29,15 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+ROCM_MI3XX = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx950, on_mi3xx
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
+    ROCM_MI3XX = on_mi3xx()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
@@ -1207,7 +1209,9 @@ ROCM_BACKEND_CONFIGS = {
         "rtol": 1.0,
         "percent": 0.7,
         "requires_aiter": True,
-        "requires_gfx950": True,
+        # gfx950 runs the CK kernel, gfx942 the Triton a16w4 kernel.
+        "requires_gfx950": False,
+        "requires_mi3xx": True,
     },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
@@ -1256,6 +1260,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config.get("requires_mi3xx") and not ROCM_MI3XX:
+        pytest.skip(f"Backend {backend_name} requires MI3xx")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1266,6 +1272,9 @@ def test_rocm_mxfp4_moe_oracle(
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        use_aiter_mxfp4_triton_moe,
     )
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1286,8 +1295,14 @@ def test_rocm_mxfp4_moe_oracle(
     if experts_cls_list is None or len(experts_cls_list) == 0:
         pytest.skip(f"Backend {backend_name} not available")
 
-    # Use first experts class
-    experts_cls = experts_cls_list[0]
+    # Mirror production selection: AITER_MXFP4_BF16 exposes the CK experts
+    # first and the Triton a16w4 experts second; only the latter runs on gfx942.
+    aiter_uses_triton_kernel = (
+        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and use_aiter_mxfp4_triton_moe()
+    )
+    experts_cls = (
+        experts_cls_list[-1] if aiter_uses_triton_kernel else experts_cls_list[0]
+    )
 
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -1463,6 +1478,12 @@ def test_rocm_mxfp4_moe_oracle(
     # SWIGLUOAI uses interleaved layout (gate/up alternating)
     # SILU uses chunked layout (first half gate, second half up)
     use_interleaved = activation == MoEActivation.SWIGLUOAI
+    ref_limit = 7.0 if activation == MoEActivation.SWIGLUOAI else None
+    if aiter_uses_triton_kernel:
+        # The Triton a16w4 kernel keeps the checkpoint's interleaved gate/up
+        # layout (the CK path de-interleaves it) and always clamps swiglu.
+        use_interleaved = True
+        ref_limit = 7.0
     if activation in [MoEActivation.SWIGLUOAI, MoEActivation.SILU]:
         act_name = "swiglu"
     else:
@@ -1479,7 +1500,7 @@ def test_rocm_mxfp4_moe_oracle(
         w2_bias.to(torch.float32),
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
-        limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
+        limit=ref_limit,
         act_type="bf16",
         activation=act_name,
         use_interleaved_layout=use_interleaved,
