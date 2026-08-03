@@ -479,35 +479,12 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=layer.routed_scaling_factor,
         )
 
-def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
-    """Whether Kimi-K3's SiTU MXFP4 MoE should use the AITER A16W4 kernel.
-    K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
-    MXFP4 backend selector does not cover; route it to AITER on gfx950.
-    """
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.platforms.rocm import on_gfx950
-
-    return (
-        rocm_aiter_ops.is_fused_moe_enabled()
-        and on_gfx950()
-        and moe.activation == MoEActivation.SITU
-        and moe.activation_situ_linear_beta is not None
-        and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
-    )
-
-
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
@@ -550,8 +527,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        if self.is_k3_situ_aiter:
-            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,
@@ -668,62 +643,62 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         hidden_size = self.hidden_size
         sf_block_size = 32
 
-        # Shape assertions
-        assert (
-            w13.dim() == 3
-            and w13.shape[0] == num_experts
-            and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
-            and w13.shape[2] == hidden_size // 2
-        )
-        assert (
-            w13_scale.dim() == 3
-            and w13_scale.shape[0] == num_experts
-            and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
-            and w13_scale.shape[2] == hidden_size // sf_block_size
-        )
-        assert (
-            w2.dim() == 3
-            and w2.shape[0] == num_experts
-            and w2.shape[1] == hidden_size
-            and w2.shape[2] == intermediate_size // 2
-        )
-        assert (
-            w2_scale.dim() == 3
-            and w2_scale.shape[1] == hidden_size
-            and w2_scale.shape[2] == intermediate_size // sf_block_size
-        )
-        if w13_bias is not None:
+        # Shape assertions — skipped for SITU since its kernel handles native
+        # (non-256-aligned) intermediate sizes without prior round-up.
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        if self.moe.activation != MoEActivation.SITU:
             assert (
-                w13_bias.dim() == 2
-                and w13_bias.shape[0] == num_experts
-                and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
+                w13.dim() == 3
+                and w13.shape[0] == num_experts
+                and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
+                and w13.shape[2] == hidden_size // 2
             )
-        if w2_bias is not None:
             assert (
-                w2_bias.dim() == 2
-                and w2_bias.shape[0] == num_experts
-                and w2_bias.shape[1] == hidden_size
+                w13_scale.dim() == 3
+                and w13_scale.shape[0] == num_experts
+                and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
+                and w13_scale.shape[2] == hidden_size // sf_block_size
             )
+            assert (
+                w2.dim() == 3
+                and w2.shape[0] == num_experts
+                and w2.shape[1] == hidden_size
+                and w2.shape[2] == intermediate_size // 2
+            )
+            assert (
+                w2_scale.dim() == 3
+                and w2_scale.shape[1] == hidden_size
+                and w2_scale.shape[2] == intermediate_size // sf_block_size
+            )
+            if w13_bias is not None:
+                assert (
+                    w13_bias.dim() == 2
+                    and w13_bias.shape[0] == num_experts
+                    and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
+                )
+            if w2_bias is not None:
+                assert (
+                    w2_bias.dim() == 2
+                    and w2_bias.shape[0] == num_experts
+                    and w2_bias.shape[1] == hidden_size
+                )
 
         # Convert weights to kernel format
-        if self.is_k3_situ_aiter:
-            w13, w2, w13_scale, w2_scale = (
-                self._convert_k3_situ_weight_to_kernel_format(layer)
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+            convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                _cache_permute_indices=self._cache_permute_indices,
+                activation=self.moe.activation,
             )
-        else:
-            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-                convert_weight_to_mxfp4_moe_kernel_format(
-                    mxfp4_backend=self.mxfp4_backend,
-                    layer=layer,
-                    w13_weight=w13,
-                    w2_weight=w2,
-                    w13_weight_scale=w13_scale,
-                    w2_weight_scale=w2_scale,
-                    w13_bias=w13_bias,
-                    w2_bias=w2_bias,
-                    _cache_permute_indices=self._cache_permute_indices,
-                )
-            )
+        )
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
@@ -769,58 +744,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer=layer,
             )
 
-    def _setup_kernel_k3_situ(self, layer: RoutedExperts) -> None:
-        # K3's AITER A16W4 kernel wants the separated ([gate_all, up_all])
-        # stage-1 layout, unlike the interleaved gpt-oss/DeepSeek path in
-        # convert_weight_to_mxfp4_moe_kernel_format. Preshuffle once here.
-        from aiter.utility.fp4_utils import e8m0_shuffle
-
-        import vllm.envs as envs
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        fp4_dtype = torch.float4_e2m1fn_x2
-        e8m0_dtype = torch.float8_e8m0fnu
-        num_experts = layer.w13_weight.shape[0]
-
-        # a8w4 (AITER_SITUV2_A8W4=1) uses the gate/up-interleaved (_gui_) fp8
-        # flydsl kernels, which need w13 weight+scale in interleave layout.
-        # Default a16w4 keeps the separated layout.
-        guinterleave = envs.AITER_SITUV2_A8W4
-        w13 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
-        )
-        w2 = rocm_aiter_ops.shuffle_weight_a16w4(
-            layer.w2_weight.data.view(fp4_dtype), 16, False
-        )
-        w13_scale_raw = layer.w13_weight_scale.data.view(e8m0_dtype)
-        w2_scale_raw = layer.w2_weight_scale.data.view(e8m0_dtype)
-        w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
-        )
-        w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
-
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-                layer=layer,
-            )
-
     def process_weights_after_loading(self, layer):
-        if self.is_k3_situ_aiter:
-            self._setup_kernel_k3_situ(layer)
-            return
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
