@@ -1280,10 +1280,6 @@ class SpecDecodeBaseProposer:
         spec_cfg = self.speculative_config
         base = self.vllm_config
 
-        target_model_type = base.model_config.hf_config.model_type
-        if target_model_type == "interns2_mobius":
-            base = replace(base, model_config=spec_cfg.draft_model_config)
-
         if spec_cfg.moe_backend is not None:
             base = replace(
                 base,
@@ -1374,7 +1370,6 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
-                "InternS2MobiusForConditionalGeneration",
                 "InternS2PreviewForConditionalGeneration",
                 "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",

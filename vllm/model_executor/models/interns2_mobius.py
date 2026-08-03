@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -42,6 +42,7 @@ from .qwen3_5 import (
     Qwen3_5Model,
     Qwen3_5RMSNorm,
 )
+from .qwen3_5_mtp import Qwen3_5MoeMTP
 from .qwen3_next import Qwen3NextAttention, _all_gather_hidden_and_residual
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -467,6 +468,22 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
         )
 
 
+class InternS2MobiusMTP(Qwen3_5MoeMTP):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is None or speculative_config.draft_model_config is None:
+            raise ValueError(
+                "Intern-S2-Mobius MTP requires a draft model configuration."
+            )
+
+        draft_vllm_config = replace(
+            vllm_config,
+            model_config=speculative_config.draft_model_config,
+        )
+        with set_current_vllm_config(draft_vllm_config, prefix=prefix):
+            super().__init__(vllm_config=draft_vllm_config, prefix=prefix)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3VLMultiModalProcessor,
     info=InternS2MobiusProcessingInfo,
@@ -477,6 +494,8 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
         nn.Module.__init__(self)
 
         config = vllm_config.model_config.hf_config
+        if getattr(config, "image_token_index", None) is None:
+            config.image_token_index = config.image_token_id
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 

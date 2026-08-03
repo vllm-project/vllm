@@ -536,10 +536,15 @@ class SpeculativeConfig:
                 text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [architecture],
                 }
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):

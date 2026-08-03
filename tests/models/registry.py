@@ -1681,6 +1681,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
     ),
+    "InternS2MobiusMTP": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        speculative_model="internlm/Intern-S2-Mobius",
+        is_available_online=False,
+    ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="moonshotai/Kimi-K3",
