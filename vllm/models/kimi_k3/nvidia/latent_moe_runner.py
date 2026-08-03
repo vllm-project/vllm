@@ -6,9 +6,9 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.utils.torch_utils import aux_stream, current_stream
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 
 logger = init_logger(__name__)
 
