@@ -9,8 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.models import supports_multimodal_embeddings
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -39,15 +37,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
-        # Draft heads reuse embeddings produced by the target's multimodal encoder
-        # and commonly have text-only checkpoint configs.
-        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            vllm_config.model_config
-        )
-        if self.supports_mm_inputs:
-            self.inputs_embeds = torch.zeros(
-                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-            )
+        self.inputs_embeds: torch.Tensor | None = None
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
@@ -57,14 +47,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if not self.supports_mm_inputs:
             return
 
-        if not supports_multimodal_embeddings(self.model):
-            logger.warning_once(
-                "Draft model %s does not support external multimodal embeddings. "
-                "Embeddings from the target model will not be passed to the "
-                "drafter; using text-only draft inputs instead.",
-                type(self.model).__name__,
-            )
-            self.supports_mm_inputs = False
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -313,6 +301,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
+                assert self.inputs_embeds is not None
                 # Merge multimodal embeddings with input ids.
                 mm_embeds, is_mm_embed = mm_inputs or (None, None)
                 num_input_tokens = (
