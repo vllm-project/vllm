@@ -613,18 +613,6 @@ def test_wait_for_file_size_timeout(tmp_path):
         os.close(fd)
 
 
-def test_wait_for_file_size_fails_when_file_is_unlinked(tmp_path):
-    """A joiner must not wait on an inode removed by a failed creator."""
-    path = tmp_path / "unlinked.mmap"
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-    os.unlink(path)
-    try:
-        with pytest.raises(FileNotFoundError, match="removed"):
-            _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)
-    finally:
-        os.close(fd)
-
-
 # ---------------------------------------------------------------------------
 # Constructor — capacity validation
 # ---------------------------------------------------------------------------

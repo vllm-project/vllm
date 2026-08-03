@@ -19,14 +19,8 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
     while True:
-        stat = os.fstat(fd)
-        if stat.st_size >= expected_size:
+        if os.fstat(fd).st_size >= expected_size:
             return
-        if stat.st_nlink == 0:
-            raise FileNotFoundError(
-                "mmap file was removed before reaching "
-                f"the expected size of {expected_size} bytes"
-            )
         if time.monotonic() > deadline:
             raise TimeoutError(
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
@@ -70,27 +64,17 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
-        # Capacity check is a creator-path concern: only the worker that
-        # wins O_EXCL needs to reserve the region, so only that worker
-        # asks "is there enough space?". Doing this after O_EXCL avoids
-        # spurious failures on joiners who arrive after the creator has
-        # already populated the file (their cap check would see reduced
-        # free and fail, even though they have nothing to reserve).
         try:
-            self.fd: int | None = os.open(
-                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
+            fd = os.open(self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            self.fd: int | None = fd
         except FileExistsError:
             # Joiner path — another worker won O_EXCL. Reopen and wait
             # for the file to reach expected size.
             self.fd = os.open(self.mmap_path, os.O_RDWR)
             try:
                 _wait_for_file_size(self.fd, self.total_size_bytes)
-            except Exception:
-                fd = self.fd
-                self.fd = None
-                if fd is not None:
-                    os.close(fd)
+            except (TimeoutError, OSError):
+                os.close(self.fd)
                 raise
             logger.info("Opened existing mmap file %s", self.mmap_path)
         else:
@@ -102,16 +86,7 @@ class SharedOffloadRegion:
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
             except (RuntimeError, OSError) as e:
-                try:
-                    os.unlink(self.mmap_path)
-                except OSError:
-                    logger.warning(
-                        "Failed to unlink mmap file %s",
-                        self.mmap_path,
-                        exc_info=True,
-                    )
-                fd = self.fd
-                self.fd = None
+                os.unlink(self.mmap_path)
                 os.close(fd)
                 if isinstance(e, RuntimeError):
                     raise RuntimeError(
