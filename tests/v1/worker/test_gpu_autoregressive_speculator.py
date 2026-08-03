@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
@@ -135,34 +134,6 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.load_model(torch.nn.Module())
 
     assert not speculator.supports_mm_inputs
-
-
-def test_eagle3_llama_merges_multimodal_embeddings():
-    embedded_input_ids = None
-
-    class _EmbeddingModel:
-        def embed_input_ids(self, input_ids):
-            nonlocal embedded_input_ids
-            embedded_input_ids = input_ids
-            return input_ids.unsqueeze(-1).expand(-1, 2).float()
-
-    model = SimpleNamespace(model=_EmbeddingModel())
-    input_ids = torch.tensor([1, 999, 2])
-    is_multimodal = torch.tensor([False, True, False])
-    multimodal_embeddings = [torch.tensor([[10.0, 11.0]])]
-
-    actual = Eagle3LlamaForCausalLM.embed_input_ids(
-        model,
-        input_ids,
-        multimodal_embeddings,
-        is_multimodal,
-    )
-
-    torch.testing.assert_close(embedded_input_ids, torch.tensor([1, 0, 2]))
-    torch.testing.assert_close(
-        actual,
-        torch.tensor([[1.0, 1.0], [10.0, 11.0], [2.0, 2.0]]),
-    )
 
 
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):

@@ -18,14 +18,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.interfaces import _require_is_multimodal
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
     process_eagle_weight,
@@ -272,8 +270,6 @@ class LlamaModel(nn.Module):
 
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
-    supports_multimodal_embeddings = True
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -325,18 +321,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if is_multimodal is not None:
-            input_ids = input_ids.masked_fill(
-                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
-            )
-        inputs_embeds = self.model.embed_input_ids(input_ids)
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-        return _merge_multimodal_embeddings(
-            inputs_embeds,
-            multimodal_embeddings,
-            _require_is_multimodal(is_multimodal),
-        )
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
