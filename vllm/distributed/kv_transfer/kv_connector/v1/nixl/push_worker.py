@@ -77,6 +77,8 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
 
+    _supports_member_identity = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -503,6 +505,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        member_state = self._member_xfer_state.get(engine_id)
+        member_groups = (
+            member_state.plan.group_ids if member_state is not None else None
+        )
 
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
@@ -557,7 +563,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_size,
                 req_id,
             )
-            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+            if member_state is not None:
+                local_xfer_side_handle = member_state.handle
+            elif tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
                 # Multiple targets: write each rank its chunk of local memory.
                 # Hybrid MLA+SSM also lands here: its split handles replicate
                 # the attention descriptors and chunk only the SSM state.
@@ -579,6 +587,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                region_group_ids=member_groups,
             )
             if handle is not None:
                 handles.append(handle)
@@ -598,6 +607,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        region_group_ids: tuple[int, ...] | None = None,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -643,12 +653,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            region_group_ids=region_group_ids,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            region_group_ids=region_group_ids,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

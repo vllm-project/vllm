@@ -1641,6 +1641,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()
     worker._xfer_blocks = MagicMock(return_value=1)
+    worker._member_xfer_state = {}
 
     meta = MagicMock()
     meta.remote.engine_id = engine_id
