@@ -91,6 +91,10 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
 
+    def supports_out(self) -> bool:
+        # Output head dim is v.shape[-1] == v_head_dim, so `out` is unpadded.
+        return True
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
@@ -102,13 +106,14 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        out = torch.empty(
-            q.shape[0],
-            q.shape[1],
-            v.shape[2],
-            device=q.device,
-            dtype=self._prefill_metadata.output_dtype,
-        )
+        if out is None:
+            out = torch.empty(
+                q.shape[0],
+                q.shape[1],
+                v.shape[2],
+                device=q.device,
+                dtype=self._prefill_metadata.output_dtype,
+            )
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
@@ -133,7 +138,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1).contiguous()
+            return ret[0], ret[1].transpose(0, 1)
         return ret
 
     def run_prefill_context_chunk(
@@ -182,4 +187,4 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1).contiguous()
+        return attn_out, lse.transpose(0, 1)

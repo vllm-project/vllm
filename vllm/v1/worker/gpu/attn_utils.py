@@ -33,7 +33,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
-    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.hisparse import HiSparseRuntime, init_hisparse_runtime
@@ -55,6 +54,18 @@ logger = init_logger(__name__)
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
+
+    def narrow(
+        self, support: AttentionCGSupport, backend: str | None
+    ) -> "AttentionCGSupportInfo":
+        """Return an info tightened by ``support`` if it is more restrictive.
+
+        Lets attention groups built outside ``init_attn_backend`` (e.g.
+        encoder-only layers) contribute to the runner's cudagraph decision.
+        """
+        if support.value < self.min_cg_support.value:
+            return AttentionCGSupportInfo(support, backend)
+        return self
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -173,7 +184,7 @@ def init_attn_backend(
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
-                cast(AttentionSpec, group.kv_cache_spec),
+                group.kv_cache_spec,
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
@@ -342,7 +353,6 @@ def _reshape_kv_cache(
                 layer_cache_dtype = (
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
                     else cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
