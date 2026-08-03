@@ -28,7 +28,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.mcp.tool_server import init_tool_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.cli_args import (
+    make_arg_parser,
+    resolve_default_chat_template_kwargs,
+    validate_parsed_serve_args,
+)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
@@ -397,6 +401,7 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
     state.tool_server = (
         await init_tool_server(args) if "generate" in supported_tasks else None
     )
@@ -427,7 +432,7 @@ async def init_app_state(
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -443,7 +448,7 @@ async def init_app_state(
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
 
@@ -453,7 +458,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -461,7 +466,12 @@ async def init_app_state(
         from vllm.entrypoints.generate.api_router import init_generate_state
 
         await init_generate_state(
-            engine_client, state, args, request_logger, supported_tasks
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
+            default_chat_template_kwargs,
         )
 
         from vllm.entrypoints.scale_out.factories import init_scale_out_state
@@ -519,6 +529,7 @@ async def init_render_app_state(
 
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
     state.tool_server = await init_tool_server(args)
 
     state.online_renderer = OnlineRenderer(
@@ -532,7 +543,7 @@ async def init_render_app_state(
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -548,7 +559,7 @@ async def init_render_app_state(
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
 
@@ -559,7 +570,7 @@ async def init_render_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 

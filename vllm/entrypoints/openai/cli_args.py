@@ -355,6 +355,16 @@ class FrontendArgs(BaseFrontendArgs):
         return frontend_kwargs
 
 
+def resolve_default_chat_template_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    kwargs = dict(args.default_chat_template_kwargs or {})
+    if getattr(args, "cohere_format", None):
+        kwargs.setdefault("cohere_format", args.cohere_format)
+    return kwargs
+
+
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     """Create the CLI argument parser used by the OpenAI API server.
 

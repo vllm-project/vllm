@@ -279,11 +279,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         *,
         skip_mm_cache: bool = False,
     ) -> ResponsesRenderResult | ErrorResponse:
-        if self.use_harmony and request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
         previous_messages: ResponsesPreviousMessages | None = None
         previous_response_outputs: list[ResponseOutputItem] | None = None
         if prev_response is not None:

@@ -231,16 +231,6 @@ class ServingRender(BaseServing):
                 param="previous_response_id",
             )
 
-        template_error = self.online_renderer.validate_chat_template(
-            request_chat_template=None,
-            chat_template_kwargs=request.chat_template_kwargs,
-            trust_request_chat_template=(
-                self.online_renderer.trust_request_chat_template
-            ),
-        )
-        if template_error is not None:
-            return template_error
-
         result = await self.online_renderer.render_responses(
             request,
             previous_messages=None,
