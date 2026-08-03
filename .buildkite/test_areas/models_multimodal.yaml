@@ -153,7 +153,7 @@ steps:
   - vllm/
   - tests/models/multimodal/generation_ppl_test/
   commands:
-    - pytest -v -s tests/models/multimodal/generation_ppl_test/
+    - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
       dind: false
