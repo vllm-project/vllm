@@ -97,7 +97,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
-    "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
+    "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
@@ -1094,7 +1094,7 @@ class _ModelRegistry:
         else:
             msg = (
                 "`model_cls` should be a string or PyTorch model class, "
-                f"not a {type(model_arch)}"
+                f"not a {type(model_cls)}"
             )
             raise TypeError(msg)
 
@@ -1352,88 +1352,88 @@ class _ModelRegistry:
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_text_generation_model
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_text_generation_model
 
     def is_pooling_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_pooling_model
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_pooling_model
 
     def is_multimodal_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_multimodal
 
     def is_multimodal_raw_input_only_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal_raw_input_only
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_multimodal_raw_input_only
 
     def is_pp_supported_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_pp
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_pp
 
     def model_has_inner_state(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.has_inner_state
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.has_inner_state
 
     def is_attention_free_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_attention_free
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_attention_free
 
     def is_hybrid_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_hybrid
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_hybrid
 
     def is_noops_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.has_noops
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.has_noops
 
     def is_transcription_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_transcription
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_transcription
 
     def is_transcription_only_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_transcription_only
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_transcription_only
 
 
 def _resolve_module_name(mod_relname: str) -> str:
