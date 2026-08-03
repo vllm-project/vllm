@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import uuid
 from http import HTTPStatus
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request
@@ -24,7 +23,7 @@ _REQUIRED_PARAMS: dict[str, set[str]] = {
 }
 
 
-def _validate_payload(body: dict) -> tuple[str, dict]:
+def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(body, dict):
         raise HTTPException(400, "Request body must be a JSON object.")
     instruction = body.get("instruction")
@@ -40,7 +39,10 @@ def _validate_payload(body: dict) -> tuple[str, dict]:
         raise HTTPException(
             400, f"Missing params for '{instruction}': {sorted(missing)}"
         )
-    return instruction, params
+    request_id = body.get("request_id", "")
+    if not isinstance(request_id, str):
+        raise HTTPException(400, "'request_id' must be a string.")
+    return instruction, params, request_id
 
 
 @router.post(
@@ -59,11 +61,15 @@ async def process_fault_tolerance_instruction(
     except json.JSONDecodeError as e:
         raise HTTPException(400, "Invalid JSON format") from e
 
-    instruction, params = _validate_payload(body)
+    instruction, params, request_id = _validate_payload(body)
+    # A recovery round fans out to all engines with the same request_id, which
+    # also namespaces that round's coordination keys; a retry must use a fresh
+    # one. Empty means the caller doesn't track rounds (engines use the local
+    # epoch for coordination instead).
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
     )
 
     client: EngineClient = raw_request.app.state.engine_client
