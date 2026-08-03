@@ -2640,6 +2640,48 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let scheduler_stats_hex = lines.by_ref().take(3).collect::<Vec<_>>();
+    assert_eq!(scheduler_stats_hex.len(), 3);
+    assert!(lines.next().is_none(), "unexpected fixture line");
+
+    let external_metrics = BTreeMap::from([(
+        "example.plugin".to_owned(),
+        BTreeMap::from([
+            (
+                "limits".to_owned(),
+                Value::Array(vec![i64::MIN.into(), u64::MAX.into()]),
+            ),
+            (
+                "labels".to_owned(),
+                Value::Map(vec![("pool".into(), "kv".into())]),
+            ),
+            ("ratio".to_owned(), Value::F64(0.5)),
+            ("enabled".to_owned(), Value::Boolean(true)),
+            ("optional".to_owned(), Value::Nil),
+        ]),
+    )]);
+    let mut rust_scheduler_stats_hex = Vec::new();
+    for (encoded, metrics) in scheduler_stats_hex.iter().zip([None, None, Some(external_metrics)]) {
+        let decoded: SchedulerStats =
+            rmp_serde::from_slice(&hex::decode(encoded).unwrap()).unwrap();
+        assert_eq!(
+            decoded,
+            SchedulerStats {
+                num_running_reqs: 7,
+                num_waiting_reqs: 3,
+                kv_cache_usage: 0.25,
+                external_metrics: metrics,
+                ..Default::default()
+            }
+        );
+        rust_scheduler_stats_hex.push(hex::encode(rmp_serde::to_vec_named(&decoded).unwrap()));
+    }
+    let roundtrip = Command::new(&script).args(&rust_scheduler_stats_hex).output().unwrap();
+    assert!(
+        roundtrip.status.success(),
+        "Python could not decode Rust scheduler stats: {}",
+        String::from_utf8_lossy(&roundtrip.stderr)
+    );
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
