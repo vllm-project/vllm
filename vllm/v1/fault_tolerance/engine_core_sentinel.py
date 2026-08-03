@@ -311,7 +311,10 @@ class EngineCoreSentinel:
             master_ip = parallel_config.data_parallel_master_ip
 
         with set_current_vllm_config(engine.vllm_config):
-            ft_request.params.update(self._reinit_dp_group(master_ip, dp_rank, dp_size))
+            recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+            ft_request.params.update(
+                self._reinit_dp_group(master_ip, dp_rank, dp_size, recovery_round)
+            )
         ft_request.params["dp_master_ip"] = master_ip
 
         # Commit the topology only after the group reinit succeeded, so a
@@ -349,12 +352,14 @@ class EngineCoreSentinel:
             timeout=timedelta(seconds=self.engine_recovery_timeout_sec),
         )
 
-    def _reinit_dp_group(self, master_ip: str, dp_rank: int, dp_size: int) -> dict:
+    def _reinit_dp_group(
+        self, master_ip: str, dp_rank: int, dp_size: int, recovery_round: str
+    ) -> dict:
         """Reinit the DP process group. Returns worker params."""
         engine = self.engine
         parallel_config = engine.vllm_config.parallel_config
-        worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
-        engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
+        worker_key = f"ft_worker_dp_ports_{recovery_round}"
+        engine_key = f"ft_engine_dp_port_{recovery_round}"
         enable_eplb = parallel_config.enable_eplb
 
         if dp_rank == 0:
@@ -369,10 +374,10 @@ class EngineCoreSentinel:
         result: dict[str, Any] = {"new_stateless_dp_group_ports": worker_ports}
         if enable_eplb:
             result["new_ep_group_port"] = self._coordinate_port(
-                "ft_worker_ep_port", dp_rank
+                "ft_worker_ep_port", dp_rank, recovery_round
             )
             result["new_eplb_group_port"] = self._coordinate_port(
-                "ft_worker_eplb_port", dp_rank
+                "ft_worker_eplb_port", dp_rank, recovery_round
             )
         self._dp_reinit_epoch += 1
 
@@ -389,10 +394,12 @@ class EngineCoreSentinel:
         )
         return result
 
-    def _coordinate_port(self, key_prefix: str, dp_rank: int) -> int:
+    def _coordinate_port(
+        self, key_prefix: str, dp_rank: int, recovery_round: str
+    ) -> int:
         """Rank 0 picks a fresh port and publishes it via dp_store;
         other ranks block-read it."""
-        key = f"{key_prefix}_{self._dp_reinit_epoch}"
+        key = f"{key_prefix}_{recovery_round}"
         engine = self.engine
         if dp_rank == 0:
             port = get_open_port()
