@@ -22,6 +22,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -51,6 +52,7 @@ class DSparkMarkovHead(nn.Module):
         draft_vocab_size: int,
         markov_rank: int,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
@@ -58,6 +60,7 @@ class DSparkMarkovHead(nn.Module):
             draft_vocab_size,
             markov_rank,
             bias=False,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "markov_w2"),
             disable_tp=True,
         )
@@ -97,6 +100,7 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             draft_vocab_size,
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
+            quant_config=self.quant_config,
         )
 
 

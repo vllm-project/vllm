@@ -1259,6 +1259,34 @@ def test_project_kv_cache_groups_to_worker():
 
 
 @pytest.mark.parametrize(
+    "layer_type,dcp_size,expected_width",
+    [
+        ("mla", 1, 64),
+        ("mla", 2, 32),
+        # Mamba state is replicated, not DCP-sharded, and its width is the
+        # resident state block count rather than cdiv(max_len, block_size).
+        ("mamba", 2, 3),
+    ],
+)
+def test_uniform_type_spec_block_table_width_matches_layer_spec(
+    layer_type, dcp_size, expected_width
+):
+    # The runner sizes the block table from the group spec while the metadata
+    # builders are constructed from the per-layer spec, so the aggregate must
+    # report the same width as the layers it wraps.
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    layer_spec = new_mla_spec() if layer_type == "mla" else new_mamba_spec()
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=layer_spec.block_size,
+        kv_cache_specs={"layer1": layer_spec, "layer2": layer_spec},
+    )
+
+    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+
+
+@pytest.mark.parametrize(
     "spec_kind,dcp_size,expected",
     [
         ("attention", 1, 16),
@@ -1273,12 +1301,7 @@ def test_resolve_block_sizes_scales_uniform_type_group_by_dcp(
 ):
     # A UniformType group is a container rather than an AttentionSpec, but the
     # span of the layers it wraps is what decides whether DCP scaling applies.
-    mamba_spec = MambaSpec(
-        block_size=16,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="align",
-    )
+    mamba_spec = new_mamba_spec()
     inner_specs = (
         {"layer1": new_kv_cache_spec(), "layer2": new_kv_cache_spec(head_size=32)}
         if spec_kind == "attention"

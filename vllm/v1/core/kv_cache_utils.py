@@ -428,26 +428,6 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
 
 
-def need_extra_keys(request: Request) -> bool:
-    """Check whether the blocks allocated to this request need extra hash keys.
-
-    Args:
-        request (Request): The request.
-
-    Returns:
-        bool: Whether blocks allocated to this request need extra hash keys.
-    """
-
-    # Multimodal requests need to include the MM hash.
-    # LoRA requests need to include the LoRA name.
-    # Request with provided cache salt need to include the salt.
-    return (
-        bool(request.mm_features)
-        or (request.lora_request is not None)
-        or (request.cache_salt is not None)
-    )
-
-
 def _gen_mm_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[list[Any], int]:
@@ -1052,20 +1032,6 @@ def _get_kv_cache_groups_uniform_type(
     """
 
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
-
-
-def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
-    """
-    Whether all layers in the given KVCacheSpec have the same page size.
-    Args:
-        kv_cache_spec: The KVCacheSpec of each attention layer in the model
-
-    Returns:
-        True if all layers have the same page size, False otherwise.
-    """
-
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    return len(page_sizes) == 1
 
 
 def unify_kv_cache_spec_page_size(

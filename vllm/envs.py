@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
-    VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_INT4_W4A8: bool = True
@@ -196,6 +195,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -868,8 +868,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
         else None
     ),
-    # (CPU backend only) whether to use SGL kernels, optimized for small batch.
-    "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
     # (CPU backend only) whether to enable attention spilt KV.
     "VLLM_CPU_ATTN_SPLIT_KV": lambda: bool(
         int(os.getenv("VLLM_CPU_ATTN_SPLIT_KV", "1"))
@@ -1328,12 +1326,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
     ),
-    # Divisor for dynamic query scale factor calculation for FP8 KV Cache
-    "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
-    "K_SCALE_CONSTANT": lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
-    "V_SCALE_CONSTANT": lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))
@@ -1533,6 +1525,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
+    # are replicated on every rank, so each rank streams the whole weight to
+    # serve its own token shard. Shard them across TP instead: the MLP then
+    # all-gathers the full token set, computes this rank's partial, and
+    # reduce-scatters (which both sums across TP and restores the sequence
+    # sharding). Trades weight bandwidth and resident memory for two collectives
+    # per layer, so it only wins at low token counts: intended for decode
+    # instances in a P/D disaggregated deployment, not for prefill or unified
+    # serving.
+    "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
