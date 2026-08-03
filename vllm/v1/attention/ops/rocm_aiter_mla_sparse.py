@@ -422,11 +422,7 @@ def _fp8_paged_mqa_logits_decode_kernel(
         pos_in_blk = pos - logical_blk * BLOCK_SIZE  # [BLOCK_KV] == pos % BLOCK_SIZE
 
         # block-flat layout: values region, then scales region.
-        val_off = (
-            page * stride_kvblk_fp8
-            + pos_in_blk[:, None] * HEAD_SIZE
-            + d[None, :]
-        )
+        val_off = page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
         kv = tl.load(kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0).to(
             tl.float32
         )  # [BLOCK_KV, D]
@@ -461,10 +457,12 @@ def rocm_fp8_paged_mqa_logits_triton(
 
     fp8_dtype = current_platform.fp8_dtype()
     num_blocks = kv_cache_fp8.shape[0]
-    row = head_size + 4  # per-position bytes: D fp8 values + 4-byte fp32 scale
-    kv_flat = kv_cache_fp8.reshape(num_blocks, -1)  # uint8 [num_blocks, block_size*row]
-    kv_val = kv_flat.view(fp8_dtype)  # [num_blocks, block_size*row] fp8
-    kv_scale = kv_flat.view(torch.float32)  # [num_blocks, block_size*row//4] fp32
+    # Each position stores D fp8 values followed by a 4-byte fp32 scale.
+    kv_flat = kv_cache_fp8.reshape(
+        num_blocks, -1
+    )  # uint8 [num_blocks, block_size*(D+4)]
+    kv_val = kv_flat.view(fp8_dtype)  # [num_blocks, block_size*(D+4)] fp8
+    kv_scale = kv_flat.view(torch.float32)  # [num_blocks, block_size*(D+4)//4] fp32
 
     # Per-(b,n) causal key count. MTP: query n sees keys [0, context-next_n+n].
     cl = context_lens.reshape(-1).to(torch.int64)
@@ -483,10 +481,13 @@ def rocm_fp8_paged_mqa_logits_triton(
     )
     out_logits.fill_(float("-inf"))
 
-    # Split each row's KV range across programs for occupancy. Small batches need
-    # more splits to fill the GPU; large batches already saturate it at 32.
-    N_SPLITS = 64 if (batch_size * next_n) <= 16 else 32
-    _fp8_paged_mqa_logits_decode_kernel[(batch_size * next_n, N_SPLITS)](
+    # Memory-bound over the KV range: split each row's keys across programs so
+    # few-row / long-context launches still fill the GPU. All terms are static
+    # at launch, so the grid stays CUDA-graph-safe.
+    rows = batch_size * next_n
+    tiles_cap = (max_model_len + BLOCK_KV - 1) // BLOCK_KV
+    N_SPLITS = max(1, min(256, tiles_cap, 1024 // rows))
+    _fp8_paged_mqa_logits_decode_kernel[(rows, N_SPLITS)](
         q_fp8,
         kv_val,
         kv_scale,
@@ -509,6 +510,8 @@ def rocm_fp8_paged_mqa_logits_triton(
         BLOCK_KV=BLOCK_KV,
         N_SPLITS=N_SPLITS,
         NEXT_N=next_n,
+        num_warps=4,
+        num_stages=2,
     )
     return out_logits
 
