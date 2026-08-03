@@ -433,6 +433,9 @@ image-build:
         --build-arg "LMCACHE_REPO_URL=${LMCACHE_REPO_URL}" \
         --build-arg "LMCACHE_BRANCH=${LMCACHE_BRANCH}" \
         --build-arg "LMCACHE_COMMIT=${LMCACHE_COMMIT}" \
+        --build-arg "FLASHINFER_REPO_URL=${FLASHINFER_REPO_URL}" \
+        --build-arg "FLASHINFER_BRANCH=${FLASHINFER_BRANCH}" \
+        --build-arg "FLASHINFER_COMMIT=${FLASHINFER_COMMIT}" \
         --destination "${REGISTRY_HOST}/${REGISTRY_IMAGE}:${IMAGE_TAG}" \
         --ignore-path=/workspace || KANIKO_EXIT=$?
       mkdir -p /workspace 2>/dev/null || /busybox/mkdir -p /workspace 2>/dev/null || true

@@ -119,4 +119,27 @@ assert '/vllm-workspace/' in vllm.__file__, 'vllm 不再是 editable(被 lmcache
 assert '/vllm-workspace/' in tf.__file__, 'transformers 不再是内部 editable(被 lmcache 依赖覆盖) -> '+tf.__file__; \
 print('env intact: torch', torch.__version__, '| vllm', vllm.__file__, '| transformers', tf.__file__)"
 
+# flashinfer-python (可编辑 --no-deps 安装, 源码在 /vllm-workspace/flashinfer)。
+# 与 transformers 一样放在 update 层: 内部分支迭代频繁, 每次发版更新, 不必重建 base。
+# REPO_URL/BRANCH 必填 (无默认值, 空则报错); COMMIT 可选 (空则停在分支 HEAD)。
+# --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境。
+ARG FLASHINFER_REPO_URL
+ARG FLASHINFER_BRANCH
+ARG FLASHINFER_COMMIT=
+RUN set -e; \
+    : "${FLASHINFER_REPO_URL:?FLASHINFER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
+    : "${FLASHINFER_BRANCH:?FLASHINFER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
+    if [ -n "${GITLAB_TOKEN:-}" ]; then \
+        fi_clone_url="https://oauth2:${GITLAB_TOKEN}@${FLASHINFER_REPO_URL#https://}"; \
+    else \
+        fi_clone_url="$FLASHINFER_REPO_URL"; \
+    fi; \
+    git clone "$fi_clone_url" /vllm-workspace/flashinfer; \
+    unset fi_clone_url; \
+    cd /vllm-workspace/flashinfer && git submodule update --init --recursive; \
+    git checkout "$FLASHINFER_BRANCH"; \
+    if [ -n "${FLASHINFER_COMMIT:-}" ]; then git checkout "$FLASHINFER_COMMIT"; fi; \
+    git remote set-url origin "$FLASHINFER_REPO_URL"; \
+    uv pip install --system --no-build-isolation --no-deps -e .
+
 ENTRYPOINT ["vllm", "serve"]
