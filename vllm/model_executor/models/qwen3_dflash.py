@@ -820,7 +820,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.model._build_fused_kv_buffers()
         if self.draft_id_to_target_id is not None:
             self._draft_targets.data = (
-                torch.arange(self.config.draft_vocab_size, device=self.draft_id_to_target_id.device)
+                torch.arange(
+                    self.config.draft_vocab_size,
+                    device=self.draft_id_to_target_id.device,
+                )
                 + self.draft_id_to_target_id
             )
 

@@ -433,6 +433,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         )
         loader.load_weights(model_weights.items())
         self._draft_targets.data = (
-            torch.arange(self.config.draft_vocab_size, device=self.draft_id_to_target_id.device)
+            torch.arange(
+                self.config.draft_vocab_size, device=self.draft_id_to_target_id.device
+            )
             + self.draft_id_to_target_id
         )
