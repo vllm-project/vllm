@@ -46,6 +46,10 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
                   "cudaHostGetDevicePointer failed with unexpected error: ",
                   cudaGetErrorString(err));
 
+  // Clear the non-fatal error immediately so it cannot affect later CUDA calls
+  // if the exception below is caught by the caller.
+  cudaGetLastError();
+
   // Zero-copy mapping failed -- the memory is truly not pinned/registered.
   // If the caller requires a live alias, raise now before allocating anything.
   STD_TORCH_CHECK(!require_live_view,
@@ -58,7 +62,6 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   // Allocate a new pinned+mapped buffer and copy the data once.
   // NOTE: this path produces a *detached* copy; subsequent writes to the
   // original cpu_tensor will NOT be visible through the returned view.
-  cudaGetLastError();  // clear the non-fatal error from the failed call above
   torch::stable::Tensor contiguous_cpu = torch::stable::contiguous(cpu_tensor);
   size_t nbytes = contiguous_cpu.numel() * contiguous_cpu.element_size();
 
