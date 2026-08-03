@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kInt8StaticTensorSym,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -71,7 +72,8 @@ def _probe(cls: type):
         obj.config = NvFp4LinearLayerConfig()
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
-            is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
+            weight_quant_key=kInt8StaticTensorSym,
+            activation_quant_key=kInt8StaticTensorSym,
         )
     else:
         obj.config = FP8ScaledMMLinearLayerConfig(

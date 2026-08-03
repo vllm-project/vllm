@@ -21,6 +21,12 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kDynamicTokenScale,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
+)
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
@@ -75,14 +81,16 @@ def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=False,
-            is_static_input_scheme=True,
-            input_symmetric=True,
+            weight_quant_key=kInt8StaticTensorSym,
+            activation_quant_key=kInt8StaticTensorSym,
         ),
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=True,
-            is_static_input_scheme=False,
-            input_symmetric=False,
+            weight_quant_key=kInt8StaticChannelSym,
+            activation_quant_key=QuantKey(
+                torch.int8,
+                kDynamicTokenScale,
+                symmetric=False,
+            ),
         ),
     ]
 
@@ -122,7 +130,11 @@ def test_register_oot_linear_kernel(platform_mock):
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTInt8ScaledMMLinearKernel, PlatformEnum.OOT, "int8")
 
-    kernel = init_int8_linear_kernel(True, True, True, "module")
+    kernel = init_int8_linear_kernel(
+        weight_quant_key=kInt8StaticChannelSym,
+        activation_quant_key=kInt8StaticTensorSym,
+        module_name="module",
+    )
 
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"

@@ -219,6 +219,7 @@ kInt4Static32Asym = QuantKey(
 )
 
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
 kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
