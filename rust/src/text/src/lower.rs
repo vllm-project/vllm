@@ -62,7 +62,7 @@ pub fn lower_text_request(
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
-        trace_headers: None,
+        trace_headers: request.trace_headers.clone(),
     };
 
     Ok(PreparedTextRequest {
@@ -313,7 +313,7 @@ fn merge_unique_token_ids(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
@@ -1299,6 +1299,43 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.generate_request.arrival_time, None);
+    }
+
+    #[test]
+    fn lower_text_request_passes_trace_headers_through() {
+        let trace_headers = BTreeMap::from([(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        )]);
+        let request = TextRequest {
+            trace_headers: Some(trace_headers.clone()),
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.trace_headers, Some(trace_headers));
+    }
+
+    #[test]
+    fn lower_text_request_leaves_trace_headers_unset_when_absent() {
+        let prepared = lower_text_request(
+            sample_request(),
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.trace_headers, None);
     }
 
     #[test]

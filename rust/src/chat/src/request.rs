@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
@@ -491,6 +491,10 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Optional W3C trace-context headers forwarded to engine-core and
+    /// downstream observability hooks.
+    #[serde(default)]
+    pub trace_headers: Option<BTreeMap<String, String>>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -514,6 +518,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            trace_headers: None,
             lora_request: None,
         }
     }

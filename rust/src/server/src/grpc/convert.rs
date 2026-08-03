@@ -100,6 +100,9 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        // gRPC trace context propagates via metadata rather than headers;
+        // wiring that up is out of scope for HTTP header propagation.
+        trace_headers: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
         arrival_time: None,

@@ -75,6 +75,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        trace_headers: ctx.trace_headers,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
@@ -95,6 +96,8 @@ pub(super) fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
     use vllm_text::Prompt;
 
@@ -208,5 +211,52 @@ mod tests {
 
         assert!(!prepared.options.include_usage);
         assert!(!prepared.options.include_continuous_usage);
+    }
+
+    #[test]
+    fn prepare_generate_request_threads_trace_headers() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {}
+        }))
+        .expect("parse request");
+
+        let ctx = ResolvedRequestContext {
+            trace_headers: Some(BTreeMap::from([(
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            )])),
+            ..ResolvedRequestContext::default()
+        };
+        let prepared = prepare_generate_request(request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]), ctx)
+            .expect("prepare");
+
+        assert_eq!(
+            prepared.text_request.trace_headers,
+            Some(BTreeMap::from([(
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            )]))
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_leaves_trace_headers_none_when_absent() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.text_request.trace_headers, None);
     }
 }
