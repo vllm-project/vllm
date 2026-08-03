@@ -635,20 +635,6 @@ class ModelConfig:
         ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
-        resolved_code_revision = self.code_revision
-
-        def resolve_code_revision(
-            repo_id: str,
-            revision: str | None,
-        ) -> str | None:
-            nonlocal resolved_code_revision
-            resolved_code_revision = _resolve_hf_revision(
-                repo_id,
-                revision,
-                self.hf_token,
-            )
-            return resolved_code_revision
-
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
@@ -657,10 +643,8 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
-            code_revision_resolver=resolve_code_revision,
             token=self.hf_token,
         )
-        self.code_revision = resolved_code_revision
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)

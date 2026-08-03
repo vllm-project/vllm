@@ -246,7 +246,6 @@ class HFConfigParser(ConfigParserBase):
         trust_remote_code: bool,
         revision: str | None = None,
         code_revision: str | None = None,
-        code_revision_resolver: Callable[[str, str | None], str | None] | None = None,
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -258,42 +257,6 @@ class HFConfigParser(ConfigParserBase):
             code_revision=code_revision,
             **kwargs,
         )
-        if trust_remote_code and code_revision_resolver is not None:
-            code_repo_ids: set[str] = set()
-            auto_map = config_dict.get("auto_map")
-            for auto_class, class_reference in (
-                auto_map.items() if isinstance(auto_map, dict) else ()
-            ):
-                if not isinstance(auto_class, str) or (
-                    auto_class != "AutoConfig"
-                    and not auto_class.startswith("AutoModel")
-                ):
-                    continue
-                references = (
-                    [class_reference]
-                    if isinstance(class_reference, str)
-                    else (
-                        class_reference
-                        if isinstance(class_reference, (list, tuple))
-                        else ()
-                    )
-                )
-                for reference in references:
-                    if not isinstance(reference, str):
-                        continue
-                    code_repo_id, separator, _ = reference.partition("--")
-                    code_repo_ids.add(code_repo_id if separator else str(model))
-
-            if len(code_repo_ids) == 1:
-                code_repo_id = code_repo_ids.pop()
-                requested_code_revision = code_revision
-                if requested_code_revision is None and code_repo_id == str(model):
-                    requested_code_revision = revision
-                code_revision = code_revision_resolver(
-                    code_repo_id,
-                    requested_code_revision,
-                )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:
@@ -724,7 +687,6 @@ def get_config(
     config_format: str | ConfigFormat = "auto",
     hf_overrides_kw: dict[str, Any] | None = None,
     hf_overrides_fn: Callable[[PretrainedConfig], PretrainedConfig] | None = None,
-    code_revision_resolver: Callable[[str, str | None], str | None] | None = None,
     **kwargs,
 ) -> PretrainedConfig:
     if config_format == "auto":
@@ -764,9 +726,6 @@ def get_config(
             raise ValueError(error_message) from e
 
     config_parser = get_config_parser(config_format)
-    parser_kwargs = dict(kwargs)
-    if isinstance(config_parser, HFConfigParser):
-        parser_kwargs["code_revision_resolver"] = code_revision_resolver
     # Retry to tolerate a concurrent HF cache refresh briefly hiding config.json.
     config_dict, config = with_retry(
         lambda: config_parser.parse(
@@ -775,7 +734,7 @@ def get_config(
             revision=revision,
             code_revision=code_revision,
             hf_overrides=hf_overrides_kw or hf_overrides_fn,
-            **parser_kwargs,
+            **kwargs,
         ),
         f"Error parsing config for {model}",
     )
