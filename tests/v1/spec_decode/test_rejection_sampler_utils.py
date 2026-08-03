@@ -298,24 +298,23 @@ def test_synthetic_rejection_sample(
 
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
-def test_all_nan_target_logits_in_range(temperature: float):
-    """Regression test for NaN breaking tl.argmax index bounds.
+@pytest.mark.parametrize("vocab_size", [999, 20000])
+def test_all_nan_target_logits_in_range(temperature: float, vocab_size: int):
+    """Degenerate tiles and padded block reductions must emit in-range IDs.
 
     An all-NaN target logits row makes every per-block local max NaN.
-    tl.argmax over such a block returns an index into the padded region
-    (>= num_blocks), causing an OOB read of the local-argmax tensors in
-    _compute_global_target_argmax (greedy) and _insert_resampled_kernel
-    (stochastic). The vocab size below gives a non-power-of-2 block count
-    (3 blocks of 8192, padded to 4) so the padded region exists. Post-fix,
-    NaN is mapped to -inf, so the kernels must complete without error and
-    emit in-range token ids.
+    vocab_size=999 is smaller than both the 8192-lane stats tile and the
+    1024-lane resampling tile, exposing an out-of-vocab tile-local argmax.
+    vocab_size=20000 retains coverage for a global argmax choosing a padded
+    fourth block after the three real 8192-lane blocks. The fallback is only
+    required to be addressable; it does not define a semantically correct token
+    or repair the source of the non-finite logits. For stochastic sampling, a
+    placeholder draft token forces the recovered-token resampling path.
     """
     torch.manual_seed(0)
     device = "cuda"
     num_trials = 4
     K = 1
-    vocab_size = 20000  # 3 vocab blocks of 8192, padded to 4
-
     target_logits_1d = torch.full(
         (vocab_size,), float("nan"), device=device, dtype=torch.float32
     )
@@ -328,6 +327,8 @@ def test_all_nan_target_logits_in_range(temperature: float):
         temperature=temperature,
         num_trials=num_trials,
     )
+    if temperature > 0:
+        inputs["draft_sampled"].view(num_trials, K + 1)[:, 1:] = -1
 
     sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
 

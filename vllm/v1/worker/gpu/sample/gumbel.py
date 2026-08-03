@@ -230,7 +230,12 @@ def _gumbel_sample_kernel(
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    # `idx` is the argmax over a BLOCK_SIZE-wide tile whose out-of-vocab tail
+    # lanes are loaded as -inf. If the in-vocab lanes are all non-finite, the
+    # reduction can settle on a tail lane and yield token_id >= vocab_size.
+    # Clamp to provide an addressable in-vocabulary fallback. This does not
+    # define a semantically correct token or fix the source of non-finite logits.
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 

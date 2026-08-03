@@ -183,6 +183,24 @@ def test_greedy_temperature_zero_returns_argmax():
     assert torch.equal(sampled, logits.argmax(dim=-1))
 
 
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_all_nan_logits_return_in_range_fallback(temperature: float):
+    """A degenerate tile must still emit an addressable token ID.
+
+    With vocab_size smaller than the 1024-lane sampling tile, an all-NaN row
+    can make the tile-local argmax settle on an out-of-vocab tail lane. The
+    fallback is only required to be in range; it does not define a semantically
+    correct token or repair the source of the non-finite logits.
+    """
+    vocab_size = 999
+    logits = torch.full((vocab_size,), float("nan"), device=DEVICE)
+
+    sampled = _sample(logits, 4, temperature=temperature)
+
+    assert sampled.min() >= 0
+    assert sampled.max() < vocab_size
+
+
 def test_zero_count_tokens_are_never_sampled():
     """Count 0 -> -inf logit -> probability 0; must never be selected."""
     counts = _make_heavy_tailed_counts(seed=7)
