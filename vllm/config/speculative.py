@@ -1104,38 +1104,55 @@ class SpeculativeConfig:
                     )
 
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter that emits
-                    # exactly one block of dspark_block_size per pass. Fewer
-                    # tokens feed the block / Markov-head machinery an
-                    # unsupported layout and garble output; more tokens are
-                    # simply never accepted -- measured on 2x GB10 (SM121a) with
-                    # DeepSeek-V4-Flash-0731 (dspark_block_size=5), draft
-                    # positions 5 and 6 accepted 0.000 in every sample while mean
-                    # acceptance length *fell*:
+                    # Upstream removed its own nst-vs-block assertion in #50869
+                    # ("invalid assertion added erroneously"), and it was right
+                    # that erroring on nst > block_size is wrong: two users on
+                    # vllm-project/vllm#41834 run nst=7 against block_size=5 and
+                    # it demonstrably works -- b0bh00d's /metrics shows a normal
+                    # accept curve. Our previous `==` guard would have rejected
+                    # their configs at startup.
                     #
-                    #   probabilistic  nst=5: 2.19 (23.8%)  nst=7: 2.03 (14.7%)
-                    #   greedy         nst=5: 2.11 (22.2%)  nst=7: 1.75 (10.8%)
-                    #
-                    # so nst>block drafts 40% more tokens per step and accepts
-                    # fewer of them. Require an exact match.
+                    # But the two directions are not symmetric, so this keeps the
+                    # half that upstream's deletion also drops:
+                    #   nst < block  -- the drafter emits one block per pass;
+                    #                   fewer tokens feed the block / Markov-head
+                    #                   machinery an unsupported layout and
+                    #                   garble output. Still an error.
+                    #   nst > block  -- works, but drafts tokens that are never
+                    #                   accepted. Measured on 2x GB10 (SM121a),
+                    #                   DeepSeek-V4-Flash-0731, block_size=5:
+                    #                     probabilistic  nst=5: 2.19  nst=7: 2.03
+                    #                     greedy         nst=5: 2.11  nst=7: 1.75
+                    #                   positions 5 and 6 accepted 0.000 in every
+                    #                   sample. A warning, not an error.
                     dspark_block_size = getattr(
                         self.draft_model_config.hf_config,
                         "dspark_block_size",
                         None,
                     )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens != dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens == "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. The drafter emits "
-                            "exactly one block per pass: smaller values garble "
-                            "output, larger values are never accepted and only "
-                            "waste draft compute. Use "
-                            f"num_speculative_tokens={dspark_block_size}."
-                        )
+                    if dspark_block_size is not None:
+                        if self.num_speculative_tokens < dspark_block_size:
+                            raise ValueError(
+                                "DSpark requires num_speculative_tokens >= "
+                                f"dspark_block_size ({dspark_block_size}); got "
+                                f"{self.num_speculative_tokens}. Smaller values "
+                                "produce incorrect output, not merely lower "
+                                f"acceptance. Use "
+                                f"num_speculative_tokens={dspark_block_size}."
+                            )
+                        if self.num_speculative_tokens > dspark_block_size:
+                            logger.warning_once(
+                                "DSpark drafts exactly one block of %d tokens "
+                                "per pass, so num_speculative_tokens=%d drafts "
+                                "%d token(s) that can never be accepted. On "
+                                "2x GB10 this lowered mean acceptance length "
+                                "(2.19 -> 2.03 probabilistic, 2.11 -> 1.75 "
+                                "greedy). Consider num_speculative_tokens=%d.",
+                                dspark_block_size,
+                                self.num_speculative_tokens,
+                                self.num_speculative_tokens - dspark_block_size,
+                                dspark_block_size,
+                            )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
