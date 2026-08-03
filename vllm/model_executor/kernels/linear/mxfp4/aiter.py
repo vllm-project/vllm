@@ -4,10 +4,17 @@
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+logger = init_logger(__name__)
 
 # NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
 # which can force the engine core to spawn instead of fork.
@@ -131,12 +138,34 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.supports_mx():
             return False, "current platform does not support native MXFP4 computation"
+
+        from vllm._aiter_ops import is_aiter_found_and_supported
+        from vllm.model_executor.kernels.linear import _get_linear_backend
+
+        linear_backend = _get_linear_backend()
+
+        if (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and "AiterMxfp4LinearKernel" not in envs.VLLM_DISABLED_KERNELS
+            and linear_backend == "auto"
+            and not is_aiter_found_and_supported()
+        ):
+            logger.warning_once(
+                "This platform supports native MXFP4 W4A4 MOE "
+                "computation via AITER MOE backend, but AITER is not "
+                "found or not supported. Consider installing AITER: "
+                "https://github.com/ROCm/aiter."
+            )
+
         if is_aiter_found_and_supported():
             return True, None
         return False, "AITER not found or not supported on the current platform"
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key != kMxfp4Dynamic:
+            return False, "only supports MXFP4 dynamic activation"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
