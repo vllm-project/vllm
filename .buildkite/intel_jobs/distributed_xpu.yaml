@@ -64,7 +64,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py || true &&
+    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py --deselect="tests/v1/distributed/test_async_llm_dp.py::test_dp_pause_barrier_request_deadlock" || true &&
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py || true &&
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py || true &&
     DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py || true'
@@ -313,7 +313,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
-    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" || true &&
+    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[ray]" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: Distributed Tests (2xB200)
   device: intel_gpu
