@@ -20,7 +20,7 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import (
@@ -29,9 +29,6 @@ from vllm.model_executor.layers.fused_moe.router.base_router import (
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     fused_grouped_topk,
-)
-from vllm.model_executor.layers.fused_moe.runner.latent_moe_runner import (
-    LatentMoERunner,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -88,20 +85,23 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
-from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
-from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
-from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
-    enable_kimi_k3_low_latency_gemm,
-)
-from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-from vllm.models.kimi_k3.nvidia.ops import attn_res
-from vllm.models.kimi_k3.nvidia.ops.sequence_parallel import (
+from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
+    LatentMoERunner,
+)
+from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
+    enable_kimi_k3_low_latency_gemm,
+)
+from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
@@ -120,6 +120,13 @@ from ..common.mm_preprocess import (
 )
 
 logger = init_logger(__name__)
+
+# Token-count cutoff for overlapping the MoE router gate with the routed-expert
+# down projection on a separate CUDA stream (latent MoE). At or below this many
+# tokens the launch-bound decode path benefits from multi-stream overlap; above
+# it the GEMMs saturate the device and the cross-stream sync is pure overhead,
+# so it falls back to sequential.
+_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
 
 class KimiMLP(nn.Module):
@@ -465,8 +472,8 @@ class KimiMoE(nn.Module):
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate_size,
+                hidden_size=config.hidden_size,  # 7618
+                intermediate_size=shared_intermediate_size,  # 3072*2
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -513,7 +520,7 @@ class KimiMoE(nn.Module):
             )
             # Auxiliary CUDA stream to overlap the router gate with the routed
             # down projection on decode-sized batches (gated by
-            # VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
+            # _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
             self._down_proj_stream: torch.cuda.Stream | None = aux_stream()
             self._down_proj_events = (torch.cuda.Event(), torch.cuda.Event())
         else:
@@ -546,8 +553,7 @@ class KimiMoE(nn.Module):
                 activation_linear_beta=activation_situ_linear_beta,
             )
         else:
-            enable_tail_fusion = envs.VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
-            self.experts = FusedMoE(
+            self.experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=num_experts,
                 top_k=num_experts_per_token,
@@ -565,7 +571,7 @@ class KimiMoE(nn.Module):
                 scoring_func=config.moe_router_activation_func,
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 routed_scaling_factor=self.routed_scaling_factor,
-                # Down projection runs outside FusedMoE so it can overlap the
+                # Down projection runs outside MoERunner so it can overlap the
                 # router gate on the aux stream (see forward()); the original
                 # hidden states are passed to forward() as shared_experts_input
                 # so shared experts still see the untransformed input.
@@ -573,11 +579,6 @@ class KimiMoE(nn.Module):
                 routed_output_transform=self.routed_output_transform,
                 is_sequence_parallel=use_sequence_parallel,
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
-                runner_args=(
-                    {"enable_k3_latent_moe_tail_fusion": enable_tail_fusion}
-                    if self.use_latent_moe
-                    else None
-                ),
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -645,7 +646,7 @@ class KimiMoE(nn.Module):
                 self._down_proj_events[0],
                 self._down_proj_events[1],
                 self._down_proj_stream
-                if num_tokens <= envs.VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
+                if num_tokens <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
                 else None,
             )
         )
@@ -676,7 +677,7 @@ class KimiMoE(nn.Module):
                 )
         else:
             # Routed experts consume the down-projected latent; shared experts
-            # (inside FusedMoE) get the original hidden states via
+            # (inside MoERunner) get the original hidden states via
             # shared_experts_input.
             final_hidden_states = self.experts(
                 hidden_states=routed_hidden_states,
@@ -938,7 +939,13 @@ class KimiDecoderLayer(nn.Module):
         return hidden_states, prefix_sum, residual
 
 
-class KimiLinearModel(nn.Module, EagleModelMixin):
+class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
+        "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1208,6 +1215,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
+
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
         # them ``.weight_packed``. Rebind so the expert mapping resolves; scales

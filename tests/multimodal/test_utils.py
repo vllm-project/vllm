@@ -199,6 +199,31 @@ def test_group_and_batch_mm_items_split_by_fieldset():
     assert [num_items for num_items, _ in res] == [2, 1, 1, 1]
 
 
+def test_group_and_batch_mm_items_splits_shared_data_by_dtype():
+    elem1 = MultiModalFieldElem(
+        data=torch.zeros(1, dtype=torch.int32),
+        field=MultiModalSharedField(batch_size=1),
+    )
+    elem2 = MultiModalFieldElem(
+        data=torch.zeros(1, dtype=torch.float32),
+        field=MultiModalSharedField(batch_size=1),
+    )
+    elem3 = MultiModalFieldElem(
+        data=[torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.float32)],
+        field=MultiModalSharedField(batch_size=1),
+    )
+
+    res = group_and_batch_mm_items(
+        [
+            MultiModalKwargsItem({"x": elem1}),
+            MultiModalKwargsItem({"x": elem2}),
+            MultiModalKwargsItem({"x": elem3}),
+        ]
+    )
+
+    assert [num_items for num_items, _ in res] == [1, 1, 1]
+
+
 def test_group_and_batch_mm_items_split_by_shared_data():
     elem1 = MultiModalFieldElem(
         data=torch.zeros(1, dtype=torch.uint8),

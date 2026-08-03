@@ -268,7 +268,7 @@ def inkling_config() -> ParserEngineConfig:
         )
         transitions[(ParserState.MESSAGE_HEADER, end)] = Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.TEXT_CHUNK,),
         )
 
     return ParserEngineConfig(

@@ -15,7 +15,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -210,7 +210,10 @@ class KimiMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts))
+        # Preserve FP32 checkpoint values and match FP32 router logits.
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(num_experts, dtype=torch.float32)
+        )
 
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
@@ -260,7 +263,7 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=num_experts,
             top_k=num_experts_per_token,

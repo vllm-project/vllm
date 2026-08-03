@@ -51,6 +51,7 @@ MTPModelTypes = Literal[
     "minimax_m3_mtp",
     "bailing_hybrid_mtp",
     "mtp",
+    "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
@@ -353,6 +354,16 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
+
+        if hf_config.model_type == "kimi_k3":
+            # Kimi-K3 keeps the text-model fields (incl. the MTP layer count)
+            # nested under ``text_config`` (a KimiLinearConfig).
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_predict = getattr(text_config, "num_nextn_predict_layers", None)
+            hf_config.model_type = "kimi_k3_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["KimiK3MTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -943,6 +954,7 @@ class SpeculativeConfig:
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
+                    and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
@@ -971,6 +983,16 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+
+                if (
+                    self.method == "dspark"
+                    and "K3DSparkModel" in self.draft_model_config.architectures
+                    and self.target_parallel_config.decode_context_parallel_size > 1
+                ):
+                    raise ValueError(
+                        "MLA DSpark does not currently support decode context "
+                        "parallelism; set decode_context_parallel_size=1."
+                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1387,6 +1409,14 @@ class SpeculativeConfig:
 
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
+
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
         method = self.method
