@@ -383,7 +383,7 @@ def rocm_aiter_fused_experts(
                 if envs.AITER_SITUV2_A8W4
                 else GateMode.SEPARATED.value
             )
-        elif quant_config.use_mxfp4_w4a16:
+        elif quant_config.use_mxfp4_w4a16 and getattr(w1, "gu_interleaved", False):
             gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
             gate_mode = (

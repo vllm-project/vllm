@@ -674,6 +674,21 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
+def _aiter_mxfp4_w4a16_gu_interleaved(layer: torch.nn.Module) -> bool:
+    """Return whether AITER MXFP4 W4A16 weights use gpt-oss gate/up interleaving.
+
+    Only ``MoEActivation.SWIGLUOAI`` (gpt-oss) stores w13 as
+    [gate0, up0, gate1, up1, ...] and requires interleaved shuffle plus
+    ``GateMode.INTERLEAVE``. Standard gated activations (e.g. SILU) use
+    separated gate/up layout and must keep separated shuffle + SEPARATED mode.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    activation = getattr(layer, "activation", None)
+    return activation == MoEActivation.SWIGLUOAI
+
+
+
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -1459,10 +1474,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # Necessary for AITER side from crashing
         os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
+        gu_interleaved = _aiter_mxfp4_w4a16_gu_interleaved(layer)
+
         w13_weight = torch.nn.Parameter(
             _shuf_w(
                 w13_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=gu_interleaved,
                 gate_up=True,
             ),
             requires_grad=False,
@@ -1471,13 +1488,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_weight_scale.reshape(-1, w13_weight_scale.shape[-1]),
             num_experts,
             True,
-            True,
+            gu_interleaved,
         )
 
         w2_weight = torch.nn.Parameter(
             _shuf_w(
                 w2_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=True,
+                is_guinterleave=gu_interleaved,
                 gate_up=False,
             ),
             requires_grad=False,
@@ -1489,6 +1506,11 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             True,
             False,
         )
+
+        w13_weight.is_shuffled = True
+        w2_weight.is_shuffled = True
+        w13_weight.gu_interleaved = gu_interleaved
+        w2_weight.gu_interleaved = gu_interleaved
 
         return (
             w13_weight,
