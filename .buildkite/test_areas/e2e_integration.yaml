@@ -21,6 +21,24 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/eplb
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - .buildkite/scripts/scheduled_integration_test/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (2xB200)
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-2xb200
@@ -31,6 +49,24 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/distributed/eplb
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - .buildkite/scripts/scheduled_integration_test/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy
   key: qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy
