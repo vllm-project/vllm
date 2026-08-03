@@ -2235,7 +2235,10 @@ upload_wheel_artifacts_if_present() {
     fi
     whl="${wheels[0]}"
     whl_name=$(basename "${whl}")
-    native_base_image="${CI_BASE_IMAGE:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}"
+    native_base_image="${CI_BASE_IMAGE_TAG_COMMIT_REF:-}"
+    if [[ -z "${native_base_image}" ]]; then
+        native_base_image="${CI_BASE_IMAGE:-${CI_BASE_IMAGE_TAG_CONTENT_REF:-}}"
+    fi
     if [[ -z "${native_base_image}" ]]; then
         echo "Native ROCm artifact requires a ci_base image reference" >&2
         return 1

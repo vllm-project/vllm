@@ -284,6 +284,24 @@ def test_content_hash_tracks_git_content(tmp_path: Path) -> None:
 
 
 def test_effective_identity_and_base_pinning(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    docker_dir = repo / "docker"
+    docker_dir.mkdir(parents=True)
+    (repo / "input.txt").write_text("cache input\n")
+    (docker_dir / "Dockerfile.rocm").write_text(
+        "ARG BASE_IMAGE=rocm/example:base\n"
+        "ARG REMOTE_VLLM=0\n"
+        "ARG VLLM_REPO=https://example.com/vllm.git\n"
+        "ARG VLLM_BRANCH=main\n"
+        "FROM ${BASE_IMAGE} AS base\n"
+        "RUN echo local\n"
+        "FROM base AS remote-input\n"
+        'RUN echo "$REMOTE_VLLM $VLLM_REPO $VLLM_BRANCH"\n'
+    )
+    (docker_dir / "docker-bake-rocm.hcl").write_text("")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+
     calls = tmp_path / "docker-calls"
     override = tmp_path / "override.hcl"
     docker_stub = """
@@ -300,9 +318,9 @@ docker() {
         CI_BAKE,
         docker_stub
         + """
-CI_BASE_DOCKERFILE="$DEFAULT_CI_BASE_DOCKERFILE"
-CI_BASE_CONTENT_FILES="$DEFAULT_CI_BASE_CONTENT_FILES"
-CI_BASE_DOCKERFILE_STAGES="$DEFAULT_CI_BASE_DOCKERFILE_STAGES"
+CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
+CI_BASE_CONTENT_FILES="input.txt"
+CI_BASE_DOCKERFILE_STAGES="base"
 REMOTE_VLLM=0
 BASE_IMAGE="rocm/example:alias-a"
 VLLM_BRANCH="commit-a"
@@ -325,6 +343,7 @@ write_rocm_build_arg_override
 printf 'pinned=%s\n' "$BASE_IMAGE"
 """,
         override,
+        cwd=repo,
         env={
             "CI_BASE_HASH_ATTEMPTS": "1",
             "CI_BASE_HASH_RETRY_DELAY": "0",
@@ -532,3 +551,35 @@ source "$1"
     else:
         assert "selected=" not in result.stdout
         assert "handoff metadata is missing or invalid" in result.stderr
+
+
+@pytest.mark.parametrize("commit_ref", ("rocm/example:ci_base-deadbeef", ""))
+def test_wheel_artifact_keeps_native_alias_separate_from_build_base(
+    tmp_path: Path, commit_ref: str
+) -> None:
+    wheel_dir = tmp_path / "wheel-export"
+    wheel_dir.mkdir()
+    (wheel_dir / "vllm-test.whl").write_text("wheel")
+    immutable_base = f"rocm/example:ci_base-content@{DIGEST_A}"
+
+    run_sourced(
+        CI_BAKE,
+        """
+buildkite-agent() { [[ "$1 $2" == "artifact upload" ]]; }
+TARGET="artifact"
+upload_wheel_artifacts_if_present >/dev/null
+""",
+        cwd=tmp_path,
+        env={
+            "BUILDKITE_COMMIT": "deadbeef",
+            "CI_BASE_IMAGE": immutable_base,
+            "CI_BASE_IMAGE_TAG_COMMIT_REF": commit_ref,
+        },
+    )
+
+    metadata_dir = tmp_path / "artifacts/vllm-rocm-install"
+    native_base = (metadata_dir / "native-base-image.txt").read_text().strip()
+    build_base = (metadata_dir / "ci-base-image.txt").read_text().strip()
+
+    assert native_base == (commit_ref or immutable_base)
+    assert build_base == immutable_base
