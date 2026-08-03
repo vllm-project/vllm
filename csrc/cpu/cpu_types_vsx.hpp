@@ -655,6 +655,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_sub(reg.val[3], b.reg.val[3])}));
   }
 
+  FP32Vec16 operator-() const {
+    return FP32Vec16(
+        f32x4x4_t({-reg.val[0], -reg.val[1], -reg.val[2], -reg.val[3]}));
+  }
+
   FP32Vec16 operator/(const FP32Vec16& b) const {
     return FP32Vec16(f32x4x4_t({vec_div(reg.val[0], b.reg.val[0]),
                                 vec_div(reg.val[1], b.reg.val[1]),
@@ -754,6 +759,24 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     auto hi_e = hi.exp();
     return FP32Vec16(f32x4x4_t{lo_e.reg.val[0], lo_e.reg.val[1],
                                hi_e.reg.val[0], hi_e.reg.val[1]});
+  }
+
+  FP32Vec16 tanh() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_tanh = lo.tanh();
+    auto hi_tanh = hi.tanh();
+    return FP32Vec16(f32x4x4_t{lo_tanh.reg.val[0], lo_tanh.reg.val[1],
+                               hi_tanh.reg.val[0], hi_tanh.reg.val[1]});
+  }
+
+  FP32Vec16 er() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_er = lo.er();
+    auto hi_er = hi.er();
+    return FP32Vec16(f32x4x4_t{lo_er.reg.val[0], lo_er.reg.val[1],
+                               hi_er.reg.val[0], hi_er.reg.val[1]});
   }
 
   float reduce_max() {

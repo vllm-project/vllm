@@ -6,8 +6,10 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <torch/all.h>
+
 namespace vec_op {
 
 struct fp8_e4m3_tag {};
@@ -727,11 +729,43 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_sub(reg.val[3], b.reg.val[3])}));
   }
 
+  FP32Vec16 operator-() const {
+    return FP32Vec16(f32x4x4_t({vec_neg(reg.val[0]), vec_neg(reg.val[1]),
+                                vec_neg(reg.val[2]), vec_neg(reg.val[3])}));
+  }
+
   FP32Vec16 operator/(const FP32Vec16& b) const {
     return FP32Vec16(f32x4x4_t({vec_div(reg.val[0], b.reg.val[0]),
                                 vec_div(reg.val[1], b.reg.val[1]),
                                 vec_div(reg.val[2], b.reg.val[2]),
                                 vec_div(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 exp() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_exp = lo.exp();
+    auto hi_exp = hi.exp();
+    return FP32Vec16(f32x4x4_t{lo_exp.reg.val[0], lo_exp.reg.val[1],
+                               hi_exp.reg.val[0], hi_exp.reg.val[1]});
+  }
+
+  FP32Vec16 tanh() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_tanh = lo.tanh();
+    auto hi_tanh = hi.tanh();
+    return FP32Vec16(f32x4x4_t{lo_tanh.reg.val[0], lo_tanh.reg.val[1],
+                               hi_tanh.reg.val[0], hi_tanh.reg.val[1]});
+  }
+
+  FP32Vec16 er() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_er = lo.er();
+    auto hi_er = hi.er();
+    return FP32Vec16(f32x4x4_t{lo_er.reg.val[0], lo_er.reg.val[1],
+                               hi_er.reg.val[0], hi_er.reg.val[1]});
   }
 
   float reduce_sum() const {
@@ -763,6 +797,17 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                 vec_max(reg.val[1], b.reg.val[1]),
                                 vec_max(reg.val[2], b.reg.val[2]),
                                 vec_max(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 min(const FP32Vec16& b) const {
+    return FP32Vec16(f32x4x4_t({vec_min(reg.val[0], b.reg.val[0]),
+                                vec_min(reg.val[1], b.reg.val[1]),
+                                vec_min(reg.val[2], b.reg.val[2]),
+                                vec_min(reg.val[3], b.reg.val[3])}));
+  }
+
+  FP32Vec16 clamp(const FP32Vec16& min_v, const FP32Vec16& max_v) const {
+    return this->max(min_v).min(max_v);
   }
 
   float reduce_max() const {
@@ -897,6 +942,25 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
       ptr[i] = ar.values[i];
     }
   }
+};
+
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
 };
 
 template <typename T>
