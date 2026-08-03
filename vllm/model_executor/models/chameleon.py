@@ -826,11 +826,11 @@ class ChameleonImageVocabularyMapping:
         cache = getattr(self, "_img2bpe_mapping_cache", None)
         if cache is None:
             cache = {}
-            object.__setattr__(self, "_img2bpe_mapping_cache", cache)
+            self._img2bpe_mapping_cache = cache
         mapping_on_device = cache.get(device)
         if mapping_on_device is None:
-            mapping_on_device = self.img2bpe_mapping_tensor.pin_memory().to(
-                device, non_blocking=True
+            mapping_on_device = async_tensor_h2d(
+                self.img2bpe_mapping_tensor, device=device
             )
             cache[device] = mapping_on_device
         return mapping_on_device[img_batch]
