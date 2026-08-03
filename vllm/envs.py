@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
+    VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL: bool = False
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS: int = 4096
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP: bool = True
@@ -1530,6 +1531,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
+    ),
+    # Opt in to the DeepseekV4 eager scratch pool. OFF by default: it corrupts
+    # output under concurrent mixed prefill+decode. Each template family is
+    # shared across all layers, and the attention eager break runs the indexer
+    # and compressor on parallel aux streams, so layer N's consumer can be
+    # reading while layer N+1 writes. Bisected on vllm-project/vllm#41834:
+    # pool active 7/7 rounds corrupt, disabled 0/2. Removing the cross-template
+    # aliasing (sum() sizing) was necessary but NOT sufficient -- 1 corrupt
+    # round in 2 remained. Safe reuse needs per-layer buffers or stream-ordering
+    # events. On the default SM12x path the pool's 256 MiB Q buffer is not
+    # allocated anyway (attention writes Q in place), so OFF costs only ~36 MiB
+    # of pooling.
+    "VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL": lambda: bool(
+        int(os.getenv("VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL", "0"))
     ),
     "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL": lambda: bool(
         int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "1"))

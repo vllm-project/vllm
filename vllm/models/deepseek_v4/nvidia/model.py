@@ -1198,8 +1198,38 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         padded_heads = _select_dsv4_attn_cls(vllm_config).get_padded_num_q_heads(
             n_local_heads
         )
+        # The eager scratch pool is OFF by default: it corrupts output under
+        # concurrent mixed prefill+decode.
+        #
+        # Reported with a clean bisect on vllm-project/vllm#41834 (tobymao,
+        # TP=4 SM12x, 1M context) -- leaked BOS tokens mid-sentence, multilingual
+        # token salad, terminal single-token repetition; pool active 7/7 rounds
+        # corrupt, pool disabled 0/2, pre-pool build 0/2, and it reproduces with
+        # speculative decoding both on and off.
+        #
+        # There are TWO races, and only one is fixed. The cross-TEMPLATE aliasing
+        # (all three families carved from offset 0) is gone -- see the sum()
+        # sizing in eager_scratch.py. But each template is still shared across all
+        # 43 layers: compressor_scratch()/indexer_q_outputs()/global_topk_outputs()
+        # hand every layer a view of the SAME buffer, keyed only by num_tokens. The
+        # attention eager break runs the indexer and compressor on parallel aux
+        # streams, so layer N's consumer can still be reading while layer N+1
+        # writes. The reporter tested the sum() fix specifically and still saw 1
+        # corrupt round in 2; with the pool disabled, 2/2 clean, which is what they
+        # now run in production.
+        #
+        # Making it safe needs per-layer buffers (43x the footprint) or explicit
+        # stream-ordering events. Until then the pool is opt-in.
+        #
+        # What OFF costs us: on the default SM12x path allocate_q is already False
+        # (attention writes Q in place), so the 256 MiB Q buffer this pool exists
+        # to manage is not allocated either way. Only the ~36 MiB of aux views stop
+        # being pooled -- allocator churn, not capacity.
         self.eager_scratch_pool: DeepseekV4EagerScratchPool | None = None
-        if not vllm_config.parallel_config.use_ubatching:
+        if (
+            not vllm_config.parallel_config.use_ubatching
+            and envs.VLLM_DEEPSEEK_V4_EAGER_SCRATCH_POOL
+        ):
             # TODO: support dbo if needed
             # this requires the buffer to have ubatch dim
             self.eager_scratch_pool = DeepseekV4EagerScratchPool(
