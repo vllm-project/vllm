@@ -100,7 +100,7 @@ def _make_bf16_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=routing_method,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype=None,
@@ -518,7 +518,7 @@ def _make_fp8_block_scale_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
 
     # Random fp8 weights + ones-block scales (the kernel decoder only cares
@@ -703,7 +703,7 @@ def _make_nvfp4_monolithic_experts(
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
-        max_num_tokens=max(8, 1),
+        max_num_tokens=16,
     )
 
     gemm1 = torch.randn(
