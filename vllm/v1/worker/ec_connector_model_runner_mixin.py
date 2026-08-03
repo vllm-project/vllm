@@ -41,6 +41,10 @@ class ECConnectorModelRunnerMixin:
         vllm_config: "VllmConfig",
         encoder_cache: dict[str, torch.Tensor],
     ) -> ModelRunnerOutput:
+        if scheduler_output.ec_connector_metadata is None:
+            # Nothing for the EC connector to do this step.
+            return ModelRunnerOutput.with_ec_conn_output_only(None)
+
         # EC send/recv even if no work to do.
         with ECConnectorModelRunnerMixin._get_ec_connector_output(
             scheduler_output, encoder_cache=encoder_cache
