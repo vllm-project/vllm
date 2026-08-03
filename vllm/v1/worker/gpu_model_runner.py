@@ -4804,16 +4804,9 @@ class GPUModelRunner(
             #     stream while the D2H is still pending on the copy
             #     stream.
             # Without clones, the copy stream would read torn data.
-            routed_experts_snapshot = None
-            if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                routed_experts_snapshot = RoutedExpertsTensors(
-                    routing_data=buf[:total].clone(),
-                    slot_mapping=self.routed_experts_slot_mapping_device[
-                        :total
-                    ].clone(),
-                )
+            routed_experts_snapshot = self.get_routed_experts(
+                scheduler_output.total_num_scheduled_tokens
+            )
 
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
@@ -7669,6 +7662,18 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+    def get_routed_experts(
+        self,
+        num_tokens: int,
+    ) -> RoutedExpertsTensors | None:
+        if not self.routed_experts_initialized:
+            return None
+
+        return RoutedExpertsTensors(
+            routing_data=self.routed_experts_capturer.get_routing_data(num_tokens),
+            slot_mapping=self.routed_experts_slot_mapping_device[:num_tokens].clone(),
+        )
 
     def init_routed_experts_capturer(self):
         logger.info(

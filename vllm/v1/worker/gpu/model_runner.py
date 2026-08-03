@@ -304,6 +304,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.routed_experts_capturer = capturer
         self.routed_experts_attn_gid = get_routed_experts_attn_gid(self.kv_cache_config)
 
+    def get_routed_experts(
+        self,
+        slot_mappings: torch.Tensor | None,
+        num_tokens: int,
+    ) -> RoutedExpertsTensors | None:
+        if self.routed_experts_capturer is None:
+            return None
+
+        assert slot_mappings is not None
+        return RoutedExpertsTensors(
+            routing_data=self.routed_experts_capturer.get_routing_data(num_tokens),
+            slot_mapping=slot_mappings[
+                self.routed_experts_attn_gid, :num_tokens
+            ].clone(),
+        )
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
@@ -1457,17 +1473,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
-        routed_experts = None
-        if self.routed_experts_capturer is not None and not dummy_run:
-            assert slot_mappings is not None
-            routed_experts = RoutedExpertsTensors(
-                routing_data=self.routed_experts_capturer.get_device_buffer()[
-                    :num_toks
-                ].clone(),
-                slot_mapping=slot_mappings[
-                    self.routed_experts_attn_gid, :num_toks
-                ].clone(),
-            )
+        routed_experts = (
+            None if dummy_run else self.get_routed_experts(slot_mappings, num_toks)
+        )
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
