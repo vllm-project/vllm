@@ -146,16 +146,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
-        ec_config = vllm_config.ec_transfer_config
-        self.is_ec_producer_only = (
-            ec_config is not None
-            and ec_config.is_ec_producer
-            and not ec_config.is_ec_consumer
-        )
-        mm_config = self.model_config.multimodal_config
-        self.is_encoder_only = self.is_ec_producer_only or bool(
-            mm_config and mm_config.mm_encoder_only
-        )
+        self.is_ec_producer_only = vllm_config.is_ec_producer_only
+        self.is_encoder_only = vllm_config.is_encoder_only
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
