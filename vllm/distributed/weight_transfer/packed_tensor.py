@@ -287,6 +287,15 @@ def packed_nccl_broadcast_consumer(
                     )
                 break
 
+    # Drain every slot before returning. The loop only synchronizes the slot it
+    # is about to reuse, so on exit the other slots may still be receiving and
+    # loading — and the caller's `finish_weight_update` post-processing runs on
+    # the default stream, which would otherwise finalize weights that have not
+    # landed. This also keeps the receive buffers alive until their broadcasts
+    # complete, mirroring the producer.
+    for stream in streams:
+        stream.synchronize()
+
 
 # ── IPC packed transfer ────────────────────────────────────────────────
 
