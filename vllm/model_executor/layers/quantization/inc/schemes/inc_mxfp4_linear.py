@@ -7,6 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -29,7 +30,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.group_size = layer_config.group_size or 32
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
 
     @classmethod
     def get_min_capability(cls) -> int:
