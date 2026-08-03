@@ -11,6 +11,25 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/distributed/eplb
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/backends/mla/
+      - vllm/v1/attention/selector.py
+      - .buildkite/scripts/scheduled_integration_test/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100)
   key: qwen3-30b-a3b-fp8-block-sync-eplb-accuracy-4xh100
@@ -41,6 +60,24 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/eplb
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - .buildkite/scripts/scheduled_integration_test/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100)
   key: deepseek-v2-lite-prefetch-offload-accuracy-h100
