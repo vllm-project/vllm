@@ -154,6 +154,11 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/docs\.(in|txt)$
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  hooks:
+  - id: check-json
+    files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
