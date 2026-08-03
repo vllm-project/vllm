@@ -109,6 +109,8 @@ def _is_equal_or_regex_match(
     Checks whether a value is exactly equal or a regex match for target
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
+    A bare target with no '.' matches against the leaf module name so that
+    e.g. "lm_head" matches "language_model.lm_head".
     """
 
     if target.startswith("re:"):
@@ -117,6 +119,9 @@ def _is_equal_or_regex_match(
             return True
     elif check_contains:
         if target.lower() in value.lower():
+            return True
+    elif "." not in target:
+        if value.split(".")[-1] == target:
             return True
     elif target == value:
         return True

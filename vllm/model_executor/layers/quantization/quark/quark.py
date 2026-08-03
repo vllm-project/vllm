@@ -77,26 +77,6 @@ class QuarkConfig(QuantizationConfig):
         # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
 
-    @staticmethod
-    def _dedupe_quark_excludes(exclude: list[str] | None) -> list[str] | None:
-        if not exclude:
-            return exclude
-
-        normalized: list[str] = []
-        seen: set[str] = set()
-
-        for module_name in exclude:
-            if not module_name or module_name in seen:
-                continue
-            seen.add(module_name)
-            # should_ignore_layer only supports exact match or re:-prefixed regex.
-            # Bare names like "lm_head" should match nested vLLM prefixes.
-            if not module_name.startswith("re:") and "." not in module_name:
-                module_name = "re:.*" + module_name + ".*"
-            normalized.append(module_name)
-
-        return normalized
-
     def maybe_update_config(
         self,
         model_name: str,
@@ -163,9 +143,6 @@ class QuarkConfig(QuantizationConfig):
                 else:
                     quant_config_with_hf_to_vllm_mapper[k] = v
 
-        quant_config_with_hf_to_vllm_mapper["exclude"] = self._dedupe_quark_excludes(
-            quant_config_with_hf_to_vllm_mapper.get("exclude")
-        )
         self.quant_config = quant_config_with_hf_to_vllm_mapper
 
     def get_quant_method(
