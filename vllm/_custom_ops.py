@@ -2611,6 +2611,42 @@ def reshape_and_cache(
     )
 
 
+# Integer codes for CacheDType strings. Keep in sync with
+# csrc/libtorch_stable/cache_kernels.cu (kv_cache_dtype_code_to_cstr).
+# Passed as `int` across the stable ABI so eager dispatch does not leak
+# host memory unboxing str→std::string (vllm#50150 / pytorch#191340).
+KV_CACHE_DTYPE_TO_CODE: dict[str, int] = {
+    "auto": 0,
+    "float16": 1,
+    "bfloat16": 2,
+    "fp8": 3,
+    "fp8_e4m3": 4,
+    "fp8_e5m2": 5,
+    "fp8_inc": 6,
+    "fp8_ds_mla": 7,
+    "turboquant_k8v4": 8,
+    "turboquant_4bit_nc": 9,
+    "turboquant_k3v4_nc": 10,
+    "turboquant_3bit_nc": 11,
+    "int4_per_token_head": 12,
+    "int8_per_token_head": 13,
+    "fp8_per_token_head": 14,
+    "nvfp4": 15,
+    "nvfp4_4over6": 16,
+}
+
+
+def kv_cache_dtype_to_code(kv_cache_dtype: str) -> int:
+    """Map a CacheDType string to the integer code expected by C++ ops."""
+    try:
+        return KV_CACHE_DTYPE_TO_CODE[kv_cache_dtype]
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported kv_cache_dtype={kv_cache_dtype!r}; "
+            f"expected one of {sorted(KV_CACHE_DTYPE_TO_CODE)}"
+        ) from e
+
+
 def reshape_and_cache_flash(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -2627,7 +2663,7 @@ def reshape_and_cache_flash(
         key_cache,
         value_cache,
         slot_mapping,
-        kv_cache_dtype,
+        kv_cache_dtype_to_code(kv_cache_dtype),
         k_scale,
         v_scale,
     )

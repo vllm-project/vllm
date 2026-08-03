@@ -23,6 +23,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 import vllm.envs as envs
+from vllm._custom_ops import reshape_and_cache_flash
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -1263,7 +1264,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
+        reshape_and_cache_flash(
             key,
             value,
             key_cache,

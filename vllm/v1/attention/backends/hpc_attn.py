@@ -14,6 +14,7 @@ from typing import ClassVar
 import torch
 from typing_extensions import override
 
+from vllm._custom_ops import reshape_and_cache_flash
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -458,12 +459,14 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         # the HPC attention backend with bf16 KV cache without any model-side
         # changes. FP8 KV cache always needs HpcRopeNorm (see check below), so
         # we never take this path in fp8 mode.
+        # Use the Python wrapper (not torch.ops._C_cache_ops directly) so
+        # kv_cache_dtype is encoded as an int across the stable ABI (#50150).
         if (
             not self.use_fp8
             and self.kv_sharing_target_layer_name is None
             and not hpc_kv_written
         ):
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            reshape_and_cache_flash(
                 key,
                 value,
                 kv_cache[:, 0],

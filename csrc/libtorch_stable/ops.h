@@ -581,10 +581,14 @@ void reshape_and_cache(torch::stable::Tensor& key, torch::stable::Tensor& value,
                        torch::stable::Tensor& k_scale,
                        torch::stable::Tensor& v_scale);
 
+// kv_cache_dtype_code is an integer CacheDType tag (see
+// vllm/_custom_ops.py::kv_cache_dtype_to_code). Using int instead of str
+// avoids a PyTorch stable-ABI host leak on every eager unbox of std::string
+// (see https://github.com/vllm-project/vllm/issues/50150).
 void reshape_and_cache_flash(
     torch::stable::Tensor& key, torch::stable::Tensor& value,
     torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
-    torch::stable::Tensor& slot_mapping, const std::string& kv_cache_dtype,
+    torch::stable::Tensor& slot_mapping, int64_t kv_cache_dtype_code,
     torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale);
 
 void concat_and_cache_mla(torch::stable::Tensor& kv_c,

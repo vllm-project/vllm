@@ -2281,7 +2281,7 @@ class FlashInferImpl(AttentionImpl):
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(
                     self.head_size, dim=-1
                 )
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
+            custom_ops.reshape_and_cache_flash(
                 key,
                 value,
                 k_cache,
