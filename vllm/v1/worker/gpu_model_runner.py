@@ -4337,6 +4337,7 @@ class GPUModelRunner(
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
                     mamba_bufs.preprocess,
+                    align_ctx=mamba_bufs.postprocess_align,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -6936,6 +6937,10 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
+        if num_warmups > 0:
+            # Warmups may use auxiliary streams. Ensure all of their work has
+            # completed before beginning CUDA graph capture.
+            torch.accelerator.synchronize()
         with (
             profiler,
             torch.profiler.record_function(

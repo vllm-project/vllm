@@ -14,11 +14,11 @@ use vllm_tokenizer::Tokenizer;
 use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::KimiK3ChatRenderer;
-use crate::AssistantContentBlock;
 use crate::ChatRenderer;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatContentPart, ChatMessage, GenerationPromptMode, ReasoningEffort};
+use crate::{AssistantContentBlock, AssistantToolCall};
 
 const OPEN_ID: u32 = 256;
 const CLOSE_ID: u32 = 257;
@@ -176,6 +176,35 @@ fn non_thinking_history_omits_reasoning_channel() {
         "<|open|>message role=\"assistant\"<|sep|>\
          <|open|>response<|sep|>answer<|close|>response<|sep|>"
     ));
+}
+
+#[test]
+fn partial_tool_results_keep_assistant_call_position() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-a".to_string(),
+                name: "weather".to_string(),
+                arguments: "{}".to_string(),
+            }),
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-b".to_string(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response("result-b", "call-b"),
+    ];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("<|open|>call tool=\"search\" index=\"2\"<|sep|>"));
+    assert!(
+        rendered
+            .contains("<|open|>message role=\"tool\" tool=\"search\" index=\"2\"<|sep|>result-b")
+    );
 }
 
 #[test]

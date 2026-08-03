@@ -4,6 +4,7 @@
 use std::io::Cursor;
 
 use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
+use bytes::Bytes;
 use itertools::Itertools as _;
 
 use crate::error::{Error, Result, ext_value_decode};
@@ -126,7 +127,7 @@ pub(super) fn decode_array_metadata<Frame>(
     field: &str,
     frames: &[Frame],
     expected_scalars: &[ScalarType],
-) -> Result<(Vec<usize>, Vec<u8>, ScalarType, Endianness)>
+) -> Result<(Vec<usize>, Bytes, ScalarType, Endianness)>
 where
     Frame: AsRef<[u8]>,
 {
@@ -171,7 +172,7 @@ pub(super) fn resolve_array_bytes<Frame>(
     value: WireArrayData,
     field: &str,
     frames: &[Frame],
-) -> Result<Vec<u8>>
+) -> Result<Bytes>
 where
     Frame: AsRef<[u8]>,
 {
@@ -187,7 +188,7 @@ where
                     ),
                 )
             })?;
-            Ok(frame.as_ref().to_vec())
+            Ok(Bytes::copy_from_slice(frame.as_ref()))
         }
     }
 }
