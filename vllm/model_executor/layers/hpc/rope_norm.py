@@ -414,10 +414,3 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     out_q=out_q_decode,
                     qk_norm_policy=self.qk_norm_policy,
                 )
-
-        # Signal HpcAttentionImpl that KV cache has been written by the fused
-        # rope_norm_store_kv op, so it should skip its own reshape_and_cache
-        # write. Set only after the fused kernel actually ran (either prefill
-        # or decode above); otherwise the standard path in the attention impl
-        # would have to run.
-        attn_metadata.hpc_kv_written = True

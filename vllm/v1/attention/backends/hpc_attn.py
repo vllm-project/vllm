@@ -94,8 +94,6 @@ class HpcAttnMetadata(AttentionMetadata):
     # Set by HpcRopeNorm._forward_impl(); consumed & reset by
     # HpcAttentionImpl.forward().  Defaults are safe for the standard
     # (non-RopeNorm) path and for profiling runs (attn_metadata=None).
-    hpc_kv_written: bool = False
-    """True when HpcRopeNorm already wrote KV cache."""
     hpc_prefill_q_scale: torch.Tensor | None = None
     """FP8 per-token-per-head Q scale for prefill (from RopeNorm)."""
     hpc_decode_q_scale: torch.Tensor | None = None
@@ -257,12 +255,6 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
                     min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
                 )
 
-        # ``hpc_kv_written`` defaults to False: KV cache is written either by
-        # ``reshape_and_cache_flash`` inside ``HpcAttentionImpl.forward`` (the
-        # standard path, e.g. bf16 KV cache without HpcRopeNorm), or by
-        # ``HpcRopeNorm._forward_impl`` (fp8 KV cache, or bf16 KV cache with
-        # the fused RoPE path enabled). When the fused RoPE op runs, it flips
-        # this to True so the attention impl skips the redundant write.
         return HpcAttnMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decodes=num_decodes,
@@ -274,7 +266,6 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             qo_indptr=qo_indptr,
-            hpc_kv_written=False,
             hpc_prefill_q_scale=None,
             hpc_decode_q_scale=None,
             hpc_split_k_flag=None,
@@ -464,7 +455,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         if attn_metadata is None:
             return output.fill_(0)
 
-        hpc_kv_written = attn_metadata.hpc_kv_written
         hpc_prefill_q_scale = attn_metadata.hpc_prefill_q_scale
         hpc_decode_q_scale = attn_metadata.hpc_decode_q_scale
         hpc_split_k_flag = attn_metadata.hpc_split_k_flag
@@ -474,31 +464,9 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         num_decode_reqs = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        # Write KV cache if not already done by HpcRopeNorm.
-        if self.kv_sharing_target_layer_name is None and not hpc_kv_written:
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
         if self.use_fp8:
             torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
             kv_cache = kv_cache.view(torch_dtype)
-
-        if self.use_fp8:
-            if not hpc_kv_written:
-                raise RuntimeError(
-                    "HpcAttentionImpl: FP8 mode requires HpcRopeNorm. "
-                    "Ensure hpc_rope_norm is enabled or set "
-                    "kv_cache_dtype='auto' for bf16 mode."
-                    f" (layer={getattr(layer, 'layer_name', '?')})"
-                )
             k_scale = layer._k_scale.reshape(1)
             v_scale = layer._v_scale.reshape(1)
 
