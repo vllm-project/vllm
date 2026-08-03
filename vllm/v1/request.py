@@ -73,6 +73,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        eagle_block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
@@ -201,17 +202,21 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Resumable requests may replace their finalized tail when new input
+        # arrives, which invalidates a successor-aware hash.
+        self.resumable = resumable
         self.block_hashes: list[BlockHash] = []
+        self.eagle_block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
+        self._eagle_block_hasher = None if resumable else eagle_block_hasher
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
         # Used for streaming
-        self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
@@ -224,6 +229,7 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
+        eagle_block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -240,6 +246,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            eagle_block_hasher=eagle_block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
@@ -263,6 +270,12 @@ class Request:
         """Compute block hashes for any new full blocks and append them."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
+        if self._eagle_block_hasher is not None:
+            self.eagle_block_hashes.extend(self._eagle_block_hasher(self))
+
+    @property
+    def eagle_hashing_enabled(self) -> bool:
+        return self._eagle_block_hasher is not None
 
     @property
     def use_structured_output(self) -> bool:

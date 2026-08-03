@@ -369,6 +369,7 @@ class KVCacheCoordinator(ABC):
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
+        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
@@ -424,6 +425,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
+        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
@@ -486,15 +488,26 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
+        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        eagle_hashing_enabled = eagle_block_hashes is not None
+        use_eagle_hashes = (
+            0 in self.eagle_group_ids
+            and eagle_hashing_enabled
+            and not isinstance(self.kv_cache_spec, MambaSpec)
+        )
+        lookup_hashes = block_hashes
+        if use_eagle_hashes:
+            assert eagle_block_hashes is not None
+            lookup_hashes = eagle_block_hashes
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
-            block_hashes=block_hashes,
+            block_hashes=lookup_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle_block=0 in self.eagle_group_ids,
+            drop_eagle_block=(0 in self.eagle_group_ids and not eagle_hashing_enabled),
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -667,7 +680,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             num_tokens_to_cache = aligned_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and aligned_num_computed_tokens > 0:
+            if (
+                manager.use_eagle
+                and not request.eagle_hashing_enabled
+                and aligned_num_computed_tokens > 0
+            ):
                 num_tokens_to_cache = min(
                     num_computed_tokens,
                     aligned_num_computed_tokens + manager.block_size,
@@ -685,6 +702,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
+        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """
@@ -744,7 +762,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified
+                eagle_hashing_enabled = eagle_block_hashes is not None
+                use_eagle_hashes = (
+                    use_eagle
+                    and eagle_hashing_enabled
+                    and not isinstance(spec, MambaSpec)
+                )
+                lookup_hashes = block_hashes
+                if use_eagle_hashes:
+                    assert eagle_block_hashes is not None
+                    lookup_hashes = eagle_block_hashes
+                drop_eagle_block = (
+                    use_eagle
+                    and not eagle_hashing_enabled
+                    and idx not in eagle_verified
+                )
 
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
@@ -764,7 +796,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         curr_hit_length + eagle_margin, max_cache_hit_length
                     )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
-                    block_hashes=block_hashes,
+                    block_hashes=lookup_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
@@ -819,6 +851,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def find_longest_cache_hit_per_group(
         self,
         block_hashes: list[BlockHash],
+        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
@@ -832,13 +865,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            eagle_hashing_enabled = eagle_block_hashes is not None
+            use_eagle_hashes = (
+                use_eagle and eagle_hashing_enabled and not isinstance(spec, MambaSpec)
+            )
+            lookup_hashes = block_hashes
+            if use_eagle_hashes:
+                assert eagle_block_hashes is not None
+                lookup_hashes = eagle_block_hashes
             blocks, group_hit = manager_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,
+                block_hashes=lookup_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=use_eagle,
+                drop_eagle_block=use_eagle and not eagle_hashing_enabled,
                 alignment_tokens=self._cache_hit_alignment_tokens,
             )
             for gid, blks in zip(group_ids, blocks):

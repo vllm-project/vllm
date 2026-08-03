@@ -35,6 +35,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     get_request_block_hasher,
+    get_request_eagle_block_hasher,
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
@@ -73,6 +74,8 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
+    use_eagle_hashes: bool = False,
+    resumable: bool = False,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -98,6 +101,12 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
+        eagle_block_hasher=(
+            get_request_eagle_block_hasher(block_size, hash_fn)
+            if use_eagle_hashes
+            else None
+        ),
+        resumable=resumable,
     )
 
 
@@ -2581,9 +2590,8 @@ def test_emit_cached_block_events_zero_cached():
     assert pool.take_events() == []
 
 
-def test_eagle_enabled_removes_last_block():
-    """Verify Eagle does NOT remove blocks when request
-    length is divisible by block size."""
+def test_eagle_identical_prompt_hits_last_safe_block():
+    """An identical prompt hits the last block before the logits token."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=10),
@@ -2595,7 +2603,13 @@ def test_eagle_enabled_removes_last_block():
 
     # Request with 3 full blocks (48 tokens)
     token_ids = [0] * (3 * block_size)
-    req = make_request("divisible_request", token_ids, block_size, sha256)
+    req = make_request(
+        "divisible_request",
+        token_ids,
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
 
     # Prime the cache
     computed_blocks, _, _ = manager.get_computed_blocks(req)
@@ -2605,18 +2619,23 @@ def test_eagle_enabled_removes_last_block():
     manager.free(req)
 
     # New request with same tokens + Eagle enabled
-    req_eagle = make_request("eagle_divisible", token_ids, block_size, sha256)
+    req_eagle = make_request(
+        "eagle_divisible",
+        token_ids,
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
 
-    # Should retain 1 block:
-    # 1. Original 3 blocks → pop last hash → 2 matched blocks
-    # 2. drop last matched block → 1 remaining block
-    assert len(computed_blocks.blocks[0]) == 1
-    assert num_tokens == 1 * block_size  # 16 tokens
+    # The final block is recomputed to obtain logits, but EAGLE should not
+    # force an additional block to be replayed for an identical prompt.
+    assert len(computed_blocks.blocks[0]) == 2
+    assert num_tokens == 2 * block_size
 
 
 def test_eagle_with_partial_blocks():
-    """Test Eagle behavior with requests containing partial blocks."""
+    """An identical partial-tail prompt reuses every full safe block."""
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=10),
@@ -2627,7 +2646,13 @@ def test_eagle_with_partial_blocks():
     )
     # 2 full blocks + 5 tokens (non-divisible length)
     token_ids = [0] * (2 * block_size + 5)
-    req = make_request("partial_block_test", token_ids, block_size, sha256)
+    req = make_request(
+        "partial_block_test",
+        token_ids,
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
 
     # Prime the cache
     computed_blocks, _, _ = manager.get_computed_blocks(req)
@@ -2637,11 +2662,159 @@ def test_eagle_with_partial_blocks():
     manager.free(req)
 
     # New request with Eagle enabled
-    req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
+    req_eagle = make_request(
+        "partial_eagle",
+        token_ids,
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
-    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
-    assert len(computed_blocks.blocks[0]) == 1
-    assert num_tokens == 1 * block_size
+    assert len(computed_blocks.blocks[0]) == 2
+    assert num_tokens == 2 * block_size
+
+
+def test_eagle_successor_token_controls_last_block_hit():
+    block_size = 2
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=20),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+    )
+
+    first = make_request(
+        "first",
+        [0, 1, 2, 3, 4, 5],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    computed_blocks, _, _ = manager.get_computed_blocks(first)
+    manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
+    manager.free(first)
+
+    same_successor = make_request(
+        "same_successor",
+        [0, 1, 2, 3, 4, 6],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    _, num_tokens, _ = manager.get_computed_blocks(same_successor)
+    assert num_tokens == 2 * block_size
+
+    different_successor = make_request(
+        "different_successor",
+        [0, 1, 2, 3, 7, 6],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    _, num_tokens, _ = manager.get_computed_blocks(different_successor)
+    assert num_tokens == block_size
+
+
+def test_eagle_hash_is_published_when_successor_arrives():
+    block_size = 2
+    request = make_request(
+        "request",
+        [0, 1],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    assert request.eagle_block_hashes == []
+
+    request.append_output_token_ids(2)
+
+    expected = make_request(
+        "expected",
+        [0, 1, 2],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    assert request.eagle_block_hashes == expected.eagle_block_hashes
+
+
+def test_eagle_hashing_is_disabled_for_resumable_requests():
+    request = make_request(
+        "resumable",
+        [0, 1, 2],
+        2,
+        sha256,
+        use_eagle_hashes=True,
+        resumable=True,
+    )
+
+    assert not request.eagle_hashing_enabled
+    assert request.eagle_block_hashes == []
+
+
+def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
+    hash_block_size = 16
+    mamba_block_size = 544
+    token_ids = list(range(1249))
+    config = KVCacheConfig(
+        num_blocks=200,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full_attention"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=hash_block_size,
+    )
+
+    first = make_request(
+        "first",
+        token_ids,
+        hash_block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
+    manager.allocate_slots(first, 1248, num_computed, computed_blocks)
+    first.num_computed_tokens = 1248
+    manager.new_step_starts()
+    manager.allocate_slots(first, 1)
+    first.num_computed_tokens = 1249
+    manager.new_step_starts()
+    manager.free(first)
+
+    second = make_request(
+        "second",
+        token_ids,
+        hash_block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    _, num_computed, _ = manager.get_computed_blocks(second)
+
+    assert num_computed == 1248
 
 
 def test_eagle_with_sliding_window():

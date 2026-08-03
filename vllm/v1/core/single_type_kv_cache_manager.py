@@ -443,7 +443,18 @@ class SingleTypeKVCacheManager(ABC):
                 a tail once per that-sized segment. Only SWA acts on it.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_full_blocks = num_tokens // self.block_size
+        use_eagle_hashes = (
+            self.use_eagle
+            and request.eagle_hashing_enabled
+            and not isinstance(self.kv_cache_spec, MambaSpec)
+        )
+        block_hashes = (
+            request.eagle_block_hashes if use_eagle_hashes else request.block_hashes
+        )
+        resolved_block_hashes = resolve_block_hashes(
+            block_hashes, self.block_pool.hash_block_size, self.block_size
+        )
+        num_full_blocks = min(num_tokens // self.block_size, len(resolved_block_hashes))
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -460,7 +471,7 @@ class SingleTypeKVCacheManager(ABC):
             end_block=num_full_blocks,
             alignment_tokens=self.scheduler_block_size,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            use_eagle=self.use_eagle and not request.eagle_hashing_enabled,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
         )
@@ -472,6 +483,7 @@ class SingleTypeKVCacheManager(ABC):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
             block_mask=block_mask,
+            block_hashes=block_hashes,
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
@@ -800,7 +812,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
+        max_boundary = request.num_prompt_tokens - int(
+            self.use_eagle and request.eagle_hashing_enabled
+        )
+        boundary_tokens = max_boundary // hash_block_size * hash_block_size
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
         if boundary_tokens % self.block_size == 0:
@@ -816,6 +831,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
+            block_hashes=(
+                request.eagle_block_hashes
+                if self.use_eagle and request.eagle_hashing_enabled
+                else request.block_hashes
+            ),
         )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:

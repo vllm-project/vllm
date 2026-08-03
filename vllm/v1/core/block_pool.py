@@ -231,6 +231,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         block_mask: list[bool] | None = None,
+        block_hashes: list[BlockHash] | None = None,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -260,11 +261,13 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
-        block_hashes = resolve_block_hashes(
-            request.block_hashes, self.hash_block_size, block_size
+        if block_hashes is None:
+            block_hashes = request.block_hashes
+        resolved_block_hashes = resolve_block_hashes(
+            block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = block_hashes[num_cached_blocks:]
+        new_block_hashes = resolved_block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
@@ -303,7 +306,7 @@ class BlockPool:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block_hash = maybe_convert_block_hash(
-                    block_hashes[num_cached_blocks - 1]
+                    resolved_block_hashes[num_cached_blocks - 1]
                 )
 
             # Calculate token range for the blocks being cached
@@ -376,6 +379,7 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        block_hashes: list[BlockHash] | None = None,
     ) -> None:
         """Generate BlockStored events for blocks reused from prefix cache.
 
@@ -392,8 +396,10 @@ class BlockPool:
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
 
-        block_hashes = resolve_block_hashes(
-            request.block_hashes, self.hash_block_size, block_size
+        if block_hashes is None:
+            block_hashes = request.block_hashes
+        resolved_block_hashes = resolve_block_hashes(
+            block_hashes, self.hash_block_size, block_size
         )
 
         # Collect external hashes and extra_keys for cached blocks.
@@ -403,7 +409,7 @@ class BlockPool:
         for i in range(num_cached_blocks):
             block_start = i * block_size
             block_end = block_start + block_size
-            cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
+            cached_hashes.append(maybe_convert_block_hash(resolved_block_hashes[i]))
             extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, block_start, block_end, curr_mm_idx
             )
@@ -449,6 +455,7 @@ class BlockPool:
         num_tokens: int,
         kv_cache_group_id: int,
         block_size: int,
+        block_hashes: list[BlockHash] | None = None,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -487,7 +494,9 @@ class BlockPool:
         assert block_size > self.hash_block_size
         assert block_size % self.hash_block_size == 0
         assert num_tokens % block_size != 0
-        block_hash = self._get_partial_block_hash(request, num_tokens)
+        if block_hashes is None:
+            block_hashes = request.block_hashes
+        block_hash = self._get_partial_block_hash(block_hashes, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
@@ -512,7 +521,7 @@ class BlockPool:
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
-                request, num_tokens
+                block_hashes, num_tokens
             )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
@@ -545,26 +554,24 @@ class BlockPool:
 
     def _get_partial_block_hash(
         self,
-        request: Request,
+        block_hashes: list[BlockHash],
         num_tokens: int,
     ) -> BlockHash:
         assert num_tokens % self.hash_block_size == 0
         num_hash_blocks = num_tokens // self.hash_block_size
-        assert 0 < num_hash_blocks <= len(request.block_hashes)
+        assert 0 < num_hash_blocks <= len(block_hashes)
 
         # Each hash_block_size hash chains over its full prefix, so the partial
         # entry for any group block size is the hash at that prefix boundary.
-        return request.block_hashes[num_hash_blocks - 1]
+        return block_hashes[num_hash_blocks - 1]
 
     def _get_partial_block_parent_hash_and_start(
         self,
-        request: Request,
+        block_hashes: list[BlockHash],
         num_tokens: int,
     ) -> tuple[BlockHash | None, int]:
         num_hash_blocks = num_tokens // self.hash_block_size
-        parent_hash = (
-            request.block_hashes[num_hash_blocks - 2] if num_hash_blocks > 1 else None
-        )
+        parent_hash = block_hashes[num_hash_blocks - 2] if num_hash_blocks > 1 else None
         block_start = (num_hash_blocks - 1) * self.hash_block_size
         return parent_hash, block_start
 

@@ -748,6 +748,53 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def get_request_eagle_block_hasher(
+    hash_block_size: int,
+    caching_hash_fn: Callable[[Any], bytes],
+) -> Callable[[Request], list[BlockHash]]:
+    """Return a hasher for EAGLE-safe prefix-cache blocks.
+
+    A target block ending at position ``end - 1`` and the corresponding
+    EAGLE draft block together depend on the token at ``end``. Therefore an
+    EAGLE cache key extends the regular target block hash with that successor
+    token and its input identity. The resulting keys are still emitted once
+    per ``hash_block_size`` tokens; they only make the dependency at each
+    block boundary explicit.
+    """
+
+    def request_eagle_block_hasher(request: Request) -> list[BlockHash]:
+        block_idx = len(request.eagle_block_hashes)
+        num_tokens = request.num_tokens
+        new_block_hashes: list[BlockHash] = []
+        curr_mm_idx = 0
+
+        while block_idx < len(request.block_hashes):
+            successor_idx = (block_idx + 1) * hash_block_size
+            if successor_idx >= num_tokens:
+                break
+
+            successor_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                request,
+                successor_idx,
+                successor_idx + 1,
+                curr_mm_idx,
+            )
+            eagle_extra_keys = ("eagle_successor", successor_extra_keys)
+            new_block_hashes.append(
+                hash_block_tokens(
+                    caching_hash_fn,
+                    request.block_hashes[block_idx],
+                    request.all_token_ids[successor_idx : successor_idx + 1],
+                    eagle_extra_keys,
+                )
+            )
+            block_idx += 1
+
+        return new_block_hashes
+
+    return request_eagle_block_hasher
+
+
 def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],
