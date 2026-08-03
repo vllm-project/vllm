@@ -80,9 +80,14 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # determines the SWA block size of 64 tokens per block.
         # TODO(yifan): make SWA block size automatically determined and configurable.
         self.block_size = 64
-        # uint8: fp8_ds_mla UE8M0 paged layout. bfloat16 / float8_e4m3fn:
-        # contiguous full-cache layout.
-        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
+        # uint8: fp8_ds_mla UE8M0 paged layout. bfloat16 / float16 /
+        # float8_e4m3fn: contiguous full-cache layout.
+        assert self.dtype in (
+            torch.uint8,
+            torch.bfloat16,
+            torch.float16,
+            torch.float8_e4m3fn,
+        )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # fp8_ds_mla's UE8M0 paged layout needs 576B alignment; contiguous
