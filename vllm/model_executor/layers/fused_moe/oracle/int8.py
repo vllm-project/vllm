@@ -294,15 +294,13 @@ def convert_to_int8_moe_kernel_format(
             quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
-    elif int8_backend == Int8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_int8_moe_layer_for_cpu,
-        )
-
-        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
-    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU_ZEN):
-        # CPU_ZEN keeps the loaded [N, K] layout (zentorch packs internally),
-        # so it needs no conversion here.
+    elif int8_backend not in (
+        Int8MoeBackend.TRITON,
+        Int8MoeBackend.CPU,
+        Int8MoeBackend.CPU_ZEN,
+    ):
+        # CPU / CPU_ZEN keep the loaded [N, K] layout (VNNI-packed internally by
+        # CPUExpertsInt8 / packed by zentorch), so they need no conversion here.
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2

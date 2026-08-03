@@ -467,7 +467,7 @@ def _merge_embeds(
 
     first_keys = set(data_items[0].keys())
     if any(set(item.keys()) != first_keys for item in data_items[1:]):
-        raise ValueError(
+        raise VLLMValidationError(
             "All dictionaries in the list of embeddings must have the same keys."
         )
 
@@ -746,9 +746,15 @@ def _resolve_items(
         modality requires a processor, enforced by the guard below.
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
-        raise ValueError("Mixing raw image and embedding inputs is not allowed")
+        raise VLLMValidationError(
+            "Mixing raw image and embedding inputs is not allowed",
+            parameter="image_embeds",
+        )
     if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
-        raise ValueError("Mixing raw audio and embedding inputs is not allowed")
+        raise VLLMValidationError(
+            "Mixing raw audio and embedding inputs is not allowed",
+            parameter="audio_embeds",
+        )
     # `prompt_embeds` bypasses HF MM processors. Every other modality requires one.
     processor_modalities = items_by_modality.keys() - {"prompt_embeds"}
     if processor_modalities and mm_processor is None:
@@ -945,15 +951,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
-
-        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
-            envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=tracker.media_io_kwargs,
-            allowed_local_media_path=tracker.allowed_local_media_path,
-            allowed_media_domains=tracker.allowed_media_domains,
-        )
-
         self._mm_processor_kwargs = mm_processor_kwargs
+
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        # Connector setup may probe VLLM_MEDIA_CACHE. Defer it until a request
+        # actually contains media so text-only parsing never blocks on that I/O.
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=self._tracker.media_io_kwargs,
+            allowed_local_media_path=self._tracker.allowed_local_media_path,
+            allowed_media_domains=self._tracker.allowed_media_domains,
+        )
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1097,13 +1106,18 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
-        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
-            envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=tracker.media_io_kwargs,
-            allowed_local_media_path=tracker.allowed_local_media_path,
-            allowed_media_domains=tracker.allowed_media_domains,
-        )
         self._mm_processor_kwargs: dict[str, Any] | None = mm_processor_kwargs
+
+    @cached_property
+    def _connector(self) -> MediaConnector:
+        # Connector setup may probe VLLM_MEDIA_CACHE. Defer it until a request
+        # actually contains media so text-only parsing never blocks on that I/O.
+        return MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
+            media_io_kwargs=self._tracker.media_io_kwargs,
+            allowed_local_media_path=self._tracker.allowed_local_media_path,
+            allowed_media_domains=self._tracker.allowed_media_domains,
+        )
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1440,7 +1454,7 @@ def _get_full_multimodal_text_prompt(
                 interleave_strings,
             )
             logger.debug("Input prompt: %s", text_prompt)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items."
             )
@@ -1688,7 +1702,7 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
     caller move or inject splice positions via plain text content.
     """
     if model_config.enable_prompt_embeds and PROMPT_EMBEDS_PLACEHOLDER_TOKEN in text:
-        raise ValueError(
+        raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
             )
@@ -2024,13 +2038,19 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
     return idx
 
 
-_KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25")
+_KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25", "kimi_k3")
 
 
 def get_tool_call_id_type(model_config: ModelConfig) -> str:
     """Return the tool-call ID type for a given model configuration."""
     hf_overrides = getattr(model_config, "hf_overrides", None)
-    if model_config.hf_text_config.model_type in _KIMI_MODEL_TYPES or (
+    hf_config = getattr(model_config, "hf_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_types = (
+        getattr(hf_config, "model_type", None),
+        getattr(hf_text_config, "model_type", None),
+    )
+    if any(model_type in _KIMI_MODEL_TYPES for model_type in model_types) or (
         isinstance(hf_overrides, dict)
         and hf_overrides.get("model_type") in _KIMI_MODEL_TYPES
     ):

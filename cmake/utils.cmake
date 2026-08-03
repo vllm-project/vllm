@@ -241,14 +241,15 @@ endmacro()
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
 # stores them in `OUT_ARCHES`.
 #
-# Example:
-#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
-#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
-#   OUT_ARCHES="7.5;...;9.0"
+# Prefer `code=sm_*`; fall back to `arch=compute_*` for PTX-only flags.
+# This handles mismatches such as `arch=compute_20,code=sm_121`.
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "code=sm_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    if (NOT _COMPUTE)
+      string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    endif()
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
