@@ -248,3 +248,89 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
+
+
+_TOOLS_CHANNEL = f"{OPEN}tools{SEP}x{CLOSE}tools{SEP}"
+
+
+def _message_level_tools_request(*, tool_choice="required") -> ChatCompletionRequest:
+    """Tools declared only on a system message (message-level declaration)."""
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {
+                "role": "system",
+                "content": "",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "calc",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+        tool_choice=tool_choice,
+    )
+
+
+def test_extract_reasoning_preserves_tool_channels_for_message_level_tools():
+    """Message-level tools are invisible in `request.tools`, but the model
+    still emits a tools channel -- it must reach the tool parser raw."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = _message_level_tools_request(tool_choice="required")
+    rest = f"{RESPONSE_OPEN}answer{CLOSE}response{SEP}{_TOOLS_CHANNEL}"
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"step{THINK_CLOSE}{rest}", request
+    )
+
+    assert reasoning == "step"
+    assert content == rest
+
+
+def test_extract_reasoning_strips_channels_for_message_level_tools_none():
+    """tool_choice='none' disables preservation even with message-level tools."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = _message_level_tools_request(tool_choice="none")
+    rest = f"{RESPONSE_OPEN}answer{CLOSE}response{SEP}{_TOOLS_CHANNEL}"
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"step{THINK_CLOSE}{rest}", request
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"
+
+
+def test_extract_reasoning_strips_channels_without_any_tools():
+    """No tools anywhere: the tools channel is unwrapped as before."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[], tool_choice="auto")
+    rest = f"{RESPONSE_OPEN}answer{CLOSE}response{SEP}{_TOOLS_CHANNEL}"
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"step{THINK_CLOSE}{rest}", request
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"
+
+
+def test_is_reasoning_end_with_structural_think_in_history():
+    """Every history assistant message carries think open/close tags, and the
+    generation prefix re-opens the think channel. History close markers must
+    not mark the prompt as "reasoning ended"."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+
+    history = [1, 2, 3, 4, 2, 3]  # <|open|>think<|sep|><|close|>think<|sep|>
+    generation_prefix = [1, 2, 3]  # <|open|>think<|sep|>
+    assert not parser.is_reasoning_end(history + generation_prefix)
+
+    # Generated output: open consumed by the prefix, close present -> ended.
+    assert parser.is_reasoning_end([9, 4, 2, 3, 10])
+    # Still reasoning: no close marker yet.
+    assert not parser.is_reasoning_end([9, 10])
