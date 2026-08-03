@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -18,9 +21,8 @@ use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
 };
-use crate::protocol::{
-    EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
-};
+use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
+use crate::protocol::{decode_msgpack, encode_msgpack};
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.
@@ -510,14 +512,14 @@ pub async fn send_message(
     input_send: &mut RouterSendHalf,
     engine_id: &EngineId,
     request_type: Bytes,
-    payload: Vec<u8>,
+    payload: Bytes,
+    aux_frames: Vec<Bytes>,
 ) -> Result<()> {
-    let message = ZmqMessage::try_from(vec![
-        engine_id.to_frame(),
-        request_type,
-        Bytes::from(payload),
-    ])
-    .expect("router messages must contain identity and payload");
+    let mut frames = Vec::with_capacity(3 + aux_frames.len());
+    frames.extend([engine_id.to_frame(), request_type, payload]);
+    frames.extend(aux_frames);
+    let message =
+        ZmqMessage::try_from(frames).expect("router messages must contain identity and payload");
 
     trace!(
         ?engine_id,

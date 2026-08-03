@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Chat template support for tokenizers using Jinja2 templates.
 //!
 //! This module is inlined from SMG's tokenizer crate with local adaptations:

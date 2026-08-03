@@ -16,13 +16,13 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
@@ -43,6 +43,7 @@ from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterat
 
 from ..transcription.protocol import (
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionSegment,
@@ -56,7 +57,9 @@ from ..translation.protocol import (
     TranslationStreamResponse,
 )
 
-SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
+SpeechToTextResponse: TypeAlias = (
+    TranscriptionResponse | TranslationResponse | TranscriptionResponseDiarized
+)
 SpeechToTextResponseVerbose: TypeAlias = (
     TranscriptionResponseVerbose | TranslationResponseVerbose
 )
@@ -70,6 +73,7 @@ ResponseType: TypeAlias = (
     TranscriptionResponse
     | TranslationResponse
     | TranscriptionResponseVerbose
+    | TranscriptionResponseDiarized
     | TranslationResponseVerbose
 )
 
@@ -87,7 +91,7 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
-class OpenAISpeechToText(OpenAIServing):
+class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
 
@@ -113,6 +117,9 @@ class OpenAISpeechToText(OpenAIServing):
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
+        )
+        self.streaming_post_processor_cls = (
+            self.model_cls.get_streaming_post_processor_cls()
         )
 
         self.enable_force_include_usage = enable_force_include_usage
@@ -171,6 +178,7 @@ class OpenAISpeechToText(OpenAIServing):
                 y, sr = load_audio(
                     buf,
                     sr=self.asr_config.sample_rate,
+                    mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                 )
         except ValueError:
@@ -255,7 +263,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -273,6 +281,13 @@ class OpenAISpeechToText(OpenAIServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+
+        chunk_start_offsets: list[float] = [0.0]
+
+        for chunk in chunks[:-1]:
+            chunk_start_offsets.append(
+                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
+            )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -303,7 +318,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        return engine_inputs, duration, chunk_start_offsets
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -388,7 +403,7 @@ class OpenAISpeechToText(OpenAIServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=start_time,
+                        seek=int(start_time),
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
@@ -438,10 +453,15 @@ class OpenAISpeechToText(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json", "verbose_json"]:
+        if request.response_format not in [
+            "text",
+            "json",
+            "verbose_json",
+            "diarized_json",
+        ]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json` or `verbose_json`"
+                "`text`, `json`, `verbose_json` or `diarized_json`"
             )
 
         if (
@@ -452,9 +472,20 @@ class OpenAISpeechToText(OpenAIServing):
                 f"Currently do not support verbose_json for {request.model}"
             )
 
-        if request.response_format == "verbose_json" and request.stream:
+        if (
+            request.response_format == "diarized_json"
+            and not self.model_cls.supports_diarized_transcription
+        ):
             return self.create_error_response(
-                "verbose_json format doesn't support streaming case"
+                f"Currently do not support diarized_json for {request.model}"
+            )
+
+        if (
+            request.response_format in {"verbose_json", "diarized_json"}
+            and request.stream
+        ):
+            return self.create_error_response(
+                f"{request.response_format} format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -464,7 +495,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
+        (
+            engine_inputs,
+            duration_s,
+            chunk_start_offsets,
+        ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -475,7 +510,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
@@ -584,11 +619,10 @@ class OpenAISpeechToText(OpenAIServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
+            assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
@@ -621,7 +655,33 @@ class OpenAISpeechToText(OpenAIServing):
                     # rounded up as per openAI specs
                     "seconds": int(math.ceil(duration_s)),
                 }
-                if request.response_format != "verbose_json":
+                if request.response_format == "diarized_json":
+                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
+                    if not diarized_segments:
+                        return self.create_error_response(
+                            "Model output did not contain a valid diarized transcript"
+                        )
+                    final_response = cast(
+                        T,
+                        TranscriptionResponseDiarized(
+                            duration=duration_s,
+                            text=separator.join(
+                                segment.text for segment in diarized_segments
+                            ),
+                            segments=[
+                                {
+                                    "id": f"seg_{index}",
+                                    "start": segment.start,
+                                    "end": segment.end,
+                                    "text": segment.text,
+                                    "speaker": segment.speaker,
+                                }
+                                for index, segment in enumerate(diarized_segments)
+                            ],
+                            usage=usage,
+                        ),
+                    )
+                elif request.response_format != "verbose_json":
                     final_response = cast(
                         T, TranscriptionResponse(text=text, usage=usage)
                     )
@@ -631,7 +691,7 @@ class OpenAISpeechToText(OpenAIServing):
                         TranscriptionResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
@@ -645,7 +705,7 @@ class OpenAISpeechToText(OpenAIServing):
                         TranslationResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
@@ -692,6 +752,7 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
+                post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -709,19 +770,24 @@ class OpenAISpeechToText(OpenAIServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
 
+                    output_text = post_processor.process_delta(
+                        output.text, output.finish_reason is not None
+                    )
+
                     # dont add separator to the first chunk
                     if (
                         result_generator is not list_result_generator[0]
                         and beginning_of_chunk
+                        and output_text
                     ):
-                        output.text = separator + output.text
+                        output_text = separator + output_text
                         beginning_of_chunk = False
 
-                    # TODO: For models that output structured formats (e.g.,
-                    # Qwen3-ASR with "language X<asr_text>" prefix), streaming
-                    # would need buffering to strip the prefix properly since
-                    # deltas may split the tag across chunks.
-                    delta_message = DeltaMessage(content=output.text)
+                    if output.finish_reason is None and not output_text:
+                        completion_tokens += len(output.token_ids)
+                        continue
+
+                    delta_message = DeltaMessage(content=output_text)
                     completion_tokens += len(output.token_ids)
 
                     if output.finish_reason is None:
