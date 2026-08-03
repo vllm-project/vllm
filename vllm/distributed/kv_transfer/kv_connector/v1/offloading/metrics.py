@@ -395,6 +395,9 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             metric_cls = self._counter_cls
         elif isinstance(metadata, OffloadingGaugeMetadata):
             metric_cls = self._gauge_cls
+            # Counters and histograms are per-process cumulative and must stay
+            # summed; only gauges collapse (see OffloadingGaugeMetadata).
+            kwargs["multiprocess_mode"] = metadata.multiprocess_mode
         elif isinstance(metadata, OffloadingHistogramMetadata):
             metric_cls = self._histogram_cls
             if metadata.buckets is not None:

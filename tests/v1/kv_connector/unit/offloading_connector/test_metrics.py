@@ -593,6 +593,37 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
 
 
+def test_prom_metrics_gauges_collapse_multiprocess_fanout():
+    """Gauges must not fan out per pid: they are point-in-time values for one
+    engine that every API-server process reports. Counters and histograms are
+    per-process cumulative and stay summed."""
+    metric_definitions = {
+        PENDING_STORES: OffloadingGaugeMetadata(documentation="pending stores"),
+        STORES_SKIPPED: OffloadingCounterMetadata(documentation="stores skipped"),
+        LOOKUP_LATENCY: OffloadingHistogramMetadata(documentation="lookup latency"),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    metric_defs = prom_metrics._offloading_metric_defs
+    assert metric_defs[PENDING_STORES].kwargs["multiprocess_mode"] == "mostrecent"
+    assert "multiprocess_mode" not in metric_defs[STORES_SKIPPED].kwargs
+    assert "multiprocess_mode" not in metric_defs[LOOKUP_LATENCY].kwargs
+
+
 def test_prom_metrics_lazily_observes_labeled_metric():
     metric_definitions = {
         MY_COUNTER: OffloadingCounterMetadata(
