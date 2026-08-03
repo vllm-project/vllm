@@ -4,6 +4,7 @@
 import asyncio
 import inspect
 import json
+import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
@@ -44,6 +45,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.metrics.mm_preprocessing import observe_resolve_items
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
@@ -715,6 +717,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
     async def all_mm_data(self) -> MultiModalDataDict | None:
         if not self._items_by_modality:
             return None
+        resolve_start = time.monotonic()
         mm_inputs = {}
         items_by_modality = {}
         for modality, items in self._items_by_modality.items():
@@ -725,6 +728,8 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
                 else:
                     coros.append(asyncio.sleep(0))
             items_by_modality[modality] = await asyncio.gather(*coros)
+
+        observe_resolve_items(time.monotonic() - resolve_start)
 
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
             raise ValueError("Mixing raw image and embedding inputs is not allowed")

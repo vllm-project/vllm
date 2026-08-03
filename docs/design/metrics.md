@@ -48,6 +48,18 @@ In v1, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
 
+#### Multi-Modal Preprocessing Metrics (APIServer)
+
+These metrics are defined in the APIServer process and measure the time spent
+in multi-modal preprocessing *before* the request reaches the engine. They
+are independent of the EngineCore metrics above.
+
+- `vllm:mm_media_download_latency_seconds` (Histogram, label: `media_type`) - HTTP media download latency per media item.
+- `vllm:mm_media_decode_latency_seconds` (Histogram, label: `media_type`) - Media decode (`load_bytes`) latency per media item.
+- `vllm:mm_media_download_bytes` (Histogram, label: `media_type`) - Downloaded media size in bytes per media item.
+- `vllm:mm_resolve_items_latency_seconds` (Histogram) - Total multi-modal resolve latency per request (all concurrent downloads + decodes).
+- `vllm:mm_preprocessing_total_latency_seconds` (Histogram) - Total preprocessing latency per request batch (render + tokenize).
+
 These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
 ### Grafana Dashboard

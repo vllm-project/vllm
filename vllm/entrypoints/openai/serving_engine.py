@@ -35,6 +35,9 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.metrics.mm_preprocessing import (
+    observe_preprocessing_total,
+)
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -1046,6 +1049,7 @@ class OpenAIServing:
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
     ]:
+        _preproc_start = time.monotonic()
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -1147,6 +1151,7 @@ class OpenAIServing:
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
+        observe_preprocessing_total(time.monotonic() - _preproc_start)
         return conversation, [request_prompt], [engine_prompt]
 
     async def _process_inputs(

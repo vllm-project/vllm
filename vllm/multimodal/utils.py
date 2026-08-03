@@ -3,6 +3,7 @@
 
 import asyncio
 import atexit
+import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -18,6 +19,10 @@ from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.entrypoints.metrics.mm_preprocessing import (
+    observe_media_decode,
+    observe_media_download,
+)
 from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
 
@@ -106,7 +111,13 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type, data)
+        # data URLs have no download phase (data is inline),
+        # but decoding (base64 -> pixel array) still takes time.
+        io_type = media_io.__class__.__name__
+        decode_start = time.monotonic()
+        result = media_io.load_base64(media_type, data)
+        observe_media_decode(io_type, time.monotonic() - decode_start)
+        return result
 
     def _load_file_url(
         self,
@@ -126,7 +137,15 @@ class MediaConnector:
                 f"of `--allowed-local-media-path` {allowed_local_media_path}."
             )
 
-        return media_io.load_file(filepath)
+        # Local file reads combine file I/O + decoding into one call;
+        # we record the total time as decode_latency (same semantic as
+        # the "decode" phase in HTTP paths). No separate download
+        # metric because file:// has no network fetch step.
+        io_type = media_io.__class__.__name__
+        decode_start = time.monotonic()
+        result = media_io.load_file(filepath)
+        observe_media_decode(io_type, time.monotonic() - decode_start)
+        return result
 
     def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
         if (
@@ -152,13 +171,22 @@ class MediaConnector:
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
+            io_type = media_io.__class__.__name__
+
+            download_start = time.monotonic()
             data = connection.get_bytes(
                 url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
+            observe_media_download(
+                io_type, time.monotonic() - download_start, len(data)
+            )
 
-            return media_io.load_bytes(data)
+            decode_start = time.monotonic()
+            result = media_io.load_bytes(data)
+            observe_media_decode(io_type, time.monotonic() - decode_start)
+            return result
 
         if url_spec.scheme == "data":
             return self._load_data_url(url_spec, media_io)
@@ -183,13 +211,29 @@ class MediaConnector:
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
+            io_type = media_io.__class__.__name__
+
+            # HTTP download is already async (aiohttp), so time it here
+            # rather than inside the thread pool.
+            download_start = time.monotonic()
             data = await connection.async_get_bytes(
                 url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
+            observe_media_download(
+                io_type, time.monotonic() - download_start, len(data)
+            )
+
+            def decode_with_timing(raw: bytes) -> _M:
+                start = time.monotonic()
+                result = media_io.load_bytes(raw)
+                observe_media_decode(io_type, time.monotonic() - start)
+                return result
+
+            return await loop.run_in_executor(
+                global_thread_pool, decode_with_timing, data
+            )
 
         if url_spec.scheme == "data":
             future = loop.run_in_executor(
