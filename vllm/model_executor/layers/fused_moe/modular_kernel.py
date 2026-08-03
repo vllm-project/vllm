@@ -1031,7 +1031,10 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
             self._routing_replay_buffer = None
             return
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (
+                self.moe_config.max_num_tokens * self.moe_config.dp_size,
+                self.moe_config.experts_per_token,
+            ),
             dtype=torch.int16,
             device=self.moe_config.device,
         )
