@@ -19,7 +19,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -215,7 +215,7 @@ class Glm5NextMoE(nn.Module):
                 swiglu_limit=swiglu_limit,
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -337,11 +337,7 @@ class Glm5NextDecoderLayer(nn.Module):
             if layer_idx < len(mlp_layer_types)
             else (mlp_layer_types[-1] if mlp_layer_types else "sparse")
         )
-        if (
-            self.is_moe
-            and self.num_experts is not None
-            and mlp_type == "sparse"
-        ):
+        if self.is_moe and self.num_experts is not None and mlp_type == "sparse":
             self.mlp = Glm5NextMoE(
                 config=config,
                 parallel_config=parallel_config,
