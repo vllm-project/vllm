@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Apertus 1.5 multimodal model."""
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from math import isqrt
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -41,6 +41,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .apertus import ApertusForCausalLM, ApertusModel
@@ -78,6 +79,28 @@ _DEFAULT_IMAGE_START_TOKEN_ID = 131073
 _DEFAULT_IMAGE_END_TOKEN_ID = 131074
 _DEFAULT_AUDIO_START_TOKEN_ID = 131080
 _DEFAULT_AUDIO_END_TOKEN_ID = 131081
+
+
+class Apertus1p5ImageInputs(TensorSchema):
+    """Processed image inputs for the Apertus vision tokenizer."""
+
+    type: Literal["pixel_values"]
+
+    pixel_values: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("ni", 3, "h", "w", dynamic_dims={"h", "w"}),
+    ]
+
+
+class Apertus1p5AudioInputs(TensorSchema):
+    """Processed audio inputs for the Apertus audio tokenizer."""
+
+    type: Literal["audio_values"]
+
+    audio_values: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "t", dynamic_dims={"t"}),
+    ]
 
 
 def _pad_logits_to_input_vocab(
@@ -304,8 +327,9 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
             mm_kwargs["pixel_values"] = pixel_values
 
         if num_audios > 0:
-            # Hugging Face pads audio features in a multimodal batch to a common
-            # length. Remove that padding with each item's attention mask.
+            # Apertus1p5 input-processor pads audio features in a multimodal
+            # batch to a common length. Remove that padding with each item's
+            # attention mask.
             audio_values = [
                 audio[0, : int(mask.sum())].contiguous()
                 for audio, mask in zip(
@@ -329,7 +353,7 @@ class Apertus1p5MultiModalProcessor(BaseMultiModalProcessor[Apertus1p5Processing
         ) -> list[PlaceholderRange]:
             """Locate processor-created multimodal spans and embedding slots.
 
-            The Hugging Face processor expands images into
+            The Apertus1p5 input-processor from transformers expands images into
             ``<|img_start|>H*W<|img_token_start|><|image|>...<|img_end|>``
             and audio into ``<|audio_start|><|audio|>...<|audio_end|>``.
             For each item, find the next complete range after the previous
@@ -465,8 +489,6 @@ class Apertus1p5ForConditionalGeneration(
         else:
             self.lm_head = PPMissingLayer()
 
-        self.vision_tower: Any | None = None
-        self.audio_tower: Any | None = None
         # A single primary source now yields the vision/audio tensors too (routed by
         # hf_to_vllm_mapper)
         self.secondary_weights = []
@@ -520,9 +542,6 @@ class Apertus1p5ForConditionalGeneration(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
-        if not get_pp_group().is_first_rank:
-            skip_prefixes.extend(["vision_tower.", "audio_tower."])
-
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
@@ -533,90 +552,123 @@ class Apertus1p5ForConditionalGeneration(
         parameter = next(module.parameters())
         return parameter.device, parameter.dtype
 
-    def _encode_image_to_llm_ids(
+    def _encode_image_to_llm(
         self,
-        image: torch.Tensor,
-    ) -> torch.Tensor:
+        image_input: Apertus1p5ImageInputs,
+    ) -> list[torch.Tensor]:
         vision_tower = self.vision_tower
         assert vision_tower is not None
         target_device, target_dtype = self._get_module_device_dtype(vision_tower)
+
+        # `list()` expands tensors along dimension 0 while preserving list inputs.
+        images = list(image_input["pixel_values"])
+        if not images:
+            return []
+
         # The vision tower expects a single image with a batch dimension;
         # per-item encoding avoids quality degradation from tokenizer batching.
-        image = image.unsqueeze(0).to(device=target_device, dtype=target_dtype)
         with torch.inference_mode():
-            valid_codes = vision_tower.encode(image).flatten()
-        return valid_codes.to(torch.long) + self.image_token_offset
+            ids_per_image = []
+            for image in images:
+                image_codes = vision_tower.encode(
+                    image.unsqueeze(0).to(device=target_device, dtype=target_dtype)
+                )
+                ids_per_image.append(image_codes.flatten())
+        ids_per_image = [
+            ids.to(torch.long) + self.image_token_offset for ids in ids_per_image
+        ]
+        lengths = [ids.shape[0] for ids in ids_per_image]
+        all_embeds = self.language_model.embed_input_ids(torch.cat(ids_per_image))
+        return list(all_embeds.split(lengths))
 
-    def _encode_audio_to_llm_ids(
+    def _encode_audio_to_llm(
         self,
-        audio: torch.Tensor,
-    ) -> torch.Tensor:
+        audio_input: Apertus1p5AudioInputs,
+    ) -> list[torch.Tensor]:
         audio_tower = self.audio_tower
         assert audio_tower is not None
         target_device, target_dtype = self._get_module_device_dtype(audio_tower)
+
+        # `list()` expands tensors along dimension 0 while preserving list inputs.
+        audios = list(audio_input["audio_values"])
+        if not audios:
+            return []
+
         # The audio tower expects a single clip with batch/channel dimensions;
         # per-item encoding avoids quality degradation from tokenizer batching.
         with torch.inference_mode():
-            output = audio_tower.encode(
-                audio.unsqueeze(0)
-                .unsqueeze(0)
-                .to(device=target_device, dtype=target_dtype)
-            )
-            valid_codes = output.audio_codes.squeeze(0).squeeze(0)
-
-        return valid_codes.to(torch.long) + self.audio_token_offset
-
-    def _process_modality_input(
-        self,
-        values: torch.Tensor | list[torch.Tensor],
-        encode_fn: Callable[[torch.Tensor], torch.Tensor],
-        device: torch.device,
-    ) -> list[torch.Tensor]:
-        """Encode modality items one by one, then batch-lookup their embeddings."""
-        items = list(values.unbind(0)) if isinstance(values, torch.Tensor) else values
-        if not items:
-            return []
-
-        # Encode each item independently to preserve HuggingFace parity for image
-        # and audio inputs.
-        ids_per_item = [encode_fn(item) for item in items]
-        lengths = [ids.shape[0] for ids in ids_per_item]
-
-        all_ids = torch.cat(ids_per_item).to(device)
-        all_embeds = self.language_model.embed_input_ids(all_ids)
+            ids_per_audio = []
+            for audio in audios:
+                audio_codes = audio_tower.encode(
+                    audio.unsqueeze(0)
+                    .unsqueeze(0)
+                    .to(device=target_device, dtype=target_dtype)
+                ).audio_codes
+                ids_per_audio.append(audio_codes.squeeze(0).squeeze(0))
+        ids_per_audio = [
+            ids.to(torch.long) + self.audio_token_offset for ids in ids_per_audio
+        ]
+        lengths = [ids.shape[0] for ids in ids_per_audio]
+        all_embeds = self.language_model.embed_input_ids(torch.cat(ids_per_audio))
         return list(all_embeds.split(lengths))
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Apertus1p5ImageInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is None:
+            return None
+
+        return Apertus1p5ImageInputs(
+            type="pixel_values",
+            pixel_values=pixel_values,
+        )
+
+    def _parse_and_validate_audio_input(
+        self, **kwargs: object
+    ) -> Apertus1p5AudioInputs | None:
+        audio_values = kwargs.pop("audio_values", None)
+        if audio_values is None:
+            return None
+
+        return Apertus1p5AudioInputs(
+            type="audio_values",
+            audio_values=audio_values,
+        )
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities: dict[str, Any] = {}
+
+        # Preserve the order of modalities when images and audio are interleaved.
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "images" not in modalities:
+                image_input = self._parse_and_validate_image_input(**kwargs)
+                assert image_input is not None
+                modalities["images"] = image_input
+            if input_key == "audio_values" and "audios" not in modalities:
+                audio_input = self._parse_and_validate_audio_input(**kwargs)
+                assert audio_input is not None
+                modalities["audios"] = audio_input
+
+        return modalities
 
     def embed_multimodal(
         self,
         **kwargs: object,
     ) -> MultiModalEmbeddings:
         """Encode all modality batches into language embeddings."""
-        try:
-            device = next(self.parameters()).device
-        except StopIteration:
-            device = torch.device("cuda")
-
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         multimodal_embeddings: list[torch.Tensor] = []
 
-        for input_key in kwargs:
-            if input_key == "pixel_values":
-                pixel_values = kwargs[input_key]
-                if pixel_values is not None and self.vision_tower is not None:
-                    image_embeds = self._process_modality_input(
-                        pixel_values,  # type: ignore
-                        self._encode_image_to_llm_ids,
-                        device,
-                    )
-                    multimodal_embeddings.extend(image_embeds)
-            elif input_key == "audio_values":
-                audio_values = kwargs[input_key]
-                if audio_values is not None and self.audio_tower is not None:
-                    audio_embeds = self._process_modality_input(
-                        audio_values,  # type: ignore
-                        self._encode_audio_to_llm_ids,
-                        device,
-                    )
-                    multimodal_embeddings.extend(audio_embeds)
+        for modality in modalities:
+            if modality == "images" and self.vision_tower is not None:
+                image_input = modalities["images"]
+                image_embeds = self._encode_image_to_llm(image_input)
+                multimodal_embeddings.extend(image_embeds)
+            if modality == "audios" and self.audio_tower is not None:
+                audio_input = modalities["audios"]
+                audio_embeds = self._encode_audio_to_llm(audio_input)
+                multimodal_embeddings.extend(audio_embeds)
 
         return multimodal_embeddings
 
