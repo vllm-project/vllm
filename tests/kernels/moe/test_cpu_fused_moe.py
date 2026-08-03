@@ -33,6 +33,8 @@ ACT = [
     MoEActivation.SWIGLUOAI,
     MoEActivation.GELU,
     MoEActivation.GELU_TANH,
+    MoEActivation.SWIGLUSTEP,
+    MoEActivation.RELU2,
 ]
 USE_BIAS = [False, True]
 ISA = ["vec"]
