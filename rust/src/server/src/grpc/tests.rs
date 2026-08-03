@@ -652,6 +652,32 @@ async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_empty_stop_string_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-empty-stop", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-empty-stop".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                stop_strings: vec!["".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("should fail when stop_strings contains an empty string");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stop strings cannot be empty"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
     let (mut client, server_task, _engine_task) = grpc_test_server(
         b"engine-grpc-invalid-sampling",

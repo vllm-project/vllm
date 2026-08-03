@@ -45,6 +45,8 @@ message GenerateRequest {
   uint32 truncate_prompt_tokens = 11;
 
   int32 priority = 12;
+
+  optional string session_id = 13;
 }
 
 message RandomSampling {
