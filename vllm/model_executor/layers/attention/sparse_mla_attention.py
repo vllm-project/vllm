@@ -267,18 +267,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_seq_len = int(
                 seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
             )
-            chunked_context = self._build_chunked_context_fields(
-                common_attn_metadata,
-                num_decodes,
-                num_prefills,
-                prefill_query_lens_cpu,
-            )
             prefill = MLACommonPrefillMetadata(
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=prefill_max_query_len,
                 query_lens_cpu=prefill_query_lens_cpu,
-                chunked_context=chunked_context,
+                chunked_context=self._build_chunked_context_fields(
+                    common_attn_metadata,
+                    num_decodes,
+                    num_prefills,
+                    prefill_query_lens_cpu,
+                ),
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
