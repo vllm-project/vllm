@@ -57,11 +57,6 @@ pub fn to_text_request(
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
     let stopping = req.stopping.as_ref();
-    if let Some(stopping) = stopping {
-        if stopping.stop_strings.iter().any(|s| s.is_empty()) {
-            return Err(Status::invalid_argument("stop strings cannot be empty"));
-        }
-    }
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
@@ -589,23 +584,6 @@ mod tests {
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
-    }
-
-    #[test]
-    fn empty_stop_string_is_rejected() {
-        let req = pb::GenerateRequest {
-            stopping: Some(pb::StoppingCriteria {
-                stop_strings: vec!["".to_string()],
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-
-        let err = to_text_request(req, false, &["test-model".to_string()])
-            .expect_err("empty stop string should be rejected");
-
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("stop strings cannot be empty"));
     }
 
     fn finished(reason: FinishReason) -> Finished {
