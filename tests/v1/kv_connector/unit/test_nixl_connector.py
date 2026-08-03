@@ -433,6 +433,9 @@ def test_kv_transfer_handshake(dist_init):
             )
         )
         assert delay
+        # Pull connector advertises its transfer mode in kv_transfer_params so
+        # an external router can distinguish it from a push producer.
+        assert kv_connector_metadata["transfer_mode"] == "pull"
 
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(
@@ -2925,6 +2928,21 @@ def test_transfer_mode_changes_compatibility_hash():
         config, "FLASH_ATTN", False, transfer_mode="pull"
     )
     assert compute_nixl_compatibility_hash(config, "FLASH_ATTN", False) == pull_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_advertises_transfer_mode():
+    # Each scheduler advertises its transfer mode in kv_transfer_params so an
+    # external router can route pull (READ) vs push (WRITE) producers.
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+        NixlPushConnectorScheduler,
+    )
+
+    assert NixlPullConnectorScheduler._TRANSFER_MODE == "pull"
+    assert NixlPushConnectorScheduler._TRANSFER_MODE == "push"
 
 
 @pytest.mark.parametrize(
