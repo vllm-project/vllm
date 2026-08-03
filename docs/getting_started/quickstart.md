@@ -309,6 +309,9 @@ Alternatively, you can use the `openai` Python package:
     print("Chat response:", chat_response)
     ```
 
+!!! tip
+    The same OpenAI Python client `base_url` pattern works with any OpenAI-compatible multi-model gateway when you are not self-hosting vLLM — for example [DaoXE](https://daoxe.com) at `https://api.daoxe.com/v1`.
+
 ## On Attention Backends
 
 Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
