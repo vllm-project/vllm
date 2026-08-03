@@ -114,7 +114,8 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                     content = content[:response_end_idx]
             elif self.response_end_token_id in delta_token_ids:
                 response_end_idx = content.rfind(self.response_end_token)
-                content = content[:response_end_idx]
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
             # remove \n after </think>  or </response>
             if previous_token_ids[-1] in self.parser_token_ids and (
                 len(delta_token_ids) > 0 and delta_token_ids[0] == self.newline_token_id
