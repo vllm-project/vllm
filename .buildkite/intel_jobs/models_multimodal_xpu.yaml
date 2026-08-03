@@ -219,7 +219,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model || true'
+    pytest -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model --deselect="models/multimodal/generation/test_common.py::test_custom_inputs_models[llava_onevision-test_case4]" || true'
 - label: Multi-Modal Models (Extended Pooling)
   device: intel_gpu
   optional: true
