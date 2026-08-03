@@ -225,7 +225,7 @@ direct_register_custom_op(
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
         torch.cpu._is_amx_tile_supported()
-        and (dtype in (torch.bfloat16, torch.int8))
+        and (dtype in (torch.bfloat16, torch.float16, torch.int8))
         and k % 32 == 0
         and n % 16 == 0
     )
