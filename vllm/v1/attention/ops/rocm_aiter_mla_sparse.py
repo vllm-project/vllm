@@ -27,8 +27,8 @@ else:
 
 import os as _os
 
-# gfx950: AITER's paged MQA-logits decode kernel mis-scores the sparse indexer
-# and collapses long-context retrieval. Opt in to the Triton path to fix it.
+# gfx942/gfx950: AITER's paged MQA-logits decode kernel mis-scores the sparse
+# indexer and collapses long-context retrieval. Opt in to the Triton path to fix.
 _DSV4_LOGITS_FIX = _os.environ.get("VLLM_DSV4_LOGITS_FIX", "0") == "1"
 
 
@@ -565,7 +565,7 @@ def rocm_fp8_paged_mqa_logits(
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if _DSV4_LOGITS_FIX and _ON_GFX950:
+    if _DSV4_LOGITS_FIX and (_ON_GFX950 or _ON_GFX942):
         if kv_cache_fp8.shape[1] % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
