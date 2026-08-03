@@ -87,17 +87,16 @@ def redistribute_expert_placement(
             f"{tuple(physical_to_logical_map.shape)}"
         )
 
-    num_layers, num_physical = physical_to_logical_map.shape
+    num_layers = physical_to_logical_map.shape[0]
     all_logical = set(range(num_logical))
     reassignments: set[tuple[int, int]] = set()
 
     for layer_idx in range(num_layers):
-        layer_p2l = physical_to_logical_map[layer_idx]
+        layer_p2l = physical_to_logical_map[layer_idx].cpu().tolist()
 
         # Replica count per logical expert across the surviving slots.
         replica_count: dict[int, int] = {}
-        for phys_idx in range(num_physical):
-            logical_id = int(layer_p2l[phys_idx].item())
+        for logical_id in layer_p2l:
             if logical_id >= 0:
                 replica_count[logical_id] = replica_count.get(logical_id, 0) + 1
 
@@ -109,8 +108,7 @@ def redistribute_expert_placement(
         # (>1) expert can spare a slot without losing coverage. Each entry
         # is (replica_count, phys_idx).
         spare_slots_by_rank: dict[int, list[tuple[int, int]]] = {}
-        for phys_idx in range(num_physical):
-            logical_id = int(layer_p2l[phys_idx].item())
+        for phys_idx, logical_id in enumerate(layer_p2l):
             if logical_id >= 0 and replica_count.get(logical_id, 0) > 1:
                 ep_rank = phys_idx // num_local_experts
                 spare_slots_by_rank.setdefault(ep_rank, []).append(
@@ -140,7 +138,7 @@ def redistribute_expert_placement(
                         f"EPLB redundancy insufficient."
                     )
                 _, spare_slot = candidate
-                prev_logical = int(layer_p2l[spare_slot].item())
+                prev_logical = layer_p2l[spare_slot]
                 # Re-check: an earlier reuse may have left prev_logical
                 # with a single replica, making this slot no longer spare.
                 if replica_count.get(prev_logical, 0) > 1:
@@ -148,6 +146,10 @@ def redistribute_expert_placement(
                     replica_count[prev_logical] -= 1
                     reassignments.add((layer_idx, logical_id))
                     break
+
+        physical_to_logical_map[layer_idx].copy_(
+            torch.tensor(layer_p2l, dtype=physical_to_logical_map.dtype)
+        )
 
     return reassignments
 
@@ -165,18 +167,21 @@ def rebuild_logical_expert_maps(
     - logical_to_physical_map: [num_layers, num_logical, max_replicas]
     - logical_replica_count: [num_layers, num_logical]
     """
-    num_layers, num_physical = physical_to_logical_map.shape
-    logical_replica_count.zero_()
-    logical_to_physical_map.fill_(-1)
+    num_layers = physical_to_logical_map.shape[0]
+    physical_to_logical_cpu = physical_to_logical_map.cpu()
+    replica_count_cpu = torch.zeros_like(logical_replica_count, device="cpu")
+    logical_to_physical_cpu = torch.full_like(logical_to_physical_map, -1, device="cpu")
     for layer_idx in range(num_layers):
-        for phys_idx in range(num_physical):
-            lid = int(physical_to_logical_map[layer_idx, phys_idx].item())
-            if lid < 0:
+        layer_p2l = physical_to_logical_cpu[layer_idx].tolist()
+        for phys_idx, logical_id in enumerate(layer_p2l):
+            if logical_id < 0:
                 continue
-            c = int(logical_replica_count[layer_idx, lid].item())
-            if c < logical_to_physical_map.shape[2]:
-                logical_to_physical_map[layer_idx, lid, c] = phys_idx
-            logical_replica_count[layer_idx, lid] += 1
+            count = int(replica_count_cpu[layer_idx, logical_id])
+            if count < logical_to_physical_cpu.shape[2]:
+                logical_to_physical_cpu[layer_idx, logical_id, count] = phys_idx
+            replica_count_cpu[layer_idx, logical_id] += 1
+    logical_replica_count.copy_(replica_count_cpu)
+    logical_to_physical_map.copy_(logical_to_physical_cpu)
 
 
 def reload_experts_from_disk(
