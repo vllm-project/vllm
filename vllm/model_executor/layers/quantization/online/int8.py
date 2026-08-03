@@ -114,6 +114,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
             layer=layer,
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

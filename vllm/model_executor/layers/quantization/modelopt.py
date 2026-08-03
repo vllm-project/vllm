@@ -405,7 +405,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -773,16 +773,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -2104,16 +2094,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             "logic. This function should not be called."
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
@@ -2363,7 +2343,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(prefix_dot):
                     return info["quant_algo"].upper()
 
-        # FusedMoE expert prefix is e.g. "...moe.experts", while ModelOpt's
+        # RoutedExperts expert prefix is e.g. "...moe.experts", while ModelOpt's
         # quantized_layers entries use "...moe.gate_proj" / "...moe.up_proj".
         if prefix.endswith(".experts"):
             parent_dot = prefix.rsplit(".experts", 1)[0] + "."
