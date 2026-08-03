@@ -3,6 +3,7 @@
 
 import torch
 from torch import Tensor
+from torch.library import triton_op, wrap_triton
 
 from vllm import ir
 from vllm.platforms import current_platform
@@ -66,10 +67,9 @@ def _supports_gelu_and_mul_sparse(
     )
 
 
-@torch.library.custom_op(
+@triton_op(
     "vllm::gelu_and_mul_sparse_triton",
     mutates_args=(),
-    device_types="cuda",
 )
 def _gelu_and_mul_sparse_triton_op(x: Tensor, std_multiplier: float) -> Tensor:
     d = x.shape[-1] // 2
@@ -82,7 +82,7 @@ def _gelu_and_mul_sparse_triton_op(x: Tensor, std_multiplier: float) -> Tensor:
     def grid(meta):
         return (n_rows,)
 
-    _gelu_and_mul_sparse_kernel[grid](
+    wrap_triton(_gelu_and_mul_sparse_kernel)[grid](
         x,
         output,
         d=d,
@@ -91,14 +91,6 @@ def _gelu_and_mul_sparse_triton_op(x: Tensor, std_multiplier: float) -> Tensor:
         num_warps=8,
     )
     return output
-
-
-@_gelu_and_mul_sparse_triton_op.register_fake
-def _gelu_and_mul_sparse_triton_fake(x: Tensor, std_multiplier: float) -> Tensor:
-    del std_multiplier
-    return torch.empty(
-        (*x.shape[:-1], x.shape[-1] // 2), dtype=x.dtype, device=x.device
-    )
 
 
 @ir.ops.gelu_and_mul_sparse.register_impl(
