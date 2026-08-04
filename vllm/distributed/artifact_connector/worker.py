@@ -179,6 +179,7 @@ class ArtifactWorkerConnector:
         captured: list[
             tuple[
                 ArtifactRequestMetadata,
+                int,
                 np.ndarray,
                 list[tuple[int, np.ndarray]],
                 int,
