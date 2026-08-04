@@ -217,8 +217,9 @@ def _make_cutlass_fp4_moe_batch_invariant_case(
         num_experts=e,
         experts_per_token=topk,
         hidden_dim=case_config["k"],
-        intermediate_size_per_partition=case_config["n"],
+        intermediate_size=case_config["n"],
         in_dtype=dtype,
+        activation=activation,
     )
     kernel = mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
@@ -231,7 +232,6 @@ def _make_cutlass_fp4_moe_batch_invariant_case(
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     return {
