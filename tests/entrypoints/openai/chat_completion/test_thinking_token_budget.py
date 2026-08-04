@@ -68,6 +68,8 @@ def server():
         "--max-model-len",
         "2048",
         "--enforce-eager",
+        # Both module-scoped servers are alive concurrently (the client
+        # fixture needs them side by side on one GPU).
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
@@ -84,6 +86,8 @@ def server_with_auto_reasoning_config():
         "--max-model-len",
         "2048",
         "--enforce-eager",
+        # Both module-scoped servers are alive concurrently (the client
+        # fixture needs them side by side on one GPU).
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",

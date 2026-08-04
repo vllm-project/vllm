@@ -132,7 +132,7 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
 )
 def test_w4a16_machete_e2e(vllm_runner, model_name):
     """Load a W4A16 model, verify Machete kernel is used, and generate."""
-    with vllm_runner(model_name, enforce_eager=True, gpu_memory_utilization=0.5) as llm:
+    with vllm_runner(model_name, enforce_eager=True) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -165,7 +165,6 @@ def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
         model_name,
         enforce_eager=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.5,
     ) as llm:
 
         def check_kernel_type(model):

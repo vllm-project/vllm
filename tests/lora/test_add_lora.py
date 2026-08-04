@@ -75,7 +75,6 @@ async def test_add_lora(chatglm3_lora_files):
         max_loras=max_loras,
         max_lora_rank=LORA_RANK,
         max_model_len=128,
-        gpu_memory_utilization=0.8,  # avoid OOM
         trust_remote_code=True,
         enforce_eager=True,
     )

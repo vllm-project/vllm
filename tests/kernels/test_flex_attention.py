@@ -102,7 +102,6 @@ def test_flex_attention_full_cudagraphs(vllm_runner):
         tensor_parallel_size=1,
         num_gpu_blocks_override=128,
         enforce_eager=False,
-        gpu_memory_utilization=0.85,
         attention_config={"backend": "FLEX_ATTENTION"},
     ) as llm_default:
         output_compile = llm_default.generate_greedy_logprobs(
@@ -164,7 +163,6 @@ def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
         tensor_parallel_size=1,
         num_gpu_blocks_override=128,
         enforce_eager=False,
-        gpu_memory_utilization=0.85,
         compilation_config={
             "cudagraph_mode": "FULL",
             "cudagraph_capture_sizes": [4],
@@ -225,7 +223,6 @@ def test_flex_attention_vs_default_backend(vllm_runner):
         tensor_parallel_size=1,
         num_gpu_blocks_override=128,
         enforce_eager=True,
-        gpu_memory_utilization=0.85,
     ) as llm_default:
         output_default = llm_default.generate_greedy_logprobs(
             prompts, max_tokens, num_logprobs

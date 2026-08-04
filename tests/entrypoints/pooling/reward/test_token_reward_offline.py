@@ -21,7 +21,6 @@ def llm(vllm_runner):
         max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.75,
         enforce_eager=True,
         trust_remote_code=True,
         seed=0,

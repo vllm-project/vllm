@@ -148,7 +148,6 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
         model=MODEL_NAME,
         max_model_len=8192,
         max_num_seqs=1,
-        gpu_memory_utilization=0.4,
         attention_config=AttentionConfig(backend=attn_backend),
         enforce_eager=True,
         kv_transfer_config=KVTransferConfig(

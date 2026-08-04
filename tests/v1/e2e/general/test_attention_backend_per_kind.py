@@ -50,7 +50,6 @@ def test_backend_per_kind_splits_groups(backend_per_kind, monkeypatch):
         attention_config=AttentionConfig(backend_per_kind=backend_per_kind),
         enforce_eager=True,
         max_model_len=2048,
-        gpu_memory_utilization=0.4,
     )
 
     group_backends = llm.llm_engine.collective_rpc(_collect_group_backends)[0]
@@ -82,7 +81,6 @@ def test_backend_per_kind_overrides_global_backend(monkeypatch):
         ),
         enforce_eager=True,
         max_model_len=2048,
-        gpu_memory_utilization=0.4,
     )
 
     group_backends = llm.llm_engine.collective_rpc(_collect_group_backends)[0]

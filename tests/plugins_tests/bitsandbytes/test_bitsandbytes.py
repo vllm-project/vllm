@@ -231,7 +231,6 @@ def test_4bit_bnb_embedding_model(
         model_name,
         runner="pooling",
         dtype=dtype,
-        gpu_memory_utilization=0.5,
         quantization="bitsandbytes",
         default_torch_num_threads=1,
     ) as vllm_model:

@@ -71,7 +71,6 @@ def test_qwen3_unembed_lora():
             max_loras=4,
             max_lora_rank=8,
             max_model_len=128,
-            gpu_memory_utilization=0.8,
             enforce_eager=True,
         )
 

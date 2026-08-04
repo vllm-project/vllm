@@ -46,8 +46,6 @@ class TestSetting:
                 "bfloat16",
                 "--max-model-len",
                 "2048",
-                "--gpu-memory-utilization",
-                "0.98",
             ],
             pp_size=1,
             tp_size=1,

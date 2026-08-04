@@ -10,8 +10,6 @@ assert chatml_jinja_path.exists()
 def run_and_test_dummy_opt_api_server(model, tp=1):
     # the model is registered through the plugin
     server_args = [
-        "--gpu-memory-utilization",
-        "0.10",
         "--dtype",
         "float32",
         "--chat-template",

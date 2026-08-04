@@ -220,8 +220,6 @@ def server_with_chunked_processing():
             '{"pooling_type": "MEAN", "use_activation": true, '
             '"enable_chunked_processing": true, "max_embed_len": 10000}'
         ),
-        "--gpu-memory-utilization",
-        "0.8",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
