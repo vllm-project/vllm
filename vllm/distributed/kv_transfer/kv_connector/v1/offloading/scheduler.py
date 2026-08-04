@@ -92,6 +92,9 @@ class GroupOffloadConfig(NamedTuple):
     kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_chunks: int | None
+    # Partial-tail data for this group comes from the scheduler's CoW hand-off
+    # rather than the request block table.
+    requires_cow_source: bool = False
     # Number of this group's offloaded chunks per full-attention alignment
     # segment. Used to skip storing SWA chunks that can never serve a load
     # hit (e.g. DeepSeek V4 where SWA groups have much smaller block sizes
@@ -165,6 +168,7 @@ class SchedulerOffloadConfig(NamedTuple):
     tokens_per_hash: int
     num_workers: int
     offload_prompt_only: bool
+    supports_partial_tail: bool
 
     @classmethod
     def from_spec(
@@ -227,9 +231,14 @@ class SchedulerOffloadConfig(NamedTuple):
                 sorted(eagle_groups),
             )
 
-        return cls(
-            num_workers=vllm_config.parallel_config.world_size,
-            kv_group_configs=tuple(
+        kv_group_configs_list: list[GroupOffloadConfig] = []
+        for idx, tokens_per_block in enumerate(spec.tokens_per_block):
+            kv_cache_group = kv_cache_config.kv_cache_groups[idx]
+            kv_spec = kv_cache_group.kv_cache_spec
+            sw = get_sliding_window_size_in_chunks(
+                kv_spec, tokens_per_block * spec.blocks_per_chunk
+            )
+            kv_group_configs_list.append(
                 GroupOffloadConfig(
                     group_idx=idx,
                     tokens_per_block=tokens_per_block,
@@ -238,25 +247,48 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
-                    sliding_window_size_in_chunks=(
-                        sw := get_sliding_window_size_in_chunks(
-                            kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                            tokens_per_block * spec.blocks_per_chunk,
-                        )
-                    ),
+                    sliding_window_size_in_chunks=sw,
                     alignment_chunk_count=_alignment_chunk_count(
                         tokens_per_block * spec.blocks_per_chunk, sw
                     ),
-                    kv_event_group_spec=get_offloading_event_group_spec(
-                        kv_cache_config.kv_cache_groups[idx]
-                    ),
+                    kv_event_group_spec=get_offloading_event_group_spec(kv_cache_group),
                     is_eagle_group=idx in eagle_groups,
+                    requires_cow_source=(
+                        isinstance(kv_spec, MambaSpec)
+                        and kv_spec.mamba_cache_mode == "align"
+                    ),
                 )
-                for idx, tokens_per_block in enumerate(spec.tokens_per_block)
-            ),
+            )
+        kv_group_configs = tuple(kv_group_configs_list)
+        group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
+        has_partial_recurrent_group = any(
+            config.requires_cow_source
+            and config.tokens_per_block > spec.tokens_per_hash
+            for config in kv_group_configs
+        )
+        # Partial tails currently require one physical block per offload chunk
+        # and uniform, non-windowed groups so one boundary identifies every
+        # group's source. EAGLE and DCP need additional hand-off semantics.
+        supports_partial_tail = (
+            spec.blocks_per_chunk == 1
+            and len(group_block_sizes) == 1
+            and has_partial_recurrent_group
+            and all(
+                config.sliding_window_size_in_chunks is None
+                or config.requires_cow_source
+                for config in kv_group_configs
+            )
+            and not any(config.is_eagle_group for config in kv_group_configs)
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        )
+
+        return cls(
+            num_workers=vllm_config.parallel_config.world_size,
+            kv_group_configs=kv_group_configs,
             blocks_per_chunk=spec.blocks_per_chunk,
             tokens_per_hash=spec.tokens_per_hash,
             offload_prompt_only=spec.offload_prompt_only,
+            supports_partial_tail=supports_partial_tail,
         )
 
 
@@ -288,6 +320,8 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    # Fine-grained token boundary selected beyond the last complete offload
+    # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
@@ -482,34 +516,16 @@ class OffloadingConnectorScheduler:
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
-        group_block_sizes = {
-            config.tokens_per_block for config in self.config.kv_group_configs
-        }
-        has_partial_mamba = any(
-            isinstance(group.kv_cache_spec, MambaSpec)
-            and group.kv_cache_spec.mamba_cache_mode == "align"
-            and group.kv_cache_spec.block_size > self.config.tokens_per_hash
-            for group in kv_cache_config.kv_cache_groups
+        self._partial_tail_enabled = self.config.supports_partial_tail
+        self._partial_tail_block_size = (
+            self.config.kv_group_configs[0].tokens_per_block
+            if self._partial_tail_enabled
+            else 0
         )
-        self._mamba_group_ids = {
-            idx
-            for idx, group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
-            and group.kv_cache_spec.mamba_cache_mode == "align"
-        }
-        has_sliding_window = any(
-            isinstance(group.kv_cache_spec, SlidingWindowSpec)
-            for group in kv_cache_config.kv_cache_groups
-        )
-        self._partial_tail_enabled = (
-            self.config.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
-            and has_partial_mamba
-            and not has_sliding_window
-            and not any(
-                config.is_eagle_group for config in self.config.kv_group_configs
-            )
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        self._cow_source_groups = frozenset(
+            config.group_idx
+            for config in self.config.kv_group_configs
+            if config.requires_cow_source
         )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
@@ -860,7 +876,7 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self.config.kv_group_configs[0].tokens_per_block
+        block_end = complete_boundary + self._partial_tail_block_size
         max_boundary = round_down(
             min(req_status.req.num_prompt_tokens - 1, block_end - 1), tokens_per_hash
         )
@@ -1131,42 +1147,28 @@ class OffloadingConnectorScheduler:
         store_jobs: dict[int, TransferJob] = {}
         for req_id, entries in handoffs.items():
             req_status = self._req_status.get(req_id)
-            if req_status is None or not entries:
-                continue
+            assert req_status is not None
+            assert entries
             boundaries = {boundary for _, _, boundary in entries}
-            if len(boundaries) != 1:
-                logger.warning(
-                    "Request %s: partial-tail groups disagree on boundary", req_id
-                )
-                continue
+            assert len(boundaries) == 1
             boundary = boundaries.pop()
             req = req_status.req
-            if (
-                boundary <= 0
-                or boundary % self.config.tokens_per_hash
-                or boundary > req.num_prompt_tokens
-                or (
-                    req_status.max_offload_tokens is not None
-                    and boundary > req_status.max_offload_tokens
-                )
-            ):
-                logger.warning(
-                    "Request %s: invalid partial-tail boundary %d", req_id, boundary
-                )
-                continue
+            max_boundary = min(
+                req.num_prompt_tokens,
+                req_status.max_offload_tokens or req.num_prompt_tokens,
+            )
+            assert boundary > 0
+            assert boundary % self.config.tokens_per_hash == 0
+            assert boundary <= max_boundary
 
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
-            if not self._mamba_group_ids.issubset(cow_blocks):
-                logger.warning(
-                    "Request %s: missing recurrent partial-tail source", req_id
-                )
-                continue
+            assert self._cow_source_groups.issubset(cow_blocks)
 
-            block_idx = boundary // self.config.kv_group_configs[0].tokens_per_block
-            if boundary % self.config.kv_group_configs[0].tokens_per_block == 0:
+            block_idx = boundary // self._partial_tail_block_size
+            if boundary % self._partial_tail_block_size == 0:
                 continue
             if any(
-                group.group_idx not in self._mamba_group_ids
+                group.group_idx not in self._cow_source_groups
                 and block_idx >= len(req_status.group_states[group.group_idx].block_ids)
                 for group in self.config.kv_group_configs
             ):
@@ -1177,17 +1179,11 @@ class OffloadingConnectorScheduler:
             ]
             block_ids = [
                 cow_blocks[group.group_idx]
-                if group.group_idx in self._mamba_group_ids
+                if group.group_idx in self._cow_source_groups
                 else req_status.group_states[group.group_idx].block_ids[block_idx]
                 for group in self.config.kv_group_configs
             ]
-            if any(block_id == 0 for block_id in block_ids):
-                logger.warning(
-                    "Request %s: cannot represent partial-tail boundary %d",
-                    req_id,
-                    boundary,
-                )
-                continue
+            assert all(block_id != 0 for block_id in block_ids)
 
             store_output = self.manager.prepare_store(keys, req_status.req_context)
             if store_output is None:
