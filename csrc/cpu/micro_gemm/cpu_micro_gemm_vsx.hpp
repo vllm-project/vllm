@@ -76,18 +76,10 @@ class TileGemmVSX {
     }
 
     for (int32_t k_idx = 0; k_idx < k; k_idx += 2) {
-        // Load A
-        __vector unsigned int vA_uint[tiles_m];
+        // Load packed A. A is packed as [tiles_m, k/2, 8]
+        __vector unsigned char vA_vec[tiles_m];
         for (int i = 0; i < tiles_m; i++) {
-            vA_uint[i] = (__vector unsigned int){0, 0, 0, 0};
-            for(int r=0; r<4; r++) {
-                int r_idx = i*4 + r;
-                if (r_idx < M) {
-                    uint32_t val;
-                    std::memcpy(&val, &a_ptr[r_idx * lda + k_idx], 4);
-                    vA_uint[i] = vec_insert(val, vA_uint[i], r);
-                }
-            }
+            vA_vec[i] = vec_xl(0, (const unsigned char*)&a_ptr[i * k * 4 + k_idx * 4]);
         }
 
         // Load packed B. B is packed such that we can load exactly 4 cols x 2 elements into one VecBF16.
@@ -99,7 +91,7 @@ class TileGemmVSX {
 
         for (int i = 0; i < tiles_m; i++) {
             for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_uint[i], vB_vec[j]);
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], vA_vec[i], vB_vec[j]);
             }
         }
     }
@@ -129,11 +121,41 @@ class MicroGemm<cpu_utils::ISA::VSX, scalar_t> {
   static constexpr int32_t MaxMSize = 8;
   static constexpr int32_t NSize = 16;
   static constexpr int32_t WeightOCGroupSize = 16;
-  static constexpr bool PackA = false;
+  static constexpr bool PackA = true;
 
  public:
   void gemm(DEFINE_CPU_MICRO_GEMM_PARAMS) {
     TileGemmVSX<scalar_t>::gemm(CPU_MICRO_GEMM_PARAMS);
+  }
+
+  // Pack A matrix:
+  // Original A is given as an array of row pointers `rows`.
+  // We need to pack it such that 4 rows and 2 columns form a single 16-byte vector.
+  // Shape: [m/4, k/2, 8]
+  static void pack_input_from_rows(const scalar_t* const* __restrict__ rows,
+                                   scalar_t* __restrict__ a_packed,
+                                   const int32_t m, const int32_t k) {
+    TORCH_CHECK(m > 0 && m <= MaxMSize);
+    TORCH_CHECK(k % 2 == 0);
+    
+    uint16_t* __restrict__ pa = reinterpret_cast<uint16_t*>(a_packed);
+    const int32_t tiles_m = (m + 3) / 4;
+
+    for (int i = 0; i < tiles_m; i++) {
+        for (int32_t k_idx = 0; k_idx < k; k_idx += 2) {
+            for (int r = 0; r < 4; r++) {
+                int r_idx = i * 4 + r;
+                if (r_idx < m) {
+                    const uint16_t* __restrict__ row_ptr = reinterpret_cast<const uint16_t*>(rows[r_idx]);
+                    *pa++ = row_ptr[k_idx];
+                    *pa++ = row_ptr[k_idx + 1];
+                } else {
+                    *pa++ = 0;
+                    *pa++ = 0;
+                }
+            }
+        }
+    }
   }
 
   // Pack weight:
@@ -151,12 +173,6 @@ class MicroGemm<cpu_utils::ISA::VSX, scalar_t> {
 
     for (int32_t o_idx = 0; o_idx < output_size; o_idx += 4) {
       for (int32_t i_idx = 0; i_idx < input_size; i_idx += 2) {
-        // We pack 4 cols from i_idx, and 4 cols from i_idx+1
-        // VSR layout for vB: u16[0,1]=col0, u16[2,3]=col1, u16[4,5]=col2, u16[6,7]=col3
-        // So for e in [0, 1, 2, 3]:
-        //   u16[2*e] = w[(o_idx+e)*input_size + i_idx]
-        //   u16[2*e+1] = w[(o_idx+e)*input_size + i_idx+1]
-        
         *pw++ = w[(o_idx+0)*input_size + i_idx];
         *pw++ = w[(o_idx+0)*input_size + i_idx+1];
         
