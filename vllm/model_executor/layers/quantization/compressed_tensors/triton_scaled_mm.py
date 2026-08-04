@@ -42,6 +42,7 @@ def scaled_mm_kernel(
     BLOCK_SIZE_SCALE_A: tl.constexpr,
     BLOCK_SIZE_SCALE_B: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    B_T: tl.constexpr = False,
 ):
     pid = tl.program_id(axis=0)
 
@@ -90,24 +91,36 @@ def scaled_mm_kernel(
     scale_b_ptrs = scale_b_ptr + offsets_scale_bn
 
     if USE_TD:
-        # A [M, K] and B [K, N] are both inner-dim contiguous: load directly, no trans.
         a_desc = tl.make_tensor_descriptor(
             a_ptr,
             shape=[M, K],
             strides=[stride_am, 1],
             block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
         )
-        b_desc = tl.make_tensor_descriptor(
-            b_ptr,
-            shape=[K, N],
-            strides=[stride_bk, 1],
-            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
-        )
+        if B_T:
+            # Checkpoint weights arrive as a transposed [N, K] view, so describe
+            # the underlying N-major buffer and transpose each tile.
+            b_desc = tl.make_tensor_descriptor(
+                b_ptr,
+                shape=[N, K],
+                strides=[stride_bn, 1],
+                block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+            )
+        else:
+            b_desc = tl.make_tensor_descriptor(
+                b_ptr,
+                shape=[K, N],
+                strides=[stride_bk, 1],
+                block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+            )
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         if USE_TD:
             a = a_desc.load([pid_m * BLOCK_SIZE_M, k * BLOCK_SIZE_K])
-            b = b_desc.load([k * BLOCK_SIZE_K, pid_n * BLOCK_SIZE_N])
+            if B_T:
+                b = tl.trans(b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]))
+            else:
+                b = b_desc.load([k * BLOCK_SIZE_K, pid_n * BLOCK_SIZE_N])
         else:
             masks_k = offsets_k < K
             masks_a = masks_am[:, None] & masks_k[None, :]
@@ -220,12 +233,16 @@ def triton_scaled_mm(
     accumulator_dtype = tl.float32 if input.is_floating_point() else tl.int32
 
     # TD operand loads; gated on inner-dim contiguity and 16-byte tile alignment.
+    # Checkpoint weights are a transposed [N, K] view, so accept either
+    # orientation and let the kernel transpose per tile.
+    b_t = weight.stride(1) != 1 and weight.stride(0) == 1
+    b_inner = K if b_t else N
     use_td = (
         use_tensor_descriptor(use_td)
         and input.stride(1) == 1
-        and weight.stride(1) == 1
+        and (weight.stride(1) == 1 or b_t)
         and (K * input.element_size()) % 16 == 0
-        and (N * weight.element_size()) % 16 == 0
+        and (b_inner * weight.element_size()) % 16 == 0
         and (block_size_m & (block_size_m - 1)) == 0
         and (block_size_n & (block_size_n - 1)) == 0
         and (block_size_k & (block_size_k - 1)) == 0
@@ -259,6 +276,7 @@ def triton_scaled_mm(
         BLOCK_SIZE_SCALE_A=block_size_sa,
         BLOCK_SIZE_SCALE_B=block_size_sb,
         USE_TD=use_td,
+        B_T=b_t,
     )
 
     return result.to(out_dtype)
