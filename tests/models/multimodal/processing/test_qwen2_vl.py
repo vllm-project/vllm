@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch.testing
+import torch
 from packaging.version import Version
-from transformers import Qwen2VLImageProcessor
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.model_executor.models.vision import make_input_norm, maybe_do_input_norm
