@@ -399,11 +399,18 @@ _TOOL_CALL_CHANNELS = [
     "<|channel|>analysis",
     "<|channel|>final",
 ]
+# Harmony renders a JSON-typed message as either a bare `` json`` marker or an
+# explicit `` <|constrain|>json`` marker (see ``openai_harmony`` render output).
+# Constrained decoding must accept both.
+_JSON_CONSTRAINTS = [" json", " <|constrain|>json"]
+# Harmony renders a tool call recipient-first with the channel attached directly
+# to the function name, e.g.
+# ``<|start|>assistant to=functions.foo<|channel|>commentary json<|message|>``.
+# The leading space follows ``<|start|>assistant``; the channel has no preceding
+# space.
 _FUNCTION_CALL_BEGINS = [
-    "to=functions.{name} {channel} json<|message|>",
-    "to=functions.{name} {channel} <|constrain|>json<|message|>",
-    "{channel} to=functions.{name} json<|message|>",
-    "{channel} to=functions.{name} <|constrain|>json<|message|>",
+    f" to=functions.{{name}}{{channel}}{constraint}<|message|>"
+    for constraint in _JSON_CONSTRAINTS
 ]
 _JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
 _ANY_CONTENT = AnyTextFormat()
@@ -490,20 +497,14 @@ def get_harmony_structural_tag(
         ]
 
     if tool_choice == "auto":
-        tags.append(
-            TagFormat(
-                begin=_FINAL_BEGIN.format(constrain=" <|constrain|>json"),
-                content=_ANY_CONTENT,
-                end=_END_TAG,
+        for constraint in (*_JSON_CONSTRAINTS, ""):
+            tags.append(
+                TagFormat(
+                    begin=_FINAL_BEGIN.format(constrain=constraint),
+                    content=_ANY_CONTENT,
+                    end=_END_TAG,
+                )
             )
-        )
-        tags.append(
-            TagFormat(
-                begin=_FINAL_BEGIN.format(constrain=""),
-                content=_ANY_CONTENT,
-                end=_END_TAG,
-            )
-        )
 
     return _assemble_tag(
         allow_analysis=True, allow_commentary=True, content=OrFormat(elements=tags)
@@ -560,14 +561,27 @@ def _adjust_output_format(
         return request
 
     if isinstance(final_content, JSONSchemaFormat):
-        begin = _FINAL_BEGIN.format(constrain=" <|constrain|>json")
+        content: Format = OrFormat(
+            elements=[
+                TagFormat(
+                    begin=_FINAL_BEGIN.format(constrain=constraint),
+                    content=final_content,
+                    end=_END_TAG,
+                )
+                for constraint in _JSON_CONSTRAINTS
+            ]
+        )
     else:
-        begin = _FINAL_BEGIN.format(constrain="")
+        content = TagFormat(
+            begin=_FINAL_BEGIN.format(constrain=""),
+            content=final_content,
+            end=_END_TAG,
+        )
 
     structural_tag = _assemble_tag(
         allow_analysis=True,
         allow_commentary=False,
-        content=TagFormat(begin=begin, content=final_content, end=_END_TAG),
+        content=content,
     )
 
     request.structured_outputs = replace(
