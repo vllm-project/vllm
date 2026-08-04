@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    FP8_SCALE_SENTINEL,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -133,6 +134,11 @@ class ModelOptKVCacheMethod(BaseKVCacheMethod):
 
 
 class ModelOptQuantConfigBase(QuantizationConfig):
+    # ModelOpt quant-algo string, set by each subclass. Fed to resolve() to
+    # build the QuantSpec for the generic ModelOptLinearMethod. The mixed
+    # config resolves the algo per-prefix instead and does not set this.
+    quant_method: str
+
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
@@ -151,15 +157,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     ):
         super().__init__()
         self.exclude_modules: list[str] = exclude_modules
-
-    def linear_algo(self) -> str:
-        """ModelOpt quant-algo string used to resolve linear layers.
-
-        Fed to ``resolve()`` to build the ``QuantSpec`` for the generic
-        ``ModelOptLinearMethod``. Overridden per homogeneous config; the mixed
-        config resolves the algo per-prefix and does not use this.
-        """
-        raise NotImplementedError
 
     def is_layer_excluded(self, prefix: str) -> bool:
         """
@@ -226,7 +223,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         # now, the layer is quantized, handle it here
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            return build_linear_method(self, self.linear_algo(), prefix)
+            return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
@@ -415,9 +412,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 f"{self.quant_method}. Supported: FP8 / "
                 "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
             )
-
-    def linear_algo(self) -> str:
-        return self.quant_method
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt"
@@ -738,9 +732,6 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
                 "Supported: NVFP4 / W4A16_NVFP4."
             )
-
-    def linear_algo(self) -> str:
-        return self.quant_method
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1095,6 +1086,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         exclude_modules: list[str],
     ) -> None:
         super().__init__(exclude_modules)
+        self.quant_method = "MXFP8"
         self.is_checkpoint_mxfp8_serialized = is_checkpoint_mxfp8_serialized
 
         if not is_checkpoint_mxfp8_serialized:
@@ -1109,9 +1101,6 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         )
 
         self.kv_cache_quant_algo = kv_cache_quant_algo
-
-    def linear_algo(self) -> str:
-        return "MXFP8"
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mxfp8"
@@ -1711,9 +1700,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.
-            # resolve() reads is_checkpoint_*_serialized/group_size off whichever
-            # sub-config it is handed (read-only — never write back, or a
-            # linear-only change leaks into the shared imported MoE method).
+            # resolve() reads group_size off whichever sub-config it is handed.
+            # Read-only — never write back, or a linear-only change leaks into
+            # the MoE method that shares the sub-config.
             subcfg = {
                 "FP8": self.fp8_config,
                 "NVFP4": self.nvfp4_config,
@@ -1759,22 +1748,22 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 # ===========================================================================
 # Generic QuantKey-driven linear method
 #
-# One ``ModelOptLinearMethod`` replaces the six per-format linear method
-# classes. It composes a per-QuantKey weight scheme + activation scheme (from
-# the ``QuantSpec`` pair produced by ``resolve``), runs a fixed create/process
-# lifecycle, selects the kernel from the pair, and applies. See
-# ``linear_design_concrete.md`` for the design and caveats C1-C13.
+# ``ModelOptLinearMethod`` serves every ModelOpt linear format. It composes a
+# per-QuantKey weight scheme + activation scheme (the ``QuantSpec`` pair that
+# ``resolve`` produces from the checkpoint's quant_algo), runs a fixed
+# create/process lifecycle, selects the kernel from the pair, and applies.
 #
-# Adding a format (developer guide):
+# Adding a format:
 #   * Composes as a (weight, activation) key pair -> add a QuantKeyScheme per
 #     new key to SCHEME_FOR, plus a resolve() row returning the QuantSpec. No
-#     new method class. (This is how all six existing formats are built.)
-#   * Needs format-wide residue but the same lifecycle -> also return a
+#     new method class; this is how every current format is built.
+#   * Needs format-wide state but the same lifecycle -> also return a
 #     FormatScheme subclass from that resolve() row (extra_weights / pre_process
 #     / post_process hooks).
-#   * Genuinely cannot be a key pair (different lifecycle) -> write a bespoke
-#     LinearMethodBase and register it in LINEAR_METHOD_BUILDERS by algo.
-#   In all cases add the algo to the owning config's linear_algo()/validation.
+#   * Needs a different lifecycle entirely -> write a bespoke LinearMethodBase
+#     and register it in LINEAR_METHOD_BUILDERS by algo.
+#   In all cases accept the algo in the owning config's quant_method validation,
+#   so get_quant_method can dispatch it.
 # ===========================================================================
 
 
@@ -1786,16 +1775,10 @@ class Role(Enum):
 WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
-# Weight-loader "unloaded shard" marker — FP8 family fills scales with it; the
-# NVFP4/MXFP8 families deliberately do not (C3, load-bearing asymmetry).
-SENTINEL = torch.finfo(torch.float32).min
-
-
 @dataclass(frozen=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
-    serialized: bool
     group_size: int | None = None
 
 
@@ -1830,20 +1813,11 @@ class QuantKeyScheme:
     ``role`` from the slot it fills the key into (wkey->WEIGHT, akey->ACT).
 
     Every scheme branches on ``role`` explicitly and ``reject``s any role it has
-    not validated — never falling through to the wrong role's registration
-    (silent-garbage trap, C13).
+    not validated — never falling through to the wrong role's registration,
+    which would allocate the wrong parameters and produce garbage silently.
     """
 
     key: QuantKey
-    requires_serialized: bool = True
-    # Whether the base advertises the kernel's input_quant_key on the layer
-    # (enables upstream activation-quant fusion). Behavior-preserving per-format:
-    # the old NVFP4 W4A4 method exposed it, the old FP8 method did NOT — and the
-    # FP8 kernel *does* return a static key, so exposing there flips activation
-    # quant into a fused path and diverges (C2). Read off the weight scheme;
-    # default True (NVFP4), False on the FP8 schemes to preserve today's
-    # behavior. Adopting FP8 fusion is a separate deliberate change.
-    exposes_input_quant_key: bool = True
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         raise NotImplementedError
@@ -1877,7 +1851,6 @@ class KNvfp4Static(QuantKeyScheme):
             raise ValueError(
                 "Unsupported model when in features size is not multiple of 16"
             )
-        weight_dtype = torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
         # Packed NVFP4 weight: 2 fp4 items per byte along the input dim.
         self.register_params(
             layer,
@@ -1903,7 +1876,7 @@ class KNvfp4Static(QuantKeyScheme):
             layer,
             "weight_scale",
             (shapes.out, shapes.in_ // ctx.group_size),
-            weight_dtype,
+            torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
             input_dim=1,
@@ -1968,46 +1941,39 @@ class KFp8StaticTensor(QuantKeyScheme):
     the activation slot (W8A8). One key in both QuantSpec slots."""
 
     key = kFp8StaticTensorSym
-    requires_serialized = False  # FP8 alone allows a non-serialized checkpoint
-    exposes_input_quant_key = False  # old FP8 method did not expose it (C2)
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is WEIGHT:
-            weight_dtype = (
-                torch.float8_e4m3fn if ctx.serialized else shapes.params_dtype
-            )
             self.register_params(
                 layer,
                 "weight",
                 (shapes.out, shapes.in_),
-                weight_dtype,
+                torch.float8_e4m3fn,
                 ModelWeightParameter,
                 wl,
                 input_dim=1,
                 output_dim=0,
             )
             layer.orig_dtype = shapes.params_dtype
-            if ctx.serialized:
-                self.register_params(
-                    layer,
-                    "weight_scale",
-                    (shapes.nparts,),
-                    torch.float32,
-                    PerTensorScaleParameter,
-                    wl,
-                    init=SENTINEL,
-                )
+            self.register_params(
+                layer,
+                "weight_scale",
+                (shapes.nparts,),
+                torch.float32,
+                PerTensorScaleParameter,
+                wl,
+                init=FP8_SCALE_SENTINEL,
+            )
         elif role is ACT:
-            if ctx.serialized:
-                self.register_params(
-                    layer,
-                    "input_scale",
-                    (shapes.nparts,),
-                    torch.float32,
-                    PerTensorScaleParameter,
-                    wl,
-                    init=SENTINEL,
-                )
+            self.register_params(
+                layer,
+                "input_scale",
+                (shapes.nparts,),
+                torch.float32,
+                PerTensorScaleParameter,
+                wl,
+                init=FP8_SCALE_SENTINEL,
+            )
         else:
             self.reject(role)
 
@@ -2019,7 +1985,8 @@ class KFp8StaticTensor(QuantKeyScheme):
                 max_w_scale, weight = requantize_with_max_scale(
                     layer.weight, layer.weight_scale, layer.logical_widths
                 )
-            # Transpose lives here (Scope A; belongs to the kernel — C1).
+            # Transposed here rather than in the kernel: ModelOpt maps each
+            # fp8 key to exactly one kernel, so the layout is key-determined.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         elif role is ACT:
@@ -2033,7 +2000,6 @@ class KFp8StaticChannel(QuantKeyScheme):
     there is no static per-channel *activation* today."""
 
     key = kFp8StaticTokenSym
-    exposes_input_quant_key = False  # old PcPt method did not expose it
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
@@ -2056,7 +2022,7 @@ class KFp8StaticChannel(QuantKeyScheme):
             ChannelQuantScaleParameter,
             wl,
             output_dim=0,
-            init=SENTINEL,
+            init=FP8_SCALE_SENTINEL,
         )
 
     def process(self, layer, role) -> None:
@@ -2065,17 +2031,16 @@ class KFp8StaticChannel(QuantKeyScheme):
         weight, weight_scale, _ = process_fp8_weight_channel_strategy(
             layer.weight, layer.weight_scale.data
         )
-        layer.weight = Parameter(weight.t(), requires_grad=False)  # C1 (Scope A)
+        layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
 
 class KFp8Block128(QuantKeyScheme):
     """128x128 block-static FP8 weight ('PbWo'). Weight-role only. ModelOpt
-    exports the scale 4-D [out_blk,1,in_blk,1] (C6); process squeezes to 2-D.
+    exports the scale 4-D [out_blk,1,in_blk,1]; process squeezes to 2-D.
     No transpose (block kernel keeps [out,in])."""
 
     key = kFp8Static128BlockSym
-    exposes_input_quant_key = False
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
@@ -2105,7 +2070,7 @@ class KFp8Block128(QuantKeyScheme):
             wl,
             input_dim=2,
             output_dim=0,
-            init=SENTINEL,
+            init=FP8_SCALE_SENTINEL,
         )
         layer.weight_block_size = [128, 128]
 
@@ -2125,10 +2090,9 @@ class KFp8Block128(QuantKeyScheme):
 
 class KMxfp8Static(QuantKeyScheme):
     """MXFP8 weight: fp8-e4m3 values + per-32-block e8m0 (uint8) scale.
-    Weight-role only. process is validate-only + idempotency guard (C13)."""
+    Weight-role only. process is validate-only plus an idempotency guard."""
 
     key = kMxfp8Static
-    exposes_input_quant_key = False
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
@@ -2174,8 +2138,6 @@ class KDynamicNoParam(QuantKeyScheme):
     the kernel. NOT the same as activation=None (weight-only) — init_fp8 needs a
     non-None activation key. Activation-role only. Serves the fp8 per-token, fp8
     per-block, and mxfp8 dynamic activation keys."""
-
-    requires_serialized = False
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not ACT:
@@ -2305,8 +2267,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del input_size, output_size
-        if self.wkey.requires_serialized and not self.ctx.serialized:
-            raise ValueError(f"{self.spec.weight} requires a serialized checkpoint")
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -2320,8 +2280,7 @@ class ModelOptLinearMethod(LinearMethodBase):
 
         rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
         self.kernel = select_linear_kernel(self.spec, layer, rt)
-        if self.wkey.exposes_input_quant_key:
-            expose_input_quant_key(layer, self.kernel)
+        expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
         self.fmt.pre_process(layer)
@@ -2337,13 +2296,15 @@ class ModelOptLinearMethod(LinearMethodBase):
 
 
 def resolve(algo: str, subcfg, prefix: str):
-    """Turn an existing (untouched) sub-config into (QuantSpec, CkptCtx,
-    format_scheme). Strictly read-only over ``subcfg`` — the one real hazard in
-    mixed mode is writing back to a config shared with the imported MoE method.
+    """Turn a sub-config into (QuantSpec, CkptCtx, format_scheme).
+
+    Strictly read-only over ``subcfg``: in mixed precision the same sub-config
+    is shared with the MoE method, so writing back would leak a linear-only
+    change into MoE.
     """
     if algo == "FP8":
         # Plain per-tensor static FP8 (W8A8): same key in both slots (bivalent).
-        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
+        ctx = CkptCtx()
         return (
             QuantSpec(weight=kFp8StaticTensorSym, activation=kFp8StaticTensorSym),
             ctx,
@@ -2351,7 +2312,7 @@ def resolve(algo: str, subcfg, prefix: str):
         )
     if algo == "FP8_PER_CHANNEL_PER_TOKEN":
         # PcPt: per-channel static weight, dynamic per-token activation (W8A8).
-        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
+        ctx = CkptCtx()
         return (
             QuantSpec(weight=kFp8StaticTokenSym, activation=kFp8DynamicTokenSym),
             ctx,
@@ -2359,9 +2320,9 @@ def resolve(algo: str, subcfg, prefix: str):
         )
     if algo == "FP8_PB_WO":
         # PbWo: 128x128 block-static weight, dynamic per-block activation (W8A8).
-        # C12: the generic base runs the block kernel's post-load, which the old
-        # method skipped via a misnamed guard — validate vs CT block-FP8.
-        ctx = CkptCtx(serialized=subcfg.is_checkpoint_fp8_serialized, group_size=None)
+        # The block kernel's post-load runs here; CompressedTensors block-FP8
+        # is the reference for this path.
+        ctx = CkptCtx()
         return (
             QuantSpec(weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym),
             ctx,
@@ -2369,14 +2330,11 @@ def resolve(algo: str, subcfg, prefix: str):
         )
     if algo == "MXFP8":
         # MXFP8: block(32) e4m3 weight + e8m0 scale, dynamic activation.
-        ctx = CkptCtx(serialized=subcfg.is_checkpoint_mxfp8_serialized, group_size=None)
+        ctx = CkptCtx()
         return QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic), ctx, None
 
     # NVFP4 family (W4A4 / W4A16).
-    ctx = CkptCtx(
-        serialized=subcfg.is_checkpoint_nvfp4_serialized,
-        group_size=subcfg.group_size,
-    )
+    ctx = CkptCtx(group_size=subcfg.group_size)
     if algo == "NVFP4":
         # W4A4: static fp4 weight + dynamic fp4 activation (has a static global
         # input scale). alpha = weight_gs * input_gs.
@@ -2400,7 +2358,7 @@ def resolve(algo: str, subcfg, prefix: str):
 #
 # Keep the ModelOpt* class-name prefix and decorate the class with
 # @register_weight_loader_v2_supported_method if it uses BasevLLMParameter
-# params. Also add the algo to the owning config's linear_algo()/validation.
+# params. Also add the algo to the owning config's quant_method validation.
 LINEAR_METHOD_BUILDERS: dict[str, Callable[..., LinearMethodBase]] = {}
 
 
