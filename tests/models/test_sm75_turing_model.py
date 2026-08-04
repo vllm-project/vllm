@@ -5,6 +5,7 @@
 import json
 
 import pytest
+import torch
 
 from vllm.config import (
     CompilationConfig,
@@ -116,6 +117,7 @@ def _build_vllm_config(model_path: str) -> VllmConfig:
 def test_turing_model_builds_and_uses_fp16_fused_moe(
     dist_init, tmp_path, default_vllm_config
 ):
+    from vllm.models.deepseek_v4.turing.attention import TuringMLAAttention
     from vllm.models.deepseek_v4.turing.model import DeepseekV4ForCausalLM
 
     model_path = _write_dsv4_config(tmp_path)
@@ -128,11 +130,26 @@ def test_turing_model_builds_and_uses_fp16_fused_moe(
     assert model.model.use_mega_moe is False
     assert len(model.model.layers) == 2
     layer = model.model.layers[0]
-    from vllm.models.deepseek_v4.turing.attention import TuringMLAAttention
 
     assert isinstance(layer.attn, TuringMLAAttention)
     # FP8 experts stay packed on device through the fused MoE runner.
     assert layer.ffn.experts.__class__.__name__ == "MoERunner"
+
+    # Quantized weights must stay packed on device (no dequant to fp16).
+    attn_weight_dtypes = {p.dtype for p in layer.attn.parameters() if p.dim() >= 2}
+    assert torch.float8_e4m3fn in attn_weight_dtypes
+    expert_dtypes = {p.dtype for p in layer.ffn.experts.parameters()}
+    assert torch.uint8 in expert_dtypes
+    shared_dtypes = {p.dtype for p in layer.ffn.shared_experts.parameters()}
+    assert torch.float8_e4m3fn in shared_dtypes
+
+
+def test_kv_bytes_per_token_fp16():
+    from vllm.models.deepseek_v4.turing.weights import kv_bytes_per_token_fp16
+
+    # DeepSeek-V4-Flash compressed MLA KV row: 512 NoPE + 64 RoPE, FP16.
+    assert kv_bytes_per_token_fp16(512, 64) == 1152
+    assert kv_bytes_per_token_fp16(448, 64) == 1024
 
 
 def test_turing_model_rejects_mega_moe_backend(dist_init, tmp_path):
@@ -141,7 +158,8 @@ def test_turing_model_rejects_mega_moe_backend(dist_init, tmp_path):
     model_path = _write_dsv4_config(tmp_path)
     vllm_config = _build_vllm_config(model_path)
     vllm_config.kernel_config.moe_backend = "deep_gemm_mega_moe"
-    with set_current_vllm_config(vllm_config), pytest.raises(
-        NotImplementedError, match="not supported on Turing"
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="not supported on Turing"),
     ):
         DeepseekV4ForCausalLM(vllm_config=vllm_config, prefix="")
