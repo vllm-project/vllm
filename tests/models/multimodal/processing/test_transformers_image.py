@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-import torch
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -79,36 +78,6 @@ def test_image_multiple_inputs():
 
     assert len(result["mm_placeholders"]["image"]) == 2
     assert len(result["mm_kwargs"]["image"]) == 2
-
-
-def test_image_embeds_inputs():
-    model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    model_config = ModelConfig(
-        model=model_id,
-        model_impl="transformers",
-        enable_mm_embeds=True,
-    )
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-
-    hidden_size = model_config.get_inputs_embeds_size()
-    num_image_tokens = 10
-    image_embeds = torch.randn(1, num_image_tokens, hidden_size)
-    image_token = mm_processor.info.get_hf_processor().image_token
-    prompt = (
-        "<|im_start|>user "
-        f"{image_token}\n"
-        "What is the content of this image?<|im_end|><|im_start|>assistant\n"
-    )
-
-    result = mm_processor(
-        prompt=prompt,
-        mm_items=mm_processor.info.parse_mm_data({"image": image_embeds}),
-        hf_processor_mm_kwargs={},
-    )
-
-    assert len(result["mm_placeholders"]["image"]) == 1
-    assert result["mm_placeholders"]["image"][0].length == num_image_tokens
-    assert len(result["mm_kwargs"]["image"]) == 1
 
 
 def test_image_cached_apply_gemma3():

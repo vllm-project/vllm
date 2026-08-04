@@ -36,7 +36,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
 )
 from vllm.multimodal.parse import (
-    EmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -111,13 +110,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             if processor.image_token in vocab:
                 return vocab[processor.image_token]
         raise ValueError("Cannot find image_token_id on processor or model config")
-
-    def _get_image_target_token_id(self) -> int:
-        processor = self.get_hf_processor()
-        boi_token = getattr(processor, "boi_token", None)
-        if boi_token is not None:
-            return self.get_tokenizer().get_vocab()[boi_token]
-        return self._get_image_token_id()
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -258,21 +250,22 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         def get_replacement(item_idx: int, modality: str, token_id: int):
             out_item = out_mm_kwargs[modality][item_idx]
-            key = f"{modality}_placeholder_ids"
-            if key in out_item:
-                repl_ids = out_item[key].data.tolist()
-                return PromptUpdateDetails.select_token_id(repl_ids, token_id)
-            items = mm_items.get_items(modality, EmbeddingItems)
-            return [token_id] * items.get_feature_size(item_idx)
+            repl_ids = out_item[f"{modality}_placeholder_ids"].data.tolist()
+            return PromptUpdateDetails.select_token_id(repl_ids, token_id)
 
-        embed_ids = self._placeholder_token_ids()
-        targets = dict(embed_ids)
-        if "image" in targets:
-            targets["image"] = self.info._get_image_target_token_id()
+        processor = self.info.get_hf_processor()
+        embed_ids: dict[str, int] = {}
+        targets: dict[str, str] = {}
+        if self.info._is_audio_model():
+            embed_ids["audio"] = self.info._get_audio_token_id()
+            targets["audio"] = processor.audio_token
+        if self.info._is_image_model():
+            embed_ids["image"] = self.info._get_image_token_id()
+            targets["image"] = processor.image_token
         return [
             PromptReplacement(
                 modality=modality,
-                target=[targets[modality]],
+                target=targets[modality],
                 replacement=partial(
                     get_replacement, modality=modality, token_id=embed_id
                 ),
@@ -426,14 +419,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             processed_data["num_audio_tokens"] = torch.tensor(
                 [ids.count(audio_token_id) for ids in repl_ids["audio"]]
             )
-
-    def _placeholder_token_ids(self) -> dict[str, int]:
-        tokens: dict[str, int] = {}
-        if self.info._is_audio_model():
-            tokens["audio"] = self.info._get_audio_token_id()
-        if self.info._is_image_model():
-            tokens["image"] = self.info._get_image_token_id()
-        return tokens
 
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
