@@ -119,30 +119,6 @@ repos:
       ]
       files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
     - id: pip-compile
-      alias: pip-compile-xpu
-      name: pip-compile-xpu
-      args: [
-        requirements/test/xpu.in,
-        -c, requirements/xpu.txt,
-        -o, requirements/test/xpu.txt,
-        --index-strategy, unsafe-best-match,
-        # TODO(xpu-wheel-testing): points at a temporary internal test index
-        # that hosts the `triton` xpu compat shim. Replace with the
-        # permanent/public index once triton-xpu ships one, then this flag
-        # can be dropped.
-        --extra-index-url, http://10.239.182.107:8081/simple/,
-        --python-platform, x86_64-manylinux_2_39,
-        --python-version, "3.12",
-      ]
-      # NOTE: --torch-backend=xpu is intentionally not used here. uv's
-      # --torch-backend resolves the `triton` package exclusively against
-      # its built-in PyTorch-ecosystem index (which only ships `triton-xpu`,
-      # not a `triton` distribution), so it can never satisfy the `triton`
-      # pin in requirements/xpu.txt. The `--extra-index-url` for the xpu
-      # torch build is already declared inline in requirements/xpu.txt, so
-      # torch/torchvision/triton still resolve correctly without this flag.
-      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
-    - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
       args: [
@@ -167,6 +143,26 @@ repos:
       files: ^requirements/docs\.(in|txt)$
 - repo: local
   hooks:
+  - id: pip-compile-xpu
+    name: pip-compile-xpu
+    # NOTE: implemented as a local shell hook (instead of the
+    # astral-sh/uv-pre-commit pip-compile hook) because the internal test
+    # index (10.239.182.107) must bypass the corporate HTTP(S) proxy via
+    # NO_PROXY/no_proxy, which can't be set from hook `args` alone and must
+    # not depend on the invoking shell's environment. See
+    # tools/pre_commit/pip-compile-xpu.sh for details.
+    #
+    # NOTE: --torch-backend=xpu is intentionally not used here. uv's
+    # --torch-backend resolves the `triton` package exclusively against
+    # its built-in PyTorch-ecosystem index (which only ships `triton-xpu`,
+    # not a `triton` distribution), so it can never satisfy the `triton`
+    # pin in requirements/xpu.txt. The `--extra-index-url` for the xpu
+    # torch build is already declared inline in requirements/xpu.txt, so
+    # torch/torchvision/triton still resolve correctly without this flag.
+    language: system
+    entry: tools/pre_commit/pip-compile-xpu.sh
+    pass_filenames: false
+    files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
   - id: format-torch-nightly-test
     name: reformat test/nightly-torch.txt to be in sync with test/cuda.in
     language: python
