@@ -83,7 +83,6 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
-    num_redundant_experts: int | None = None
 
 
 def _make_control_bundle(node_ip: str) -> dict[str, float]:
