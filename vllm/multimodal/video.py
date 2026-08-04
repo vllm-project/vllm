@@ -807,7 +807,7 @@ class PyNvVideoCodecVideoBackendMixin:
                         "PyNvVideoCodec returned frames with unexpected shape "
                         f"{tuple(device_frames.shape)}"
                     )
-                device_frames = device_frames.permute(0, 3, 1, 2).contiguous()
+                device_frames = device_frames.contiguous()
                 host_frames = torch.empty(
                     device_frames.shape,
                     dtype=device_frames.dtype,
