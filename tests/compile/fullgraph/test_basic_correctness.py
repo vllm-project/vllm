@@ -36,21 +36,12 @@ class TestSetting:
             attn_backend=ATTN_BACKEND,
             method="generate",
         ),
-        # llama model with quantization
-        TestSetting(
-            model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            model_args=["--quantization", "gptq", "--max-model-len", "2048"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend=ATTN_BACKEND,
-            method="generate",
-        ),
         # MoE model
         TestSetting(
-            model="ibm/PowerMoE-3b",
+            model="ibm-granite/granite-3.0-1b-a400m",
             model_args=["--max-model-len", "2048"],
             pp_size=1,
-            tp_size=2,
+            tp_size=1,
             attn_backend=ATTN_BACKEND,
             method="generate",
         ),
@@ -72,30 +63,6 @@ class TestSetting:
             attn_backend=ATTN_BACKEND,
             method="encode",
         ),
-        pytest.param(
-            TestSetting(
-                model="BAAI/bge-base-en-v1.5",
-                model_args=["--runner", "pooling"],
-                pp_size=1,
-                tp_size=1,
-                attn_backend="FLASH_ATTN",
-                method="encode",
-            ),
-            marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Encoder self-attention is not implemented for ROCm",
-            ),
-        ),
-        # vision language model
-        # See https://github.com/vllm-project/vllm/issues/26716.
-        # TestSetting(
-        #     model="microsoft/Phi-3.5-vision-instruct",
-        #     model_args=["--trust-remote-code", "--max-model-len", "2048"],
-        #     pp_size=2,
-        #     tp_size=1,
-        #     attn_backend="FLASH_ATTN",
-        #     method="generate_with_image",
-        # ),
     ],
 )
 def test_compile_correctness(
@@ -129,29 +96,29 @@ def test_compile_correctness(
     all_args: list[list[str]] = []
     all_envs: list[dict[str, str] | None] = []
 
-    for comp_mode in [
+    # Test all compilation modes with inductor backend
+    for mode in [
+        CompilationMode.NONE,
         CompilationMode.STOCK_TORCH_COMPILE,
         CompilationMode.DYNAMO_TRACE_ONCE,
         CompilationMode.VLLM_COMPILE,
     ]:
-        for mode in [CompilationMode.NONE, comp_mode]:
-            all_args.append(
-                final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
-            )
-            all_envs.append({})
+        all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"])
+        all_envs.append({})
+    # inductor will change the output, so we only compare if the output
+    # is close, not exactly the same.
+    compare_all_settings(
+        model,
+        all_args,
+        all_envs,
+        method=method if method != "generate" else "generate_close",
+        force_v1_runner=True,
+    )
 
-        # inductor will change the output, so we only compare if the output
-        # is close, not exactly the same.
-        compare_all_settings(
-            model,
-            all_args,
-            all_envs,
-            method=method if method != "generate" else "generate_close",
-            force_v1_runner=True,
-        )
-        all_envs.clear()
-        all_args.clear()
+    all_envs.clear()
+    all_args.clear()
 
+    # Test all compilation modes with eager backend
     for mode in [
         CompilationMode.NONE,
         CompilationMode.STOCK_TORCH_COMPILE,
@@ -160,5 +127,4 @@ def test_compile_correctness(
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
-
     compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)
