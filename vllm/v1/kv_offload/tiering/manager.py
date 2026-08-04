@@ -364,13 +364,13 @@ class TieringOffloadingManager(OffloadingManager):
         assert req_context.req_id in self._req_state
         start_time = time.monotonic()
         primary_hit = self.primary_tier.lookup(key, req_context)
-        elapsed = time.monotonic() - start_time
+        lookup_duration = time.monotonic() - start_time
         self._metrics.on_lookup(
             req_context,
             key,
             self._metrics.primary_tier_label,
             primary_hit,
-            elapsed,
+            lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
             return LookupResult.HIT
@@ -386,15 +386,16 @@ class TieringOffloadingManager(OffloadingManager):
             labelvalues = self._metrics.tier_label(i)
             start_time = time.monotonic()
             result = tier.lookup(key, req_context)
+            lookup_duration = time.monotonic() - start_time
             if result is LookupResult.HIT:
-                promoted = self._initiate_promotion(i, key, req_context)
                 self._metrics.on_lookup(
                     req_context,
                     key,
                     labelvalues,
                     result,
-                    time.monotonic() - start_time,
+                    lookup_duration,
                 )
+                promoted = self._initiate_promotion(i, key, req_context)
                 return LookupResult.MISS if not promoted else LookupResult.RETRY
             if result is LookupResult.RETRY:
                 any_retry = True
@@ -403,10 +404,7 @@ class TieringOffloadingManager(OffloadingManager):
                 key,
                 labelvalues,
                 result,
-                time.monotonic() - start_time,
-                async_delay_start_time=(
-                    start_time if result is LookupResult.RETRY else None
-                ),
+                lookup_duration,
             )
 
         if any_retry:

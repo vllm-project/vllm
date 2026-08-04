@@ -83,9 +83,7 @@ class TieringMetricsTracker:
         key: OffloadKey,
         tier_label: TierLabel,
         result: LookupResult,
-        elapsed: float,
-        *,
-        async_delay_start_time: float | None = None,
+        lookup_duration: float,
     ) -> None:
         state = self._request_states.get(req_context.req_id)
         assert state is not None
@@ -101,12 +99,12 @@ class TieringMetricsTracker:
                 self._observe_resolved_lookup(
                     tier_label,
                     result,
-                    elapsed,
+                    lookup_duration,
                     start_time,
                 )
-        elif async_delay_start_time is not None and state.observed_lookups is not None:
+        elif result is LookupResult.RETRY and state.observed_lookups is not None:
             observed = state.observed_lookups.setdefault(tier_label, {})
-            observed.setdefault(key, async_delay_start_time)
+            observed.setdefault(key, time.monotonic())
 
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
@@ -240,7 +238,7 @@ class TieringMetricsTracker:
         self,
         tier_label: TierLabel,
         result: LookupResult,
-        elapsed: float,
+        lookup_duration: float,
         async_start_time: float | None,
     ) -> None:
         self._stats.increase_counter(
@@ -254,7 +252,7 @@ class TieringMetricsTracker:
             )
         self._stats.observe_histogram(
             TieringOffloadingMetrics.LOOKUP_SYNC_DELAY,
-            elapsed,
+            lookup_duration,
             tier_label,
         )
         if async_start_time is not None:
