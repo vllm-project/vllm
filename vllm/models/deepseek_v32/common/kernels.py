@@ -10,14 +10,6 @@ from vllm.triton_utils import tl, triton
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
 
 
-@torch.compiler.assume_constant_result
-def _is_arch_support_pdl() -> bool:
-    return (
-        current_platform.has_device_capability(100)
-        and current_platform.is_arch_support_pdl()
-    )
-
-
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     key = (shape, dtype, device)
     t = _DUMMY_CACHE.get(key)
@@ -484,7 +476,7 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
-    use_pdl = _is_arch_support_pdl()
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -835,7 +827,7 @@ def fused_q(
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-    use_pdl = _is_arch_support_pdl()
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
