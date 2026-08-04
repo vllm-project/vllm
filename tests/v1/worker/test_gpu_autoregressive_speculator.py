@@ -334,7 +334,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     assert run_fullgraph.call_count == expected_graph_replays
 
 
-def test_refresh_meta_for_draft_decodes_updates_fa3_scheduler_metadata(
+def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     monkeypatch,
 ):
     builder = object.__new__(flash_attn_module.FlashAttentionMetadataBuilder)
@@ -389,13 +389,13 @@ def test_refresh_meta_for_draft_decodes_updates_fa3_scheduler_metadata(
         rswa_window_tensor=None,
     )
 
-    builder.refresh_meta_for_draft_decodes(metadata)
+    builder.update_draft_decode_metadata(metadata)
 
     assert torch.equal(metadata.scheduler_metadata, expected)
     assert torch.equal(builder.scheduler_metadata[:3], expected)
 
 
-def test_refresh_meta_for_draft_decodes_skips_non_fa3_builders(monkeypatch):
+def test_update_draft_decode_metadata_skips_non_fa3_builders(monkeypatch):
     builder = object.__new__(flash_attn_module.FlashAttentionMetadataBuilder)
     builder.aot_schedule = False
     builder.use_full_cuda_graph = True
@@ -440,7 +440,7 @@ def test_refresh_meta_for_draft_decodes_skips_non_fa3_builders(monkeypatch):
         rswa_window_tensor=None,
     )
 
-    builder.refresh_meta_for_draft_decodes(metadata)
+    builder.update_draft_decode_metadata(metadata)
 
     assert not called
     assert torch.equal(
