@@ -30,7 +30,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.models.audio_utils import batch_audio_features
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,

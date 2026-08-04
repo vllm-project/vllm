@@ -40,7 +40,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.models.audio_utils import batch_audio_features
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import (
     _GEMMA4_EXPERT_PARENT_MAPPER,
     Gemma4ForCausalLM,
