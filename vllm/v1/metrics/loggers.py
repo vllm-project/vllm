@@ -106,6 +106,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.vllm_config = vllm_config
         device_type = vllm_config.device_config.device_type
         self.kv_cache_device = "GPU" if device_type == "cuda" else device_type.upper()
+        self.detect_nans_in_logits = (
+            vllm_config.observability_config.enable_detect_nans_in_logits
+        )
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
@@ -306,7 +309,7 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Prefix cache hit rate: %.1f%%")
             log_args.append(self.prefix_caching_metrics.hit_rate * 100)
 
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             log_parts.append("Corrupted: %d reqs")
             log_args.append(self.num_corrupted_reqs)
         if not self.connector_prefix_caching_metrics.empty:
@@ -475,6 +478,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
+        self.detect_nans_in_logits = (
+            vllm_config.observability_config.enable_detect_nans_in_logits
+        )
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
@@ -582,7 +588,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
                 documentation=(
@@ -1115,7 +1121,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         if iteration_stats is None:
             return
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )
