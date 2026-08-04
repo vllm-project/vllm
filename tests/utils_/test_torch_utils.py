@@ -4,9 +4,13 @@ import pytest
 import torch
 
 from vllm.utils.torch_utils import (
+    OMP_NUM_THREADS_SET_BY_VLLM,
+    available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,
+    set_torch_threads_for_runtime,
+    startup_omp_num_threads,
 )
 
 
@@ -114,3 +118,49 @@ def test_current_stream_multithread():
     )
 
     _test_stream_thread(main_dedicated_stream)
+
+
+@pytest.fixture
+def restore_torch_threads(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    original = torch.get_num_threads()
+    yield
+    torch.set_num_threads(original)
+
+
+def test_startup_omp_num_threads_divides_between_local_workers():
+    """Workers share the node's usable CPUs rather than each taking them all."""
+    available = available_cpu_count()
+    if available < 4:
+        pytest.skip("needs at least 4 usable CPUs")
+    assert startup_omp_num_threads(1) == available
+    assert startup_omp_num_threads(2) == available // 2
+    # Never zero, however many workers share the node.
+    assert startup_omp_num_threads(available * 4) == 1
+
+
+def test_set_torch_threads_for_runtime(restore_torch_threads):
+    torch.set_num_threads(max(2, available_cpu_count()))
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 1
+
+
+def test_runtime_threads_respect_user_omp_num_threads(
+    restore_torch_threads, monkeypatch: pytest.MonkeyPatch
+):
+    """An externally-set OMP_NUM_THREADS is the user's choice; leave it alone."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    torch.set_num_threads(3)
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 3
+
+
+def test_runtime_threads_override_vllm_set_omp_num_threads(
+    restore_torch_threads, monkeypatch: pytest.MonkeyPatch
+):
+    """The value vLLM picked for worker startup is dropped once serving starts."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    monkeypatch.setenv(OMP_NUM_THREADS_SET_BY_VLLM, "1")
+    torch.set_num_threads(3)
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 1
