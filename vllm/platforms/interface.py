@@ -508,6 +508,18 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_foreign_device_processes(cls, device_id: int = 0) -> dict[int, int] | None:
+        """Compute processes on a device that do not belong to this instance.
+
+        Maps PID to the bytes that process holds on the device, excluding this
+        process's session so vLLM's own engine and workers do not count.
+
+        Returns None where the platform cannot enumerate device processes,
+        which callers must treat as "unknown", not as "none present".
+        """
+        return None
+
+    @classmethod
     def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
         """Return a mapping of device index to PCI bus ID string.
 

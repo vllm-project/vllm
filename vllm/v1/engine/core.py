@@ -322,6 +322,7 @@ class EngineCore:
                 vllm_config,
                 available_gpu_memory,
                 [times.warmup_memory for times in compilation_times],
+                [times.transient_peak_headroom for times in compilation_times],
             )
             if final_memory is not None:
                 kv_cache_configs, scheduler_kv_cache_config = configure_kv_cache(

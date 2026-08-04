@@ -411,6 +411,25 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Resolve the extensible-KV driver gate before memory profiling:
+            # the gate lowers gpu_memory_utilization back to the standard
+            # default, so sizing must not run against the extensible defaults
+            # on a fallback path. Each worker resolves against its own driver;
+            # the engine applies the same gate to its own config copy via the
+            # extensible_kv_cache_unsupported_reason RPC.
+            cache_config = self.cache_config
+            if (
+                cache_config.enable_extensible_kv_cache
+                and not cache_config.user_specified_enable_extensible_kv_cache
+                and (reason := self.extensible_kv_cache_unsupported_reason())
+            ):
+                logger.info_once(
+                    "Not using the extensible KV cache: %s. KV cache sizing "
+                    "will use profiling estimates instead of measured usage.",
+                    reason,
+                )
+                cache_config.disable_extensible_kv_cache()
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()
@@ -549,6 +568,7 @@ class Worker(WorkerBase):
         )
 
         self.total_consumed = profile_result.total_consumed
+        self.transient_peak_headroom = profile_result.transient_peak_headroom
         self.peak_activation_memory = (
             profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
@@ -571,6 +591,17 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+        if self.cache_config.enable_extensible_kv_cache:
+            # The utilization budget is a fraction of *total* memory, so as it
+            # approaches 1 it can exceed what is actually free. Warmup
+            # physically commits a prefix of this size before CUDA graph
+            # capture, so bound it by measured free memory less the activation
+            # peak warmup re-creates. The post-warmup resize, which measures
+            # rather than estimates, sets the final size regardless.
+            self.available_kv_cache_memory_bytes = min(
+                self.available_kv_cache_memory_bytes,
+                free_gpu_memory - profile_result.transient_peak_headroom,
+            )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
@@ -900,7 +931,15 @@ class Worker(WorkerBase):
                 - free_memory
                 - self.model_runner.kv_cache_committed_bytes
             )
-            post_warmup_available = int(self.requested_memory) - non_kv_used_memory
+            # Honor the utilization budget without claiming more than is
+            # free: the budget is a fraction of *total* memory, so it can
+            # exceed what was free at the initial snapshot (this worker's
+            # context and comm buffers were already resident) -- harmless at
+            # the default utilization, an over-commitment as it approaches 1.
+            post_warmup_available = min(
+                int(self.requested_memory) - non_kv_used_memory,
+                free_memory + self.model_runner.kv_cache_committed_bytes,
+            )
             warmup_memory_bytes = max(
                 cuda_graph_memory_bytes,
                 int(self.available_kv_cache_memory_bytes) - post_warmup_available,
@@ -946,6 +985,7 @@ class Worker(WorkerBase):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
             warmup_memory=warmup_memory_bytes,
+            transient_peak_headroom=getattr(self, "transient_peak_headroom", 0),
         )
 
     def reset_mm_cache(self) -> None:

@@ -1522,6 +1522,9 @@ class VllmConfig:
                 "Remove VLLM_USE_V2_MODEL_RUNNER=0."
             )
 
+        if self.cache_config.enable_extensible_kv_cache:
+            self._validate_extensible_kv_cache()
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -2365,6 +2368,43 @@ class VllmConfig:
             unsupported.append("KV sharing fast prefill")
 
         return unsupported
+
+    def _validate_extensible_kv_cache(self) -> None:
+        """Check for configurations the extensible KV cache cannot support.
+
+        Config-level only, so they fail before workers are spawned; driver
+        support is resolved later, worker-side (each worker probes its own
+        driver before memory profiling) and by `use_extensible_kv_cache`.
+        """
+        from vllm.platforms import current_platform
+
+        reason = None
+        if not current_platform.is_cuda_alike():
+            reason = f"{current_platform.device_type} is not a CUDA or ROCm platform"
+        elif self.kv_transfer_config is not None:
+            if not self.use_v2_model_runner:
+                reason = (
+                    "KV connectors require the V2 model runner, which defers "
+                    "connector registration until the final KV cache size is "
+                    "committed"
+                )
+            elif self.model_config is not None and self.model_config.enable_sleep_mode:
+                # Waking remaps physical pages, invalidating the connector's
+                # memory registration.
+                reason = "sleep mode is not supported alongside KV connectors"
+        if reason is None:
+            return
+
+        if self.cache_config.user_specified_enable_extensible_kv_cache:
+            raise ValueError(
+                f"enable_extensible_kv_cache=True cannot be honored: {reason}."
+            )
+        logger.info_once(
+            "Not using the extensible KV cache: %s. KV cache sizing will use "
+            "profiling estimates instead of measured usage.",
+            reason,
+        )
+        self.cache_config.disable_extensible_kv_cache()
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

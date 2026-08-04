@@ -721,6 +721,32 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
+    def get_foreign_device_processes(cls, device_id: int = 0) -> dict[int, int] | None:
+        try:
+            physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        except Exception:
+            return None
+
+        own_session = os.getsid(0)
+        foreign: dict[int, int] = {}
+        for proc in procs:
+            try:
+                if os.getsid(proc.pid) == own_session:
+                    # Our own engine/worker processes.
+                    continue
+            except (ProcessLookupError, PermissionError):
+                # Exited between the query and now, or not ours to inspect;
+                # either way treat it as foreign.
+                pass
+            # usedGpuMemory is None when the driver cannot report per-process
+            # usage (e.g. MIG, some virtualized setups).
+            foreign[proc.pid] = proc.usedGpuMemory or 0
+        return foreign
+
+    @classmethod
+    @with_nvml_context
     def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
         try:
             return int(device_id)

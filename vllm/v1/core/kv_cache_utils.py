@@ -15,6 +15,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -86,9 +87,35 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
 
 logger = init_logger(__name__)
 
-# Headroom left over the measured post-warmup memory when re-deriving the
-# extensible KV cache size.
-_WARMUP_MEMORY_BUFFER_BYTES = 150 * (1 << 20)
+# Headroom over the measured post-warmup memory, absorbing what the
+# measurement cannot see: fragmentation, activation peaks at shapes warmup did
+# not exercise, workspaces that grow at runtime. Those scale with the workload
+# rather than the device, hence a fraction of the profiled activation peak.
+# TODO: the fraction is unfitted; it wants a sweep against a long-running
+# workload, which is the only thing that exercises what it covers.
+_WARMUP_MEMORY_BUFFER_FLOOR_BYTES = 150 * (1 << 20)
+_WARMUP_MEMORY_BUFFER_PEAK_FRACTION = 0.20
+# Some runtime allocations happen only after warmup (first spec-decode
+# rejection batch, multimodal frame staging, backend workspaces grown on
+# demand), so the margin also carries a small share of the KV budget itself
+# -- still far below the ~8% the old fixed-utilization default left idle.
+_WARMUP_MEMORY_BUFFER_MIN_BUDGET_FRACTION = 0.02
+# The floor is disproportionate for a small budget -- a shared device, or a low
+# gpu_memory_utilization -- where it can rival the KV cache it is carved from.
+# Cap it as a share of that budget so the margin stays proportionate.
+_WARMUP_MEMORY_BUFFER_MAX_BUDGET_FRACTION = 0.10
+
+
+def _warmup_memory_buffer(transient_peak_headroom: int, available_memory: int) -> int:
+    buffer = max(
+        _WARMUP_MEMORY_BUFFER_FLOOR_BYTES,
+        int(_WARMUP_MEMORY_BUFFER_PEAK_FRACTION * transient_peak_headroom),
+        int(_WARMUP_MEMORY_BUFFER_MIN_BUDGET_FRACTION * available_memory),
+    )
+    return min(
+        buffer, int(_WARMUP_MEMORY_BUFFER_MAX_BUDGET_FRACTION * available_memory)
+    )
+
 
 # The hash seed for the first block of any prefix block sequence.
 #
@@ -2170,34 +2197,45 @@ def configure_kv_cache(
     return kv_cache_configs, scheduler_kv_cache_config
 
 
+def _extensible_kv_cache_unsupported_reason(
+    collective_rpc: Callable[..., list[Any]],
+) -> str | None:
+    """Why the workers cannot back a growable KV cache, if they can't.
+
+    e.g. a non-CUDA/ROCm platform, WSL2, or ROCm before rocm-systems#2451.
+    """
+    if not current_platform.is_cuda_alike():
+        return f"{current_platform.device_type} is not a CUDA or ROCm platform"
+    reasons: list[str | None] = collective_rpc("extensible_kv_cache_unsupported_reason")
+    return next((reason for reason in reasons if reason), None)
+
+
 def use_extensible_kv_cache(
     vllm_config: VllmConfig,
     collective_rpc: Callable[..., list[Any]],
 ) -> bool:
     """Whether to allocate the KV cache through the extensible (growable) path.
 
-    Raises if the configuration is unsupported; returns False (with a warning)
-    if the workers' drivers lack virtual memory management support.
+    Config-level incompatibilities are rejected earlier, by
+    `VllmConfig._validate_extensible_kv_cache`; this resolves whether the
+    drivers support it. An explicit request is mandatory, so it raises rather
+    than falling back.
     """
-    if not vllm_config.cache_config.enable_extensible_kv_cache:
+    cache_config = vllm_config.cache_config
+    if not cache_config.enable_extensible_kv_cache:
         return False
-    if vllm_config.kv_transfer_config is not None and not (
-        vllm_config.use_v2_model_runner
-    ):
-        raise ValueError(
-            "enable_extensible_kv_cache=True with KV connectors requires the "
-            "V2 model runner (which defers connector registration until the "
-            "final KV cache size is committed)."
-        )
-    # e.g. WSL2 and non-GPU platforms have no VMM support; fall back
-    # gracefully rather than failing to start.
-    reasons: list[str | None] = collective_rpc("extensible_kv_cache_unsupported_reason")
-    if reason := next((r for r in reasons if r), None):
-        logger.warning(
-            "Disabling extensible KV cache; falling back to standard KV cache "
-            "allocation: %s",
+    if reason := _extensible_kv_cache_unsupported_reason(collective_rpc):
+        if cache_config.user_specified_enable_extensible_kv_cache:
+            raise ValueError(
+                f"enable_extensible_kv_cache=True cannot be honored: {reason}. "
+                "Omit the option to fall back to standard KV cache allocation."
+            )
+        logger.info_once(
+            "Not using the extensible KV cache: %s. KV cache sizing will use "
+            "profiling estimates instead of measured usage.",
             reason,
         )
+        cache_config.disable_extensible_kv_cache()
         return False
     return True
 
@@ -2206,6 +2244,7 @@ def post_warmup_available_memory(
     vllm_config: VllmConfig,
     available_memory: list[int],
     warmup_memory: list[int],
+    transient_peak_headroom: list[int],
 ) -> list[int] | None:
     """Per-worker KV cache memory re-derived from what warmup actually used.
 
@@ -2217,8 +2256,10 @@ def post_warmup_available_memory(
     if vllm_config.cache_config.kv_cache_memory_bytes is not None or not warmup_memory:
         return None
     return [
-        max(available - used - _WARMUP_MEMORY_BUFFER_BYTES, 0)
-        for available, used in zip(available_memory, warmup_memory, strict=True)
+        max(available - used - _warmup_memory_buffer(peak, available), 0)
+        for available, used, peak in zip(
+            available_memory, warmup_memory, transient_peak_headroom, strict=True
+        )
     ]
 
 

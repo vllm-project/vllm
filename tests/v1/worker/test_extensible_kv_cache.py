@@ -184,7 +184,7 @@ def test_extensible_release_and_recommit():
     buffers.commit(NUM_BLOCKS)
     view = kv_caches["layer.0"]
     view.fill_(3.0)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     buffers.release_physical()
     assert buffers.num_blocks_committed == 0
@@ -192,7 +192,7 @@ def test_extensible_release_and_recommit():
     assert buffers.num_blocks_committed == NUM_BLOCKS
     assert view.data_ptr() == kv_caches["layer.0"].data_ptr()
     assert view.eq(0).all()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     buffers.free()
 
 

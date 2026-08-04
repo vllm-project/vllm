@@ -45,6 +45,11 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
+    # Sizing from measured post-warmup memory needs no unused fraction as a
+    # margin; the explicit post-warmup buffer is its margin instead.
+    DEFAULT_GPU_MEMORY_UTILIZATION_EXTENSIBLE: ClassVar[float] = 1.0
+    DEFAULT_EXTENSIBLE_KV_CACHE: ClassVar[bool] = True
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
@@ -72,14 +77,23 @@ class CacheConfig:
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
-    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
+    gpu_memory_utilization: float = Field(  # type: ignore[assignment]
+        default=None, gt=0, le=1
+    )
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.92. This is a
-    per-instance limit, and only applies to the current vLLM instance. It does
-    not matter if you have another vLLM instance running on the same GPU. For
-    example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
+    utilization. If unspecified, will use the default value of
+    `DEFAULT_GPU_MEMORY_UTILIZATION`. This is a per-instance limit, and only
+    applies to the current vLLM instance. It does not matter if you have
+    another vLLM instance running on the same GPU. For example, if you have two
+    vLLM instances running on the same GPU, you can set the GPU memory
+    utilization to 0.5 for each instance.
+
+    Accepts None (meaning "use default"). After construction, always float."""
+    user_specified_gpu_memory_utilization: bool = field(default=False, init=False)
+    """Whether gpu_memory_utilization was explicitly provided. Derived
+    automatically. Sharing a GPU with another process requires setting it
+    explicitly, since the default assumes exclusive use of the device."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -190,7 +204,7 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
-    enable_extensible_kv_cache: bool = False
+    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
     """Use driver virtual memory to reserve the KV cache address range up
     front, run warmup and CUDA graph capture with only a small block prefix
     physically committed, and commit the final size afterwards.
@@ -198,9 +212,16 @@ class CacheConfig:
     This makes automatic KV sizing account for the memory that warmup and
     CUDA graph capture actually consume (including worst-case activation
     working sets, e.g. with speculative decoding), and avoids warmup-time
-    OOMs. Requires driver VMM support (CUDA or ROCm; falls back to standard
-    allocation with a warning where unavailable, e.g. WSL2).
-    """
+    OOMs. Requires driver VMM support (CUDA or ROCm), and is used by default
+    wherever that support is present.
+
+    Requesting this explicitly makes it mandatory: startup fails where it
+    cannot be honored, rather than quietly falling back.
+
+    Accepts None (meaning "use default"). After construction, always bool."""
+    user_specified_enable_extensible_kv_cache: bool = field(default=False, init=False)
+    """Whether enable_extensible_kv_cache was explicitly provided. Derived
+    automatically."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
@@ -239,7 +260,9 @@ class CacheConfig:
             "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
-            "_block_size_resolved",
+            "user_specified_gpu_memory_utilization",
+            "user_specified_enable_extensible_kv_cache",
+            "_defaults_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -256,15 +279,31 @@ class CacheConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
+    def disable_extensible_kv_cache(self) -> None:
+        """Turn the extensible KV cache off, undoing defaults that assumed it.
+
+        Its raised utilization default only makes sense when sizing comes from
+        measured post-warmup memory; the path being fallen back to sizes from
+        profiling estimates and needs its unused fraction back.
+        """
+        self.enable_extensible_kv_cache = False
+        if not self.user_specified_gpu_memory_utilization:
+            self.gpu_memory_utilization = self.DEFAULT_GPU_MEMORY_UTILIZATION
+
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
 
-    _block_size_resolved: bool = field(default=False, init=False)
-    """Guard against pydantic re-running _apply_block_size_default."""
+    _defaults_resolved: bool = field(default=False, init=False)
+    """Guard against pydantic re-running `_apply_defaults`."""
 
-    @field_validator("block_size", mode="wrap")
+    @field_validator(
+        "block_size",
+        "gpu_memory_utilization",
+        "enable_extensible_kv_cache",
+        mode="wrap",
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         if value is None:
@@ -272,18 +311,30 @@ class CacheConfig:
         return handler(value)
 
     @model_validator(mode="after")
-    def _apply_block_size_default(self) -> "CacheConfig":
+    def _apply_defaults(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
         # another pydantic model (e.g. VllmConfig). Guard against that.
-        if self._block_size_resolved:
+        if self._defaults_resolved:
             return self
-        self._block_size_resolved = True
+        self._defaults_resolved = True
         if self.block_size is None:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
+        if self.enable_extensible_kv_cache is None:
+            self.enable_extensible_kv_cache = self.DEFAULT_EXTENSIBLE_KV_CACHE
+        else:
+            self.user_specified_enable_extensible_kv_cache = True
+        if self.gpu_memory_utilization is None:
+            self.gpu_memory_utilization = (
+                self.DEFAULT_GPU_MEMORY_UTILIZATION_EXTENSIBLE
+                if self.enable_extensible_kv_cache
+                else self.DEFAULT_GPU_MEMORY_UTILIZATION
+            )
+        else:
+            self.user_specified_gpu_memory_utilization = True
         return self
 
     @field_validator("cache_dtype", mode="after")

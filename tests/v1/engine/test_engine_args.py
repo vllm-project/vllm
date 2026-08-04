@@ -52,13 +52,15 @@ def test_prefix_caching_from_cli():
 def test_extensible_kv_cache_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
+    # Unset stays None so CacheConfig can tell "default" from "explicitly
+    # requested"; only an explicit request is mandatory.
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.enable_extensible_kv_cache
+    assert engine_args.enable_extensible_kv_cache is None
 
     args = parser.parse_args(["--enable-extensible-kv-cache"])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.enable_extensible_kv_cache
+    assert engine_args.enable_extensible_kv_cache is True
 
 
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")

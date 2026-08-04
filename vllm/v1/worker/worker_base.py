@@ -38,6 +38,9 @@ class CompilationTimes(NamedTuple):
     # profiled baseline; used by the extensible KV cache flow to compute the
     # final KV cache size from actual usage.
     warmup_memory: int = 0
+    # Profiled transient activation peak (bytes) above steady-state usage; the
+    # extensible KV cache flow scales its safety margin off this.
+    transient_peak_headroom: int = 0
 
 
 class WorkerBase:
