@@ -130,7 +130,9 @@ def test_scaled_mm(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Triton scaled_mm runs on CUDA-alike or XPU.",
 )
-@pytest.mark.parametrize("M,N,K", [(1, 4096, 4096), (64, 4096, 4096), (256, 2048, 4096)])
+@pytest.mark.parametrize(
+    "M,N,K", [(1, 4096, 4096), (64, 4096, 4096), (256, 2048, 4096)]
+)
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
 @pytest.mark.parametrize("use_scalar_scale_a", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
