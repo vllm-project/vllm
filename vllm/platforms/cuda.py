@@ -221,6 +221,10 @@ class CudaPlatformBase(Platform):
     def import_kernels(cls) -> None:
         """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
         try:
+            import vllm._C  # noqa: F401
+        except ImportError as e:
+            logger.warning_once("Failed to import from vllm._C: %r", e)
+        try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
             logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)

@@ -1515,6 +1515,8 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
+            if self._reject_when_busy(req):
+                return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1549,6 +1551,25 @@ class EngineCoreProc(EngineCore):
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
         return True
+
+    def _reject_when_busy(self, request: Request) -> bool:
+        if not os.environ.get("VLLM_REJECT_WHEN_BUSY"):
+            return False
+        running, waiting = self.scheduler.get_request_counts()
+        if waiting > 0 or running >= self.scheduler.max_num_running_reqs:
+            logger.info(
+                "Rejecting request %s (server at capacity: "
+                "running=%d, waiting=%d, max=%d)",
+                request.request_id,
+                running,
+                waiting,
+                self.scheduler.max_num_running_reqs,
+            )
+            self._send_abort_outputs_to_client(
+                [request.request_id], request.client_index
+            )
+            return True
+        return False    
 
     def _reject_utility_in_shutdown(
         self, client_idx: int, call_id: int, method_name: str
