@@ -41,6 +41,7 @@ logger = init_logger(__name__)
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
+SESSION_ID_HEADER = "X-Session-ID"
 
 
 def build_per_request_timing_metrics(
@@ -214,6 +215,29 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             return int(rank_str)
         except ValueError:
             return None
+
+    @staticmethod
+    def _get_session_id_from_headers(raw_request: Request | None) -> str | None:
+        if raw_request is None:
+            return None
+        if value := raw_request.headers.get(SESSION_ID_HEADER):
+            return value
+        return None
+
+    @staticmethod
+    def _get_session_id(
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> str | None:
+        if request.session_id:
+            return request.session_id
+        if value := GenerateBaseServing._get_session_id_from_headers(raw_request):
+            return value
+        if request.vllm_xargs:
+            session_id = request.vllm_xargs.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
+        return None
 
     async def _with_kv_transfer_rejection_cleanup(
         self,
