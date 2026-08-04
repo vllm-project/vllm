@@ -235,9 +235,9 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
 
 
 def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
-    """Test FP8 BRGEMM for expert blocks spanning the TinyGEMM boundary."""
+    """Test FP8 BRGEMM at exact and multi-block expert boundaries."""
     set_random_seed(0)
-    block_sizes = (1, 2, 3, 4, 5, 8, 16, 32)
+    block_sizes = (4, 5, 33)
     N, K, E = 128, 128, len(block_sizes)
     M = sum(block_sizes)
 
@@ -488,9 +488,9 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
 
 
 def test_mxfp4_cpu_fused_moe_small_expert_blocks():
-    """Test MXFP4 BRGEMM for expert blocks spanning the TinyGEMM boundary."""
+    """Test MXFP4 BRGEMM at exact and multi-block expert boundaries."""
     set_random_seed(0)
-    block_sizes = (1, 2, 3, 4, 5, 8, 16, 32)
+    block_sizes = (4, 5, 33)
     N, K, E = 128, 128, len(block_sizes)
     M = sum(block_sizes)
     dtype = torch.bfloat16

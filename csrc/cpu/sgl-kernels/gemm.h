@@ -49,9 +49,21 @@ constexpr PackedGemmBackend select_moe_packed_gemm_backend() {
 }
 
 constexpr bool moe_uses_brgemm(PackedGemmBackend backend, int64_t M, int64_t N) {
-  return backend == PackedGemmBackend::Brgemm &&
+  return M > 0 && backend == PackedGemmBackend::Brgemm &&
       (M > MOE_TINY_GEMM_MAX_M || N != block_size_n());
 }
+
+static_assert(
+    select_moe_packed_gemm_backend<at::BFloat16>() ==
+    (brgemm_supported() ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm));
+static_assert(select_moe_packed_gemm_backend<at::Half>() == PackedGemmBackend::TinyGemm);
+static_assert(select_moe_packed_gemm_backend<at::Float8_e4m3fn>() == PackedGemmBackend::TinyGemm);
+static_assert(!moe_uses_brgemm(PackedGemmBackend::Brgemm, 0, block_size_n()));
+static_assert(!moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M, block_size_n()));
+static_assert(
+    moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M + 1, block_size_n()));
+static_assert(
+    moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M, block_size_n() - 1));
 
 // define threshold using brgemm (intel AMX)
 template <typename T>

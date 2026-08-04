@@ -570,56 +570,6 @@ struct brgemm {
 template <typename scalar_t>
 struct brgemm2 {};
 
-template <bool has_bias, int Rows>
-inline void store_brgemm_rows(
-    at::BFloat16* __restrict__ C,
-    const float* __restrict__ Ctmp,
-    const float* __restrict__ bias,
-    int N,
-    int ldc) {
-  for (int m = 0; m < Rows; ++m) {
-    if constexpr (has_bias) {
-      copy_add_stub(C + m * ldc, Ctmp + m * block_size_n(), bias, N);
-    } else {
-      copy_stub(C + m * ldc, Ctmp + m * block_size_n(), N);
-    }
-  }
-}
-
-template <bool has_bias>
-inline void store_brgemm_output(
-    at::BFloat16* __restrict__ C,
-    const float* __restrict__ Ctmp,
-    const float* __restrict__ bias,
-    int M,
-    int N,
-    int ldc) {
-  switch (M) {
-    case 0:
-      return;
-    case 1:
-      store_brgemm_rows<has_bias, 1>(C, Ctmp, bias, N, ldc);
-      return;
-    case 2:
-      store_brgemm_rows<has_bias, 2>(C, Ctmp, bias, N, ldc);
-      return;
-    case 3:
-      store_brgemm_rows<has_bias, 3>(C, Ctmp, bias, N, ldc);
-      return;
-    case 4:
-      store_brgemm_rows<has_bias, 4>(C, Ctmp, bias, N, ldc);
-      return;
-    default:
-      for (int m = 0; m < M; ++m) {
-        if constexpr (has_bias) {
-          copy_add_stub(C + m * ldc, Ctmp + m * block_size_n(), bias, N);
-        } else {
-          copy_stub(C + m * ldc, Ctmp + m * block_size_n(), N);
-        }
-      }
-  }
-}
-
 template <typename scalar_t, typename packed_t, typename param_t, bool has_bias, int Rows>
 inline void tinygemm_rows(
     const scalar_t* __restrict__ A,
@@ -663,7 +613,7 @@ inline bool brgemm_small_m(
   if constexpr (!std::is_same_v<scalar_t, at::BFloat16>) {
     return false;
   } else {
-    if (N != block_size_n() || M < 1 || M > MOE_TINY_GEMM_MAX_M) {
+    if (M < 1 || moe_uses_brgemm(PackedGemmBackend::Brgemm, M, N)) {
       return false;
     }
 
@@ -683,30 +633,6 @@ inline bool brgemm_small_m(
       case 4:
         tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
             A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
-        return true;
-      case 5:
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
-            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 1>(
-            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
-        return true;
-      case 6:
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
-            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 2>(
-            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
-        return true;
-      case 7:
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
-            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 3>(
-            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
-        return true;
-      case 8:
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
-            A, B, C, bias, scale, 0, K, lda, ldb, ldc, block_size_K);
-        tinygemm_rows<scalar_t, packed_t, param_t, has_bias, 4>(
-            A, B, C, bias, scale, 4, K, lda, ldb, ldc, block_size_K);
         return true;
       default:
         return false;
@@ -753,7 +679,14 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, float, has_bias> {
 
     at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
-    store_brgemm_output<has_bias>(C, Ctmp, bias, M, N, ldc);
+    // copy from Ctmp to C
+    for (int m = 0; m < M; ++m) {
+      if constexpr (has_bias) {
+        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+      } else {
+        copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
+      }
+    }
   }
 };
 
@@ -830,7 +763,14 @@ struct brgemm<at::BFloat16, uint8_t, uint8_t, has_bias> {
 
     at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
-    store_brgemm_output<has_bias>(C, Ctmp, bias, M, N, ldc);
+    // copy from Ctmp to C
+    for (int m = 0; m < M; ++m) {
+      if constexpr (has_bias) {
+        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+      } else {
+        copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
+      }
+    }
   }
 };
 
