@@ -343,6 +343,16 @@ pub async fn connect_bootstrapped(
     let mut output_socket = PullSocket::new();
     let output_address = output_socket.bind(output_address).await?.to_string();
 
+    // Report resolved bind addresses (ports may be OS-assigned from a
+    // tcp://host:0 request) to the supervising process before waiting for
+    // engine registrations, which depend on the engines learning them.
+    if std::env::var_os("VLLM_RS_REPORT_BOUND_ADDRESSES").is_some() {
+        println!(
+            "VLLM_RS_BOUND_ADDRESSES {{\"inputs\":[{input_address:?}],\"outputs\":[{output_address:?}]}}"
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
     let engines = wait_for_input_registrations(
         &mut input_socket,
         (0..engine_count)

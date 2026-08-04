@@ -387,7 +387,12 @@ class RustFrontendProcessManager:
         cmd.extend(["--args-json", args_json])
 
         logger.info("Launching Rust frontend: %s", " ".join(cmd))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        # Pipe stdout so the bound-address report line can be captured; the
+        # rest of the output is relayed through (see gather_actual_addresses).
+        env = dict(os.environ, VLLM_RS_REPORT_BOUND_ADDRESSES="1")
+        self._proc = subprocess.Popen(
+            cmd, pass_fds=(fd,), env=env, stdout=subprocess.PIPE
+        )
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
@@ -395,6 +400,34 @@ class RustFrontendProcessManager:
         ]
 
         self._finalizer = weakref.finalize(self, _shutdown_subprocesses, self.processes)
+
+    def gather_actual_addresses(self) -> tuple[list[str], list[str]]:
+        """Return the input/output addresses actually bound by the Rust
+        front-end (reported on its stdout after binding, so that deferred
+        ``tcp://host:0`` addresses resolve to kernel-assigned ports)."""
+        import sys
+        import threading
+
+        assert self._proc.stdout is not None
+        prefix = b"VLLM_RS_BOUND_ADDRESSES "
+        for line in self._proc.stdout:
+            if line.startswith(prefix):
+                payload = json.loads(line[len(prefix) :])
+
+                def relay(stdout=self._proc.stdout):
+                    for out_line in stdout:
+                        sys.stdout.buffer.write(out_line)
+                        sys.stdout.buffer.flush()
+
+                threading.Thread(
+                    target=relay, daemon=True, name="rust-frontend-stdout"
+                ).start()
+                return payload["inputs"], payload["outputs"]
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+        raise RuntimeError(
+            "Rust frontend exited before reporting its bound addresses"
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         if self._finalizer.detach() is not None:
