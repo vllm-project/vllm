@@ -6,6 +6,9 @@ from unittest.mock import patch
 import numpy as np
 import pybase64 as base64
 import pytest
+from io import BytesIO
+
+import av
 
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media.audio import load_audio
@@ -70,7 +73,6 @@ def test_audio_media_io_encode_base64(dummy_audio):
 
 def test_load_audio_max_duration_respected(dummy_audio_bytes):
     """Valid audio within the duration limit should load successfully."""
-    from io import BytesIO
 
     y, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=3600)
     assert isinstance(y, np.ndarray)
@@ -79,7 +81,6 @@ def test_load_audio_max_duration_respected(dummy_audio_bytes):
 
 def test_load_audio_max_duration_rejected(dummy_audio_bytes):
     """Audio exceeding the duration limit must be rejected during decode."""
-    from io import BytesIO
 
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
@@ -87,9 +88,7 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
 
 @pytest.fixture(params=[False, True], ids=["with-metadata", "cueless"])
 def dummy_webm_bytes(request):
-    from io import BytesIO
 
-    import av
 
     rate = 48000
     total = rate  # 1 second
@@ -118,7 +117,6 @@ def dummy_webm_bytes(request):
 
 def test_load_audio_pyav_fallback_within_duration(dummy_webm_bytes):
     """A WebM under the duration limit should load via the PyAV fallback."""
-    from io import BytesIO
 
     y, sr = load_audio(BytesIO(dummy_webm_bytes), sr=None, max_duration_s=3600)
     assert isinstance(y, np.ndarray)
@@ -127,7 +125,6 @@ def test_load_audio_pyav_fallback_within_duration(dummy_webm_bytes):
 
 def test_load_audio_pyav_fallback_max_duration_rejected(dummy_webm_bytes):
     """The duration guard's message must survive the PyAV fallback."""
-    from io import BytesIO
 
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio(BytesIO(dummy_webm_bytes), sr=None, max_duration_s=0.25)
@@ -135,7 +132,6 @@ def test_load_audio_pyav_fallback_max_duration_rejected(dummy_webm_bytes):
 
 def test_load_audio_invalid_bytes_rejected():
     """Undecodable bytes keep the generic invalid-file error."""
-    from io import BytesIO
 
     with pytest.raises(ValueError, match="Invalid or unsupported audio file"):
         load_audio(BytesIO(b"\x00\x01not-audio"), sr=None, max_duration_s=3600)
