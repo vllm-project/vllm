@@ -70,12 +70,85 @@ class TileGemmVSX {
         }
     }
 
-    for (int32_t k_idx = 0; k_idx < k; k_idx += 2) {
-        // Load A directly from contiguous memory since PackA = false.
+    int32_t k_idx = 0;
+    const __vector unsigned short vzero = {0};
+
+    // Main unrolled loop processing 8 columns (4 k-iterations) at a time
+    for (; k_idx <= k - 8; k_idx += 8) {
+        __vector unsigned int vA_0[tiles_m];
+        __vector unsigned int vA_2[tiles_m];
+        __vector unsigned int vA_4[tiles_m];
+        __vector unsigned int vA_6[tiles_m];
+        
+        if constexpr (M >= 1) {
+            __vector unsigned short v0;
+            if constexpr (M >= 1) v0 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[0 * lda + k_idx]); else v0 = vzero;
+            __vector unsigned short v1;
+            if constexpr (M >= 2) v1 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[1 * lda + k_idx]); else v1 = vzero;
+            __vector unsigned short v2;
+            if constexpr (M >= 3) v2 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[2 * lda + k_idx]); else v2 = vzero;
+            __vector unsigned short v3;
+            if constexpr (M >= 4) v3 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[3 * lda + k_idx]); else v3 = vzero;
+            
+            __vector unsigned short vh01 = vec_mergeh(v0, v1);
+            __vector unsigned short vh23 = vec_mergeh(v2, v3);
+            vA_0[0] = vec_mergeh((__vector unsigned int)vh01, (__vector unsigned int)vh23);
+            vA_2[0] = vec_mergel((__vector unsigned int)vh01, (__vector unsigned int)vh23);
+            
+            __vector unsigned short vl01 = vec_mergel(v0, v1);
+            __vector unsigned short vl23 = vec_mergel(v2, v3);
+            vA_4[0] = vec_mergeh((__vector unsigned int)vl01, (__vector unsigned int)vl23);
+            vA_6[0] = vec_mergel((__vector unsigned int)vl01, (__vector unsigned int)vl23);
+        }
+        
+        if constexpr (M >= 5) {
+            __vector unsigned short v4;
+            if constexpr (M >= 5) v4 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[4 * lda + k_idx]); else v4 = vzero;
+            __vector unsigned short v5;
+            if constexpr (M >= 6) v5 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[5 * lda + k_idx]); else v5 = vzero;
+            __vector unsigned short v6;
+            if constexpr (M >= 7) v6 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[6 * lda + k_idx]); else v6 = vzero;
+            __vector unsigned short v7;
+            if constexpr (M >= 8) v7 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[7 * lda + k_idx]); else v7 = vzero;
+            
+            __vector unsigned short vh45 = vec_mergeh(v4, v5);
+            __vector unsigned short vh67 = vec_mergeh(v6, v7);
+            vA_0[1] = vec_mergeh((__vector unsigned int)vh45, (__vector unsigned int)vh67);
+            vA_2[1] = vec_mergel((__vector unsigned int)vh45, (__vector unsigned int)vh67);
+            
+            __vector unsigned short vl45 = vec_mergel(v4, v5);
+            __vector unsigned short vl67 = vec_mergel(v6, v7);
+            vA_4[1] = vec_mergeh((__vector unsigned int)vl45, (__vector unsigned int)vl67);
+            vA_6[1] = vec_mergel((__vector unsigned int)vl45, (__vector unsigned int)vl67);
+        }
+        
+        // Load B and GER for k_idx + 0
+        __vector unsigned char vB_vec_0[tiles_n];
+        for (int j = 0; j < tiles_n; j++) vB_vec_0[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 0) * 4]);
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
+        
+        // Load B and GER for k_idx + 2
+        __vector unsigned char vB_vec_2[tiles_n];
+        for (int j = 0; j < tiles_n; j++) vB_vec_2[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 2) * 4]);
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
+        
+        // Load B and GER for k_idx + 4
+        __vector unsigned char vB_vec_4[tiles_n];
+        for (int j = 0; j < tiles_n; j++) vB_vec_4[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 4) * 4]);
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
+        
+        // Load B and GER for k_idx + 6
+        __vector unsigned char vB_vec_6[tiles_n];
+        for (int j = 0; j < tiles_n; j++) vB_vec_6[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 6) * 4]);
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
+    }
+    
+    // Remainder loop processing 2 columns at a time
+    for (; k_idx < k; k_idx += 2) {
         __vector unsigned int vA_uint[tiles_m];
         if constexpr (M == 1) {
             uint32_t val0;
-            std::memcpy(&val0, &a_ptr[0 + k_idx], 4);
+            std::memcpy(&val0, &a_ptr[0 * lda + k_idx], 4);
             vA_uint[0] = (__vector unsigned int){val0, 0, 0, 0};
         } else if constexpr (M == 2) {
             uint32_t val0, val1;
@@ -139,8 +212,7 @@ class TileGemmVSX {
             vA_uint[1] = (__vector unsigned int){val4, val5, val6, val7};
         }
 
-        // Load packed B. B is packed such that we can load exactly 4 cols x 2 elements into one VecBF16.
-        // We packed B as [N/4, K/2, 8] elements = 128 bit vectors.
+        // Load packed B
         __vector unsigned char vB_vec[tiles_n];
         for (int j = 0; j < tiles_n; j++) {
             vB_vec[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + k_idx * 4]);
