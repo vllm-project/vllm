@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
+    apply_moe_activation,
     apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1000,6 +1001,23 @@ def test_fused_marlin_moe(
             per_act_token_quant=True,
         )
 
+    def instance_activation(
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_config=ApplyMoEActivationConfig(),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -1025,6 +1043,7 @@ def test_fused_marlin_moe(
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
         is_k_full=is_k_full,
+        activation_func=instance_activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)

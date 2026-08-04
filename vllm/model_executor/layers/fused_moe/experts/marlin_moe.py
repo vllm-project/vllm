@@ -74,7 +74,7 @@ def _fused_marlin_moe(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     activation: MoEActivation = MoEActivation.SILU,
-    activation_func: Callable[..., None] = apply_moe_activation,
+    activation_func: Callable[..., None] | None = None,
     topk_ids: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
@@ -160,17 +160,29 @@ def _fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     )
-    config = (
-        ApplyMoEActivationConfig() if activation_config is None else activation_config
-    )
-    activation_func(
-        activation,
-        intermediate_cache2,
-        intermediate_cache1.view(-1, w13_num_shards * N),
-        activation_config=config,
-        topk_ids=topk_ids,
-        expert_map=expert_map,
-    )
+    activation_input = intermediate_cache1.view(-1, w13_num_shards * N)
+    if activation_func is None:
+        config = (
+            ApplyMoEActivationConfig()
+            if activation_config is None
+            else activation_config
+        )
+        apply_moe_activation(
+            activation,
+            intermediate_cache2,
+            activation_input,
+            activation_config=config,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+    else:
+        activation_func(
+            activation,
+            intermediate_cache2,
+            activation_input,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
 
     if output is None:
         output = intermediate_cache3
@@ -233,7 +245,7 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: MoEActivation = MoEActivation.SILU,
-    activation_func: Callable[..., None] = apply_moe_activation,
+    activation_func: Callable[..., None] | None = None,
     moe_sum: Callable[..., torch.Tensor | None] | None = None,
     expert_map: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
@@ -415,7 +427,7 @@ def batched_fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    activation_func: Callable[..., None] = apply_moe_activation,
+    activation_func: Callable[..., None] | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     """
@@ -798,7 +810,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             act_output: torch.Tensor,
             act_input: torch.Tensor,
             *,
-            activation_config: ApplyMoEActivationConfig,
             topk_ids: torch.Tensor | None = None,
             expert_map: torch.Tensor | None = None,
         ) -> None:
@@ -989,8 +1000,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             act: MoEActivation,
             act_output: torch.Tensor,
             act_input: torch.Tensor,
-            *,
-            activation_config: ApplyMoEActivationConfig,
             **kwargs,
         ) -> None:
             if act != MoEActivation.SITU:
@@ -1003,8 +1012,8 @@ class BatchedMarlinExperts(MarlinExpertsBase):
                 return
 
             num_experts, max_num_tokens = hidden_states.shape[:2]
-            beta = activation_config.activation_situ_beta
-            linear_beta = activation_config.activation_situ_linear_beta
+            beta = self.activation_config.activation_situ_beta
+            linear_beta = self.activation_config.activation_situ_linear_beta
             torch.ops._C.masked_situ_and_mul(
                 act_output.view(num_experts, max_num_tokens, -1),
                 act_input.view(num_experts, max_num_tokens, -1),
