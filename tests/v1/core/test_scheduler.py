@@ -6584,7 +6584,9 @@ def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
         -1,
     ]
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
- def test_nan_fault_tolerance_aborts_request():
+
+
+def test_nan_fault_tolerance_aborts_request():
     """NaN fault tolerance aborts requests with NaN logits."""
     scheduler = create_scheduler()
     scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
@@ -6651,6 +6653,7 @@ def test_nan_fault_tolerance_chunked_prefill():
     """NaN abort fires during chunked prefill intermediate chunks."""
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
+        max_num_seqs=15,
         enable_chunked_prefill=True,
     )
     scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
@@ -6682,8 +6685,7 @@ def test_nan_fault_tolerance_implies_detect():
     """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
     from vllm.engine.arg_utils import EngineArgs
 
-    args = EngineArgs(model="facebook/opt-125m",
-                      enable_nan_fault_tolerance=True)
+    args = EngineArgs(model="facebook/opt-125m", enable_nan_fault_tolerance=True)
     assert args.enable_detect_nans_in_logits is True
     assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
 
