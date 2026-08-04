@@ -87,6 +87,18 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _configure_no_context_parallelism(impl: MLAAttentionImpl) -> None:
+    """Set the canonical backend state for Kimi-K3's no-CP contract."""
+    impl.dcp_world_size = 1
+    impl.dcp_rank = 0
+    impl.pcp_world_size = 1
+    impl.pcp_rank = 0
+    impl.total_cp_world_size = 1
+    impl.total_cp_rank = 0
+    impl.need_to_return_lse_for_decode = False
+
+
 # Below this many tokens, overlap the g_proj GEMM on the aux stream with the
 # attention front-end (the GEMM is small and launch-bound, so the overlap
 # hides it); at or above it, run the gate on the main stream.
@@ -309,6 +321,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             parallel_config.decode_context_parallel_size <= 1
             and parallel_config.prefill_context_parallel_size <= 1
         ), "Kimi-K3 MultiHeadLatentAttention does not support context parallelism."
+        # This layer constructs the backend directly instead of going through
+        # MLAAttention.forward_impl, which normally resolves the backend's lazy
+        # DCP sentinel. Canonicalize the explicitly unsupported CP state before
+        # the backend can forward it to FlashAttention.
+        _configure_no_context_parallelism(self.impl)
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
