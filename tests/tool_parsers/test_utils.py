@@ -290,6 +290,36 @@ class TestExtractTypesFromSchema:
         assert result == {"integer", "null", "string"}
 
 
+def _value_of(expr: str):
+    """Parse a single Python expression and run get_parameter_value on it."""
+    return get_parameter_value(ast.parse(expr, mode="eval").body)
+
+
+def _first_call(text: str) -> ast.Call:
+    """Parse ``[foo(...)]`` and return the single ast.Call node."""
+    statement = ast.parse(text).body[0]
+    assert isinstance(statement, ast.Expr)
+    assert isinstance(statement.value, ast.List)
+    call = statement.value.elts[0]
+    assert isinstance(call, ast.Call)
+    return call
+
+
+def _bare_call(text: str) -> ast.Call:
+    """Parse ``foo(...)`` (no list wrapper) and return the ast.Call node."""
+    statement = ast.parse(text).body[0]
+    assert isinstance(statement, ast.Expr)
+    assert isinstance(statement.value, ast.Call)
+    return statement.value
+
+
+def _kwarg_constant(call: ast.Call, index: int = 0):
+    """Return the constant value of the call's ``index``-th keyword arg."""
+    value = call.keywords[index].value
+    assert isinstance(value, ast.Constant)
+    return value.value
+
+
 class TestMakeValidPythonStringLiterals:
     def test_bracket_inside_string_is_literal(self):
         # A bracket inside a string argument must not be counted as a
@@ -328,9 +358,7 @@ class TestMakeValidPythonStringLiterals:
         assert result is not None
         completed, added = result
         assert added == ""
-        module = ast.parse(completed)
-        call = module.body[0].value.elts[0]
-        assert call.keywords[0].value.value == "line1\nline2"
+        assert _kwarg_constant(_first_call(completed)) == "line1\nline2"
 
     def test_value_ending_in_backslash_recovers(self):
         # A string value ending in a literal backslash: the closing quote follows
@@ -346,8 +374,7 @@ class TestMakeValidPythonStringLiterals:
         # only the final unescaped quote does. Value round-trips to it's fine.
         text = "[say(msg='it\\'s fine')]"
         assert make_valid_python(text) == (text, "")
-        module = ast.parse(text)
-        assert module.body[0].value.elts[0].keywords[0].value.value == "it's fine"
+        assert _kwarg_constant(_first_call(text)) == "it's fine"
 
 
 class TestEscapeCtrlCharsInStrings:
@@ -368,8 +395,7 @@ class TestEscapeCtrlCharsInStrings:
         # The escaped text parses and evaluates back to the original value.
         raw = "cat > f.py << EOF\nimport csv\nEOF\techo done"
         escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
-        call = ast.parse(escaped).body[0].value
-        assert call.keywords[0].value.value == raw
+        assert _kwarg_constant(_bare_call(escaped)) == raw
 
     def test_nul_byte_inside_string_escaped(self):
         # ast.parse raises ValueError (not SyntaxError) on NUL anywhere in
@@ -377,22 +403,11 @@ class TestEscapeCtrlCharsInStrings:
         raw = "printf a\x00b"
         escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
         assert "\x00" not in escaped
-        call = ast.parse(escaped).body[0].value
-        assert call.keywords[0].value.value == raw
+        assert _kwarg_constant(_bare_call(escaped)) == raw
 
     def test_nul_byte_outside_strings_untouched(self):
         text = "f(a=1,\x00b=2)"
         assert escape_ctrl_chars_in_strings(text) == text
-
-
-def _value_of(expr: str):
-    """Parse a single Python expression and run get_parameter_value on it."""
-    return get_parameter_value(ast.parse(expr, mode="eval").body)
-
-
-def _first_call(text: str) -> ast.Call:
-    """Parse ``[foo(...)]`` and return the single ast.Call node."""
-    return ast.parse(text).body[0].value.elts[0]
 
 
 class TestGetParameterValueNegativeNumbers:
@@ -579,8 +594,7 @@ class TestNormalizeLeadingZeroInts:
 
     def test_end_to_end(self):
         normalized = normalize_leading_zero_ints("[set_date(month=07, day=05)]")
-        call = ast.parse(normalized).body[0].value.elts[0]
-        tool = handle_single_tool(call)
+        tool = handle_single_tool(_first_call(normalized))
         assert json.loads(tool.function.arguments) == {"month": 7, "day": 5}
 
 
@@ -596,17 +610,14 @@ class TestRenameReservedKwargs:
 
     def test_round_trip_restores_original_name(self):
         renamed, _ = rename_reserved_kwargs("[memory_get(path='M.md', from=1)]")
-        call = ast.parse(renamed).body[0].value.elts[0]
-        tool = handle_single_tool(call)
+        tool = handle_single_tool(_first_call(renamed))
         restored = restore_reserved_kwarg_names(json.loads(tool.function.arguments))
         assert restored == {"path": "M.md", "from": 1}
 
     def test_multiple_reserved_kwargs(self):
         text, changed = rename_reserved_kwargs('[search(in="docs/", from=0)]')
         assert changed
-        args = json.loads(
-            handle_single_tool(ast.parse(text).body[0].value.elts[0]).function.arguments
-        )
+        args = json.loads(handle_single_tool(_first_call(text)).function.arguments)
         assert restore_reserved_kwarg_names(args) == {"in": "docs/", "from": 0}
 
     def test_keyword_inside_string_untouched(self):
