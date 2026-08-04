@@ -1672,38 +1672,62 @@ class TestPhantomRetractionIsLinear:
             tool_choice="auto",
         )
 
-    def test_retraction_window_stays_bounded(self, mock_tokenizer, monkeypatch):
-        """Each retraction may only look at its own call's events.
+    def test_retraction_examines_only_its_own_call(self, mock_tokenizer, monkeypatch):
+        """Retraction work must grow with the document, not with its square.
 
-        The fix records where a call's first event of the batch landed and
-        hands _retract_call that offset, so the slice it examines is a
-        couple of events wide however long the document is.  Rebuilding the
-        whole list instead -- or losing the bookkeeping that produces the
-        offset -- makes the window grow with the output, which is the
-        quadratic this guards.
+        The offset handed to _retract_call is not evidence on its own: a body
+        that ignores it and rebuilds the whole list receives the same offset
+        and restores the same events, so measuring the argument proves
+        nothing.  Count what the body actually reads instead, by handing it a
+        list that records every element each read touches.
         """
-        windows: list[int] = []
+
+        class _CountingList(list):
+            def __init__(self, items):
+                super().__init__(items)
+                self.touched = 0
+
+            def __iter__(self):
+                self.touched += len(self)
+                return super().__iter__()
+
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    self.touched += len(range(*index.indices(len(self))))
+                else:
+                    self.touched += 1
+                return super().__getitem__(index)
+
         real = LlamaJsonParser._retract_call
+        touched = 0
+        retractions = 0
 
         def measuring(out, start, dense_idx):
-            windows.append(len(out) - start)
-            return real(out, start, dense_idx)
+            nonlocal touched, retractions
+            probe = _CountingList(out)
+            real(probe, start, dense_idx)
+            # Read the count before the write-back: assigning out[:] = probe
+            # iterates the probe and would charge the harness's own copy to
+            # the callee.
+            touched += probe.touched
+            out[:] = list(list.__iter__(probe))
+            retractions += 1
 
         monkeypatch.setattr(LlamaJsonParser, "_retract_call", staticmethod(measuring))
 
-        widest = []
-        for count in (50, 400):
-            windows.clear()
+        work = []
+        for count in (200, 400):
+            touched = retractions = 0
             parser = LlamaJsonParser(mock_tokenizer)
             parser.extract_tool_calls(self._document(count), self._request())
-            # Liveness: an implementation that never retracts would make
-            # every assertion below vacuous.
-            assert len(windows) == count
-            widest.append(max(windows))
+            # Liveness: an implementation that never retracts would make the
+            # growth assertion vacuous.
+            assert retractions == count
+            work.append(touched)
 
-        # An eightfold longer document must not widen the window at all.
-        assert widest[1] == widest[0]
-        assert widest[1] <= 8
+        # Linear doubles, quadratic quadruples.  The slack absorbs the couple
+        # of events each call contributes without admitting a rate change.
+        assert work[1] <= 3 * work[0]
 
     @pytest.mark.parametrize("count", [1, 5, 50])
     def test_prose_json_is_returned_as_content(self, mock_tokenizer, count):
@@ -1914,10 +1938,38 @@ class TestArgumentsStreamIncrementally:
     together before asserting, so a change that buffered the whole call
     until it closed -- turning streaming into non-streaming -- would leave
     the suite green.
+
+    The request carries a tool schema deliberately.  Without one,
+    _compute_arg_delta takes the schema-less ``_safe_arg_prefix`` branch,
+    which production tool calling never reaches, and the splice machinery
+    this class names is not exercised at all.
     """
 
+    TOOLS = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "f",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"body": {"type": "string"}},
+                },
+            },
+        )
+    ]
+
     @staticmethod
-    def _arg_deltas(parser, request, text, chunk_size):
+    def _text(length: int) -> str:
+        return '{"name": "f", "parameters": {"body": "' + "x" * length + '"}}'
+
+    def _parser(self, mock_tokenizer):
+        return LlamaJsonParser(mock_tokenizer, self.TOOLS)
+
+    def _request(self, mock_request):
+        mock_request.tools = self.TOOLS
+        return mock_request
+
+    def _arg_deltas(self, parser, request, text, chunk_size):
         """Argument fragments, and how many arrived before the last feed."""
         deltas: list[str] = []
         before_final = 0
@@ -1932,32 +1984,67 @@ class TestArgumentsStreamIncrementally:
                         before_final += 1
         return deltas, before_final
 
-    def test_arguments_arrive_before_the_stream_ends(self, parser, mock_request):
-        value = "x" * 200
-        text = f'{{"name": "f", "parameters": {{"body": "{value}"}}}}'
+    def test_arguments_arrive_in_bounded_pieces(self, mock_tokenizer, mock_request):
+        """No delta may carry much more than one feed's worth of text.
 
-        deltas, before_final = self._arg_deltas(parser, mock_request, text, 8)
+        Counting deltas is not enough on its own: an implementation that
+        withholds a string value until it closes still emits a couple of
+        deltas, so only a bound on their size separates streaming from a
+        blob at the end.
+        """
+        chunk_size = 8
+        value_length = 200
+        deltas, before_final = self._arg_deltas(
+            self._parser(mock_tokenizer),
+            self._request(mock_request),
+            self._text(value_length),
+            chunk_size,
+        )
 
-        assert json.loads("".join(deltas)) == {"body": value}
-        # The load-bearing assertion: not one blob at the end.
+        assert json.loads("".join(deltas)) == {"body": "x" * value_length}
         assert before_final > 1
+        assert max(len(d) for d in deltas) <= 4 * chunk_size
 
     def test_more_feeds_produce_more_argument_deltas(
         self, mock_tokenizer, mock_request
     ):
         """Halving the chunk size must not collapse to a single delta."""
-        value = "y" * 240
-        text = f'{{"name": "f", "parameters": {{"body": "{value}"}}}}'
+        text = self._text(240)
 
         coarse, _ = self._arg_deltas(
-            LlamaJsonParser(mock_tokenizer), mock_request, text, 64
+            self._parser(mock_tokenizer), self._request(mock_request), text, 64
         )
         fine, _ = self._arg_deltas(
-            LlamaJsonParser(mock_tokenizer), mock_request, text, 8
+            self._parser(mock_tokenizer), self._request(mock_request), text, 8
         )
 
         assert json.loads("".join(coarse)) == json.loads("".join(fine))
         assert len(fine) > len(coarse)
+
+    def test_the_schema_path_is_the_one_under_test(self, mock_tokenizer, mock_request):
+        """Guard the guard: this class must not drift back to the
+        schema-less branch, where none of the above proves anything."""
+        seen = 0
+        real = LlamaJsonParser._stable_arg_prefix
+
+        def counting(self_, *args, **kwargs):
+            nonlocal seen
+            seen += 1
+            return real(self_, *args, **kwargs)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(LlamaJsonParser, "_stable_arg_prefix", counting)
+        try:
+            self._arg_deltas(
+                self._parser(mock_tokenizer),
+                self._request(mock_request),
+                self._text(64),
+                8,
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert seen > 0
 
 
 class TestBareArgumentsRepair:
