@@ -561,11 +561,12 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=self.embedding_fields["image"],
-                allow_out_of_band=self.allow_out_of_band_embeds,
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_hunyuan_vl_field_config,
             )
 

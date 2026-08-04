@@ -260,71 +260,54 @@ class DictEmbeddingItems(
         self,
         data: Mapping[str, torch.Tensor],
         modality: str,
-        required_fields: Set[str] | Mapping[str, EmbeddingFieldRole],
+        required_fields: Set[str],
         fields_factory: Callable[
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
-        allow_out_of_band: bool = False,
+        optional_fields: Set[str] = frozenset(),
     ) -> None:
         """
         Args:
             data: The dictionary of tensors for this modality.
             modality: The modality these items belong to.
-            required_fields: Fields the data must contain, either as a plain set
-                (all of them, always) or as a field -> role mapping. `"values"`
-                marks the pre-computed embeddings, which an encode/prefill/decode
-                encoder instance may instead publish through the EC connector, so
-                they may be absent from `data` when `allow_out_of_band` is set.
-                `"metadata"` marks the keys that size the prompt's placeholder
-                range, e.g. `"image_grid_thw"`; those stay required either way,
-                since out of band they are all the consumer has left.
+            required_fields: Fields `data` must contain.
             fields_factory: Builds the field config from the data.
-            allow_out_of_band: Whether out-of-band delivery is actually in
-                effect, i.e. whether this instance consumes an EC connector.
+            optional_fields: Fields `data` may omit. Which fields these are is
+                the caller's decision -- see
+                `MultiModalDataParser.embedding_field_sets`, where a deployment
+                that receives embeddings through an EC connector makes the
+                embeddings optional. They still need a field config, since they
+                are used whenever they *are* supplied.
         """
         from transformers.feature_extraction_utils import BatchFeature
 
         super().__init__(data, modality)
 
-        roles: Mapping[str, EmbeddingFieldRole] = (
-            required_fields
-            if isinstance(required_fields, Mapping)
-            else dict.fromkeys(required_fields, "metadata")
-        )
-        declared_fields = set(roles)
-        out_of_band_fields = {f for f, role in roles.items() if role == "values"}
-        in_band_fields = declared_fields - out_of_band_fields
-
-        # Relaxing the last field would leave nothing to size the placeholder
-        # range from, so the item would parse into zero entries and silently
-        # produce a wrong prompt instead of failing here.
-        if (
-            allow_out_of_band
-            and (out_of_band_fields - data.keys())
-            and not in_band_fields
-        ):
+        # Nothing required would leave nothing to size the placeholder range
+        # from, so the item would parse into zero entries and silently produce a
+        # wrong prompt instead of failing here.
+        if not required_fields:
             raise ValueError(
-                f"Cannot accept {modality!r} embeddings out of band: "
-                f"{sorted(out_of_band_fields)} are the only declared fields, so "
-                "nothing left in the request sizes the placeholder range. The "
-                'sizing metadata has to be declared with the "metadata" role.'
+                f"Cannot parse {modality!r} embeddings: every declared field is "
+                f"optional ({sorted(optional_fields)}), so nothing is left to "
+                "size the placeholder range."
             )
 
-        effective_required = in_band_fields if allow_out_of_band else declared_fields
+        declared_fields = set(required_fields) | set(optional_fields)
 
-        missing_required_data_keys = effective_required - data.keys()
+        missing_required_data_keys = set(required_fields) - data.keys()
         if missing_required_data_keys:
             data_keys = set(data.keys())
             msg = (
-                f"The data should contain the fields: {effective_required}, "
+                f"The data should contain the fields: {set(required_fields)}, "
                 f"but only found the following keys: {data_keys}"
             )
             raise ValueError(msg)
 
         fields_config = fields_factory(data)
-        # Check every declared field, not just the effective ones: a field that
-        # is optional today still needs a config for when it is supplied.
+        # Check every declared field, not just the required ones: an optional
+        # field still needs a config for when it is supplied.
         missing_required_fields = declared_fields - fields_config.keys()
         if missing_required_fields:
             fields = set(fields_config.keys())
@@ -332,7 +315,7 @@ class DictEmbeddingItems(
             raise ValueError(msg)
 
         self.fields_config = fields_config
-        self.required_fields = effective_required
+        self.required_fields = set(required_fields)
 
         self._kwargs = MultiModalKwargsItems.from_hf_inputs(
             BatchFeature(dict(data)),
@@ -600,6 +583,20 @@ class MultiModalDataParser:
             for field, role in cls.embedding_fields.get(modality, {}).items()
             if role == "metadata"
         }
+
+    def embedding_field_sets(self, modality: str) -> tuple[set[str], set[str]]:
+        """`modality`'s (required, optional) fields for this deployment.
+
+        Resolves the static roles in `embedding_fields` against where the
+        embeddings actually come from: on an EC consumer they arrive through the
+        connector, so the request may omit them; anywhere else a request that
+        claims to carry pre-computed embeddings has to actually carry them.
+        """
+        metadata = self.placeholder_metadata_fields(modality)
+        values = set(self.embedding_fields.get(modality, {})) - metadata
+        if self.allow_out_of_band_embeds:
+            return metadata, values
+        return metadata | values, set()
 
     def __init__(
         self,

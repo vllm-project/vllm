@@ -331,11 +331,12 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=self.embedding_fields["image"],
-                allow_out_of_band=self.allow_out_of_band_embeds,
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
@@ -346,11 +347,12 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields=self.embedding_fields["video"],
-                allow_out_of_band=self.allow_out_of_band_embeds,
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_keye_field_config,
             )
 
