@@ -670,7 +670,17 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if activation != MoEActivation.SITU:
+        if (
+            backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and activation == MoEActivation.SITU
+        ):
+            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
+            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
+            # which would inflate weights and OOM.
+            intermediate_size = round_up(intermediate_size, 128)
+            hidden_size = round_up(hidden_size, 128)
+        else:
             # SiTU FlyDSL kernel pads per gate/up half internally; rounding up
             # to 256 would inflate weight tensors and OOM on native sizes.
             intermediate_size = round_up(intermediate_size, 256)
@@ -1496,14 +1506,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2.is_shuffled = True
             return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
-        import os
-
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
-
-        # TODO: Remove this once AITER is fixed
-        # Necessary for AITER side from crashing
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         w13_weight = torch.nn.Parameter(
             _shuf_w(
