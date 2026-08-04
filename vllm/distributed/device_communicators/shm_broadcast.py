@@ -528,12 +528,10 @@ class MessageQueue:
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            # Bind to port 0 so the OS assigns a port atomically,
-            # avoiding TOCTOU race with get_open_port(). (See #28498)
             self.remote_socket.bind(f"tcp://{connect_ip}:0")
-            remote_subscribe_addr = (
-                self.remote_socket.getsockopt(zmq.LAST_ENDPOINT).decode()
-            )
+            last_endpoint = self.remote_socket.getsockopt(zmq.LAST_ENDPOINT)
+            remote_subscribe_port = last_endpoint.decode().rsplit(":", 1)[1]
+            remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
             self.remote_socket = None
