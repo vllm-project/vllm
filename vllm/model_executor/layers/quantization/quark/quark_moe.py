@@ -1324,7 +1324,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # TODO: clean up this backend-specific logic.
         if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
