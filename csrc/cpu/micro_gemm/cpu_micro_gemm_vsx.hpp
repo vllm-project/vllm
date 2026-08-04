@@ -68,7 +68,11 @@ class TileGemmVSX {
                         for(int c=0; c<4; c++) ((float*)&tmp[r])[c] = 0.0f;
                     }
                 }
-                __builtin_mma_build_acc(&acc[i][j], (__vector unsigned char*)&tmp);
+                __builtin_mma_build_acc(&acc[i][j], 
+                    (__vector unsigned char)tmp[0], 
+                    (__vector unsigned char)tmp[1], 
+                    (__vector unsigned char)tmp[2], 
+                    (__vector unsigned char)tmp[3]);
             }
         }
     }
