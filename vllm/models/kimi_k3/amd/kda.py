@@ -1,170 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-
 import torch
 from einops import rearrange
 from torch import nn
-from torch.nn.parameter import Parameter
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_rank
+from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    sharded_weight_loader,
-)
-from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-
-from ...linear import (
+from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
-from ..mamba_utils import (
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+
+# Generic KDA helpers, shared with Kimi-Linear. They are neither ROCm- nor
+# K3-specific, so they are imported rather than duplicated. (nvidia/kda.py keeps
+# its own copies; duplicating here instead would be a one-line change.)
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    _KDA_GATE_LOGBOUND_MIN,
+    _KimiGDNMergedColumnParallelLinear,
+    _make_fused_conv1d_weight_loader,
+    a_log_weight_loader,
+)
+from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from ..ops.gather_initial_states import gather_initial_states
-
-# Empirical lower bound for the KDA gate to avoid numerical underflow.
-_KDA_GATE_LOGBOUND_MIN = -5.0
-
-
-def a_log_weight_loader(
-    shard_axis: int,
-) -> Callable[[torch.Tensor, torch.Tensor], None]:
-    """Load KDA A_log stored as either old 4D or current 1D weights."""
-
-    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = param.data.shape[shard_axis]
-        start_idx = tp_rank * shard_size
-
-        if loaded_weight.dim() == 4:
-            assert loaded_weight.shape[:2] == (1, 1), (
-                f"Expected old A_log shape (1, 1, H, 1), got {loaded_weight.shape}"
-            )
-            assert loaded_weight.shape[-1] == 1, (
-                f"Expected old A_log last dim to be 1, got {loaded_weight.shape}"
-            )
-            loaded_weight = loaded_weight.view(loaded_weight.shape[2])
-
-        loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
-        return default_weight_loader(param, loaded_weight)
-
-    return loader
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda_with_fused_gate,
+    fused_recurrent_kda,
+    fused_recurrent_kda_packed_decode,
+)
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
-def _make_fused_conv1d_weight_loader(
-    dims: list[int],
-    tp_size: int,
-    tp_rank: int,
-) -> Callable[..., None]:
-    sharded_dims = [dim // tp_size for dim in dims]
-
-    def weight_loader(
-        param: torch.Tensor,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: int,
-    ) -> None:
-        if loaded_weight.dim() == 2:
-            loaded_weight = loaded_weight.unsqueeze(1)
-        shard_size = sharded_dims[loaded_shard_id]
-        source_start = tp_rank * shard_size
-        target_start = sum(sharded_dims[:loaded_shard_id])
-        loaded_shard = loaded_weight[source_start : source_start + shard_size]
-        param.data[target_start : target_start + shard_size].copy_(loaded_shard)
-
-    return weight_loader
-
-
-class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
-    """Merged projection with one output replicated across TP ranks.
-
-    The replicated shard is represented as ``size * tp_size`` so the merged
-    parameter reserves ``size`` local rows on every rank. Loading that shard
-    from rank zero then gives every rank the complete checkpoint weight.
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: list[int],
-        replicated_shard_id: int,
-        tp_size: int,
-        **kwargs,
-    ) -> None:
-        self.replicated_shard_id = replicated_shard_id
-        output_sizes = output_sizes.copy()
-        output_sizes[replicated_shard_id] *= tp_size
-        super().__init__(input_size, output_sizes, **kwargs)
-
-    def weight_loader(
-        self,
-        param: Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        tp_rank = self.tp_rank
-        param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
-            self.tp_rank = 0
-            if param_tp_rank is not None:
-                param.tp_rank = 0
-        try:
-            super().weight_loader(param, loaded_weight, loaded_shard_id)
-        finally:
-            self.tp_rank = tp_rank
-            if param_tp_rank is not None:
-                param.tp_rank = param_tp_rank
-
-    def weight_loader_v2(
-        self,
-        param: BasevLLMParameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        tp_rank = self.tp_rank
-        param_tp_rank = getattr(param, "tp_rank", None)
-        if loaded_shard_id == self.replicated_shard_id:
-            self.tp_rank = 0
-            if param_tp_rank is not None:
-                param.tp_rank = 0
-        try:
-            super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        finally:
-            self.tp_rank = tp_rank
-            if param_tp_rank is not None:
-                param.tp_rank = param_tp_rank
-
-
-@PluggableLayer.register("kimi_gated_delta_net_attention")
-class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
-    def get_state_dtype(
-        self,
-    ) -> tuple[torch.dtype, torch.dtype]:
+class KimiK3DeltaAttention(GatedDeltaNetAttention):
+    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
 
-    def get_state_shape(
-        self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
@@ -183,6 +75,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         kda_config = config.linear_attn_config  # type: ignore[attr-defined]
         assert kda_config is not None, "linear_attn_config must be set"
+        assert kda_config.get("use_full_rank_gate", False), (
+            "KimiK3DeltaAttention requires use_full_rank_gate; the low-rank "
+            "gate path belongs to the shared Kimi-Linear layer."
+        )
+
         self.head_dim = kda_config["head_dim"]
         self.num_heads = kda_config["num_heads"]
         assert self.num_heads % self.tp_size == 0
@@ -191,29 +88,20 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
-        self.use_full_rank_gate = kda_config.get("use_full_rank_gate", False)
+        self.use_full_rank_gate = True
 
-        if self.use_full_rank_gate:
-            # Keep f_a before the narrow beta shard, then pad each TP-local row
-            # to select the aligned BF16 GEMM path. The padding also avoids an
-            # Inductor correctness issue seen with the row-strided G view.
-            qkvg_output_sizes = [self.projection_size] * 4
-            in_proj_output_sizes = qkvg_output_sizes + [
-                self.head_dim,
-                self.num_heads,
-            ]
-            local_output_size = (
-                4 * self.local_projection_size + self.head_dim + self.local_num_heads
-            )
-            self.in_proj_padding = -local_output_size % 16
-            if self.in_proj_padding:
-                in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
-        else:
-            in_proj_output_sizes = [self.projection_size] * 3 + [
-                self.num_heads,
-                self.head_dim,
-            ]
-            self.in_proj_padding = 0
+        # Keep f_a before the narrow beta shard, then pad each TP-local row to
+        # select the aligned BF16 GEMM path. The padding also avoids an Inductor
+        # correctness issue seen with the row-strided G view.
+        qkvg_output_sizes = [self.projection_size] * 4
+        in_proj_output_sizes = qkvg_output_sizes + [self.head_dim, self.num_heads]
+        local_output_size = (
+            4 * self.local_projection_size + self.head_dim + self.local_num_heads
+        )
+        self.in_proj_padding = -local_output_size % 16
+        if self.in_proj_padding:
+            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
+
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
@@ -236,7 +124,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.dt_bias = nn.Parameter(
             torch.empty(self.local_projection_size, dtype=torch.float32)
         )
-
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
         # One packed parameter and cache let decode run a single conv update.
@@ -274,6 +161,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 f"Got {self.gate_lower_bound}."
             )
         self.use_safe_gate = self.gate_lower_bound is not None
+
         additional_config = vllm_config.additional_config
         backend = (
             additional_config.get("kda_prefill_backend", "auto")
@@ -282,24 +170,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         backend = "triton" if backend == "auto" else backend
         assert backend == "triton", (
-            "The shared Kimi GDN layer only supports the Triton KDA "
-            f"prefill backend, got {backend!r}."
+            "The ROCm Kimi-K3 KDA layer only supports the Triton KDA prefill "
+            f"backend, got {backend!r}."
         )
-        if not self.use_full_rank_gate:
-            self.g_a_proj = ReplicatedLinear(
-                self.hidden_size,
-                self.head_dim,
-                bias=False,
-                quant_config=self.quant_config,
-                prefix=f"{prefix}.g_a_proj",
-            )
-            self.g_b_proj = ColumnParallelLinear(
-                self.head_dim,
-                self.projection_size,
-                bias=False,
-                quant_config=self.quant_config,
-                prefix=f"{prefix}.g_b_proj",
-            )
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             self.projection_size,
@@ -332,32 +206,21 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> None:
         num_tokens = hidden_states.size(0)
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
-        if self.use_full_rank_gate:
-            split_sizes = [
-                3 * self.local_projection_size,
-                self.local_projection_size,
-                self.head_dim,
-                self.local_num_heads,
-            ]
-            if self.in_proj_padding:
-                split_sizes.append(self.in_proj_padding)
-            projected = projected_qkvgfab.split(split_sizes, dim=-1)
-            mixed_qkv, g_proj_states, f_a, beta = projected[:4]
-        else:
-            mixed_qkv, beta, f_a = projected_qkvgfab.split(
-                [
-                    3 * self.local_projection_size,
-                    self.local_num_heads,
-                    self.head_dim,
-                ],
-                dim=-1,
-            )
-            g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+
+        split_sizes = [
+            3 * self.local_projection_size,
+            self.local_projection_size,
+            self.head_dim,
+            self.local_num_heads,
+        ]
+        if self.in_proj_padding:
+            split_sizes.append(self.in_proj_padding)
+        projected = projected_qkvgfab.split(split_sizes, dim=-1)
+        mixed_qkv, g_proj_states, f_a, beta = projected[:4]
 
         g1 = self.f_b_proj(f_a)[0]
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
-
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
 
         core_attn_out = torch.empty(
@@ -390,21 +253,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if attn_metadata_raw is None:
             return
-
-        # Vendor-specific KDA kernels: AMD/ROCm and NVIDIA keep their own copies
-        # under kimi_k3/{amd,nvidia}/ops so each can diverge independently.
-        if current_platform.is_rocm():
-            from vllm.models.kimi_k3.amd.ops.third_party.kda import (
-                chunk_kda_with_fused_gate,
-                fused_recurrent_kda,
-                fused_recurrent_kda_packed_decode,
-            )
-        else:
-            from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
-                chunk_kda_with_fused_gate,
-                fused_recurrent_kda,
-                fused_recurrent_kda_packed_decode,
-            )
 
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata_narrowed = attn_metadata_raw[self.prefix]
@@ -556,10 +404,51 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
+
+                # A mixed non-spec batch is decode-first: the decodes are
+                # length-1 sequences, and the chunk kernel returns NaN for those.
+                # Send them to the recurrent kernel and give the chunk kernel the
+                # prefill tail only.
+                core_attn_out_decode = None
+                split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
+                if split_non_spec:
+                    assert non_spec_query_start_loc is not None
+                    nd_tok = m.num_decode_tokens
+                    core_attn_out_decode, _ = fused_recurrent_kda(
+                        q=q_ns[:, :nd_tok],
+                        k=k_ns[:, :nd_tok],
+                        v=v_ns[:, :nd_tok],
+                        raw_g=g1_ns[:, :nd_tok],
+                        raw_beta=beta_ns[:, :nd_tok],
+                        A_log=self.A_log,
+                        dt_bias=self.dt_bias,
+                        lower_bound=self.gate_lower_bound,
+                        initial_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc[: m.num_decodes + 1],
+                        ssm_state_indices=non_spec_state_indices_tensor[
+                            : m.num_decodes
+                        ],
+                    )
+                    q_ns = q_ns[:, nd_tok:]
+                    k_ns = k_ns[:, nd_tok:]
+                    v_ns = v_ns[:, nd_tok:]
+                    g1_ns = g1_ns[:, nd_tok:]
+                    beta_ns = beta_ns[:, nd_tok:]
+                    prefill_query_start_loc = m.prefill_query_start_loc
+                    prefill_state_indices = m.prefill_state_indices
+                    prefill_has_initial_state = m.prefill_has_initial_state
+                    assert prefill_query_start_loc is not None
+                    assert prefill_state_indices is not None
+                    assert prefill_has_initial_state is not None
+                else:
+                    prefill_query_start_loc = non_spec_query_start_loc
+                    prefill_state_indices = non_spec_state_indices_tensor
+                    prefill_has_initial_state = has_initial_state
+
                 initial_state = gather_initial_states(
                     recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
+                    prefill_state_indices,
+                    prefill_has_initial_state,
                 )
                 (
                     core_attn_out_non_spec,
@@ -576,10 +465,16 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
+                    cu_seqlens=prefill_query_start_loc,
                 )
                 # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                recurrent_state[prefill_state_indices] = last_recurrent_state
+
+                if split_non_spec:
+                    # Restore decode-first token order for the merge below.
+                    core_attn_out_non_spec = torch.cat(
+                        [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                    )
 
             else:
                 # pure-decode non-spec batch
