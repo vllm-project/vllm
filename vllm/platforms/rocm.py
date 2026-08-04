@@ -1122,65 +1122,69 @@ class RocmPlatform(Platform):
     ) -> tuple[Any, list[Any]]:
         """Launch default and auxiliary work on separate HIP streams.
 
-        ROCm uses a different sync path than CUDA because the HIP backend is
-        sensitive to cross-stream ordering via bare ``Event.wait()``. DSV4 CSA
-        multistream decode experiments (#43718, #41820) observed deadlocks and
-        hangs with the CUDA-style path; this implementation avoids them by:
+        ROCm uses ``Stream.wait_stream()`` fork-join instead of the CUDA Event
+        sync used by ``CudaPlatformBase.launch_multi_stream``. On HIP, bare
+        ``Event.wait()`` / ``Event.wait_event()`` cross-stream ordering was
+        observed to deadlock during DeepSeek-V4 CSA multistream decode; ATOM's
+        validated DSV4 path (``maybe_compressors_async``,
+        ``dual_stream_moe_forward`` in ``atom/models/deepseek_v4.py``)
+        synchronizes exclusively via ``wait_stream``.
 
-        * Using ``Stream.wait_event()`` and stream-qualified ``Event.record()``
-          instead of bare ``Event.wait()`` / ``Event.record()``.
-        * Calling ``Tensor.record_stream()`` on aux results so tensors
-          produced on aux streams remain valid when consumed on the main
-          stream (required under graph capture on ROCm).
-        * Always scheduling ``default_fn`` before aux work. The
-          ``queue_aux_before_default`` flag is accepted for API compatibility
-          with CUDA but ignored on ROCm because aux-first ordering caused
-          hangs in upstream multistream experiments.
+        Why ROCm differs from CUDA:
+
+        * **CUDA** records ``start_event`` on the main stream and joins each
+          aux stream back via ``done_events[i].wait()`` on the main stream.
+        * **ROCm** calls ``aux_stream.wait_stream(current_stream)`` before aux
+          work and ``current_stream.wait_stream(aux_stream)`` before return.
+          ``start_event`` and ``done_events`` are kept for a uniform platform
+          API but are not used on ROCm.
+        * Neither platform needs ``record_stream()`` on aux **outputs** here:
+          both join back to the main stream before returning results. ATOM DSV4
+          and vLLM ``shared_experts`` follow the same rule.
+
+        Side-stream launches should be gated at the call site (for example
+        ATOM's ``forward_context.in_hipgraph``); this method only implements
+        the fork-join primitives.
 
         Args:
             default_fn: Callable for the current (default) stream.
             aux_fns: Per-aux callables; entries may be None to skip.
-            start_event: Recorded on the current stream to fan out to aux
-                streams.
-            done_events: One event per aux slot, recorded after the aux fn.
+            start_event: Unused on ROCm; CUDA-path fan-out event.
+            done_events: Unused on ROCm; CUDA-path per-aux join events.
             aux_streams: Per-aux HIP streams. Length must match ``aux_fns``.
-            queue_aux_before_default: Ignored on ROCm; kept for a uniform
-                platform API.
+            queue_aux_before_default: When True, queue aux before
+                ``default_fn`` (``execute_in_parallel`` / ATOM CSA compressor
+                pattern). When False, run ``default_fn`` first
+                (``maybe_execute_in_parallel`` / ATOM MoE dual-stream
+                pattern).
 
         Returns:
             Tuple of (default_result, aux_results).
         """
-        del queue_aux_before_default
+        _ = (start_event, done_events)
         assert aux_streams is not None
         aux_results = [None] * len(aux_fns)
         current_stream = torch.cuda.current_stream()
-        pending: list[tuple[torch.cuda.Event, Any]] = []
+        pending: list[torch.cuda.Stream] = []
 
-        def _record_result_stream(result: Any, stream: torch.cuda.Stream) -> None:
-            if isinstance(result, torch.Tensor):
-                result.record_stream(stream)
-            elif isinstance(result, (tuple, list)):
-                for item in result:
-                    _record_result_stream(item, stream)
-            elif isinstance(result, dict):
-                for item in result.values():
-                    _record_result_stream(item, stream)
+        def _launch_aux() -> None:
+            for i, fn in enumerate(aux_fns):
+                if fn is None:
+                    continue
+                aux_stream = aux_streams[i]
+                aux_stream.wait_stream(current_stream)
+                with torch.cuda.stream(aux_stream):
+                    aux_results[i] = fn()
+                pending.append(aux_stream)
 
-        start_event.record(current_stream)
-        default_result = default_fn()
+        if queue_aux_before_default:
+            _launch_aux()
+            default_result = default_fn()
+        else:
+            default_result = default_fn()
+            _launch_aux()
 
-        for i, fn in enumerate(aux_fns):
-            if fn is None:
-                continue
-            aux_stream = aux_streams[i]
-            with torch.cuda.stream(aux_stream):
-                aux_stream.wait_event(start_event)
-                aux_results[i] = fn()
-                done_events[i].record(aux_stream)
-            pending.append((done_events[i], aux_results[i]))
-
-        for ev, result in pending:
-            current_stream.wait_event(ev)
-            _record_result_stream(result, current_stream)
+        for aux_stream in pending:
+            current_stream.wait_stream(aux_stream)
 
         return default_result, aux_results
