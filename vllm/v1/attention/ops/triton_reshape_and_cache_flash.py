@@ -424,7 +424,10 @@ def triton_reshape_and_cache_flash(
         if not current_platform.has_device_capability(90):
             TILE_SIZE = min(512, TILE_SIZE)
 
-    grid = (slot_mapping.shape[0], triton.cdiv(n, TILE_SIZE))
+    grid = lambda meta: (
+        slot_mapping.shape[0],
+        triton.cdiv(n, meta["TILE_SIZE"]),
+    )
 
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
@@ -575,7 +578,10 @@ def triton_reshape_and_cache_flash_diffkv(
         num_stages = 10
         num_warps = 16
 
-    grid = (slot_mapping.shape[0], num_heads)
+    grid = lambda meta: (
+        slot_mapping.shape[0],
+        num_heads,
+    )
 
     reshape_and_cache_kernel_flash_diffkv[grid](
         key_ptr=key,
