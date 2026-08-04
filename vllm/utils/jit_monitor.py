@@ -231,10 +231,26 @@ def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
 
 
 def _setup_triton_jit_hook() -> None:
-    """Register a ``jit_post_compile_hook`` that warns on compilation."""
+    """Register a jit_post_compile_hook that warns on compilation."""
     if not HAS_TRITON:
         return
-    from triton import knobs  # type: ignore[import-untyped]
+    from triton import knobs
+    from triton.runtime import jit as _triton_jit
+
+    # kernels pass non-JSON-serializable constexprs
+    # make that serialization non-fatal
+    _orig = _triton_jit.serialize_specialization_data
+    if not getattr(_orig, "_vllm_guarded", False):
+
+        @functools.wraps(_orig)
+        def _guarded(*args, **kwargs):
+            try:
+                return _orig(*args, **kwargs)
+            except (TypeError, ValueError):
+                return None  # best-effort metadata; monitor ignores it
+
+        cast(Any, _guarded)._vllm_guarded = True
+        _triton_jit.serialize_specialization_data = _guarded
 
     existing_hook = knobs.runtime.jit_post_compile_hook
 
@@ -267,6 +283,26 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
     )
 
 
+class _MonitoredCuteCompile:
+    """Logs JIT compilations; a plain function would break ``cute.compile[opts]``."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getitem__(self, options) -> "_MonitoredCuteCompile":
+        return _MonitoredCuteCompile(self._inner[options])
+
+    def __call__(self, *args, **kwargs):
+        kernel = args[0] if args else kwargs.get("function")
+        kernel_name = getattr(kernel, "__name__", None)
+        if kernel_name is None:
+            kernel_name = (
+                kernel.__class__.__name__ if kernel is not None else "<unknown>"
+            )
+        _log_cutedsl_jit_compile(kernel_name)
+        return self._inner(*args, **kwargs)
+
+
 def _setup_cutedsl_jit_hook() -> None:
     """Wrap ``cutlass.cute.compile`` to warn on compilation."""
     global _cutedsl_hook_installed
@@ -279,20 +315,7 @@ def _setup_cutedsl_jit_hook() -> None:
         logger.debug("CuTeDSL is not available; skipping CuTeDSL JIT monitor.")
         return
 
-    original_compile = cute.compile
-
-    @functools.wraps(original_compile)
-    def _compile_with_monitor(*args, **kwargs):
-        kernel = args[0] if args else kwargs.get("function")
-        kernel_name = getattr(kernel, "__name__", None)
-        if kernel_name is None:
-            kernel_name = (
-                kernel.__class__.__name__ if kernel is not None else "<unknown>"
-            )
-        _log_cutedsl_jit_compile(kernel_name)
-        return original_compile(*args, **kwargs)
-
-    cute.compile = _compile_with_monitor
+    cute.compile = _MonitoredCuteCompile(cute.compile)
     _cutedsl_hook_installed = True
 
 

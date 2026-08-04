@@ -880,6 +880,12 @@ class Platform:
                 ),
                 cache_config.block_size,
             )
+            if model_config.use_mla:
+                # TRTLLM/FlashInfer MLA decode kernels require the physical
+                # number of kernel blocks to be aligned to 128 / kernel_block_size.
+                # For hybrid MLA/Mamba models, make the manager block size a
+                # multiple of 128 so split kernel blocks keep that invariant.
+                kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
 
         if cache_config.mamba_cache_mode == "all":
             # With prefix caching, align to mamba chunk size for kernel perf
@@ -991,7 +997,8 @@ class Platform:
             # Pinned memory support under WSL depends on the vendor and driver
             # version. Conservative default: return False. Platform subclasses
             # that can verify support (e.g. CudaPlatformBase) override this.
-            logger.warning_once(
+            # warning_once() causes a circular import on WSL, see #48397.
+            logger.warning(
                 "Using 'pin_memory=False' as WSL is detected. "
                 "This may slow down performance."
             )

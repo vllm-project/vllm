@@ -102,6 +102,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
     ),
+    "kimi_k3": (
+        "kimi_k3_tool_parser",
+        "KimiK3ToolParser",
+    ),
     "llama3_json": (
         "llama_tool_parser",
         "Llama3JsonToolParser",
@@ -173,6 +177,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "inkling": (
+        "inkling_tool_parser",
+        "InklingEngineToolParser",
     ),
     "xlam": (
         "xlam_tool_parser",
