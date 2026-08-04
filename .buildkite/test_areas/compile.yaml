@@ -15,7 +15,8 @@ steps:
   - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
 
 - label: Sequence Parallel Correctness Tests (2xH100)
   key: sequence-parallel-correctness-tests-2xh100
