@@ -12,7 +12,9 @@ from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     """Run a model with the given compilation config for E2E fusion tests."""
     compilation_config = (
         compile_config
@@ -54,7 +56,7 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
     )
 
     # Fetch match table from each worker via RPC and sum across workers.
-    worker_tables = llm.llm_engine.engine_core.collective_rpc(
+    worker_tables: list[dict[str, int]] = llm.llm_engine.engine_core.collective_rpc(
         "get_compilation_match_table"
     )
     combined: defaultdict[str, int] = defaultdict(int)

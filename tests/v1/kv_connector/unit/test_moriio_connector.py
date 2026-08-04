@@ -508,9 +508,15 @@ def test_send_transfer_release_sends_structured_release_message():
     scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
 
     payload = sock.send.call_args.args[0]
+    # WRITE-mode release advertises the consumer (decode) TP size so the prefill
+    # side counts the right number of ACKs via get_moriio_expected_ack_count,
+    # mirroring the READ-mode release in _pop_done_transfers (see
+    # test_read_completion_sends_structured_release_with_consumer_tp_size). The
+    # fixture's tp_size is 2, so consumer_tp_size == 2.
     assert msgspec.msgpack.decode(payload) == {
         "type": "release",
         "transfer_id": "xfer-7",
+        "consumer_tp_size": 2,
     }
 
 
