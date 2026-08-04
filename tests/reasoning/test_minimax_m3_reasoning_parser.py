@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import pytest
 
+from vllm.entrypoints.chat_utils import make_reasoning_parser_chat_template_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning import ReasoningParserManager
@@ -420,6 +421,34 @@ def test_adaptive_continuation_resumes_separate_reasoning_content():
 
     assert (reasoning or "") == " more"
     assert (content or "") == ""
+
+
+@pytest.mark.parametrize(("closed", "expected"), [(False, False), (True, True)])
+def test_continuation_preserves_thinking_content_part_state(closed, expected):
+    final_message = {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "partial plan",
+                "closed": closed,
+            }
+        ],
+    }
+    chat_template_kwargs = make_reasoning_parser_chat_template_kwargs(
+        {"thinking_mode": "adaptive"},
+        continue_final_message=True,
+        final_message=final_message,
+    )
+    parser, tokenizer = make_parser(chat_template_kwargs=chat_template_kwargs)
+
+    assert chat_template_kwargs["_vllm_continue_final_message_content"] == ""
+    assert (
+        chat_template_kwargs["_vllm_continue_final_message_reasoning"] == "partial plan"
+    )
+    assert parser.is_reasoning_end_from_prompt(tokenizer.encode("partial plan")) is (
+        expected
+    )
 
 
 def test_streaming_boundary_can_emit_reasoning_and_content():
