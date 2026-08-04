@@ -65,8 +65,9 @@ class SharedOffloadRegion:
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            fd = os.open(self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            self.fd: int | None = fd
+            self.fd: int | None = os.open(
+                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+            )
         except FileExistsError:
             # Joiner path — another worker won O_EXCL. Reopen and wait
             # for the file to reach expected size.
@@ -87,7 +88,7 @@ class SharedOffloadRegion:
                 os.ftruncate(self.fd, self.total_size_bytes)
             except (RuntimeError, OSError) as e:
                 os.unlink(self.mmap_path)
-                os.close(fd)
+                os.close(self.fd)
                 if isinstance(e, RuntimeError):
                     raise RuntimeError(
                         f"{e} Reduce the CPU KV offloading capacity by lowering "
