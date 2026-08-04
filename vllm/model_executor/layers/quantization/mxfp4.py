@@ -803,6 +803,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
         )
         w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+
         return w13, w2, w13_scale, w2_scale
 
     def process_weights_after_loading(self, layer):

@@ -3,7 +3,6 @@
 """Utils for model executor."""
 
 import copy
-import types
 from typing import Any
 
 import torch
@@ -45,15 +44,6 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def _bond_method_to_cls(func: Any, obj: Any) -> Any:
-    """Bind an unbound function to `obj` as a method, unless `func` is not
-    callable or is already bound to some instance."""
-    if hasattr(func, "__self__") or not callable(func):
-        return func
-    else:
-        return types.MethodType(func, obj)
-
-
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -63,6 +53,10 @@ def replace_parameter(
     """
     Replace a parameter of a layer while maintaining the ability to reload the weight.
     Called within implementations of the `process_weights_after_loading` method.
+
+    Custom attributes set on ``new_data`` (e.g. kernel dispatch flags such as
+    ``is_shuffled``) are carried over to the replacement parameter; attributes set
+    on the existing parameter are not, except for ``weight_loader``.
 
     This function should not be called on weights which are tied/shared
 
@@ -84,10 +78,16 @@ def replace_parameter(
         setattr(layer, param_name, None)
         return
 
+    old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
+
+    new_data_attrs = dict(new_data.__dict__)
+
+    # `weight_loader` is the only attribute not ported over from new_data,
+    # old_param.weight_loader only is supported.
+    new_data_attrs.pop("weight_loader", None)
+
     if isinstance(new_data, torch.nn.Parameter):
         new_data = new_data.data
-
-    old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
 
     if (
         prefer_copy
@@ -97,20 +97,14 @@ def replace_parameter(
         and old_param.device == new_data.device
     ):
         old_param.copy_(new_data)
+        for attr_name, attr in new_data_attrs.items():
+            setattr(old_param, attr_name, attr)
         return
 
     new_param = torch.nn.Parameter(new_data, requires_grad=False)
 
-    # Adapted from vllm/model_executor/layers/quantization/torchao.py.
-    # `torch.nn.Parameter(new_data, ...)` does not carry over attributes
-    # attached to `new_data` itself (e.g. kernel-specific flags, like is_shuffled=True)
-    for attr_name, attr in new_data.__dict__.items():
-        if hasattr(attr, "__self__") and attr.__self__ is new_data:
-            # if attr is a bonded method for an instance, and
-            # attr.__self__ points to the instance (param)
-            # we'll record the underlying function object
-            attr = attr.__func__
-        setattr(new_param, attr_name, _bond_method_to_cls(attr, new_param))
+    for attr_name, attr in new_data_attrs.items():
+        setattr(new_param, attr_name, attr)
 
     if old_param is not None and hasattr(old_param, "weight_loader"):
         weight_loader = old_param.weight_loader
