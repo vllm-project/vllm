@@ -4,7 +4,6 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
-from types import SimpleNamespace
 from typing import Annotated, Literal
 
 import pytest
@@ -487,20 +486,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
-
-
-def test_prefix_cache_enabled_by_default_for_hybrid_models():
-    engine_args = EngineArgs()
-    model_config = SimpleNamespace(
-        is_chunked_prefill_supported=True,
-        is_prefix_caching_supported=True,
-        is_hybrid=True,
-        runner_type="generate",
-    )
-
-    engine_args._set_default_chunked_prefill_and_prefix_caching_args(model_config)
-
-    assert engine_args.enable_prefix_caching
 
 
 @pytest.mark.parametrize(

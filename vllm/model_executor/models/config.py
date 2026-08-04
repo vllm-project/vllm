@@ -621,9 +621,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
+                cache_config.mamba_cache_mode = "align"
                 logger.warning(
                     "Mamba cache mode is set to '%s' for %s by default "
                     "when prefix caching is enabled",
