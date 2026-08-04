@@ -57,11 +57,6 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
     ),
 }
 
-# Backends that run the DeepSeek-V4 mega-MoE model path (fused expert module
-# plus prepare_megamoe routing), whether the experts compute natively or
-# through flashinfer.
-MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe", *FI_MOE_EP_BACKENDS})
-
 _FI_RUNTIME_HANDLE: Any = None
 _FI_MOE_EP_RUNTIME_AVAILABLE: bool | None = None
 
@@ -82,10 +77,6 @@ def _has_fi_moe_ep_runtime() -> bool:
     else:
         _FI_MOE_EP_RUNTIME_AVAILABLE = True
     return _FI_MOE_EP_RUNTIME_AVAILABLE
-
-
-def is_mega_moe_backend(moe_backend: str) -> bool:
-    return moe_backend in MEGA_MOE_BACKENDS
 
 
 def is_fi_moe_ep_backend(moe_backend: str) -> bool:
@@ -761,7 +752,6 @@ __all__ = [
     "DeepseekV4MegaMoEExpertsFI",
     "FI_MOE_EP_BACKENDS",
     "FiMoeEpBackendSpec",
-    "MEGA_MOE_BACKENDS",
     "apply_mega_moe_routing_preprocess",
     "build_fi_mega_config",
     "build_fi_mega_layer",
@@ -771,7 +761,6 @@ __all__ = [
     "fi_moe_ep_backend_spec",
     "finalize_fi_moe_ep_runtime",
     "is_fi_moe_ep_backend",
-    "is_mega_moe_backend",
     "make_fi_mega_moe_experts_cls",
     "make_fi_moe_ep_bootstrap",
     "mega_moe_weight_pack_from_params",
