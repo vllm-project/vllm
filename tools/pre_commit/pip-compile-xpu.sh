@@ -14,6 +14,5 @@ exec uv pip compile \
   -c requirements/xpu.txt \
   -o requirements/test/xpu.txt \
   --index-strategy unsafe-best-match \
-  --extra-index-url http://10.239.182.107:8081/simple/ \
   --python-platform x86_64-manylinux_2_39 \
   --python-version "3.12"

@@ -1,5 +1,15 @@
 # Common dependencies
 -r common.txt
+# TODO(xpu-wheel-testing): triton-xpu doesn't publish a `triton`-named
+# distribution on PyPI, but other transitive deps (e.g. xgrammar) require a
+# package literally named `triton` to exist. wheels.vllm.ai/xpu will host a
+# compat shim wheel (`triton==3.7.2+xpu` -> depends on `triton-xpu==3.7.2`)
+# once this branch lands upstream. Until then we point at the internal test
+# index below (which currently hosts the same shim wheel). --trusted-host is
+# only needed because the internal test index is plain HTTP; it will be
+# removed once wheels.vllm.ai/xpu (HTTPS) replaces it.
+--extra-index-url=http://10.239.182.107:8081/simple/
+--trusted-host=10.239.182.107
 triton==3.7.2+xpu
 
 ray>=2.9
