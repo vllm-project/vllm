@@ -36,6 +36,7 @@ from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdo
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+    from torch.distributed import TCPStore
 
 logger = init_logger(__name__)
 
@@ -173,6 +174,9 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
+        # Coordination TCPStore kept alive while engines may rendezvous,
+        # see launch_core_engines().
+        self._coord_store: TCPStore | None = None
 
         # All ranks share this config object: capture the user-provided
         # --device-ids list before the per-rank shard overwrites it. Mutating
@@ -1133,6 +1137,33 @@ def launch_core_engines(
         )
         return
 
+    # For coordinated online DP, bind-and-hold a coordination TCPStore so
+    # that engines pick DP master ports at bind time instead of using the
+    # pre-allocated _data_parallel_master_port_list, whose ports can be
+    # taken by other processes before they are bound. Only created when
+    # engine rank 0 is local, i.e. this process runs on the DP master node.
+    # See ParallelConfig._pick_stateless_dp_port().
+    coord_store = None
+    if (
+        dp_size > 1
+        and not offline_mode
+        and dp_rank == 0
+        and local_engine_count > 0
+        and vllm_config.model_config.is_moe
+        and not parallel_config.enable_elastic_ep
+        and not parallel_config._coord_store_port
+    ):
+        from vllm.distributed.utils import create_tcp_store
+
+        coord_store = create_tcp_store(
+            host,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = coord_store.port
+
     if offline_mode:
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
@@ -1196,6 +1227,7 @@ def launch_core_engines(
                 local_start_index=local_start_index or 0,
                 tensor_queue=tensor_queue,
             )
+            local_engine_manager._coord_store = coord_store
         else:
             local_engine_manager = None
 
@@ -1338,6 +1370,7 @@ def wait_for_engine_startup(
                             "data_parallel_master_ip",
                             "data_parallel_master_port",
                             "_data_parallel_master_port_list",
+                            "_coord_store_port",
                             "data_parallel_size",
                         )
                     }
