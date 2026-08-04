@@ -27,7 +27,6 @@ from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    async_tensor_h2d,
     direct_register_custom_op,
 )
 
@@ -671,17 +670,6 @@ def _merge_multimodal_embeddings(
         raise ValueError("Error during index put operation") from e
 
     return inputs_embeds
-
-
-def isin_list(
-    elements: torch.Tensor,
-    test_elements_list: list[int],
-) -> torch.Tensor:
-    test_elements = async_tensor_h2d(
-        test_elements_list, dtype=torch.int64, device=elements.device
-    )
-
-    return torch.isin(elements, test_elements)
 
 
 class StageMissingLayer(nn.Module):
