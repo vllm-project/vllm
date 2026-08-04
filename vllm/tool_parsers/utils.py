@@ -765,6 +765,131 @@ def normalize_leading_zero_ints(text: str) -> str:
     return "".join(out)
 
 
+_QUOTE_FOLLOWERS = {",", ")", "]", "}", ":"}
+
+
+def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
+    """Close a broken string literal at the only closing quote that works.
+
+    Models emitting shell commands frequently nest unescaped same-style
+    quotes inside a string argument — ``command='sed -n '360,450p' f.py'``,
+    or a quoted ``python3 -c`` payload that itself contains quoted strings —
+    which Python reads as juxtaposed garbage, so the call is dropped even
+    though the intent is unambiguous. A string is treated as broken when
+    its first unescaped quote cannot syntactically close it (what follows
+    is none of ``,``, ``)``, ``]``, ``}``, ``:``). For a broken string,
+    every syntactically plausible closing quote is tried: interior quotes
+    escaped, the rest of the text kept verbatim, and the result (with
+    control chars escaped) validated with ``ast.parse``. Exactly one
+    candidate parsing means recovery — the decoded value is exactly the
+    text the model wrote. Zero or several parsing candidates means the
+    nesting is genuinely ambiguous and the text is returned unchanged
+    rather than guessed at.
+
+    Returns (rewritten_text, changed); run the result through
+    escape_ctrl_chars_in_strings before parsing — quotes chosen here can
+    move raw control chars inside the string.
+    """
+
+    def unescaped_quotes(start: int, quote: str) -> list[int]:
+        positions = []
+        j = start
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == quote:
+                positions.append(j)
+            j += 1
+        return positions
+
+    def is_closer(pos: int) -> bool:
+        k = pos + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        return k < len(text) and text[k] in _QUOTE_FOLLOWERS
+
+    prefix: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char not in {"'", '"'}:
+            prefix.append(char)
+            index += 1
+            continue
+        quotes = unescaped_quotes(index + 1, char)
+        if not quotes:
+            return text, False
+        if is_closer(quotes[0]):
+            # The normal reading closes this string; move past it.
+            prefix.append(text[index : quotes[0] + 1])
+            index = quotes[0] + 1
+            continue
+        winners = []
+        for close in (j for j in quotes if is_closer(j)):
+            interior: list[str] = []
+            for j in range(index + 1, close):
+                if text[j] == char and not _is_escaped(text, j):
+                    interior.append("\\")
+                interior.append(text[j])
+            candidate = "".join(
+                ["".join(prefix), char, "".join(interior), char, text[close + 1 :]]
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                try:
+                    ast.parse(escape_ctrl_chars_in_strings(candidate))
+                except (SyntaxError, ValueError):
+                    continue
+            winners.append(candidate)
+        if len(winners) == 1:
+            return winners[0], True
+        return text, False
+    return text, False
+
+
+def contains_broken_string_literal(text: str) -> bool:
+    """Whether some string literal's first closing quote cannot close it.
+
+    Streaming guard companion to escape_nested_quotes_in_strings:
+    completion-based partial parses of nested-quote text read the string as
+    implicit concatenation and stream argument prefixes that can never be
+    retracted. Callers should withhold tool deltas while this returns True
+    and let the requote recovery run on the final text instead. A string
+    whose closing quote has not arrived yet is NOT broken (normal
+    streaming); a closing quote at the very end of the text counts as
+    broken only because its follower is still unknown.
+    """
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char not in {"'", '"'}:
+            index += 1
+            continue
+        j = index + 1
+        close = -1
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == char:
+                close = j
+                break
+            j += 1
+        if close == -1:
+            return False
+        k = close + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        if k >= len(text) or text[k] not in _QUOTE_FOLLOWERS:
+            return True
+        index = close + 1
+    return False
+
+
 def _is_escaped(text: str, index: int) -> bool:
     """Whether the character at ``index`` is backslash-escaped.
 

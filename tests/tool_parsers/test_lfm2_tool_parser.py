@@ -64,6 +64,24 @@ LEADING_ZERO_FUNCTION_CALL = FunctionCall(
     name="set_date",
     arguments='{"month": 7, "day": 5}',
 )
+NESTED_QUOTE_FUNCTION_OUTPUT = (
+    "bash(command='sed -n '360,450p' /testbed/sympy/matrices/common.py')"
+)
+NESTED_QUOTE_FUNCTION_CALL = FunctionCall(
+    name="bash",
+    arguments=('{"command": "sed -n \'360,450p\' /testbed/sympy/matrices/common.py"}'),
+)
+NESTED_PYTHON_C_FUNCTION_OUTPUT = (
+    "bash(command='cd /testbed && python3 -c \"from sympy import latex\n"
+    "print(latex(3*x, mul_symbol='\\,'))\"')"
+)
+NESTED_PYTHON_C_FUNCTION_CALL = FunctionCall(
+    name="bash",
+    arguments=(
+        '{"command": "cd /testbed && python3 -c \\"from sympy import latex\\n'
+        "print(latex(3*x, mul_symbol='\\\\,'))\\\"\"}"
+    ),
+)
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"
 )
@@ -304,6 +322,36 @@ TEST_CASES = [
         [SET_ARG_FUNCTION_CALL],
         None,
         id="set_arg_nonstreaming",
+    ),
+    # Unescaped same-style quotes nested in a shell command argument
+    pytest.param(
+        True,
+        _wrap(NESTED_QUOTE_FUNCTION_OUTPUT),
+        [NESTED_QUOTE_FUNCTION_CALL],
+        None,
+        id="nested_quote_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NESTED_QUOTE_FUNCTION_OUTPUT),
+        [NESTED_QUOTE_FUNCTION_CALL],
+        None,
+        id="nested_quote_nonstreaming",
+    ),
+    # Doubly nested: multi-line python -c payload with its own inner quotes
+    pytest.param(
+        True,
+        _wrap(NESTED_PYTHON_C_FUNCTION_OUTPUT),
+        [NESTED_PYTHON_C_FUNCTION_CALL],
+        None,
+        id="nested_python_c_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NESTED_PYTHON_C_FUNCTION_OUTPUT),
+        [NESTED_PYTHON_C_FUNCTION_CALL],
+        None,
+        id="nested_python_c_nonstreaming",
     ),
     # Zero-padded integer arguments (SyntaxError: leading zeros)
     pytest.param(

@@ -9,7 +9,9 @@ import pytest
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     coerce_to_schema_type,
+    contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
+    escape_nested_quotes_in_strings,
     extract_types_from_schema,
     get_parameter_value,
     handle_single_tool,
@@ -532,6 +534,112 @@ class TestGetParameterValueTuple:
         call = _first_call("[resize(size=(800, 600))]")
         tool = handle_single_tool(call)
         assert json.loads(tool.function.arguments) == {"size": [800, 600]}
+
+
+class TestEscapeNestedQuotesInStrings:
+    # Unescaped same-style quotes nested in a string argument (shell
+    # commands like sed -n '1,9p') are Python juxtaposition errors. When
+    # exactly one quote can syntactically close the string, close there and
+    # escape the interior quotes; anything ambiguous is left unchanged.
+    def test_sed_command_recovers_exact_value(self):
+        text = "[bash(command='sed -n '360,450p' /testbed/common.py')]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        assert _kwarg_constant(_first_call(rewritten)) == (
+            "sed -n '360,450p' /testbed/common.py"
+        )
+
+    def test_double_quote_variant(self):
+        text = '[bash(command="grep "foo" log.txt")]'
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        assert _kwarg_constant(_first_call(rewritten)) == 'grep "foo" log.txt'
+
+    def test_mixed_with_already_escaped_quote(self):
+        text = "[bash(command='it\\'s 'x' end')]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        assert _kwarg_constant(_first_call(rewritten)) == "it's 'x' end"
+
+    def test_doubly_nested_python_c_payload(self):
+        # command='python3 -c "...latex(x, mul_symbol='\,')..."' — two false
+        # closers both followed by ')', but only the real one yields text
+        # that parses; ast-validation disambiguates.
+        text = "[bash(command='python3 -c \"print(latex(x, mul_symbol='\\,'))\"')]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        assert _kwarg_constant(_first_call(rewritten)) == (
+            "python3 -c \"print(latex(x, mul_symbol='\\,'))\""
+        )
+
+    def test_multiline_python_c_with_inner_string(self):
+        # Raw newlines beyond the phantom close plus a single-quoted inner
+        # string; recovery must survive both (caller re-escapes ctrl chars).
+        inner = "python3 -c \"\ntest_str = 'is <b>fine</b>'\nprint(test_str)\n\""
+        text = f"[bash(command='{inner}')]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        recovered = escape_ctrl_chars_in_strings(rewritten)
+        assert _kwarg_constant(_first_call(recovered)) == inner
+
+    def test_nested_quotes_before_non_string_argument(self):
+        # A later NON-string argument adds no candidate closer, so the
+        # nested string is still unambiguous.
+        text = "[run(cmd='awk '{print}' f', count=2)]"
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert changed
+        call = _first_call(rewritten)
+        assert _kwarg_constant(call, 0) == "awk '{print}' f"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[f(a='x')]",
+            "[f(a='x', b='y')]",
+            "[f(a={'k': 'v'})]",
+            "[f(a='it\\'s fine')]",
+            "[a(x='p'), b(y='q')]",
+        ],
+    )
+    def test_valid_text_unchanged(self, text):
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert not changed
+        assert rewritten == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[f(a='echo 'hi', b='x')]",
+            "[run(cmd='awk '{print}' f', mode='fast')]",
+        ],
+    )
+    def test_ambiguous_nesting_left_unchanged(self, text):
+        # A later string argument's closing quote is itself a plausible
+        # closer, making the nesting formally ambiguous; no rewrite is
+        # attempted rather than guessing.
+        rewritten, changed = escape_nested_quotes_in_strings(text)
+        assert not changed
+        assert rewritten == text
+
+
+class TestContainsBrokenStringLiteral:
+    @pytest.mark.parametrize(
+        "text, broken",
+        [
+            ("[bash(command='sed -n '360,450p' /x')]", True),
+            ("[f(a='echo 'hi', b='x')]", True),
+            # Closing quote at the very end of partial text: the follower
+            # is unknown until the next chunk arrives, so hold.
+            ("[f(a='x'", True),
+            ("[f(a='x', b='y')]", False),
+            # Mid-string (no closing quote yet) is normal streaming.
+            ('[f(a=\'grep -F "]" log', False),
+            ("[f(a={'k': 'v'})]", False),
+            ("[f(a='it\\'s fine')]", False),
+        ],
+    )
+    def test_detection(self, text, broken):
+        assert contains_broken_string_literal(text) is broken
 
 
 class TestGetParameterValueNonJsonConstants:

@@ -25,7 +25,9 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
+    escape_nested_quotes_in_strings,
     handle_single_tool,
     make_valid_python,
     normalize_leading_zero_ints,
@@ -189,23 +191,32 @@ class Lfm2ToolParser(ToolParser):
             try:
                 module = ast.parse(tool_text)
             except (SyntaxError, ValueError):
-                # A raw newline/tab inside a string argument (e.g. a multi-line
-                # shell command) is invalid Python, and a NUL byte anywhere is
-                # a ValueError; escape control chars inside string literals and
-                # strip leading zeros from int literals (month=07), then retry
-                # instead of dropping the call.
+                # Progressive rewrites, each a no-op on already-valid text:
+                # escape raw control chars / NUL bytes inside string literals,
+                # strip leading zeros from int literals (month=07), close
+                # unambiguous nested quotes (command='sed -n '1,9p' f.py'),
+                # and rename reserved-keyword parameters (from=1; restored
+                # below). The first rewrite whose result parses wins.
                 escaped = escape_ctrl_chars_in_strings(
                     normalize_leading_zero_ints(tool_text)
                 )
-                try:
-                    module = ast.parse(escaped)
-                except (SyntaxError, ValueError):
-                    # A parameter named after a Python keyword (`from=1`) is
-                    # also a SyntaxError; rename it, parse, restore below.
-                    renamed, kw_renamed = rename_reserved_kwargs(escaped)
-                    if not kw_renamed:
-                        raise
-                    module = ast.parse(renamed)
+                candidates = [escaped]
+                requoted, requote_changed = escape_nested_quotes_in_strings(escaped)
+                if requote_changed:
+                    # Requoting can move raw control chars (newlines beyond
+                    # the phantom close) inside the string; escape again.
+                    candidates.append(escape_ctrl_chars_in_strings(requoted))
+                renamed, kw_renamed = rename_reserved_kwargs(candidates[-1])
+                if kw_renamed:
+                    candidates.append(renamed)
+                for candidate in candidates:
+                    try:
+                        module = ast.parse(candidate)
+                        break
+                    except (SyntaxError, ValueError):
+                        continue
+                else:
+                    raise
             parsed = getattr(module.body[0], "value", None)
             # An empty block ([]) must not report tools_called=True with zero
             # calls, so require at least one element.
@@ -326,9 +337,29 @@ class Lfm2ToolParser(ToolParser):
             tool_text = escape_ctrl_chars_in_strings(
                 normalize_leading_zero_ints(tool_text)
             )
+            if has_end_in_current:
+                # Nested-quote recovery needs the final text (which quote
+                # closes a partial string is not stable across chunks) and
+                # must never touch text that already parses.
+                try:
+                    ast.parse(tool_text)
+                except (SyntaxError, ValueError):
+                    requoted_text, requote_changed = escape_nested_quotes_in_strings(
+                        tool_text
+                    )
+                    if requote_changed:
+                        tool_text = escape_ctrl_chars_in_strings(requoted_text)
             renamed_tool_text, kw_renamed = rename_reserved_kwargs(tool_text)
             if kw_renamed:
                 tool_text = renamed_tool_text
+
+            # A broken string (its first closing quote cannot close it —
+            # nested-quote text mid-arrival) makes every completion-based
+            # partial parse an implicit-concatenation misreading whose
+            # streamed prefix could never be retracted. Withhold deltas
+            # until the requote recovery above has produced sane text.
+            if contains_broken_string_literal(tool_text):
+                return _content_only_or_none()
 
             valid_and_added_text = make_valid_python(tool_text)
             if valid_and_added_text is None:
