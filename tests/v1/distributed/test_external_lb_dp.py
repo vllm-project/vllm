@@ -57,6 +57,21 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
     assert coordinator._calculate_num_redundant_experts(2, 3) == 64
 
 
+def test_external_elastic_ep_rejects_insufficient_expert_capacity():
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(get_num_experts=lambda: 128),
+            parallel_config=SimpleNamespace(
+                eplb_config=SimpleNamespace(num_redundant_experts=0)
+            ),
+        )
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+
+    with pytest.raises(ValueError, match="cannot retain all model experts"):
+        coordinator._calculate_num_redundant_experts(3, 2)
+
+
 @pytest.mark.asyncio
 async def test_external_elastic_ep_late_rank_observes_epoch_error():
     coordinator = ExternalElasticEPScaleCoordinator(
@@ -245,19 +260,25 @@ def _send_scale_command(
     )
 
 
-def _assert_scale_requests_are_waiting(
+def _wait_for_scale_requests_to_start(
     scale_requests: list[Future[requests.Response]],
+    timeout: float = 30,
 ) -> None:
-    # Preparation blocks until the externally managed new rank joins. The
-    # serving middleware enters scaling mode only after preparation completes.
-    time.sleep(1)
-    for request in scale_requests:
-        if request.done():
-            response = request.result()
-            pytest.fail(
-                "Scale request finished before the new rank was launched: "
-                f"{response.status_code} {response.text}"
-            )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for request in scale_requests:
+            if request.done():
+                response = request.result()
+                pytest.fail(
+                    "Scale request finished before the new rank was launched: "
+                    f"{response.status_code} {response.text}"
+                )
+
+        if all(request.running() for request in scale_requests):
+            return
+        time.sleep(0.1)
+
+    pytest.fail("Timed out waiting for all scale requests to start")
 
 
 @pytest.mark.distributed(num_gpus=3)
@@ -296,7 +317,7 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
                 executor.submit(_send_scale_command, server, 3)
                 for server in existing_servers
             ]
-            _assert_scale_requests_are_waiting(scale_requests)
+            _wait_for_scale_requests_to_start(scale_requests)
             server_manager.start_rank(
                 rank=2,
                 dp_size=3,

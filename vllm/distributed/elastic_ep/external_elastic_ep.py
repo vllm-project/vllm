@@ -29,6 +29,12 @@ logger = init_logger(__name__)
 POLL_BACKOFF_STEPS_S = (0.1, 0.2, 0.4, 0.8)
 
 
+@dataclass
+class ExternalElasticEPScaleUpHandshakeMetadata:
+    engine_metadata: EngineHandshakeMetadata
+    num_redundant_experts: int
+
+
 class ExternalElasticEPScaleUpHandshakeServer:
     """Temporary rank-0 handshake server for external EEP scale-up.
 
@@ -138,9 +144,11 @@ class ExternalElasticEPScaleUpHandshakeServer:
                             "_coord_store_port": b.coord_store_port,
                         }
                         init_message = msgspec.msgpack.encode(
-                            EngineHandshakeMetadata(
-                                addresses=self.addresses,
-                                parallel_config=parallel_config,
+                            ExternalElasticEPScaleUpHandshakeMetadata(
+                                engine_metadata=EngineHandshakeMetadata(
+                                    addresses=self.addresses,
+                                    parallel_config=parallel_config,
+                                ),
                                 num_redundant_experts=self.num_redundant_experts,
                             )
                         )
@@ -220,9 +228,16 @@ class ExternalElasticEPScaleCoordinator:
     ) -> int:
         parallel_config = self.client.vllm_config.parallel_config
         num_experts = self.client.vllm_config.model_config.get_num_experts()
-        return (
+        num_redundant_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts
         ) * new_data_parallel_size // cur_data_parallel_size - num_experts
+        if num_redundant_experts < 0:
+            raise ValueError(
+                "Cannot scale external Elastic EP from DP size "
+                f"{cur_data_parallel_size} to {new_data_parallel_size}: "
+                "the target topology cannot retain all model experts."
+            )
+        return num_redundant_experts
 
     def _get_reconfig_store(self):
         from vllm.distributed.utils import get_cached_tcp_store_client
@@ -410,7 +425,7 @@ class ExternalElasticEPScaleCoordinator:
                     f"ranks to prepare: {error}"
                 )
 
-            if all(reconfig_store.check([key]) for key in ready_keys):
+            if reconfig_store.check(ready_keys):
                 return
 
             now = loop.time()
@@ -488,7 +503,7 @@ class ExternalElasticEPScaleCoordinator:
             error = self._get_error(prepared.control_store, prepared.epoch)
             if error is not None:
                 raise RuntimeError(error)
-            if all(prepared.reconfig_store.check([key]) for key in keys):
+            if prepared.reconfig_store.check(keys):
                 return
             if loop.time() - start > timeout_s:
                 raise TimeoutError(
