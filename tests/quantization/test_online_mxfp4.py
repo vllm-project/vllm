@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
@@ -174,7 +174,7 @@ def test_online_mxfp4_moe_matches_quark(
     device = current_platform.device_type
 
     def make_layer(prefix: str) -> RoutedExperts:
-        runner = FusedMoE(
+        runner = FusedMoEFactory(
             num_experts=num_experts,
             top_k=2,
             hidden_size=hidden_size,
@@ -279,24 +279,31 @@ def test_online_mxfp4_moe_matches_quark(
         assert torch.equal(checkpoint_tensor, online_tensor)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="Only compared against a ROCm/AITER build."
-)
-def test_online_mxfp4_dense_matches_quark(default_vllm_config, dist_init):
+@pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
+def test_online_mxfp4_dense_matches_quark(
+    linear_backend: str, default_vllm_config, dist_init
+):
     """
     Ensures `Mxfp4OnlineLinearMethod` (online quantization)
     and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
-    with the same linear kernel used.
+    with same linear backend used.
     """
-    if not current_platform.supports_mx():
-        pytest.skip(
-            "Without native MXFP4 support, `QuarkOCP_MX` falls back to "
-            "emulation and skips the kernel weight post-processing that "
-            "`Mxfp4OnlineLinearMethod` always runs, so the two layouts are "
-            "not comparable."
-        )
+    # The reference checkpoint weights come from `quark_quantize_weight_to_mxfp4`,
+    # which needs AITER regardless of the linear backend under test.
+    skip_reason = _skip_reason_if_unavailable("aiter", torch.bfloat16)
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
+
+    if linear_backend == "marlin" and not current_platform.is_cuda():
+        # `MarlinMxFp4LinearKernel` is registered only for CUDA in
+        # `_POSSIBLE_MXFP4_KERNELS`, and its repack ops are not built on ROCm.
+        pytest.skip("The Marlin MXFP4 linear kernel is CUDA-only.")
+
+    if linear_backend == "aiter" and not current_platform.supports_mx():
+        pytest.skip("The AITER MXFP4 linear kernel requires native MXFP4 support.")
 
     default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.linear_backend = linear_backend
 
     input_size = 256
     output_size = 128

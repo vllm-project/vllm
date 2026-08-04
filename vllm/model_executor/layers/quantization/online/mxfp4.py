@@ -77,9 +77,13 @@ class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
     FP4 with block-32 scales) during weight loading.
     """
 
+    activation_quant_key = kMxfp4Dynamic
+
     def __init__(self):
         super().__init__()
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(
+            activation_quant_key=self.activation_quant_key
+        )
 
     def create_weights(
         self,
