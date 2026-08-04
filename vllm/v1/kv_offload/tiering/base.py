@@ -121,6 +121,7 @@ class SecondaryTierManager(ABC):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        backpressure: dict[str, Any] | None = None,
     ) -> None:
         """
         Args:
@@ -128,11 +129,13 @@ class SecondaryTierManager(ABC):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
+            backpressure: Optional backpressure detector configuration.
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
         self.locality: Locality | None = None
+        self.backpressure_config: dict[str, Any] | None = backpressure
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:

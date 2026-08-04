@@ -39,6 +39,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 _BP_EMA_ALPHA = EMABackpressureDetector.DEFAULT_ALPHA
 _BP_HIGH_WATER_S = EMABackpressureDetector.DEFAULT_HIGH_WATER_S
 _BP_LOW_WATER_S = EMABackpressureDetector.DEFAULT_LOW_WATER_S
+_BP_WARMUP = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -64,8 +65,10 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
     submit_time on the JobMetadata before triggering the completion poll.
     """
 
-    def __init__(self, offloading_spec, primary_kv_view, tier_type):
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+    def __init__(self, offloading_spec, primary_kv_view, tier_type, backpressure=None):
+        super().__init__(
+            offloading_spec, primary_kv_view, tier_type, backpressure=backpressure
+        )
         self.blocks: dict[OffloadKey, bool] = {}
         self._held_jobs: list[JobResult] = []
         self._released_jobs: list[JobResult] = []
@@ -118,6 +121,7 @@ class TestBackpressure:
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="delayed",
+            backpressure={},
         )
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary,
@@ -166,11 +170,18 @@ class TestBackpressure:
         )
 
     def test_pressure_activates_above_high_water(self, setup):
-        keys = to_keys(range(2))
-        self._store_blocks(keys)
         bp = self.manager._bp_detectors[self.tier]
 
-        # Reset the per-step gate so the next on_schedule_end processes jobs.
+        # Warm up the detector with fast completions first.
+        for i in range(_BP_WARMUP):
+            keys = to_keys([200 + i])
+            self._store_blocks(keys)
+            self._backdate_held_jobs(0.001)
+            self.tier.release_jobs()
+            self._simulate_on_schedule_end()
+
+        keys = to_keys(range(2))
+        self._store_blocks(keys)
         self._simulate_on_schedule_end()
 
         slow_latency = _BP_HIGH_WATER_S * 5
@@ -185,6 +196,7 @@ class TestBackpressure:
         bp = self.manager._bp_detectors[self.tier]
         bp.store_latency_ema = _BP_HIGH_WATER_S * 2
         bp._under_pressure = True
+        bp._completions = _BP_WARMUP
 
         # Drive several fast completions to bring EMA below low water.
         block_id = 100
@@ -204,6 +216,7 @@ class TestBackpressure:
 
     def test_hysteresis_prevents_oscillation(self, setup):
         bp = self.manager._bp_detectors[self.tier]
+        bp._completions = _BP_WARMUP
 
         # Set EMA between low and high water marks.
         mid = (_BP_LOW_WATER_S + _BP_HIGH_WATER_S) / 2
@@ -264,7 +277,7 @@ class TestBackpressure:
         bp = self.manager._bp_detectors[self.tier]
         bp._under_pressure = True
         policy = self.manager._bp_policy
-        assert policy.get_stores_dropped(self.tier) == 0
+        assert policy.pop_stores_dropped(self.tier) == 0
 
         self._store_blocks(to_keys([80]))
         assert policy._stores_dropped.get(self.tier, 0) == 1
@@ -284,8 +297,8 @@ class TestBackpressure:
 
         gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
         counter_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
-        assert reduced[f"{gauge_key}:('delayed',)"] == 1
-        assert reduced[f"{counter_key}:('delayed',)"] == 5
+        assert reduced[f"{gauge_key}:('0_delayed',)"] == 1
+        assert reduced[f"{counter_key}:('0_delayed',)"] == 5
 
         # Dropped count resets after get_stats.
         assert policy._stores_dropped.get(self.tier, 0) == 0
@@ -299,7 +312,7 @@ class TestBackpressure:
         reduced = stats.reduce()
 
         gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
-        assert reduced[f"{gauge_key}:('delayed',)"] == 0
+        assert reduced[f"{gauge_key}:('0_delayed',)"] == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
         bp = self.manager._bp_detectors[self.tier]

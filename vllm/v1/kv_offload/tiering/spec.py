@@ -129,30 +129,38 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 ),
             )
         )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_ACTIVE] = OffloadingGaugeMetadata(
-            documentation=(
-                "Indicates when a secondary tier is experiencing back-pressure."
-                "(1 = active, 0 = inactive)."
-            ),
-            labelnames=("tier_type",),
-        )
-        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
-            OffloadingCounterMetadata(
-                documentation=(
-                    "Number of store operations dropped due to back-pressure "
-                    "on a secondary tier."
-                ),
-                labelnames=("tier_type",),
-            )
-        )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        has_backpressure = False
         for tier_config in secondary_tier_configs:
             assert isinstance(tier_config, dict)
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
+            if tier_config.get("backpressure") is not None:
+                has_backpressure = True
+
+        if has_backpressure:
+            metrics[TieringOffloadingMetrics.BACKPRESSURE_ACTIVE] = (
+                OffloadingGaugeMetadata(
+                    documentation=(
+                        "Indicates when a secondary tier is experiencing "
+                        "back-pressure (1 = active, 0 = inactive)."
+                    ),
+                    labelnames=("tier",),
+                )
+            )
+            metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+                OffloadingCounterMetadata(
+                    documentation=(
+                        "Number of store operations dropped due to "
+                        "back-pressure on a secondary tier."
+                    ),
+                    labelnames=("tier",),
+                )
+            )
+
         return metrics
 
     def __init__(self, config: OffloadingConfig):

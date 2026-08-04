@@ -73,18 +73,6 @@ class PendingPromotion:
 
 
 @dataclass(slots=True)
-class BackpressureState:
-    store_latency_ema: float = 0.0
-    is_under_pressure: bool = False
-    stores_dropped: int = 0
-
-
-_BP_EMA_ALPHA = 0.3
-_BP_HIGH_WATER_S = 1.0
-_BP_LOW_WATER_S = 0.5
-
-
-@dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
     pending_primary_stores: int = 0
@@ -242,10 +230,17 @@ class TieringOffloadingManager(OffloadingManager):
             for tier in self.secondary_tiers
         }
 
-        factory = detector_factory or EMABackpressureDetector
-        self._bp_detectors: dict[SecondaryTierManager, BackpressureDetector] = {
-            tier: factory() for tier in self.secondary_tiers
+        self._tier_index: dict[SecondaryTierManager, int] = {
+            tier: i for i, tier in enumerate(self.secondary_tiers)
         }
+
+        self._bp_detectors: dict[SecondaryTierManager, BackpressureDetector] = {}
+        for tier in self.secondary_tiers:
+            bp_config = tier.backpressure_config
+            if detector_factory is not None:
+                self._bp_detectors[tier] = detector_factory()
+            elif bp_config is not None:
+                self._bp_detectors[tier] = EMABackpressureDetector(**bp_config)
         self._bp_policy: BackpressurePolicy = policy or DropStorePolicy()
 
         # Buffers manager-level observations (e.g. lookup delay) between
@@ -307,18 +302,28 @@ class TieringOffloadingManager(OffloadingManager):
                     )
                     self._update_backpressure(tier, job_metadata)
 
+    def _should_store_to_tier(self, tier: SecondaryTierManager) -> bool:
+        detector = self._bp_detectors.get(tier)
+        if detector is None:
+            return True
+        if not self._bp_policy.should_store(tier, detector):
+            self._bp_policy.on_store_skipped(tier)
+            return False
+        return True
+
     def _update_backpressure(
         self, tier: SecondaryTierManager, job_metadata: JobMetadata
     ) -> None:
-        if job_metadata.submit_time <= 0:
+        detector = self._bp_detectors.get(tier)
+        if detector is None:
             return
-        elapsed = time.monotonic() - job_metadata.submit_time
-        detector = self._bp_detectors[tier]
         was_under_pressure = detector.is_under_pressure()
-        detector.on_store_completed(elapsed)
+        detector.update(job_metadata.submit_time)
         if detector.is_under_pressure() != was_under_pressure:
+            tier_idx = self._tier_index[tier]
             logger.info(
-                "Tier %s back-pressure %s (stats=%s)",
+                "Tier #%d (%s) back-pressure %s (stats=%s)",
+                tier_idx,
                 tier.tier_type,
                 "activated" if detector.is_under_pressure() else "cleared",
                 detector.stats,
@@ -625,13 +630,10 @@ class TieringOffloadingManager(OffloadingManager):
         if not ready_keys:
             return
 
-        now = time.monotonic()
         for tier in request_level_tiers:
-            if not self._bp_policy.should_store(tier, self._bp_detectors[tier]):
-                self._bp_policy.on_store_skipped(tier)
+            if not self._should_store_to_tier(tier):
                 continue
             job_metadata = self.create_store_job(ready_keys, req_context)
-            job_metadata.submit_time = now
             tier.submit_store(job_metadata)
 
     @override
@@ -668,13 +670,10 @@ class TieringOffloadingManager(OffloadingManager):
             # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
-            now = time.monotonic()
             for tier in self.secondary_tiers:
-                if not self._bp_policy.should_store(tier, self._bp_detectors[tier]):
-                    self._bp_policy.on_store_skipped(tier)
+                if not self._should_store_to_tier(tier):
                     continue
                 job_metadata = self.create_store_job(keys, req_context)
-                job_metadata.submit_time = now
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -708,6 +707,7 @@ class TieringOffloadingManager(OffloadingManager):
             block_ids=primary_blocks_spec.block_ids,
             is_promotion=False,
             req_context=req_context,
+            submit_time=time.monotonic(),
         )
         self._transfer_jobs[job_id] = job_metadata
         return job_metadata
@@ -894,15 +894,14 @@ class TieringOffloadingManager(OffloadingManager):
             else:
                 stats.aggregate(tier_stats)
 
-        for tier in self.secondary_tiers:
-            detector = self._bp_detectors[tier]
-            label = (tier.tier_type,)
+        for tier, detector in self._bp_detectors.items():
+            label = (f"{self._tier_index[tier]}_{tier.tier_type}",)
             self._stats.set_gauge(
                 TieringOffloadingMetrics.BACKPRESSURE_ACTIVE,
                 int(detector.is_under_pressure()),
                 labelvalues=label,
             )
-            dropped = self._bp_policy.get_stores_dropped(tier)
+            dropped = self._bp_policy.pop_stores_dropped(tier)
             if dropped > 0:
                 self._stats.increase_counter(
                     TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
