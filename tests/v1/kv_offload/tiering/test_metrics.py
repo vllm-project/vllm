@@ -36,7 +36,7 @@ def test_tiering_metrics_tracker_records_lookup_metrics():
         key,
         tracker.primary_tier_label,
         LookupResult.MISS,
-        elapsed=0.0,
+        lookup_duration=0.0,
     )
     tracker.on_lookup(_CTX, key, tracker.tier_label(0), LookupResult.MISS, 0.0)
     tracker.on_lookup(_CTX, key, tracker.tier_label(1), LookupResult.HIT, 0.0)
@@ -66,7 +66,7 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
         key,
         tracker.primary_tier_label,
         LookupResult.MISS,
-        elapsed=0.0,
+        lookup_duration=0.0,
     )
     tracker.on_lookup(_CTX, key, tracker.tier_label(0), LookupResult.HIT, 0.0)
 
@@ -83,7 +83,7 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
         key,
         tracker.primary_tier_label,
         LookupResult.MISS,
-        elapsed=0.0,
+        lookup_duration=0.0,
     )
     tracker.on_lookup(_CTX, key, tracker.tier_label(0), LookupResult.HIT, 0.0)
 
