@@ -10,6 +10,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -81,7 +82,6 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.utils.flashinfer_moe_ep import (
     is_fi_moe_ep_backend,
     validate_fi_moe_ep_config,
@@ -521,9 +521,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
 
 
-DeepseekV4MegaMoEExpertsFI = make_fi_mega_moe_experts_cls(DeepseekV4MegaMoEExperts)
-
-
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -654,11 +651,16 @@ class DeepseekV4MoE(nn.Module):
         activation_clamp = (
             float(self.swiglu_limit) if self.swiglu_limit is not None else None
         )
-        experts_cls = (
-            DeepseekV4MegaMoEExpertsFI
-            if self.use_fi_mega_moe
-            else DeepseekV4MegaMoEExperts
-        )
+        if self.use_fi_mega_moe:
+            # Deferred: fi_moe subclasses DeepseekV4MegaMoEExperts, so a
+            # module-level import here would be circular.
+            from vllm.models.deepseek_v4.nvidia.fi_moe import (
+                DeepseekV4MegaMoEExpertsFI,
+            )
+
+            experts_cls: type[DeepseekV4MegaMoEExperts] = DeepseekV4MegaMoEExpertsFI
+        else:
+            experts_cls = DeepseekV4MegaMoEExperts
         expert_kwargs: dict[str, typing.Any] = dict(
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
@@ -1020,9 +1022,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = (
-            vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
-        )
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
