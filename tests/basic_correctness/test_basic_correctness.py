@@ -302,16 +302,15 @@ def test_raise_on_logit_nans(
             engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
             assert model_runner.vllm_config.use_v2_model_runner is use_v2_model_runner
-            original_compute_logits = model_runner.model.compute_logits
+            model_cls = type(model_runner.model)
+            original_compute_logits = model_cls.compute_logits
 
-            def compute_nan_logits(*args, **kwargs):
-                logits = original_compute_logits(*args, **kwargs)
+            def compute_nan_logits(self, *args, **kwargs):
+                logits = original_compute_logits(self, *args, **kwargs)
                 logits[0, 0] = float("nan")
                 return logits
 
-            monkeypatch.setattr(
-                model_runner.model, "compute_logits", compute_nan_logits
-            )
+            monkeypatch.setattr(model_cls, "compute_logits", compute_nan_logits)
 
             with pytest.raises(RuntimeError, match="NaNs detected in logits"):
                 vllm_model.generate_greedy(["Hello, my name is"], 1, use_tqdm=False)
