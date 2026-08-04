@@ -84,6 +84,73 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+## Profile with Triton Proton
+
+[Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)
+is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
+Chrome trace and works through the same vLLM profiling controls as the PyTorch
+and CUDA profilers. Proton currently requires eager execution.
+
+Start a server with a local output directory:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --enforce-eager \
+    --profiler-config '{
+        "profiler": "proton",
+        "proton_profiler_dir": "./proton_profile",
+        "proton_output_format": "hatchet",
+        "proton_hook": "triton"
+    }'
+```
+
+Then use `/start_profile` and `/stop_profile` as shown above, or pass
+`--profile` to a vLLM benchmark. Each worker uses a topology- and
+rank-qualified output name, such as
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
+so distributed workers, restarted servers, and repeated profiling runs do not
+overwrite one another. A `profile_prefix` is included when supplied. Each
+profile is finalized by `/stop_profile` and is ready to inspect immediately.
+
+The Proton-specific options are:
+
+- `proton_context`: `shadow` (default) or `python`
+- `proton_data`: `tree` (default) or `trace`
+- `proton_backend`: `cupti`, `rocprofiler`, or automatic
+- `proton_mode`: an optional backend mode string
+- `proton_hook`: `triton` to record Triton launch metadata, or unset
+- `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
+
+`hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
+`chrome_trace` requires `proton_data: "trace"`. Proton does not support
+`delay_iterations`; starting the session synchronously ensures initialization
+errors are returned by `/start_profile`. CUDA graph profiling is not yet
+supported, so `--enforce-eager` is required for every Proton mode.
+
+Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
+`rocprofiler` requires a ROCm installation. vLLM does not expose Proton's
+experimental instrumentation backend because current upstream Triton builds
+can produce profiles without timing metrics. Backend-specific modes, including
+`pcsampling`, can be selected with `proton_mode`.
+
+Triton 3.6 supports explicit `hatchet` and `chrome_trace` output. The
+`hatchet_msgpack` format, `periodic_flushing` mode, and `rocprofiler` backend
+require Triton 3.8 or newer; vLLM rejects these options with the detected
+version before starting a session. On AMD, Proton requires
+`ROCR_VISIBLE_DEVICES`; `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` must be
+unset.
+
+Inspect tree profiles with:
+
+```bash
+proton-viewer -m time/ns \
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet
+```
+
+Chrome traces (`proton_data: "trace"`) can be opened in
+<https://ui.perfetto.dev/>. Proton is imported lazily, so selecting another
+profiler does not require a Proton-capable Triton installation.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.
