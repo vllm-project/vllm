@@ -48,13 +48,12 @@ ACT = [
 ]
 USE_BIAS = [False, True]
 ISA = ["vec"]
-if (
-    current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    and sys.platform != "darwin"
-):
+if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
     ISA.append("neon")
 if torch.cpu._is_amx_tile_supported():
     ISA.append("amx")
+if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+    ISA.append("vsx")
 
 DTYPE = [torch.bfloat16]
 

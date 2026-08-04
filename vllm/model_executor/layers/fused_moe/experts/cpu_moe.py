@@ -451,6 +451,21 @@ class ArmCPUUnquantizedExperts(CPUUnquantizedExperts):
             and sys.platform != "darwin"
         )
 
+
+class PowerCPUUnquantizedExperts(CPUUnquantizedExperts):
+    """PowerPC VSX grouped-gemm unquantized MoE experts."""
+
+    isa = "vsx"
+    output_alignment = 16
+    reduction_alignment = 2
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+        )
+
     @staticmethod
     def is_supported_config(
         cls: type[mk.FusedMoEExperts],
