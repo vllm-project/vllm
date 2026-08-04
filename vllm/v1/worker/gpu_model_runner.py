@@ -749,6 +749,9 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
+        )
         # Capture warmup providers registered by the initial placeholder InputBatch
         with self.jit_warmup_registry.activate():
             self.input_batch = InputBatch(
@@ -7343,11 +7346,16 @@ class GPUModelRunner(
             or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
+            or self.cp_kv_cache_interleave_size
+            != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
+            self.cp_kv_cache_interleave_size = (
+                self.parallel_config.cp_kv_cache_interleave_size
+            )
             # Capture warmup providers registered after final KV-cache geometry is known
             with self.jit_warmup_registry.activate():
                 self.input_batch = InputBatch(

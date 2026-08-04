@@ -530,6 +530,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        # GPUWorker finalizes the PD interleave before KV cache initialization.
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
