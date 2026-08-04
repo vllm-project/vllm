@@ -1,7 +1,6 @@
 # Common dependencies
 -r common.txt
---extra-index-url=http://10.239.182.107:8081/sample
-triton
+triton @ http://10.239.182.107:8081/packages/triton-3.7.2+xpu-py3-none-any.whl#sha256=3c822f73e9870512f59a6ecf5dc305a4bcab11fa623f9ce91011f604315227e9
 
 ray>=2.9
 cmake>=3.26.1
