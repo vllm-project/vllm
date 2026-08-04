@@ -39,8 +39,11 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
+#      clock-sync timestamp
+#   6: Validate EAGLE/MTP speculative configuration compatibility
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -76,6 +79,49 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
 
 
+def _get_speculative_compatibility_factors(
+    vllm_config: VllmConfig,
+) -> dict[str, Any] | None:
+    """Return NIXL compatibility factors for hidden-state-based speculators."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or not speculative_config.use_eagle():
+        return None
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config is not None
+    auxiliary_layer_ids = getattr(
+        draft_model_config.hf_config,
+        "eagle_aux_hidden_state_layer_ids",
+        None,
+    )
+
+    # kv_cache_dtype is a user override that defaults to None, meaning "inherit
+    # the target's --kv-cache-dtype". Resolve it to the effective value so an
+    # explicit setting on one side and inheritance on the other (same effective
+    # dtype) don't spuriously mismatch.
+    kv_cache_dtype = (
+        speculative_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
+    )
+
+    # Note: the draft attention_backend is intentionally not hashed. Its only
+    # transfer-relevant effect is the KV block layout/size, which is validated
+    # per region at runtime in _validate_remote_agent_handshake. The connector
+    # only sees the raw override here (usually None = auto-select), never the
+    # resolved backend, so hashing it would cause false mismatches without
+    # catching anything the runtime layout check misses.
+    return {
+        "method": speculative_config.method,
+        "model": draft_model_config.model,
+        "revision": draft_model_config.revision,
+        "code_revision": draft_model_config.code_revision,
+        "parallel_drafting": speculative_config.parallel_drafting,
+        "kv_cache_dtype": str(kv_cache_dtype),
+        "auxiliary_layer_ids": (
+            tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
+        ),
+    }
+
+
 def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
 ) -> str:
@@ -90,6 +136,7 @@ def compute_nixl_compatibility_hash(
     - Model architecture (name, dtype, KV heads, layers)
     - KV cache format (dtype, sliding window)
     - Attention backend
+    - EAGLE/MTP configuration that affects transferred state
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
     are validated at runtime in _validate_remote_agent_handshake and are not
@@ -123,6 +170,7 @@ def compute_nixl_compatibility_hash(
         "cache_dtype": str(cache_config.cache_dtype),
         "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
+        "speculative_config": _get_speculative_compatibility_factors(vllm_config),
     }
 
     compat_hash = hash_factors(factors)
@@ -157,6 +205,7 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
+    blocks_expiry_time: float | None = None
 
 
 @dataclass
@@ -177,6 +226,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        # The scheduler process's time.perf_counter() when this metadata was
+        # built. reqs_to_send deadlines are stamped with the scheduler's
+        # clock, which is NOT comparable across processes (perf_counter is
+        # process/boot-local): workers must rebase the remaining TTL onto
+        # their own clock via this reference. 0.0 = unset (legacy metadata).
+        self.scheduler_clock: float = 0.0
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
@@ -225,5 +280,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
+            blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
         )
         self.reqs_to_recv[request_id] = req

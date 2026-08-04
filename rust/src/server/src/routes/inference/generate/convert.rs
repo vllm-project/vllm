@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
@@ -72,6 +75,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id: ctx.session_id,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,

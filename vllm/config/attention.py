@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import field
 from typing import Any, Literal
 
 from pydantic import field_validator
@@ -10,6 +11,7 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
 @config
@@ -18,6 +20,20 @@ class AttentionConfig:
 
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
+
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
+
+    backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
+    """Per-KV-cache-group attention backend overrides, keyed by
+    `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
+    "sliding_window_mla": "TRITON_MLA"}`). This lets a model that splits its
+    layers across multiple KV-cache groups (e.g. interleaved full and
+    sliding-window attention) use a different backend per group.
+
+    An entry overrides `backend` for layers of the matching kind; kinds not
+    listed fall back to `backend` (or automatic selection). A selected backend
+    that is invalid for that kind raises at startup."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
@@ -59,6 +75,11 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    sparse_mla_force_mqa: bool = False
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
+    Set to True to always use the MQA path."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
@@ -72,13 +93,26 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses the default (16 on PyTorch >= 2.9, 128 otherwise)."""
+    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
+    for encoder-only attention or older PyTorch versions."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
-    128 otherwise)."""
+    If None, uses the KV cache block size for paged KV attention on
+    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
+    versions."""
+
+    def __post_init__(self) -> None:
+        msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
+            AttentionBackendEnum.CUTLASS_MSA: "cutlass",
+            AttentionBackendEnum.TRITON_MSA: "triton",
+        }
+        if self.backend in msa_aliases:
+            self.minimax_m3_msa_decode_backend = msa_aliases[self.backend]
+            # The alias selects only MiniMax's sparse decode kernel. Dense
+            # layers still use the platform's normal automatic backend.
+            self.backend = None
 
     def compute_hash(self) -> str:
         """
@@ -115,3 +149,29 @@ class AttentionConfig:
         if isinstance(value, str):
             return MLAPrefillBackendEnum[value.upper()]
         return value
+
+    @field_validator("backend_per_kind", mode="before")
+    @classmethod
+    def validate_backend_per_kind_before(cls, value: Any) -> Any:
+        """Parse the `backend_per_kind` map from strings.
+
+        Keys must be valid `KVCacheSpecKind` values; values are parsed like
+        `backend` (enum name, case-insensitive).
+        """
+        from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+        if not isinstance(value, dict):
+            return value
+        valid_kinds = {kind.value for kind in KVCacheSpecKind}
+        parsed: dict[str, AttentionBackendEnum] = {}
+        for kind, backend in value.items():
+            if kind not in valid_kinds:
+                raise ValueError(
+                    f"Unknown KV cache group kind '{kind}' in "
+                    f"backend_per_kind. Valid kinds are: "
+                    f"{', '.join(sorted(valid_kinds))}."
+                )
+            if isinstance(backend, str):
+                backend = AttentionBackendEnum[backend.upper()]
+            parsed[kind] = backend
+        return parsed

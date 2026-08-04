@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod abort_requests;
 mod cache;
 mod collective_rpc;
@@ -24,10 +27,9 @@ use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
+use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
 use crate::state::AppState;
-
-const DEFAULT_JSON_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 fn server_dev_mode_enabled() -> bool {
     std::env::var("VLLM_SERVER_DEV_MODE")
@@ -124,7 +126,7 @@ fn build_router_with_options(
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(DEFAULT_JSON_BODY_LIMIT_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
         .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
