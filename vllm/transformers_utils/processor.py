@@ -6,8 +6,6 @@ import inspect
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
-import torch
-import torch.nn as nn
 from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
@@ -160,10 +158,10 @@ def get_processor_cls_name_from_config(
     return None
 
 
-def get_video_processor_cls_name_from_config(
+def get_video_processor_config(
     processor_name: str,
     revision: str | None = "main",
-) -> str | None:
+) -> dict:
     processor_name = convert_model_repo_to_path(processor_name)
     config_file = [
         "video_preprocessor_config.json",
@@ -171,8 +169,20 @@ def get_video_processor_cls_name_from_config(
     ]
     for file in config_file:
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
-        if config and "video_processor_type" in config:
-            return config["video_processor_type"]
+        if config:
+            return config
+
+    return {}
+
+
+def get_video_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
+    config = get_video_processor_config(processor_name, revision)
+
+    if config and "video_processor_type" in config:
+        return config["video_processor_type"]
 
     # Some models ship no explicit ``video_processor_type`` in their
     # preprocessor config. Fall back to transformers' ``model_type`` -> video
@@ -584,52 +594,3 @@ def call_hf_processor_mm_only(
         data={**audio_inputs, **images_inputs, **videos_inputs},
         tensor_type=kwargs.get("return_tensors"),
     )
-
-
-def make_input_norm(processor: type[BaseImageProcessor]) -> nn.BatchNorm1d:
-    image_mean = getattr(processor, "image_mean", None)
-    image_std = getattr(processor, "image_std", None)
-    rescale_factor = getattr(processor, "rescale_factor", None)
-
-    assert image_mean is not None
-    assert image_std is not None
-    assert rescale_factor is not None
-
-    image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
-        1.0 / rescale_factor
-    )
-    image_std_tensor = torch.tensor(image_std, dtype=torch.float32) * (
-        1.0 / rescale_factor
-    )
-
-    bn = nn.BatchNorm1d(3, eps=0.0).to(torch.float32)
-    bn.weight.data = 1.0 / image_std_tensor
-    bn.bias.data = -image_mean_tensor / image_std_tensor
-    bn.running_mean.zero_()
-    bn.running_var.fill_(1.0)
-    bn.eval()
-    for p in bn.parameters():
-        p.requires_grad = False
-
-    return bn
-
-
-def maybe_do_input_norm(
-    grid_thw: torch.Tensor,
-    input_norm: nn.Module | None,
-    visual_dtype: torch.dtype,
-    channel: int = 3,
-) -> torch.Tensor:
-    # "grid_thw" is very likely a torch.uint8 tensor
-    # when mm_device_do_normalize is enabled.
-
-    if input_norm is None or isinstance(input_norm, nn.Identity):
-        return grid_thw.to(visual_dtype)
-
-    assert grid_thw.ndim == 2
-    patches, size = grid_thw.shape
-    patch_size = size // channel
-
-    grid_thw = grid_thw.view(patches, channel, patch_size)
-    grid_thw = input_norm(grid_thw.to(torch.float32))
-    return grid_thw.view(patches, size).to(visual_dtype)

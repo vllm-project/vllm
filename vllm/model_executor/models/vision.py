@@ -8,9 +8,10 @@ from collections.abc import Callable
 from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
+from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -18,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processor import get_video_processor_config
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -580,3 +582,55 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
+
+
+def make_input_norm(model_config: "ModelConfig") -> nn.BatchNorm1d:
+    model = model_config.model
+    revision = model_config.revision
+    config = get_video_processor_config(model, revision=revision)
+
+    image_mean = config.get("image_mean", None)
+    image_std = config.get("image_std", None)
+    rescale_factor = config.get("rescale_factor", 1 / 255)
+
+    assert image_mean is not None
+    assert image_std is not None
+
+    image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
+        1.0 / rescale_factor
+    )
+    image_std_tensor = torch.tensor(image_std, dtype=torch.float32) * (
+        1.0 / rescale_factor
+    )
+
+    bn = nn.BatchNorm1d(3, eps=0.0).to(torch.float32)
+    bn.weight.data = 1.0 / image_std_tensor
+    bn.bias.data = -image_mean_tensor / image_std_tensor
+    bn.running_mean.zero_()
+    bn.running_var.fill_(1.0)
+    bn.eval()
+    for p in bn.parameters():
+        p.requires_grad = False
+
+    return bn
+
+
+def maybe_do_input_norm(
+    grid_thw: torch.Tensor,
+    input_norm: nn.Module | None,
+    visual_dtype: torch.dtype,
+    channel: int = 3,
+) -> torch.Tensor:
+    # "grid_thw" is very likely a torch.uint8 tensor
+    # when mm_device_do_normalize is enabled.
+
+    if input_norm is None or isinstance(input_norm, nn.Identity):
+        return grid_thw.to(visual_dtype)
+
+    assert grid_thw.ndim == 2
+    patches, size = grid_thw.shape
+    patch_size = size // channel
+
+    grid_thw = grid_thw.view(patches, channel, patch_size)
+    grid_thw = input_norm(grid_thw.to(torch.float32))
+    return grid_thw.view(patches, size).to(visual_dtype)

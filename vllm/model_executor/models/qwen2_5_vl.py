@@ -35,7 +35,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, Qwen2VLImageProcessor
+from transformers import BatchFeature
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
@@ -82,7 +82,6 @@ from vllm.multimodal.video_prune.evs import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import make_input_norm, maybe_do_input_norm
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -116,6 +115,8 @@ from .vision import (
     get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
+    make_input_norm,
+    maybe_do_input_norm,
     run_dp_sharded_mrope_vision_model,
 )
 
@@ -1366,7 +1367,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
             if multimodal_config.mm_device_do_normalize:
-                self.input_norm = make_input_norm(Qwen2VLImageProcessor)
+                self.input_norm = make_input_norm(self.model_config)
             else:
                 self.input_norm = nn.Identity()
 

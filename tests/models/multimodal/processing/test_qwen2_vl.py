@@ -7,8 +7,8 @@ from packaging.version import Version
 from transformers import Qwen2VLImageProcessor
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.model_executor.models.vision import make_input_norm, maybe_do_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.processor import make_input_norm, maybe_do_input_norm
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -172,9 +172,9 @@ def test_mm_device_do_normalize(
     pixel_values_without_normalize = processed_inputs_without_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
-    input_norm = make_input_norm(Qwen2VLImageProcessor)
+    input_norm = make_input_norm(ctx.model_config)
     pixel_values_do_input_norm = maybe_do_input_norm(
-        pixel_values_without_normalize.to(dtype), input_norm
+        pixel_values_without_normalize.to(dtype), input_norm, torch.bfloat16
     )
 
     torch.testing.assert_close(pixel_values_with_normalize, pixel_values_do_input_norm)
