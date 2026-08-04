@@ -18,37 +18,63 @@ class DraftTokensHandler:
         self.req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
+        self.proposal_lengths_np: np.ndarray | None = None
 
     def set_draft_tokens(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        draft_tokens: torch.Tensor,
+        proposal_lengths: torch.Tensor | None = None,
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
-        if not input_batch.has_structured_output_reqs:
+        need_tokens = input_batch.has_structured_output_reqs
+        if not need_tokens and proposal_lengths is None:
             # No draft token validation needs to be performed by
-            # the scheduler for this batch.
+            # the scheduler for this batch, and lengths are uniform.
             self.draft_tokens_np = None
+            self.proposal_lengths_np = None
             return
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
+        # Per-request proposal lengths ride the same copy stream: they are
+        # bound to this exact in-flight batch and consumed with it.
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            self.draft_tokens_np = async_copy_to_np(draft_tokens)
-            # draft_tokens is a temporary allocation on the main stream and read here on
-            # copy_stream; without record_stream, the caching allocator may reuse its
-            # memory before the async copy executes.
-            draft_tokens.record_stream(self.copy_stream)
+            if need_tokens:
+                self.draft_tokens_np = async_copy_to_np(draft_tokens)
+                # draft_tokens is a temporary allocation on the main stream and
+                # read here on copy_stream; without record_stream, the caching
+                # allocator may reuse its memory before the async copy executes.
+                draft_tokens.record_stream(self.copy_stream)
+            else:
+                self.draft_tokens_np = None
+            if proposal_lengths is not None:
+                self.proposal_lengths_np = async_copy_to_np(proposal_lengths)
+                proposal_lengths.record_stream(self.copy_stream)
+            else:
+                self.proposal_lengths_np = None
             self.copy_event.record()
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
-        if self.draft_tokens_np is not None:
+        if self.draft_tokens_np is not None or self.proposal_lengths_np is not None:
             self.copy_event.synchronize()
+        if self.draft_tokens_np is not None:
             draft_token_ids = self.draft_tokens_np.tolist()
         else:
             # This case only happens when async scheduling is disabled.
             draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
+        if self.proposal_lengths_np is not None:
+            # Only the confident prefix of each request's proposal is
+            # semantically present; positions beyond it must not reach
+            # verification or scheduler accounting.
+            lengths = self.proposal_lengths_np
+            draft_token_ids = [
+                ids[: int(lengths[i])] if i < len(lengths) else ids
+                for i, ids in enumerate(draft_token_ids)
+            ]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
 
