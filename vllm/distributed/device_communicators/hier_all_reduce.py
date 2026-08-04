@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 _MAX_ELEMS = 256 * 1024  # 512KB bf16 cap; decode messages are ~8-512KB
 _MAX_CTA = 16
+_NUM_WARPS = 8
 # One-shot moves 4n remote bytes in 2 sync rounds, two-shot 7n/4 in 3 and
 # crosses the slow inter-island link with only n/island_size. Latency wins
 # below this size, bandwidth above it; crossover measured on 2x4 A800 PCIe
@@ -121,13 +122,19 @@ def _check(rc: int, what: str) -> None:
 
 
 @triton.jit
-def _fence_sys(dummy):
-    """System-scope acq_rel fence (PCIe P2P has no native remote atomics,
-    so signaling uses plain remote stores bracketed by this fence)."""
-    return tl.inline_asm_elementwise(
+def _fence_sys(FENCE_LANES: tl.constexpr):
+    """System-scope acq_rel fence, executed by every thread in the CTA.
+
+    PCIe has no native remote atomics, so signalling is a plain remote store
+    bracketed by this fence. Applying the asm to a tensor rather than a
+    scalar is what makes every thread issue it: a fence executed by one
+    thread does not order another thread's stores, so a scalar (single-lane)
+    fence would leave the other lanes' data unordered against the flag.
+    """
+    tl.inline_asm_elementwise(
         "fence.acq_rel.sys; mov.u32 $0, $1;",
         "=r,r",
-        [dummy],
+        [tl.zeros((FENCE_LANES,), dtype=tl.int32)],
         dtype=tl.int32,
         is_pure=False,
         pack=1,
@@ -149,6 +156,7 @@ def _hier_all_reduce_kernel(
     numel,
     token_ptr,  # [MAX_CTA] device int32 sequence counters (cudagraph-safe)
     MAX_ELEMS: tl.constexpr,
+    FENCE_LANES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     # Each CTA owns a disjoint chunk with its own flag row and sequence
@@ -181,8 +189,8 @@ def _hier_all_reduce_kernel(
         mask = offs < end
         x = tl.load(inp_ptr + offs, mask=mask, other=0.0)
         tl.store(my_slot + offs, x, mask=mask)
+    _fence_sys(FENCE_LANES)
     tl.debug_barrier()
-    _fence_sys(0)
     for i in tl.static_range(island_size):
         peer = island_base + i
         if peer != rank:
@@ -205,8 +213,8 @@ def _hier_all_reduce_kernel(
                 < token
             ):
                 pass
-    _fence_sys(0)
     tl.debug_barrier()
+    _fence_sys(FENCE_LANES)
 
     # Phase B: island reduce over P2P reads, publish partial, signal the
     # cross-island counterpart. Partials are bf16 to halve cross-island
@@ -227,8 +235,8 @@ def _hier_all_reduce_kernel(
                 )
                 acc += tl.load(peer_slot + offs, mask=mask, other=0.0).to(tl.float32)
         tl.store(my_partial + offs, acc.to(tl.bfloat16), mask=mask)
+    _fence_sys(FENCE_LANES)
     tl.debug_barrier()
-    _fence_sys(0)
     cp_flags = tl.cast(tl.load(flag_ptrs_ptr + counterpart), tl.pointer_type(tl.int32))
     tl.store(cp_flags + fbase + 1 * WORLD + rank, token)
 
@@ -244,8 +252,8 @@ def _hier_all_reduce_kernel(
         < token
     ):
         pass
-    _fence_sys(0)
     tl.debug_barrier()
+    _fence_sys(FENCE_LANES)
     cp_partial = (
         tl.cast(
             tl.load(partial_ptrs_ptr + counterpart),
@@ -279,6 +287,7 @@ def _hier_two_shot_kernel(
     token_ptr,  # [MAX_CTA] device int32 sequence counters
     MAX_ELEMS: tl.constexpr,
     MAX_CTA: tl.constexpr,
+    FENCE_LANES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """Two-shot variant: reduce-scatter, one cross-island shard exchange,
@@ -320,8 +329,8 @@ def _hier_two_shot_kernel(
             mask = offs < end
             x = tl.load(inp_ptr + offs, mask=mask, other=0.0)
             tl.store(my_data + offs, x, mask=mask)
+    _fence_sys(FENCE_LANES)
     tl.debug_barrier()
-    _fence_sys(0)
     for i in tl.static_range(island_size):
         peer = island_base + i
         if peer != rank:
@@ -341,8 +350,8 @@ def _hier_two_shot_kernel(
                 < token
             ):
                 pass
-    _fence_sys(0)
     tl.debug_barrier()
+    _fence_sys(FENCE_LANES)
 
     # Phase B: reduce-scatter -- sum the island over the shard this rank owns.
     for off in range(my_start, my_end, BLOCK):
@@ -358,8 +367,8 @@ def _hier_two_shot_kernel(
                 )
                 acc += tl.load(pd + offs, mask=mask, other=0.0).to(tl.float32)
         tl.store(my_partial + offs, acc.to(tl.bfloat16), mask=mask)
+    _fence_sys(FENCE_LANES)
     tl.debug_barrier()
-    _fence_sys(0)
     cpf = tl.cast(tl.load(flag_ptrs_ptr + counterpart), tl.pointer_type(tl.int32))
     tl.store(cpf + (1 * WORLD + rank) * MAX_CTA + pid, token)
 
@@ -375,8 +384,8 @@ def _hier_two_shot_kernel(
         < token
     ):
         pass
-    _fence_sys(0)
     tl.debug_barrier()
+    _fence_sys(FENCE_LANES)
     cp_partial = (
         tl.cast(
             tl.load(partial_ptrs_ptr + counterpart),
@@ -390,8 +399,8 @@ def _hier_two_shot_kernel(
         acc = tl.load(my_partial + offs, mask=mask, other=0.0).to(tl.float32)
         acc += tl.load(cp_partial + offs, mask=mask, other=0.0).to(tl.float32)
         tl.store(my_gather + offs, acc.to(tl.bfloat16), mask=mask)
+    _fence_sys(FENCE_LANES)
     tl.debug_barrier()
-    _fence_sys(0)
     for i in tl.static_range(island_size):
         peer = island_base + i
         if peer != rank:
@@ -412,8 +421,8 @@ def _hier_two_shot_kernel(
                 < token
             ):
                 pass
-    _fence_sys(0)
     tl.debug_barrier()
+    _fence_sys(FENCE_LANES)
     for s in tl.static_range(island_size):
         peer = island_base + s
         pg = (
@@ -559,8 +568,9 @@ class HierarchicalAllReduce:
                 token_ptr=self._token_ctr2,
                 MAX_ELEMS=_MAX_ELEMS,
                 MAX_CTA=_MAX_CTA,
+                FENCE_LANES=_NUM_WARPS * 32,
                 BLOCK=min(4096, triton.next_power_of_2(numel)),
-                num_warps=8,
+                num_warps=_NUM_WARPS,
             )
             return out
         ncta = min(_MAX_CTA, max(1, (numel + 4095) // 4096))
@@ -578,7 +588,8 @@ class HierarchicalAllReduce:
             numel=numel,
             token_ptr=self._token_ctr,
             MAX_ELEMS=_MAX_ELEMS,
+            FENCE_LANES=_NUM_WARPS * 32,
             BLOCK=min(8192, triton.next_power_of_2(numel)),
-            num_warps=8,
+            num_warps=_NUM_WARPS,
         )
         return out
