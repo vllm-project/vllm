@@ -687,8 +687,8 @@ class TestARCPolicy:
         # block 5 should be in T1
         assert to_keys([5])[0] in arc_policy.t1
 
-    def test_batch_eviction_scans_each_entry_at_most_once(self):
-        """A large ARC eviction must not restart its scan per selected block."""
+    def test_batch_eviction_scans_t1_and_t2_once(self):
+        """ARC batch eviction must preserve order without restarting scans."""
 
         class CountingOrderedDict(OrderedDict):
             def __init__(self, *args, **kwargs):
@@ -707,14 +707,58 @@ class TestARCPolicy:
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
 
-        counting_t1 = CountingOrderedDict(arc_policy.t1)
-        arc_policy.t1 = counting_t1
+        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 64
 
-        evicted = arc_policy.evict(128, protected=set())
+        protected = {keys[0], keys[2], keys[255]}
+        arc_policy.t1[keys[1]].ref_cnt = 1
+        arc_policy.t2[keys[254]].ref_cnt = 1
+
+        num_evictions = 124
+        num_t1_evictions = len(arc_policy.t1) - int(arc_policy.target_t1_size) + 1
+        num_t2_evictions = num_evictions - num_t1_evictions
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        expected_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t1_evictions]
+        expected_t2 = [
+            key
+            for key, block in arc_policy.t2.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t2_evictions]
+        expected_t1_scans = t1_order.index(expected_t1[-1]) + 1
+        expected_t2_scans = t2_order.index(expected_t2[-1]) + 1
+
+        counting_t1 = CountingOrderedDict(arc_policy.t1)
+        counting_t2 = CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(num_evictions, protected)
 
         assert evicted is not None
-        assert [key for key, _ in evicted] == keys[:128]
-        assert counting_t1.items_yielded == 128
+        assert [key for key, _ in evicted] == expected_t1 + expected_t2
+        assert counting_t1.items_yielded == expected_t1_scans
+        assert counting_t2.items_yielded == expected_t2_scans
+
+    def test_batch_eviction_failure_is_atomic(self):
+        """Finding only some candidates must not partially evict the cache."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=4, enable_events=False)
+        keys = to_keys(list(range(4)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        before_t1 = list(arc_policy.t1.items())
+        protected = set(keys[1:])
+
+        assert arc_policy.evict(2, protected) is None
+        assert list(arc_policy.t1.items()) == before_t1
+        assert not arc_policy.t2
+        assert not arc_policy.b1
+        assert not arc_policy.b2
 
     def test_ghost_list_bounds(self):
         """
