@@ -8,10 +8,11 @@ import copy
 import ctypes
 import json
 import os
-import re
 import struct
 from dataclasses import dataclass
 from typing import Any
+
+import regex as re
 
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
     EMBEDDING_PROTOCOL_VERSION,
@@ -147,17 +148,12 @@ def create_mooncake_embedding_store_client() -> MooncakeEmbeddingStoreClient:
         )
     except ImportError as e:
         raise ImportError(
-            "Please install mooncake to run vLLM with " "MooncakeStoreECConnector."
+            "Please install mooncake to run vLLM with MooncakeStoreECConnector."
         ) from e
 
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 
     config = MooncakeEmbeddingStoreConfig.load_from_env()
-    config.device_name = rdma_utils.get_configured_worker_rnic(
-        protocol=config.protocol,
-        configured_device=config.device_name,
-    )
-
     store = MooncakeDistributedStore()
     local_ip = get_ip()
     local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
@@ -447,7 +443,7 @@ def _decode_mooncake_tensor_metadata(
         or header_size != MOONCAKE_TENSOR_METADATA_NBYTES
     ):
         raise EmbeddingStoreLoadError(
-            "invalid Mooncake tensor metadata header for " f"{pool_key.to_string()}"
+            f"invalid Mooncake tensor metadata header for {pool_key.to_string()}"
         )
     if ndim < 0 or ndim > 8:
         raise EmbeddingStoreLoadError(

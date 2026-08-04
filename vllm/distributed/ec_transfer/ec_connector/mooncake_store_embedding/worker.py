@@ -26,15 +26,13 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data imp
     build_tensor_meta,
     validate_loaded_tensor,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
+from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_socket
+
+from .store_client import (
     EmbeddingStoreLoadError,
     MooncakeEmbeddingStoreClient,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    get_mooncake_dp_engine_index,
-)
-from vllm.logger import init_logger
-from vllm.utils.network_utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -215,6 +213,8 @@ class EmbeddingStoreWorker:
         stored_tensor = tensor if tensor.is_contiguous() else tensor.contiguous()
         used_staging = stored_tensor is not tensor
         tensor_meta = build_tensor_meta(pool_key, stored_tensor)
+        staging_event = _record_tensor_ready_event(stored_tensor)
+        _wait_tensor_ready_event(staging_event)
         try:
             self.store_client.put_tensor(
                 pool_key,
@@ -350,6 +350,19 @@ def _resolve_torch_dtype(dtype: str) -> torch.dtype:
     raise EmbeddingStoreLoadError(f"unsupported embedding tensor dtype: {dtype}")
 
 
+def _record_tensor_ready_event(tensor: torch.Tensor) -> torch.Event | None:
+    if not tensor.is_cuda:
+        return None
+    event = torch.Event()
+    event.record()
+    return event
+
+
+def _wait_tensor_ready_event(event: torch.Event | None) -> None:
+    if event is not None:
+        event.synchronize()
+
+
 class EmbeddingStoreSendingThread(threading.Thread):
     """Background thread for storing embedding tensors to the store."""
 
@@ -404,6 +417,7 @@ class EmbeddingStoreSendingThread(threading.Thread):
             try:
                 if request is None:
                     return
+                _wait_tensor_ready_event(request.ready_event)
                 self.store_worker.save_tensor(
                     request.pool_key,
                     request.tensor,
@@ -482,9 +496,13 @@ class EmbeddingLookupServer:
                         identifiers = [
                             bytes(frame).decode("utf-8") for frame in all_frames[1:]
                         ]
-                        exists = self.store_worker.lookup_batch(identifiers)
+                        exists_by_identifier = self.store_worker.lookup_batch(
+                            identifiers
+                        )
                         frames = [
-                            RESP_HIT if exists.get(identifier, False) else RESP_MISS
+                            RESP_HIT
+                            if exists_by_identifier.get(identifier, False)
+                            else RESP_MISS
                             for identifier in identifiers
                         ]
                         self.socket.send_multipart([RESP_BATCH, *frames])
@@ -615,7 +633,7 @@ class EmbeddingLookupClient:
 def get_zmq_rpc_path_embedding_lookup(vllm_config: VllmConfig) -> str:
     """Construct IPC path for Embedding Store lookup socket."""
     assert vllm_config.ec_transfer_config is not None
-    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
+    dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     hostname = socket.gethostname()
     extra_config = vllm_config.ec_transfer_config.ec_connector_extra_config

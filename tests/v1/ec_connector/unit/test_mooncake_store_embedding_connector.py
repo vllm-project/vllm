@@ -8,7 +8,7 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
     connector as connector_module,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.connector import (
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.connector import (  # noqa: E501
     MooncakeStoreECConnector,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (

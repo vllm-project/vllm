@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
-import sys
 import struct
+import sys
 import types
 from concurrent.futures import Future
 
@@ -21,7 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data imp
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.keys import (
     make_embedding_data_key,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (  # noqa: E501
     EmbeddingStoreError,
     EmbeddingStoreLoadError,
     EmbeddingStoreSaveError,
@@ -167,6 +167,14 @@ class FakeContext:
 
     def term(self):
         self.term_called = True
+
+
+class FakeExecutor:
+    def __init__(self):
+        self.shutdown_called = False
+
+    def shutdown(self, wait=False, cancel_futures=True):
+        self.shutdown_called = True
 
 
 class FakeThread:
@@ -434,7 +442,7 @@ def test_buffer_put_unregisters_payload_when_metadata_registration_fails():
             store.fail_register_addrs.add(addr)
         return original_register(addr, size)
 
-    store.register_buffer = register_buffer
+    store.register_buffer = register_buffer  # type: ignore[method-assign]
     client = MooncakeEmbeddingStoreClient(store, replicate_config=FakeReplicateConfig())
 
     try:
@@ -450,7 +458,9 @@ def test_buffer_put_unregisters_payload_when_metadata_registration_fails():
 def test_worker_save_marks_embedding_data_type(monkeypatch):
     fake_mooncake = types.ModuleType("mooncake")
     fake_store = types.ModuleType("mooncake.store")
-    fake_store.ObjectDataType = FakeObjectDataTypeWithEmbedding
+    fake_store.ObjectDataType = (  # type: ignore[attr-defined]
+        FakeObjectDataTypeWithEmbedding
+    )
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake)
     monkeypatch.setitem(sys.modules, "mooncake.store", fake_store)
 
@@ -476,7 +486,7 @@ def test_worker_save_marks_embedding_data_type(monkeypatch):
 def test_embedding_data_type_falls_back_to_tensor(monkeypatch):
     fake_mooncake = types.ModuleType("mooncake")
     fake_store = types.ModuleType("mooncake.store")
-    fake_store.ObjectDataType = FakeObjectDataTypeOnlyTensor
+    fake_store.ObjectDataType = FakeObjectDataTypeOnlyTensor  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake)
     monkeypatch.setitem(sys.modules, "mooncake.store", fake_store)
 
@@ -486,7 +496,7 @@ def test_embedding_data_type_falls_back_to_tensor(monkeypatch):
 def test_embedding_data_type_missing_type_returns_none(monkeypatch):
     fake_mooncake = types.ModuleType("mooncake")
     fake_store = types.ModuleType("mooncake.store")
-    fake_store.ObjectDataType = FakeObjectDataTypeNoTensor
+    fake_store.ObjectDataType = FakeObjectDataTypeNoTensor  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake)
     monkeypatch.setitem(sys.modules, "mooncake.store", fake_store)
 
@@ -574,9 +584,7 @@ def test_sending_thread_stores_embedding_tensor_asynchronously():
     sending_thread = EmbeddingStoreSendingThread(worker)
     sending_thread.start()
 
-    sending_thread.add_request(
-        EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor)
-    )
+    sending_thread.add_request(EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor))
     sending_thread.request_queue.join()
 
     assert store.pub_tensors[0][0] == make_embedding_data_key(pool_key)
@@ -596,9 +604,7 @@ def test_sending_thread_records_failed_identifier_without_finishing():
     sending_thread = EmbeddingStoreSendingThread(worker)
     sending_thread.start()
 
-    sending_thread.add_request(
-        EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor)
-    )
+    sending_thread.add_request(EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor))
     sending_thread.request_queue.join()
 
     assert sending_thread.get_and_clear_finished_identifiers() == set()
@@ -696,12 +702,7 @@ def test_lookup_server_close_joins_thread_and_closes_context(tmp_path):
 def test_lookup_client_close_shuts_down_executor_socket_and_context():
     socket = FakeSocket()
     ctx = FakeContext()
-    executor = types.SimpleNamespace(
-        shutdown_called=False,
-        shutdown=lambda wait=False, cancel_futures=True: setattr(
-            executor, "shutdown_called", True
-        ),
-    )
+    executor = FakeExecutor()
     client = EmbeddingLookupClient.__new__(EmbeddingLookupClient)
     client.executor = executor
     client.futures = {"image-hash": Future()}
@@ -728,7 +729,7 @@ def test_worker_load_gets_tensor_data_into_encoder_cache_before_returning():
     )
     worker.save_tensor(pool_key, stored)
 
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
     worker.load(
         [MMMeta(identifier=pool_key.identifier, load_spec=LoadSpec(can_load=True))],
         encoder_cache,
@@ -760,7 +761,7 @@ def test_worker_load_records_error_without_writing_encoder_cache():
         tensor_database=EmbeddingTensorDatabase(),
         key_metadata=pool_key.key_metadata,
     )
-    encoder_cache = {}
+    encoder_cache: dict[str, torch.Tensor] = {}
 
     try:
         worker.load(

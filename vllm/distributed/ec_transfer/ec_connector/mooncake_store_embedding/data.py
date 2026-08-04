@@ -97,6 +97,7 @@ class EmbeddingSaveRequest:
     pool_key: EmbeddingPoolKey
     tensor: torch.Tensor
     with_soft_pin: bool = False
+    ready_event: torch.Event | None = None
 
     @property
     def identifier(self) -> str:

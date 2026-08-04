@@ -28,18 +28,19 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data imp
     MMMeta,
     MooncakeStoreConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
+from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.v1.core.sched.output import SchedulerOutput
+
+from .store_client import (
     MooncakeEmbeddingStoreClient,
     create_mooncake_embedding_store_client,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.worker import (
+from .worker import (
     EmbeddingLookupClient,
     EmbeddingLookupServer,
     EmbeddingStoreWorker,
 )
-from vllm.logger import init_logger
-from vllm.multimodal.utils import get_mm_features_in_window
-from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -138,9 +139,7 @@ class MooncakeStoreECConnector(ECConnectorBase):
         end = request.num_tokens
         lo, hi = get_mm_features_in_window(request.mm_features, start, end)
         identifiers = list(
-            dict.fromkeys(
-                feature.identifier for feature in request.mm_features[lo:hi]
-            )
+            dict.fromkeys(feature.identifier for feature in request.mm_features[lo:hi])
         )
         if not identifiers:
             return True
@@ -231,7 +230,9 @@ class MooncakeStoreECConnector(ECConnectorBase):
                 if item.modality is None:
                     item.modality = self._save_modalities.get(identifier)
 
-        finished_req_ids = getattr(scheduler_output, "finished_req_ids", set())
+        finished_req_ids: set[str] = getattr(
+            scheduler_output, "finished_req_ids", set()
+        )
         for finished_req_id in finished_req_ids:
             for waiters in self.identifier_waiters.values():
                 waiters.discard(finished_req_id)
@@ -296,12 +297,14 @@ class MooncakeStoreECConnector(ECConnectorBase):
                 identifier,
             )
             return
+        tensor = encoder_cache[identifier]
         pool_key = self.worker.make_pool_key(identifier)
         self.worker.enqueue_save(
             EmbeddingSaveRequest(
                 pool_key=pool_key,
-                tensor=encoder_cache[identifier],
+                tensor=tensor,
                 with_soft_pin=self._should_soft_pin(item),
+                ready_event=_record_tensor_ready_event(tensor),
             )
         )
 
@@ -375,3 +378,11 @@ def build_embedding_key_metadata(vllm_config: VllmConfig) -> EmbeddingKeyMetadat
         parallel=parallel,
         tensor_layout=EMBEDDING_TENSOR_LAYOUT,
     )
+
+
+def _record_tensor_ready_event(tensor: torch.Tensor) -> torch.Event | None:
+    if not tensor.is_cuda:
+        return None
+    event = torch.Event()
+    event.record()
+    return event

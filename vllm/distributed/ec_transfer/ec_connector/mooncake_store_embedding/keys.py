@@ -8,9 +8,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
-        EmbeddingPoolKey,
-    )
+    from .data import EmbeddingPoolKey
 
 
 def escape_key_part(value: str) -> str:
@@ -18,5 +16,5 @@ def escape_key_part(value: str) -> str:
     return quote(str(value), safe="-_.~")
 
 
-def make_embedding_data_key(pool_key: "EmbeddingPoolKey") -> str:
+def make_embedding_data_key(pool_key: EmbeddingPoolKey) -> str:
     return pool_key.to_string()
