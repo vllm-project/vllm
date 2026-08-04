@@ -253,6 +253,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._pending_unmapped_acks = []
 
     assert worker.get_finished() == (set(), set())
     assert worker._consumer_notification_counts == {"tx-fanin": 1}
@@ -295,6 +296,8 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
+    # Transfer-timeout reaping state consulted by _pop_done_transfers.
+    worker._recving_transfers_start = {}
 
     assert worker._pop_done_transfers() == {"tx-release"}
     assert worker.moriio_wrapper.sent == [

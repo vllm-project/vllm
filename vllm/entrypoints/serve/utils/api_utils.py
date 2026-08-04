@@ -331,7 +331,7 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
             "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
         )
         colors = {
-            "w": "\033[97;1m",  # white
+            "w": "\033[1m",  # bold, default foreground
             "o": "\033[93m",  # orange
             "b": "\033[94m",  # blue
             "r": "\033[0m",  # reset
