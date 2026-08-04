@@ -218,6 +218,7 @@ _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
 _ON_RDNA = _ON_GFX1X and not _ON_CDNA
+_ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -313,6 +314,10 @@ def on_gfx12x() -> bool:
 
 def on_gfx1250() -> bool:
     return _ON_GFX1250
+
+
+def on_rdna4() -> bool:
+    return _ON_RDNA4
 
 
 def on_mi3xx() -> bool:
@@ -413,9 +418,21 @@ def flash_attn_triton_available() -> bool:
     try:
         from importlib.util import find_spec
 
-        if find_spec("flash_attn") is None:
-            return False
-        if find_spec("flash_attn.flash_attn_triton_amd") is None:
+        # Locate the Triton-AMD kernels. Older ROCm/flash-attention (pre
+        # 2026-03) shipped them as the flash_attn.flash_attn_triton_amd
+        # subpackage. The main_perf migration commit 3f94643 moved them
+        # into aiter at aiter.ops.triton._triton_kernels.flash_attn_triton_amd,
+        # so accept either location.
+        def _has_spec(name: str) -> bool:
+            try:
+                return find_spec(name) is not None
+            except (ImportError, ValueError):
+                return False
+
+        if not (
+            _has_spec("flash_attn.flash_attn_triton_amd")
+            or _has_spec("aiter.ops.triton._triton_kernels.flash_attn_triton_amd")
+        ):
             return False
         if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
             logger.info_once(
@@ -459,6 +476,8 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    elif rocm_aiter_ops.is_rdna_aiter_enabled():
+        backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
 
@@ -906,7 +925,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_cdna() or on_gfx12x()
+        return on_cdna() or on_rdna4()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
@@ -1053,6 +1072,7 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
+            and not on_rdna4()
         ):
             rms_norm = ["aiter"] + default
         else:

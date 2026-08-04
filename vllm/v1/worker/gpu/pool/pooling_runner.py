@@ -12,12 +12,18 @@ from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import PoolerOutput
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.states import RequestState
 
 _SUPPORTED_TASKS: frozenset[PoolingTask] = frozenset(
-    {"embed", "classify", "token_classify"}
+    {"embed", "classify", "token_embed", "token_classify", "embed&token_classify"}
+)
+# `embed&token_classify` concatenates a fixed-size embedding with per-token
+# weights, so its output length scales with the prompt like the others here.
+_TOKEN_TASKS: frozenset[PoolingTask] = frozenset(
+    {"token_embed", "token_classify", "embed&token_classify"}
 )
 
 
@@ -53,13 +59,14 @@ class PoolingRunner:
         self.pooling_params: dict[int, PoolingParams] = {}
         self.pooling_states: dict[int, PoolingStates] = {}
         self.prompt_token_ids: dict[int, torch.Tensor] = {}
+        self.late_interaction_runner = LateInteractionRunner()
 
     @staticmethod
     def _get_enabled_tasks(model_config: ModelConfig) -> frozenset[PoolingTask]:
-        # Token classification is validated only for unchunked encoder-only prefill.
+        # Token-wise pooling is validated only for unchunked encoder-only prefill.
         if model_config.attn_type == "encoder_only":
             return _SUPPORTED_TASKS
-        return _SUPPORTED_TASKS - {"token_classify"}
+        return _SUPPORTED_TASKS - _TOKEN_TASKS
 
     @staticmethod
     def get_supported_tasks(
@@ -72,6 +79,7 @@ class PoolingRunner:
 
     def add_request(
         self,
+        req_id: str,
         req_index: int,
         pooling_params: PoolingParams,
         prompt_token_ids: list[int],
@@ -83,6 +91,7 @@ class PoolingRunner:
                 f"Supported tasks: {sorted(self.supported_tasks)}"
             )
         self.model.pooler.get_pooling_updates(task).apply(pooling_params)
+        self.late_interaction_runner.register_request(req_id, pooling_params)
         self.pooling_params[req_index] = pooling_params
         self.pooling_states[req_index] = PoolingStates()
         if pooling_params.requires_token_ids:
@@ -95,6 +104,12 @@ class PoolingRunner:
         if state := self.pooling_states.pop(req_index, None):
             state.clean()
         self.prompt_token_ids.pop(req_index, None)
+
+    def on_requests_finished(self, req_ids: set[str]) -> None:
+        self.late_interaction_runner.on_requests_finished(req_ids)
+
+    def clear(self) -> None:
+        self.late_interaction_runner.clear()
 
     def _get_pooling_metadata(
         self,
@@ -153,8 +168,13 @@ class PoolingRunner:
             query_start_loc_gpu=input_batch.query_start_loc[: num_reqs + 1],
         )
         pooler_output = self.model.pooler(hidden_states, pooling_metadata)
-
         finished_mask = pooling_metadata.get_pooling_cursor().is_finished().tolist()
+        pooler_output = self.late_interaction_runner.postprocess_pooler_output(
+            raw_pooler_output=pooler_output,
+            pooling_params=pooling_metadata.pooling_params,
+            req_ids=input_batch.req_ids,
+            finished_mask=finished_mask,
+        )
         return pooler_output, finished_mask
 
     def _dummy_pooler_run_task(
