@@ -39,6 +39,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+    bind_routed_experts_capturer,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -55,7 +59,11 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    ModelRunnerOutput,
+    RoutedExpertsTensors,
+)
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -279,10 +287,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
+        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
+
+    def init_routed_experts_capturer(self) -> None:
+        """Initialize target-model capture on every participating worker."""
+        self.routed_experts_capturer = RoutedExpertsCapturer(
+            max_num_batched_tokens=self.max_num_tokens,
+            vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
+        )
+        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -305,7 +323,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
-            logger.info("Loading model from scratch...")
+            logger.info_once("Loading model from scratch...")
 
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
@@ -743,6 +761,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def reset_encoder_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_encoder_cache()
+        if self.pooling_runner is not None:
+            self.pooling_runner.clear()
 
     def profile_cudagraph_memory(self) -> int:
         # NOTE(woosuk): It is TBD whether we keep this API or not.
@@ -813,6 +833,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
+        if self.pooling_runner is not None:
+            # Preempted docs keep their query-use reservation until rescheduled.
+            self.pooling_runner.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
@@ -857,6 +880,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
                 self.pooling_runner.add_request(
+                    req_id,
                     req_index,
                     new_req_data.pooling_params,
                     new_req_data.prompt_token_ids,
@@ -1431,6 +1455,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        routed_experts = None
+        if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
+            assert slot_mappings is not None
+            routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
+
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -1439,6 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            routed_experts=routed_experts,
         )
 
         if not self.is_last_pp_rank:
@@ -1461,6 +1491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        routed_experts = self.execute_model_state.routed_experts
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1526,6 +1557,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
+            routed_experts=routed_experts,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1706,6 +1738,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    routed_experts: RoutedExpertsTensors | None
 
 
 def sort_batch_req_ids(
