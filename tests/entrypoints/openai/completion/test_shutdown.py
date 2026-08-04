@@ -3,6 +3,8 @@
 """Integration tests for shutdown behavior, timeout, and signal handling."""
 
 import asyncio
+import json
+import os
 import signal
 import subprocess
 import sys
@@ -14,7 +16,7 @@ import openai
 import psutil
 import pytest
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -29,6 +31,15 @@ _CHILD_CLEANUP_TIMEOUT = 10
 _INFLIGHT_REQUEST_START_TIMEOUT = 5
 _INFLIGHT_REQUEST_POLL_INTERVAL = 0.1
 _ABORT_CLIENT_TIMEOUT = 3
+
+
+@pytest.fixture
+def setup_test_module_path(monkeypatch):
+    """Make tests.* modules importable in spawned subprocesses."""
+    repo_root = str(VLLM_PATH.resolve())
+    existing = os.environ.get("PYTHONPATH", "")
+    new_pythonpath = repo_root + (os.pathsep + existing if existing else "")
+    monkeypatch.setenv("PYTHONPATH", new_pythonpath)
 
 
 def _get_child_pids(parent_pid: int) -> list[int]:
@@ -566,5 +577,267 @@ async def test_multi_api_server_shutdown():
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("Process did not exit after SIGTERM")
+
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_completes_during_shutdown_wait(setup_test_module_path):
+    """Verify shutdown waits for async KV transfers to complete.
+
+    Uses DelayedKVConnector to simulate async KV transfers with a 3s delay.
+    Shutdown should wait for transfers to complete within the 30s timeout.
+    """
+    kv_delay = 3.0
+    kv_transfer_config = {
+        "kv_connector": "DelayedKVConnector",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"delay_duration": kv_delay},
+    }
+    server_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "256",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.05",
+        "--max-num-seqs",
+        "4",
+        "--shutdown-timeout",
+        "30",
+        "--kv-transfer-config",
+        json.dumps(kv_transfer_config),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        proc = remote_server.proc
+        child_pids = _get_child_pids(proc.pid)
+
+        state = ShutdownState()
+        sigterm_sent = asyncio.Event()
+
+        # Start concurrent requests to fill max_num_seqs
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(client, state, sigterm_sent, concurrency=8)
+        )
+
+        # Let requests start
+        await asyncio.sleep(0.5)
+
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+        sigterm_sent.set()
+
+        # Wait for shutdown detection
+        try:
+            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            state.stop_requesting = True
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        # Wait for process to exit (should happen after KV transfer delay)
+        for _ in range(int((kv_delay + 10) * 10)):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        exit_time = time.time() - start_time
+
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"Process did not exit within {kv_delay + 10}s after SIGTERM")
+
+        # Verify some requests completed after SIGTERM (during shutdown wait)
+        assert state.requests_after_sigterm > 0, (
+            f"Expected requests to complete during shutdown wait. "
+            f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
+        )
+
+        # Verify shutdown waited approximately the KV transfer delay duration
+        # Allow for some variance but should be at least the delay duration
+        assert exit_time >= kv_delay * 0.8, (
+            f"Shutdown completed too quickly ({exit_time:.1f}s), "
+            f"expected >= {kv_delay * 0.8:.1f}s"
+        )
+        assert exit_time < kv_delay + 10, (
+            f"Shutdown took too long ({exit_time:.1f}s), expected < {kv_delay + 10}s"
+        )
+
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_respects_shutdown_timeout(setup_test_module_path):
+    """Verify shutdown timeout is respected even with pending KV transfers.
+
+    Uses DelayedKVConnector with a delay longer than shutdown timeout.
+    Shutdown should abort after timeout expires.
+    """
+    kv_delay = 10.0  # Longer than shutdown timeout
+    shutdown_timeout = 3
+    kv_transfer_config = {
+        "kv_connector": "DelayedKVConnector",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"delay_duration": kv_delay},
+    }
+    server_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "256",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.05",
+        "--max-num-seqs",
+        "4",
+        "--shutdown-timeout",
+        str(shutdown_timeout),
+        "--kv-transfer-config",
+        json.dumps(kv_transfer_config),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        proc = remote_server.proc
+        child_pids = _get_child_pids(proc.pid)
+
+        state = ShutdownState()
+        sigterm_sent = asyncio.Event()
+
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(client, state, sigterm_sent, concurrency=8)
+        )
+
+        await asyncio.sleep(0.5)
+
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+        sigterm_sent.set()
+
+        try:
+            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            state.stop_requesting = True
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        # Wait for process to exit (should happen after timeout, not delay)
+        max_wait = shutdown_timeout + 15
+        for _ in range(int(max_wait * 10)):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        exit_time = time.time() - start_time
+
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"Process did not exit within {max_wait}s after SIGTERM")
+
+        # Verify shutdown respected timeout (didn't wait full delay duration)
+        assert exit_time < shutdown_timeout + 10, (
+            f"Shutdown took too long ({exit_time:.1f}s), "
+            f"expected < {shutdown_timeout + 10}s"
+        )
+        # Should exit after timeout, not immediately
+        assert exit_time >= shutdown_timeout * 0.5, (
+            f"Shutdown completed too quickly ({exit_time:.1f}s), "
+            f"expected >= {shutdown_timeout * 0.5}s"
+        )
+
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_zero_timeout_no_wait(setup_test_module_path):
+    """Verify zero timeout doesn't wait for KV transfers.
+
+    With abort timeout (0), shutdown should not wait for KV transfers.
+    """
+    kv_delay = 25.0
+    kv_transfer_config = {
+        "kv_connector": "DelayedKVConnector",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"delay_duration": kv_delay},
+    }
+    server_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "256",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.05",
+        "--max-num-seqs",
+        "4",
+        "--shutdown-timeout",
+        "0",
+        "--kv-transfer-config",
+        json.dumps(kv_transfer_config),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        proc = remote_server.proc
+        child_pids = _get_child_pids(proc.pid)
+
+        state = ShutdownState()
+        sigterm_sent = asyncio.Event()
+
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(client, state, sigterm_sent, concurrency=8)
+        )
+
+        await asyncio.sleep(0.5)
+
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+        sigterm_sent.set()
+
+        try:
+            await asyncio.wait_for(request_task, timeout=_SHUTDOWN_DETECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            state.stop_requesting = True
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        # Abort timeout should exit quickly, not wait for KV transfers
+        max_exit_time = 15.0
+        for _ in range(int(max_exit_time * 10)):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        exit_time = time.time() - start_time
+
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(
+                f"Process did not exit within {max_exit_time}s with shutdown_timeout=0"
+            )
+
+        # Should not wait for KV transfer delay
+        assert exit_time < max_exit_time, (
+            f"Abort timeout shutdown took too long ({exit_time:.1f}s), "
+            f"expected < {max_exit_time}s"
+        )
 
         await _assert_children_cleaned_up(child_pids)
