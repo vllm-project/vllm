@@ -453,8 +453,7 @@ class RoutedExperts(PluggableLayer):
             # contains the global intermediate dimension. Reconstruct that
             # global shape: w1/w3 shard their first data axis and w2 its second.
             expected_global_shape = list(target_shape[-2:])
-            tp_shard_axis = 1 if shard_id == "w2" else 0
-            expected_global_shape[tp_shard_axis] *= tp_size
+            expected_global_shape[intermediate_axis] *= tp_size
             checkpoint_shape = list(fused_weight.shape[-2:])
             # This is only a tie-breaker: require an exact reversed-shape
             # match so padded, square, or otherwise ambiguous layouts are
