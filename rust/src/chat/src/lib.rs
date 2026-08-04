@@ -21,6 +21,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
+pub use llm_multimodal::MediaContentPart;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
@@ -41,6 +42,7 @@ pub use request::{
     ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
 
@@ -56,7 +58,6 @@ mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
-use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
@@ -210,9 +211,6 @@ impl ChatRequestProcessor {
     /// Prepare one chat request for tokenization without constructing an output processor.
     pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
-        if request.has_multimodal() && request.truncate_prompt_tokens.is_some() {
-            return Err(Error::TruncateUnsupportedWithMultimodal);
-        }
         self.prepare_text_request(request).await
     }
 
@@ -222,9 +220,6 @@ impl ChatRequestProcessor {
         mut request: ChatRequest,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
-        if request.has_multimodal() && request.truncate_prompt_tokens.is_some() {
-            return Err(Error::TruncateUnsupportedWithMultimodal);
-        }
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
@@ -319,6 +314,15 @@ impl ChatLlm {
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
+    }
+
+    /// Prepare media for an already-tokenized request.
+    pub async fn prepare_media(
+        &self,
+        media: Vec<MediaContentPart>,
+        token_ids: &mut Vec<u32>,
+    ) -> Result<Option<MmFeatures>> {
+        self.processor.prepare_media(media, token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

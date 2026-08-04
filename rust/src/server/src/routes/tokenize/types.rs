@@ -50,6 +50,8 @@ impl TokenizeCompletionRequest {
             intermediate: false,
             priority: 0,
             cache_salt: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
             session_id: None,
