@@ -9,6 +9,7 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
@@ -111,8 +112,9 @@ def test_online_quantization(
     if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
         pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
 
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
 
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
