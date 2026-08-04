@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Iterable, Mapping
 from functools import cached_property, partial
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import torch
 from torch import nn
@@ -55,6 +55,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+
+if TYPE_CHECKING:
+    from vllm.renderers import TokenizeParams
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -144,6 +147,20 @@ class SiglipProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width, image_height=target_height
         )
+
+    def get_text_max_length(self) -> int:
+        return self.get_hf_config().text_config.max_position_embeddings
+
+    def get_default_tok_params(self) -> "TokenizeParams":
+        """Pad text prompts to the length the text tower was trained with.
+
+        SigLIP is trained with `padding="max_length"` and without an attention
+        mask, so padding tokens are part of the input and the pooled embedding
+        is taken from the last position. Text embeddings computed without
+        padding are not aligned with the image embeddings.
+        """
+        tok_params = super().get_default_tok_params()
+        return tok_params.with_kwargs(pad_prompt_tokens=self.get_text_max_length())
 
 
 class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):

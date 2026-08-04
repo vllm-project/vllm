@@ -39,10 +39,13 @@ def _run_test(
     *,
     dtype: str,
     tokenization_kwargs: dict[str, Any] | None = None,
+    vllm_tokenization_kwargs: dict[str, Any] | None = None,
     attention_config: dict[str, Any] | None = None,
 ) -> None:
     if tokenization_kwargs is None:
         tokenization_kwargs = {}
+    if vllm_tokenization_kwargs is None:
+        vllm_tokenization_kwargs = tokenization_kwargs
 
     with vllm_runner(
         model,
@@ -54,7 +57,9 @@ def _run_test(
         attention_config=attention_config,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(
-            input_texts, images=input_images, tokenization_kwargs=tokenization_kwargs
+            input_texts,
+            images=input_images,
+            tokenization_kwargs=vllm_tokenization_kwargs,
         )
 
     with hf_runner(model, dtype=dtype, auto_cls=SiglipModel) as hf_model:
@@ -92,6 +97,7 @@ def _run_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("explicit_padding", [True, False])
 def test_models_text(
     hf_runner,
     vllm_runner,
@@ -99,10 +105,20 @@ def test_models_text(
     siglip_attention_config,
     model: str,
     dtype: str,
+    explicit_padding: bool,
 ) -> None:
+    """Text embeddings must match HF whether or not the caller pads.
+
+    SigLIP is trained with this padding setting, and vLLM applies it by
+    default. Callers that cannot pass tokenization kwargs (such as the
+    OpenAI-compatible server) would otherwise get embeddings that are not
+    aligned with the image embeddings.
+    """
     input_texts_images = [(text, None) for text in HF_TEXT_PROMPTS]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
+
+    padding_kwargs = {"padding": "max_length", "max_length": 64}
 
     _run_test(
         hf_runner,
@@ -111,10 +127,8 @@ def test_models_text(
         input_images,  # type: ignore
         model,
         dtype=dtype,
-        tokenization_kwargs={
-            "padding": "max_length",
-            "max_length": 64,
-        },  # siglip2 was trained with this padding setting.
+        tokenization_kwargs=padding_kwargs,
+        vllm_tokenization_kwargs=padding_kwargs if explicit_padding else {},
         attention_config=siglip_attention_config,
     )
 
