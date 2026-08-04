@@ -104,6 +104,7 @@ class Base(
         super().__init__()
         logger.info("Using Transformers modeling backend.")
 
+        self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
@@ -357,7 +358,7 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            logger.warning(
+            logger.warning_once(
                 "%s does not define a pipeline parallel plan. The Transformers "
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
@@ -452,7 +453,7 @@ class Base(
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
         # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.model_config)
+        fusers = Fusers(self.model, self.vllm_config)
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
@@ -503,9 +504,7 @@ class Base(
                     new_module = replace_conv_class(child_module)
                 elif (fuser := fusers[child_module]) is not None:
                     register_fusion(fuser, qual_name)
-                    new_module = fuser.fuse(
-                        child_module, qual_name, self.model_config, self.quant_config
-                    )
+                    new_module = fuser.fuse(child_module, qual_name, self.vllm_config)
                     logger.info_once(fuser.info(child_name))
                     _recursive_replace(new_module, prefix=qual_name)
                 elif not isinstance(child_module, MoERunner):
@@ -587,22 +586,23 @@ class Base(
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
+        dtype = dtype or self.model_config.dtype
+        device = self.device_config.device
 
-        def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
+        def _init_parameters(module: nn.Module):
             for name, param in module.named_parameters(recurse=False):
-                if param.device == torch.device("meta"):
-                    new_param = nn.Parameter(
-                        torch.empty_like(
-                            param.data,
-                            dtype=dtype or self.model_config.dtype,
-                            device=self.device_config.device,
-                        )
-                    )
-                    setattr(module, name, new_param)
+                # Already on device, nothing to do
+                if param.device != torch.device("meta"):
+                    continue
+                # Already a vLLM parameter, nothing to do
+                if hasattr(param, "weight_loader"):
+                    continue
+                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                setattr(module, name, nn.Parameter(data=data))
             for child in module.children():
-                _init_parameters(child, dtype)
+                _init_parameters(child)
 
-        _init_parameters(module, dtype)
+        _init_parameters(module)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)

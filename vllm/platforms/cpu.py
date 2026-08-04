@@ -461,11 +461,7 @@ class CpuPlatform(Platform):
     @classmethod
     def pack_kv_cache(
         cls,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_ids: list[int],
+        kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
         """
@@ -476,15 +472,26 @@ class CpuPlatform(Platform):
         from vllm._custom_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
+        num_blocks, num_kv_heads, block_size, fused_head_size = kv_cache.shape
+        head_size = fused_head_size // 2
+
+        # Fused path used by heterogeneous NIXL CPU_ATTN post-processing.
+        blocks_to_update = kv_cache.index_select(0, indices)
+        key = blocks_to_update[..., :head_size]
+        value = blocks_to_update[..., head_size:]
+
+        key_cache, value_cache = kv_cache.view(
+            num_blocks, num_kv_heads, block_size * 2, head_size
+        ).chunk(2, dim=2)
+
         dtype = key.dtype
         # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
-        _, _, block_size, head_size = key_cache.shape
         key = key.permute(0, 2, 1, 3).flatten(0, 1)
         value = value.permute(0, 2, 1, 3).flatten(0, 1)
 
         isa = _get_attn_isa(dtype, block_size, head_size)
         block_offsets = torch.arange(block_size, device="cpu", dtype=torch.long)
-        num_blocks = len(block_ids)
+        num_blocks = indices.numel()
         slot_mapping = (
             block_offsets.reshape(1, block_size)
             + indices.reshape(num_blocks, 1) * block_size

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
@@ -27,6 +27,13 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
         for layer in layers.values():
+            get_attn_backend = getattr(layer, "get_attn_backend", None)
+            if pcp_size > 1 and get_attn_backend is not None:
+                backend = get_attn_backend()
+                assert backend.supports_pcp(), (
+                    "PCP requires attention backend support, "
+                    f"but {backend.get_name()} does not support PCP."
+                )
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
                 continue
@@ -44,26 +51,14 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "--attention-backend or disable DCP."
                 )
 
-            if pcp_size > 1:
-                assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
-                )
 
-
-def get_total_cp_world_size():
-    try:
-        pcp_world_size = get_pcp_group().world_size
-    except AssertionError:
-        # PCP might not be initialized in testing
-        pcp_world_size = 1
+def get_kv_cache_shard_count() -> int:
     try:
         dcp_world_size = get_dcp_group().world_size
     except AssertionError:
         # DCP might not be initialized in testing
         dcp_world_size = 1
-    return dcp_world_size * pcp_world_size
+    return dcp_world_size
 
 
 def get_dcp_dummy_context_len(

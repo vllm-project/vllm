@@ -14,6 +14,7 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
 
@@ -28,6 +29,7 @@ class _FakeLmHead:
         self.weight = weight
         self.quant_method = object() if quantized else UnquantizedEmbeddingMethod()
         self.shard_indices = shard_indices
+        self.tp_size = 1
 
 
 def _build_processor(vocab_size: int) -> LogitsProcessor:
@@ -95,6 +97,37 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
     assert logits.dtype == torch.bfloat16
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Exercises the torch.mm(out_dtype=...) device fast path, "
+    "available on CUDA and ROCm.",
+)
+def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
+    # On ROCm, current_platform.is_cuda() is False, so this previously fell
+    # through to the cast path (F.linear) instead of torch.mm(out_dtype=...),
+    # even though ROCm supports the out_dtype mm via its non-Lt GEMM path.
+    from unittest import mock
+
+    vocab_size, hidden_size, num_tokens = 64, 16, 4
+    lp = _build_processor(vocab_size)
+    lp.head_dtype = torch.float32
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+
+    with mock.patch(
+        "vllm.model_executor.layers.logits_processor.F.linear"
+    ) as linear_mock:
+        logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+
+    linear_mock.assert_not_called()
+    assert logits.dtype == torch.float32
+    expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
+    torch.testing.assert_close(logits, expected)
+
+
 def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
     lp = _build_processor(64)
     lp.head_dtype = torch.float32
@@ -104,11 +137,59 @@ def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
 
 
+def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
+    default_vllm_config,
+):
+    from unittest import mock
+
+    vocab_size, hidden_size = 12, 8
+    soft_cap, scale = 2.0, 0.5
+    lp = LogitsProcessor(
+        vocab_size,
+        soft_cap=soft_cap,
+        scale=scale,
+    )
+    lp.head_dtype = torch.float32
+
+    hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    world_size_getter = (
+        "vllm.model_executor.layers.vocab_parallel_embedding."
+        "get_tensor_model_parallel_world_size"
+    )
+    with mock.patch(world_size_getter, return_value=2):
+        lm_head = ParallelLMHead(
+            vocab_size,
+            hidden_size,
+            params_dtype=torch.bfloat16,
+            disable_tp=True,
+        )
+    lm_head.weight_loader(lm_head.weight, weight)
+    assert lm_head.tp_size == 1
+
+    with mock.patch.object(lp, "_gather_logits") as gather_mock:
+        logits = lp(lm_head, hidden_states)
+
+    gather_mock.assert_not_called()
+
+    expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
+    expected = torch.tanh(expected / soft_cap) * soft_cap * scale
+    torch.testing.assert_close(logits, expected)
+
+    all_gather_path = (
+        "vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather"
+    )
+    with mock.patch(all_gather_path) as all_gather:
+        top = lp.get_top_tokens(lm_head, hidden_states)
+
+    all_gather.assert_not_called()
+    assert torch.equal(top, expected.argmax(dim=-1))
+
+
 def test_get_top_tokens_honors_head_dtype(default_vllm_config):
     # The spec-decode local-argmax path (get_top_tokens) must run the lm_head
     # in head_dtype too, not just _get_logits.
     import types
-    from unittest import mock
 
     vocab_size, hidden_size = 64, 16
     lp = _build_processor(vocab_size)
@@ -123,13 +204,7 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
         ),
     )
 
-    with mock.patch(
-        "vllm.model_executor.layers.logits_processor."
-        "get_tensor_model_parallel_world_size",
-        return_value=1,
-    ):
-        top = lp.get_top_tokens(lm_head, hidden_states, None)
-
+    top = lp.get_top_tokens(lm_head, hidden_states, None)
     expected = torch.nn.functional.linear(hidden_states.float(), weight.float()).argmax(
         dim=-1
     )

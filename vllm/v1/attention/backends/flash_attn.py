@@ -22,6 +22,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
@@ -57,7 +58,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -74,6 +75,8 @@ class FlashAttentionBackend(AttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -178,14 +181,11 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if current_platform.is_xpu():
-                return True
-            return (
-                get_flash_attn_version() == 3
-                and current_platform.is_device_capability_family(90)
-            )
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
+        return True
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
@@ -216,6 +216,17 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
+        if (
+            kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and not flash_attn_supports_kv_cache_dtype(
+                kv_cache_dtype,
+                head_size=head_size,
+                head_size_v=head_size,
+                has_sinks=has_sink,
+            )
+        ):
+            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
         if (
             use_mm_prefix
             and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
@@ -349,7 +360,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     def get_cudagraph_support(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
 
@@ -771,7 +782,9 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
+            requires_local_attention=sliding_window is not None,
             head_size=head_size,
+            has_sinks=sinks is not None,
         )
         logger.info_once(
             "Using FlashAttention version %s",
@@ -779,6 +792,20 @@ class FlashAttentionImpl(AttentionImpl):
         )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
+
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+        ):
+            raise NotImplementedError(
+                f"FlashAttention does not support {self.kv_cache_dtype}"
+                " kv-cache on this device."
+            )
 
         self.sinks = sinks
         if self.sinks is not None:
