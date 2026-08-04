@@ -1046,10 +1046,14 @@ def preprocess_mamba(
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
     align_ctx: MambaSpecDecodeGPUContext | None = None,
-):
+) -> bool:
     """
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
+
+    Returns True if any request had its ``num_accepted_tokens_cpu`` reset to 1
+    (i.e. crossed a block boundary), so the caller can gate the follow-up
+    H2D sync of ``num_accepted_tokens``.
     """
     fused = _resolve_fused_precopy(align_ctx)
     mamba_group_ids = copy_bufs.mamba_group_ids
@@ -1065,7 +1069,7 @@ def preprocess_mamba(
 
     if fused is not None:
         if num_reqs == 0:
-            return
+            return False
         if not fused.ctx.is_initialized:
             fused.ctx.initialize_from_forward_context(
                 kv_cache_config,
@@ -1080,6 +1084,7 @@ def preprocess_mamba(
         fused.src_col.np[:num_reqs] = -1
         fused.token_bias.np[:num_reqs] = 0
 
+    any_reset = False
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
@@ -1126,6 +1131,7 @@ def preprocess_mamba(
                     forward_context,
                 )
             input_batch.num_accepted_tokens_cpu[i] = 1
+            any_reset = True
 
     if fused is not None:
         fused.state_idx.copy_to_gpu(num_reqs)
@@ -1140,6 +1146,8 @@ def preprocess_mamba(
         )
     else:
         do_mamba_copy_block(copy_bufs)
+
+    return any_reset
 
 
 def postprocess_mamba_all(
