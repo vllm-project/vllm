@@ -81,10 +81,9 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.config.kernel import MEGA_MOE_BACKENDS
 from vllm.utils.flashinfer_moe_ep import (
     is_fi_moe_ep_backend,
-    is_mega_moe_backend,
-    make_fi_mega_moe_experts_cls,
     validate_fi_moe_ep_config,
 )
 from vllm.utils.math_utils import cdiv
@@ -541,7 +540,7 @@ class DeepseekV4MoE(nn.Module):
         self.use_sequence_parallel = use_sequence_parallel
         moe_backend = vllm_config.kernel_config.moe_backend
         validate_fi_moe_ep_config(vllm_config)
-        self.use_mega_moe = is_mega_moe_backend(moe_backend)
+        self.use_mega_moe = moe_backend in MEGA_MOE_BACKENDS
         self.use_fi_mega_moe = is_fi_moe_ep_backend(moe_backend)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
@@ -1021,8 +1020,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.use_mega_moe = is_mega_moe_backend(
-            vllm_config.kernel_config.moe_backend
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
         )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:

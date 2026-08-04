@@ -141,6 +141,17 @@ MoEBackend = Literal[
     "emulation",
 ]
 
+# Backends that run the DeepSeek-V4 mega-MoE model path (fused expert module
+# plus prepare_megamoe routing), whether the experts compute natively
+# (deep_gemm) or through the flashinfer moe_ep runtime.
+MEGA_MOE_BACKENDS = frozenset(
+    {
+        "deep_gemm_mega_moe",
+        "flashinfer_moe_ep_mega_deep_gemm",
+        "flashinfer_moe_ep_mega_cutedsl",
+    }
+)
+
 LinearBackend = Literal[
     "auto",
     "cutlass",
