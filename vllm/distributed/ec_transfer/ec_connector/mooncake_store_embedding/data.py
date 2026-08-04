@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Data classes for the hidden-state Mooncake Store EC connector."""
+"""Data classes for the embedding Mooncake Store EC connector."""
 
 from __future__ import annotations
 
@@ -9,21 +9,21 @@ from dataclasses import dataclass, field
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.keys import (
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.keys import (
     escape_key_part,
-    make_hidden_data_key,
+    make_embedding_data_key,
 )
 
-HIDDEN_OBJECT_KIND = "encoder_output"
-HIDDEN_STORAGE_LAYOUT = "replicated_object"
-HIDDEN_TENSOR_LAYOUT = "tensor"
-HIDDEN_PROTOCOL_VERSION = "v1"
+EMBEDDING_OBJECT_KIND = "encoder_output"
+EMBEDDING_STORAGE_LAYOUT = "replicated_object"
+EMBEDDING_TENSOR_LAYOUT = "tensor"
+EMBEDDING_PROTOCOL_VERSION = "v1"
 MOONCAKE_TENSOR_METADATA_NBYTES = 304
 
 
 @dataclass(frozen=True)
-class HiddenKeyMetadata:
-    """Metadata that defines the semantic namespace for hidden reuse."""
+class EmbeddingKeyMetadata:
+    """Metadata that defines the semantic namespace for embedding reuse."""
 
     cache_prefix: str
     kind: str
@@ -35,10 +35,10 @@ class HiddenKeyMetadata:
 
 
 @dataclass(frozen=True, order=True)
-class HiddenPoolKey:
-    """Key for addressing one hidden tensor in the distributed store."""
+class EmbeddingPoolKey:
+    """Key for addressing one embedding tensor in the distributed store."""
 
-    key_metadata: HiddenKeyMetadata
+    key_metadata: EmbeddingKeyMetadata
     identifier: str
 
     def to_string(self) -> str:
@@ -47,7 +47,7 @@ class HiddenPoolKey:
             f"{escape_key_part(meta.cache_prefix)}@" if meta.cache_prefix else ""
         )
         return (
-            f"{prefix}hidden"
+            f"{prefix}embedding"
             f"@kind:{escape_key_part(meta.kind)}"
             f"@model:{escape_key_part(meta.model_name)}"
             f"@encoder:{escape_key_part(meta.encoder)}"
@@ -60,7 +60,7 @@ class HiddenPoolKey:
 
 @dataclass
 class MMMeta:
-    """Per hidden object metadata passed from scheduler to worker."""
+    """Per embedding object metadata passed from scheduler to worker."""
 
     identifier: str
     modality: str | None = None
@@ -70,9 +70,9 @@ class MMMeta:
 
 @dataclass(frozen=True)
 class TensorMeta:
-    """Canonical contiguous tensor descriptor for one hidden store object."""
+    """Canonical contiguous tensor descriptor for one embedding store object."""
 
-    pool_key: HiddenPoolKey
+    pool_key: EmbeddingPoolKey
     protocol_version: str
     layout: str
     shape: tuple[int, ...]
@@ -85,16 +85,16 @@ class TensorMeta:
 
 @dataclass
 class LoadSpec:
-    """Specification for loading a hidden tensor from external store."""
+    """Specification for loading an embedding tensor from external store."""
 
     can_load: bool = False
 
 
 @dataclass
-class HiddenSaveRequest:
-    """Specification for asynchronously storing one hidden tensor."""
+class EmbeddingSaveRequest:
+    """Specification for asynchronously storing one embedding tensor."""
 
-    pool_key: HiddenPoolKey
+    pool_key: EmbeddingPoolKey
     tensor: torch.Tensor
     with_soft_pin: bool = False
 
@@ -105,7 +105,7 @@ class HiddenSaveRequest:
 
 @dataclass
 class MooncakeStoreConnectorMetadata(ECConnectorMetadata):
-    """Metadata passed from scheduler to worker for hidden store operations."""
+    """Metadata passed from scheduler to worker for embedding store operations."""
 
     items: list[MMMeta] = field(default_factory=list)
 
@@ -114,7 +114,7 @@ class MooncakeStoreConnectorMetadata(ECConnectorMetadata):
 
 
 @dataclass
-class HiddenStoreOperationStats:
+class EmbeddingStoreOperationStats:
     """Minimal per-operation telemetry aligned with Mooncake KV store stats."""
 
     data: dict[str, list[dict[str, int | float | str]]] = field(default_factory=dict)
@@ -143,33 +143,33 @@ class HiddenStoreOperationStats:
         )
 
 
-class HiddenTensorDatabase:
-    """Maps hidden tensors to store keys and GPU memory descriptors."""
+class EmbeddingTensorDatabase:
+    """Maps embedding tensors to store keys and GPU memory descriptors."""
 
     def prepare_value(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         tensor: torch.Tensor,
     ) -> tuple[str, list[int], list[int]]:
         return (
-            make_hidden_data_key(pool_key),
+            make_embedding_data_key(pool_key),
             [tensor.data_ptr()],
             [tensor.numel() * tensor.element_size()],
         )
 
 
 def build_tensor_meta(
-    pool_key: HiddenPoolKey,
+    pool_key: EmbeddingPoolKey,
     tensor: torch.Tensor,
 ) -> TensorMeta:
-    """Build metadata for the canonical stored hidden tensor layout."""
+    """Build metadata for the canonical stored embedding tensor layout."""
     if not tensor.is_contiguous():
-        raise ValueError("Hidden tensor descriptor requires a contiguous tensor")
+        raise ValueError("Embedding tensor descriptor requires a contiguous tensor")
 
     return TensorMeta(
         pool_key=pool_key,
-        protocol_version=HIDDEN_PROTOCOL_VERSION,
-        layout=HIDDEN_TENSOR_LAYOUT,
+        protocol_version=EMBEDDING_PROTOCOL_VERSION,
+        layout=EMBEDDING_TENSOR_LAYOUT,
         shape=tuple(tensor.shape),
         dtype=str(tensor.dtype),
         nbytes=tensor.numel() * tensor.element_size(),
@@ -181,22 +181,22 @@ def build_tensor_meta(
 def validate_loaded_tensor(tensor: torch.Tensor, meta: TensorMeta) -> None:
     if tuple(tensor.shape) != tuple(meta.shape):
         raise ValueError(
-            "Hidden tensor shape mismatch: "
+            "Embedding tensor shape mismatch: "
             f"actual={tuple(tensor.shape)} expected={meta.shape}"
         )
 
     if str(tensor.dtype) != meta.dtype:
         raise ValueError(
-            "Hidden tensor dtype mismatch: "
+            "Embedding tensor dtype mismatch: "
             f"actual={tensor.dtype} expected={meta.dtype}"
         )
 
     actual_nbytes = tensor.numel() * tensor.element_size()
     if actual_nbytes != meta.nbytes:
         raise ValueError(
-            "Hidden tensor nbytes mismatch: "
+            "Embedding tensor nbytes mismatch: "
             f"actual={actual_nbytes} expected={meta.nbytes}"
         )
 
-    if meta.layout != HIDDEN_TENSOR_LAYOUT:
-        raise ValueError(f"Unsupported hidden tensor layout: {meta.layout}")
+    if meta.layout != EMBEDDING_TENSOR_LAYOUT:
+        raise ValueError(f"Unsupported embedding tensor layout: {meta.layout}")

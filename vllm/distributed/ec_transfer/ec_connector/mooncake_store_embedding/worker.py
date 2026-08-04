@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side hidden-state load/save logic for Mooncake Store."""
+"""Worker-side embedding load/save logic for Mooncake Store."""
 
 from __future__ import annotations
 
@@ -16,19 +16,19 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HiddenKeyMetadata,
-    HiddenPoolKey,
-    HiddenSaveRequest,
-    HiddenStoreOperationStats,
-    HiddenTensorDatabase,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    EmbeddingKeyMetadata,
+    EmbeddingPoolKey,
+    EmbeddingSaveRequest,
+    EmbeddingStoreOperationStats,
+    EmbeddingTensorDatabase,
     MMMeta,
     build_tensor_meta,
     validate_loaded_tensor,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.store_client import (
-    HiddenStoreLoadError,
-    MooncakeHiddenStoreClient,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
+    EmbeddingStoreLoadError,
+    MooncakeEmbeddingStoreClient,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     get_mooncake_dp_engine_index,
@@ -47,25 +47,25 @@ RESP_ERR = b"ERR"
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 
 
-class HiddenStoreWorker:
-    """Synchronous hidden tensor load/save path used by the EC connector."""
+class EmbeddingStoreWorker:
+    """Synchronous embedding tensor load/save path used by the EC connector."""
 
     def __init__(
         self,
-        store_client: MooncakeHiddenStoreClient,
-        tensor_database: HiddenTensorDatabase | None = None,
-        key_metadata: HiddenKeyMetadata | None = None,
+        store_client: MooncakeEmbeddingStoreClient,
+        tensor_database: EmbeddingTensorDatabase | None = None,
+        key_metadata: EmbeddingKeyMetadata | None = None,
     ):
         self.store_client = store_client
-        self.tensor_database = tensor_database or HiddenTensorDatabase()
+        self.tensor_database = tensor_database or EmbeddingTensorDatabase()
         self.key_metadata = key_metadata
-        self.sending_thread: HiddenStoreSendingThread | None = None
+        self.sending_thread: EmbeddingStoreSendingThread | None = None
         self._operation_stats_lock = threading.Lock()
-        self._operation_stats = HiddenStoreOperationStats()
+        self._operation_stats = EmbeddingStoreOperationStats()
 
-    def make_pool_key(self, identifier: str) -> HiddenPoolKey:
+    def make_pool_key(self, identifier: str) -> EmbeddingPoolKey:
         assert self.key_metadata is not None
-        return HiddenPoolKey(
+        return EmbeddingPoolKey(
             key_metadata=self.key_metadata,
             identifier=identifier,
         )
@@ -73,10 +73,10 @@ class HiddenStoreWorker:
     def start_sending_thread(self) -> None:
         if self.sending_thread is not None:
             return
-        self.sending_thread = HiddenStoreSendingThread(self)
+        self.sending_thread = EmbeddingStoreSendingThread(self)
         self.sending_thread.start()
 
-    def enqueue_save(self, request: HiddenSaveRequest) -> None:
+    def enqueue_save(self, request: EmbeddingSaveRequest) -> None:
         if self.sending_thread is None:
             self.save_tensor(
                 request.pool_key,
@@ -96,12 +96,12 @@ class HiddenStoreWorker:
             return {}
         return self.sending_thread.get_and_clear_failure_reasons()
 
-    def get_operation_stats(self) -> HiddenStoreOperationStats | None:
+    def get_operation_stats(self) -> EmbeddingStoreOperationStats | None:
         with self._operation_stats_lock:
             if self._operation_stats.is_empty():
                 return None
             stats = self._operation_stats
-            self._operation_stats = HiddenStoreOperationStats()
+            self._operation_stats = EmbeddingStoreOperationStats()
             return stats
 
     def _record_operation(
@@ -133,11 +133,11 @@ class HiddenStoreWorker:
             close_fn()
 
     def lookup(self, identifier: str) -> bool:
-        """Return whether the hidden object exists in Mooncake Store."""
+        """Return whether the embedding object exists in Mooncake Store."""
         return self.lookup_batch([identifier]).get(identifier, False)
 
     def lookup_batch(self, identifiers: list[str]) -> dict[str, bool]:
-        """Return whether hidden objects exist in Mooncake Store."""
+        """Return whether embedding objects exist in Mooncake Store."""
         pool_keys = [self.make_pool_key(identifier) for identifier in identifiers]
         started = time.perf_counter()
         try:
@@ -164,13 +164,13 @@ class HiddenStoreWorker:
         for pool_key, hit in zip(pool_keys, exists, strict=True):
             if hit:
                 logger.info(
-                    "hidden_store_lookup_hit identifier=%s hidden_pool_key=%s",
+                    "embedding_store_lookup_hit identifier=%s embedding_pool_key=%s",
                     pool_key.identifier,
                     pool_key.to_string(),
                 )
             else:
                 logger.info(
-                    "hidden_store_lookup_miss identifier=%s hidden_pool_key=%s "
+                    "embedding_store_lookup_miss identifier=%s embedding_pool_key=%s "
                     "reason=missing_object",
                     pool_key.identifier,
                     pool_key.to_string(),
@@ -179,7 +179,7 @@ class HiddenStoreWorker:
 
     def save_tensor(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         tensor: torch.Tensor,
         with_soft_pin: bool = False,
     ) -> None:
@@ -204,7 +204,7 @@ class HiddenStoreWorker:
         )
         if exists:
             logger.info(
-                "hidden_store_save_skip identifier=%s hidden_pool_key=%s "
+                "embedding_store_save_skip identifier=%s embedding_pool_key=%s "
                 "reason=exists",
                 pool_key.identifier,
                 pool_key.to_string(),
@@ -239,8 +239,8 @@ class HiddenStoreWorker:
             status="ok",
         )
         logger.info(
-            "hidden_store_put identifier=%s hidden_pool_key=%s nbytes=%d "
-            "used_staging=%s hidden_store_put_ms=%.3f",
+            "embedding_store_put identifier=%s embedding_pool_key=%s nbytes=%d "
+            "used_staging=%s embedding_store_put_ms=%.3f",
             pool_key.identifier,
             pool_key.to_string(),
             tensor_meta.nbytes,
@@ -261,7 +261,7 @@ class HiddenStoreWorker:
                 continue
             if item.identifier in encoder_cache:
                 logger.debug(
-                    "hidden_store_load_skip identifier=%s "
+                    "embedding_store_load_skip identifier=%s "
                     "reason=local_encoder_cache",
                     item.identifier,
                 )
@@ -274,8 +274,8 @@ class HiddenStoreWorker:
             try:
                 tensor_meta = self.store_client.get_tensor_meta(pool_key)
                 if tensor_meta is None:
-                    raise HiddenStoreLoadError(
-                        "failed to load hidden tensor metadata for "
+                    raise EmbeddingStoreLoadError(
+                        "failed to load embedding tensor metadata for "
                         f"{pool_key.to_string()}"
                     )
 
@@ -311,7 +311,7 @@ class HiddenStoreWorker:
                     num_failed_keys=1,
                 )
                 logger.exception(
-                    "hidden_store_load_failed identifier=%s hidden_pool_key=%s "
+                    "embedding_store_load_failed identifier=%s embedding_pool_key=%s "
                     "stage=%s shape=%s dtype=%s nbytes=%s error=%s",
                     item.identifier,
                     pool_key.to_string(),
@@ -331,8 +331,8 @@ class HiddenStoreWorker:
                 status="ok",
             )
             logger.info(
-                "hidden_store_get identifier=%s hidden_pool_key=%s nbytes=%d "
-                "hidden_store_get_ms=%.3f",
+                "embedding_store_get identifier=%s embedding_pool_key=%s nbytes=%d "
+                "embedding_store_get_ms=%.3f",
                 item.identifier,
                 pool_key.to_string(),
                 tensor_meta.nbytes,
@@ -347,23 +347,23 @@ def _resolve_torch_dtype(dtype: str) -> torch.dtype:
         return torch.bfloat16
     if dtype == "torch.float32":
         return torch.float32
-    raise HiddenStoreLoadError(f"unsupported hidden tensor dtype: {dtype}")
+    raise EmbeddingStoreLoadError(f"unsupported embedding tensor dtype: {dtype}")
 
 
-class HiddenStoreSendingThread(threading.Thread):
-    """Background thread for storing hidden tensors to the store."""
+class EmbeddingStoreSendingThread(threading.Thread):
+    """Background thread for storing embedding tensors to the store."""
 
-    def __init__(self, store_worker: HiddenStoreWorker):
-        super().__init__(daemon=True, name="HiddenStoreSendingThread")
+    def __init__(self, store_worker: EmbeddingStoreWorker):
+        super().__init__(daemon=True, name="EmbeddingStoreSendingThread")
         self.store_worker = store_worker
-        self.request_queue: queue.Queue[HiddenSaveRequest | None] = queue.Queue()
+        self.request_queue: queue.Queue[EmbeddingSaveRequest | None] = queue.Queue()
         self.done_task_lock = threading.Lock()
         self.finished_identifiers: set[str] = set()
         self.failed_identifiers: set[str] = set()
         self.failure_reasons: dict[str, str] = {}
         self._closed = threading.Event()
 
-    def add_request(self, request: HiddenSaveRequest) -> None:
+    def add_request(self, request: EmbeddingSaveRequest) -> None:
         self.request_queue.put(request)
 
     def get_and_clear_finished_identifiers(self) -> set[str]:
@@ -432,16 +432,16 @@ class HiddenStoreSendingThread(threading.Thread):
                 )
 
 
-class HiddenLookupServer:
-    """Worker rank-0 admin channel for scheduler-side hidden lookups."""
+class EmbeddingLookupServer:
+    """Worker rank-0 admin channel for scheduler-side embedding lookups."""
 
     def __init__(
         self,
-        store_worker: HiddenStoreWorker,
+        store_worker: EmbeddingStoreWorker,
         vllm_config: VllmConfig,
     ):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_hidden_lookup(vllm_config)
+        socket_path = get_zmq_rpc_path_embedding_lookup(vllm_config)
         self._ipc_path = socket_path.removeprefix("ipc://")
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
@@ -462,7 +462,7 @@ class HiddenLookupServer:
                 except zmq.error.ZMQError:
                     if not self.running:
                         return
-                    logger.exception("HiddenLookupServer recv failed")
+                    logger.exception("EmbeddingLookupServer recv failed")
                     continue
                 msg_type = bytes(all_frames[0])
 
@@ -475,7 +475,7 @@ class HiddenLookupServer:
                         else:
                             self.socket.send_multipart([RESP_HIT])
                     except Exception:
-                        logger.exception("HiddenLookupServer lookup failed")
+                        logger.exception("EmbeddingLookupServer lookup failed")
                         self.socket.send_multipart([RESP_ERR])
                 elif msg_type == BATCH_LOOKUP_MSG:
                     try:
@@ -489,11 +489,11 @@ class HiddenLookupServer:
                         ]
                         self.socket.send_multipart([RESP_BATCH, *frames])
                     except Exception:
-                        logger.exception("HiddenLookupServer batch lookup failed")
+                        logger.exception("EmbeddingLookupServer batch lookup failed")
                         self.socket.send_multipart([RESP_ERR])
                 else:
                     logger.warning(
-                        "HiddenLookupServer received unknown msg_type: %r",
+                        "EmbeddingLookupServer received unknown msg_type: %r",
                         msg_type,
                     )
                     self.socket.send_multipart([RESP_ERR])
@@ -507,7 +507,7 @@ class HiddenLookupServer:
         self.thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
         if self.thread.is_alive():
             logger.warning(
-                "HiddenLookupServer thread did not exit within %.1f seconds",
+                "EmbeddingLookupServer thread did not exit within %.1f seconds",
                 THREAD_JOIN_TIMEOUT_SECONDS,
             )
         _close_zmq_context(self.ctx)
@@ -515,12 +515,12 @@ class HiddenLookupServer:
             os.unlink(self._ipc_path)
 
 
-class HiddenLookupClient:
-    """Scheduler-side client for worker rank-0 hidden lookup queries."""
+class EmbeddingLookupClient:
+    """Scheduler-side client for worker rank-0 embedding lookup queries."""
 
     def __init__(self, vllm_config: VllmConfig):
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_hidden_lookup(vllm_config)
+        socket_path = get_zmq_rpc_path_embedding_lookup(vllm_config)
         self.socket = make_zmq_socket(
             self.ctx,
             socket_path,
@@ -529,7 +529,7 @@ class HiddenLookupClient:
         )
         self.executor = ThreadPoolExecutor(
             max_workers=1,
-            thread_name_prefix="HiddenLookupClient",
+            thread_name_prefix="EmbeddingLookupClient",
         )
         self.futures: dict[str, Future[dict[str, bool]]] = {}
 
@@ -551,7 +551,7 @@ class HiddenLookupClient:
             states = [bytes(frame) == RESP_HIT for frame in resp[1:]]
             if len(states) != len(identifiers):
                 logger.warning(
-                    "HiddenLookupClient received malformed batch response: "
+                    "EmbeddingLookupClient received malformed batch response: "
                     "identifiers=%d states=%d",
                     len(identifiers),
                     len(states),
@@ -560,7 +560,7 @@ class HiddenLookupClient:
             return dict(zip(identifiers, states, strict=True))
         if msg_type == RESP_ERR:
             return {identifier: False for identifier in identifiers}
-        logger.warning("HiddenLookupClient received unknown response: %r", msg_type)
+        logger.warning("EmbeddingLookupClient received unknown response: %r", msg_type)
         return {identifier: False for identifier in identifiers}
 
     def lookup_batch(
@@ -592,7 +592,7 @@ class HiddenLookupClient:
                 batch_results = future.result()
                 results[identifier] = batch_results.get(identifier, False)
             except Exception as e:
-                logger.error("Async hidden lookup failed for %s: %s", identifier, e)
+                logger.error("Async embedding lookup failed for %s: %s", identifier, e)
                 results[identifier] = False
             finally:
                 self.futures.pop(identifier, None)
@@ -612,20 +612,20 @@ class HiddenLookupClient:
         _close_zmq_context(self.ctx)
 
 
-def get_zmq_rpc_path_hidden_lookup(vllm_config: VllmConfig) -> str:
-    """Construct IPC path for Hidden Store lookup socket."""
+def get_zmq_rpc_path_embedding_lookup(vllm_config: VllmConfig) -> str:
+    """Construct IPC path for Embedding Store lookup socket."""
     assert vllm_config.ec_transfer_config is not None
     dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
     base_url = envs.VLLM_RPC_BASE_PATH
     hostname = socket.gethostname()
     extra_config = vllm_config.ec_transfer_config.ec_connector_extra_config
     rpc_port = extra_config.get(
-        "hidden_lookup_rpc_port",
+        "embedding_lookup_rpc_port",
         extra_config.get("lookup_rpc_port", 0),
     )
-    logger.debug("Hidden lookup Base URL: %s, RPC Port: %s", base_url, rpc_port)
+    logger.debug("Embedding lookup Base URL: %s, RPC Port: %s", base_url, rpc_port)
     return (
-        f"ipc://{base_url}/hidden_lookup_rpc_port_{rpc_port}_host_{hostname}"
+        f"ipc://{base_url}/embedding_lookup_rpc_port_{rpc_port}_host_{hostname}"
         f"_dp_rank{dp_rank}"
     )
 
@@ -640,4 +640,4 @@ def _close_zmq_context(ctx) -> None:
         if term is not None:
             term()
     except Exception:
-        logger.warning("failed to close hidden lookup ZMQ context", exc_info=True)
+        logger.warning("failed to close embedding lookup ZMQ context", exc_info=True)

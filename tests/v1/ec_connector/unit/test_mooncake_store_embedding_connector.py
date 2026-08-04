@@ -5,16 +5,16 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden import (
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
     connector as connector_module,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.connector import (
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.connector import (
     MooncakeStoreECConnector,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_TENSOR_LAYOUT,
-    HiddenKeyMetadata,
-    HiddenPoolKey,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    EMBEDDING_TENSOR_LAYOUT,
+    EmbeddingKeyMetadata,
+    EmbeddingPoolKey,
     LoadSpec,
     MMMeta,
     MooncakeStoreConnectorMetadata,
@@ -25,18 +25,18 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 class FakeWorker:
     def __init__(self):
         self.requests = []
-        self.key_metadata = HiddenKeyMetadata(
+        self.key_metadata = EmbeddingKeyMetadata(
             cache_prefix="",
             kind="encoder_output",
             model_name="qwen",
             encoder="encoder-config-a",
             storage="replicated_object",
             parallel="tp:1@pp:1@pcp:1@dcp:1@mm_tp:weights",
-            tensor_layout=HIDDEN_TENSOR_LAYOUT,
+            tensor_layout=EMBEDDING_TENSOR_LAYOUT,
         )
 
-    def make_pool_key(self, identifier: str) -> HiddenPoolKey:
-        return HiddenPoolKey(self.key_metadata, identifier)
+    def make_pool_key(self, identifier: str) -> EmbeddingPoolKey:
+        return EmbeddingPoolKey(self.key_metadata, identifier)
 
     def enqueue_save(self, request):
         self.requests.append(request)
@@ -48,7 +48,7 @@ class FakeWorker:
         return {}
 
 
-def make_connector(*, soft_pin_video_hidden: bool = False):
+def make_connector(*, soft_pin_video_embedding: bool = False):
     connector = MooncakeStoreECConnector.__new__(MooncakeStoreECConnector)
     connector._is_producer = True
     connector._is_consumer = False
@@ -56,7 +56,7 @@ def make_connector(*, soft_pin_video_hidden: bool = False):
     connector.lookup_async = True
     connector.worker = FakeWorker()
     connector._connector_metadata = None
-    connector.soft_pin_video_hidden = soft_pin_video_hidden
+    connector.soft_pin_video_embedding = soft_pin_video_embedding
     connector.load_specs = {}
     connector.lookup_result_cache = {}
     connector.identifier_waiters = {}
@@ -106,7 +106,7 @@ def make_scheduler_output(*, finished_req_ids=None, preempted_req_ids=None):
     )
 
 
-def test_build_hidden_key_metadata_uses_structured_key_fields(monkeypatch):
+def test_build_embedding_key_metadata_uses_structured_key_fields(monkeypatch):
     monkeypatch.setattr(
         connector_module,
         "get_tensor_model_parallel_world_size",
@@ -135,14 +135,14 @@ def test_build_hidden_key_metadata_uses_structured_key_fields(monkeypatch):
         ec_transfer_config=SimpleNamespace(
             ec_connector_extra_config={
                 "cache_prefix": "shared-prefix",
-                "hidden_cache_prefix": "hidden-prefix",
+                "embedding_cache_prefix": "embedding-prefix",
             }
         ),
     )
 
-    metadata = connector_module.build_hidden_key_metadata(vllm_config)
+    metadata = connector_module.build_embedding_key_metadata(vllm_config)
 
-    assert metadata.cache_prefix == "hidden-prefix"
+    assert metadata.cache_prefix == "embedding-prefix"
     assert metadata.kind == "encoder_output"
     assert metadata.model_name == "qwen"
     assert metadata.encoder == "encoder-config-a"
@@ -354,8 +354,8 @@ def test_save_caches_skips_items_without_save_plan():
     assert connector.worker.requests == []
 
 
-def test_save_caches_enqueues_video_hidden_with_soft_pin():
-    connector = make_connector(soft_pin_video_hidden=True)
+def test_save_caches_enqueues_video_embedding_with_soft_pin():
+    connector = make_connector(soft_pin_video_embedding=True)
     tensor = torch.zeros((1, 2))
     connector.bind_connector_metadata(
         MooncakeStoreConnectorMetadata(
@@ -379,8 +379,8 @@ def test_save_caches_enqueues_video_hidden_with_soft_pin():
     assert request.with_soft_pin
 
 
-def test_save_caches_does_not_soft_pin_image_hidden():
-    connector = make_connector(soft_pin_video_hidden=True)
+def test_save_caches_does_not_soft_pin_image_embedding():
+    connector = make_connector(soft_pin_video_embedding=True)
     connector.bind_connector_metadata(
         MooncakeStoreConnectorMetadata(
             items=[
@@ -399,7 +399,7 @@ def test_save_caches_does_not_soft_pin_image_hidden():
     assert not connector.worker.requests[0].with_soft_pin
 
 
-def test_get_finished_logs_failed_hidden_saves(caplog):
+def test_get_finished_logs_failed_embedding_saves(caplog):
     class FailedWorker(FakeWorker):
         def get_finished_sending(self):
             return {"image-ok"}
@@ -414,6 +414,6 @@ def test_get_finished_logs_failed_hidden_saves(caplog):
 
     assert finished_sending == {"image-ok"}
     assert finished_recving is None
-    assert "hidden_store_save_failed" in caplog.text
+    assert "embedding_store_save_failed" in caplog.text
     assert "image-failed" in caplog.text
     assert "batch put failed" in caplog.text
