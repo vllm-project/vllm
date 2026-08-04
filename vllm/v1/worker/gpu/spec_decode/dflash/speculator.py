@@ -76,7 +76,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
-        # Per-mask-token sampling buffers. Flattened from (num_reqs, num_spec_tokens).
+        # Per-mask-token sampling buffers. DFlash stores all three in
+        # request-major order. DSpark stores sample_indices in step-major order
+        # so its full-vocab LM-head output is contiguous for each sequential
+        # Markov step; sample_pos and sample_idx_mapping remain request-major.
+        self.sample_step_major = False
         max_num_sampled_tokens = self.max_num_reqs * self.num_speculative_steps
         self.sample_indices = torch.zeros(
             max_num_sampled_tokens, dtype=torch.int64, device=device
@@ -399,6 +403,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
+                self.sample_step_major,
             )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
@@ -507,6 +512,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_tokens,
     max_model_len,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
+    SAMPLE_STEP_MAJOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -579,8 +585,13 @@ def _prepare_dflash_inputs_kernel(
     sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
     is_sample = is_query & (query_off >= sample_off)
     sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
+    sample_hidden_idx = tl.where(
+        SAMPLE_STEP_MAJOR,
+        (query_off - sample_off) * max_num_reqs + req_idx,
+        sample_idx,
+    )
     sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
-    tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
+    tl.store(out_sample_indices_ptr + sample_hidden_idx, query_idx, mask=is_sample)
     tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
     tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
 
@@ -608,15 +619,26 @@ def _prepare_dflash_inputs_kernel(
                 mask = block < max_num_reqs
                 tl.store(out_seq_lens_ptr + block, 0, mask=mask)
             # Padded sample slots point at query index 0 (a valid row in
-            # last_hidden_states) so CG replay never reads OOB. Padded
-            # sample idx mappings point to -1, which is ignored during
-            # sampling to prevent writing stale values to draft logits.
+            # last_hidden_states) so CG replay never reads OOB. Step-major
+            # indices use a fixed max_num_reqs stride so a graph captured for
+            # a padded batch interprets the same rows as the preparation
+            # kernel. Padded sample idx mappings point to -1, which is ignored
+            # during sampling to prevent writing stale values to draft logits.
             pad_start = num_reqs * num_speculative_steps
             pad_end = max_num_reqs * num_speculative_steps
+            if SAMPLE_STEP_MAJOR:
+                for i in range(0, pad_end, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = (block < pad_end) & (block % max_num_reqs >= num_reqs)
+                    tl.store(out_sample_indices_ptr + block, 0, mask=mask)
+            else:
+                for i in range(pad_start, pad_end, BLOCK_SIZE):
+                    block = i + tl.arange(0, BLOCK_SIZE)
+                    mask = block < pad_end
+                    tl.store(out_sample_indices_ptr + block, 0, mask=mask)
             for i in range(pad_start, pad_end, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < pad_end
-                tl.store(out_sample_indices_ptr + block, 0, mask=mask)
                 tl.store(out_sample_pos_ptr + block, 0, mask=mask)
                 tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
             # Pad query slot mappings past num_query_tokens with PAD so the
@@ -662,6 +684,7 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    sample_step_major: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -703,6 +726,7 @@ def prepare_dflash_inputs(
         max_num_tokens,
         max_model_len,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        SAMPLE_STEP_MAJOR=sample_step_major,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )

@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models import qwen3_dspark
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.kimi_k3.nvidia import dspark_mla
@@ -102,6 +103,73 @@ def test_dspark_markov_head_is_replicated(
     bias = head.bias(markov_embed, logits_processor)
     assert markov_embed.shape == (2, 8)
     assert bias.shape == (2, 128)
+
+
+@pytest.mark.cpu_test
+def test_dspark_markov_head_fuses_projection_and_bias_add_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.model_executor.layers import logits_processor
+
+    monkeypatch.setattr(
+        logits_processor,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=None),
+    )
+    monkeypatch.setattr(qwen3_dspark.current_platform, "is_cuda", lambda: True)
+
+    head = DSparkMarkovHead(130, 130, 8, prefix="markov_head")
+    with torch.no_grad():
+        head.markov_w1.weight.normal_()
+        head.markov_w2.weight.normal_()
+    processor = LogitsProcessor(130)
+    markov_embed = head.embed(torch.tensor([1, 2]))
+    base_logits = torch.randn(2, 130)
+    expected = base_logits + head.bias(markov_embed, processor)
+    base_logits_ptr = base_logits.data_ptr()
+    actual = head.add_bias(base_logits, markov_embed, processor)
+
+    assert actual.data_ptr() == base_logits_ptr
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("scale", "soft_cap", "noncontiguous"),
+    [(1.0, 10.0, False), (0.75, None, False), (1.0, None, True)],
+)
+def test_dspark_markov_head_falls_back_when_inplace_is_not_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    scale: float,
+    soft_cap: float | None,
+    noncontiguous: bool,
+):
+    from vllm.model_executor.layers import logits_processor
+
+    monkeypatch.setattr(
+        logits_processor,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=None),
+    )
+    monkeypatch.setattr(qwen3_dspark.current_platform, "is_cuda", lambda: True)
+
+    head = DSparkMarkovHead(128, 128, 8, prefix="markov_head")
+    with torch.no_grad():
+        head.markov_w1.weight.normal_()
+        head.markov_w2.weight.normal_()
+    processor = LogitsProcessor(128, scale=scale, soft_cap=soft_cap)
+    markov_embed = head.embed(torch.tensor([1, 2]))
+    if noncontiguous:
+        base_logits = torch.randn(128, 2).t()
+        assert not base_logits.is_contiguous()
+    else:
+        base_logits = torch.randn(2, 128)
+    original_base_logits = base_logits.clone()
+    expected = base_logits + head.bias(markov_embed, processor)
+    actual = head.add_bias(base_logits, markov_embed, processor)
+
+    torch.testing.assert_close(base_logits, original_base_logits)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.cpu_test

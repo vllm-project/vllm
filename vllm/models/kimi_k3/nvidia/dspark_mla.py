@@ -506,8 +506,14 @@ class K3DSparkForCausalLM(nn.Module):
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)
 
-    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.model.markov_head.bias(markov_embed, self.logits_processor)
+    def add_markov_bias(
+        self,
+        base_logits: torch.Tensor,
+        markov_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.markov_head.add_bias(
+            base_logits, markov_embed, self.logits_processor
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # confidence_head is training-only. The frozen target embedding and LM

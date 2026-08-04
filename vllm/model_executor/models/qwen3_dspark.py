@@ -25,7 +25,9 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
 )
+from vllm.platforms import current_platform
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
@@ -76,6 +78,42 @@ class DSparkMarkovHead(nn.Module):
     ) -> torch.Tensor:
         """Vocab-size transition bias from a Markov embedding ([B, r] -> [B, V])."""
         return logits_processor(self.markov_w2, markov_embed)
+
+    def add_bias(
+        self,
+        base_logits: torch.Tensor,
+        markov_embed: torch.Tensor,
+        logits_processor: LogitsProcessor,
+    ) -> torch.Tensor:
+        """Add the transition bias to ``base_logits``.
+
+        On CUDA, fuse the replicated Markov projection and addition into an
+        in-place ``addmm_``. Fall back to the regular logits processor whenever
+        it has semantics that ``addmm_`` cannot preserve. The fast path
+        consumes and overwrites ``base_logits``.
+        """
+        can_fuse = (
+            current_platform.is_cuda()
+            and isinstance(
+                self.markov_w2.quant_method,
+                UnquantizedEmbeddingMethod,
+            )
+            and logits_processor.soft_cap is None
+            and logits_processor.scale == 1.0
+            and (
+                logits_processor.head_dtype is None
+                or logits_processor.head_dtype == markov_embed.dtype
+            )
+            and base_logits.is_contiguous()
+            and base_logits.dtype == markov_embed.dtype
+            and markov_embed.dtype == self.markov_w2.weight.dtype
+        )
+        if not can_fuse:
+            return base_logits + self.bias(markov_embed, logits_processor)
+
+        vocab_size = base_logits.shape[-1]
+        weight = self.markov_w2.weight[:vocab_size]
+        return base_logits.addmm_(markov_embed, weight.t())
 
 
 class Qwen3DSparkModel(DFlashQwen3Model):
@@ -155,8 +193,14 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)
 
-    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.model.markov_head.bias(markov_embed, self.logits_processor)
+    def add_markov_bias(
+        self,
+        base_logits: torch.Tensor,
+        markov_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.markov_head.add_bias(
+            base_logits, markov_embed, self.logits_processor
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
