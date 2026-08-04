@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.quark import quark_moe
     ],
 )
 def test_use_k3_situ_aiter_a8w4(monkeypatch, scheme, opt_in, aiter_supported, expected):
-    monkeypatch.setattr(quark_moe.envs, "AITER_SITUV2_A8W4", opt_in)
+    monkeypatch.setattr(quark_moe.envs, "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", opt_in)
     monkeypatch.setattr(quark_moe, "_use_k3_situ_aiter", lambda _moe: aiter_supported)
 
     assert quark_moe._use_k3_situ_aiter_a8w4(MagicMock(), scheme) is expected

@@ -104,7 +104,7 @@ def _use_k3_situ_aiter_a8w4(
     """Whether Quark K3 should override A4 activations with native A8."""
     return (
         ocp_mx_scheme == "w_mxfp4_a_mxfp4"
-        and envs.AITER_SITUV2_A8W4
+        and envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
         and _use_k3_situ_aiter(moe)
     )
 
@@ -1170,8 +1170,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.is_k3_situ_aiter_a8w4:
             logger.warning_once(
                 "Kimi-K3 Quark checkpoint declares dynamic MXFP4 activations; "
-                "AITER_SITUV2_A8W4=1 explicitly overrides routed-MoE activations "
-                "to FP8 and uses native AITER SiTUv2 A8W4 with MXFP4 weights."
+                "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly overrides "
+                "routed-MoE activations to FP8 and uses native AITER SiTUv2 "
+                "A8W4 with MXFP4 weights."
             )
 
     def maybe_roundup_sizes(

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -503,13 +504,10 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     )
 
 
-def setup_k3_situ_aiter_weights(layer: RoutedExperts) -> None:
-    """Preshuffle K3 SiTU MXFP4 weights for AITER SiTUv2 kernels.
-
-    AITER's A8W4 SiTUv2 path uses an interleaved gate/up layout, while its
-    A16W4 path keeps gate and up blocks separated. Both consume the original
-    checkpoint's packed MXFP4 weights and E8M0 scales.
-    """
+def convert_k3_situ_weight_to_kernel_format(
+    layer: RoutedExperts,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Preshuffle K3 SiTU MXFP4 weights for AITER SiTUv2 kernels."""
     from aiter.utility.fp4_utils import e8m0_shuffle
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -517,7 +515,7 @@ def setup_k3_situ_aiter_weights(layer: RoutedExperts) -> None:
     fp4_dtype = torch.float4_e2m1fn_x2
     e8m0_dtype = torch.float8_e8m0fnu
     num_experts = layer.w13_weight.shape[0]
-    guinterleave = envs.AITER_SITUV2_A8W4
+    guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
 
     w13 = rocm_aiter_ops.shuffle_weight_a16w4(
         layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
@@ -533,6 +531,12 @@ def setup_k3_situ_aiter_weights(layer: RoutedExperts) -> None:
         guinterleave,
     )
     w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+    return w13, w2, w13_scale, w2_scale
+
+
+def setup_k3_situ_aiter_weights(layer: RoutedExperts) -> None:
+    """Convert and install K3 SiTU MXFP4 weights for AITER SiTUv2 kernels."""
+    w13, w2, w13_scale, w2_scale = convert_k3_situ_weight_to_kernel_format(layer)
 
     replace_parameter(layer, "w13_weight", w13)
     replace_parameter(layer, "w2_weight", w2)
@@ -554,6 +558,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
             logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled():
+                # AITER keeps bf16 activations below this token count, which
+                # would not match the fp8 a8w4 kernels the interleaved SiTU
+                # path is tuned for. The a16w4 path never reads it.
+                # TODO: Remove once AITER takes this as a kernel argument.
+                os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe
@@ -599,13 +611,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        if self.is_k3_situ_aiter:
-            # K3's AITER A16W4 kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8); the generic
-            # 256 round-up would inflate weights and OOM.
-            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
-            self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+            self.mxfp4_backend,
+            hidden_size,
+            intermediate_size_per_partition,
+            activation=self.moe.activation,
         )
 
     def create_weights(
@@ -755,19 +765,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
 
         # Convert weights to kernel format
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_weight_to_mxfp4_moe_kernel_format(
-                mxfp4_backend=self.mxfp4_backend,
-                layer=layer,
-                w13_weight=w13,
-                w2_weight=w2,
-                w13_weight_scale=w13_scale,
-                w2_weight_scale=w2_scale,
-                w13_bias=w13_bias,
-                w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
+        if self.is_k3_situ_aiter:
+            w13, w2, w13_scale, w2_scale = (
+                self._convert_k3_situ_weight_to_kernel_format(layer)
             )
-        )
+        else:
+            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=w13,
+                    w2_weight=w2,
+                    w13_weight_scale=w13_scale,
+                    w2_weight_scale=w2_scale,
+                    w13_bias=w13_bias,
+                    w2_bias=w2_bias,
+                    _cache_permute_indices=self._cache_permute_indices,
+                )
+            )
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
@@ -813,25 +828,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer=layer,
             )
 
-    def _setup_kernel_k3_situ(self, layer: RoutedExperts) -> None:
-        setup_k3_situ_aiter_weights(layer)
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-                layer=layer,
-            )
+    def _convert_k3_situ_weight_to_kernel_format(
+        self, layer: RoutedExperts
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return convert_k3_situ_weight_to_kernel_format(layer)
 
     def process_weights_after_loading(self, layer):
-        if self.is_k3_situ_aiter:
-            self._setup_kernel_k3_situ(layer)
-            return
-
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
