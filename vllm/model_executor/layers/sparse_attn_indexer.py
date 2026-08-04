@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
@@ -864,5 +863,5 @@ class SparseAttnIndexer(CustomOp):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
+            skip_k_cache_insert=self.skip_k_cache_insert,
         )
