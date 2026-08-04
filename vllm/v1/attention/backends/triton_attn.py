@@ -417,6 +417,11 @@ class TritonAttentionImpl(AttentionImpl):
     # Per-token-head quant: scale views carved from inline head padding.
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
+    # Storages whose inline scale regions have been initialized; keyed by
+    # (data_ptr, nbytes) so re-allocated caches (e.g. after sleep/wake_up)
+    # are re-initialized. Shared across impls because KV-sharing layers alias
+    # their target layer's storage.
+    _scale_initialized_storages: ClassVar[set[tuple[int, int]]] = set()
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
@@ -470,7 +475,6 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=k_scale_off_f32,
         )
-        self._k_scale_cache.fill_(1.0)
 
         # V scales (second content half)
         self._v_scale_cache = torch.as_strided(
@@ -479,7 +483,19 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
-        self._v_scale_cache.fill_(1.0)
+
+        # Initialize the scale regions exactly once per underlying storage.
+        # KV-sharing layers alias their target layer's cache tensor and build
+        # their own views lazily on their first forward, which can happen
+        # AFTER the target layer has already written real per-token scales in
+        # the same pass; an unconditional fill here would wipe those scales
+        # and corrupt every request in the first batch (issues #50702/#50749).
+        storage = kv_cache.untyped_storage()
+        storage_key = (storage.data_ptr(), storage.nbytes())
+        if storage_key not in TritonAttentionImpl._scale_initialized_storages:
+            self._k_scale_cache.fill_(1.0)
+            self._v_scale_cache.fill_(1.0)
+            TritonAttentionImpl._scale_initialized_storages.add(storage_key)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
