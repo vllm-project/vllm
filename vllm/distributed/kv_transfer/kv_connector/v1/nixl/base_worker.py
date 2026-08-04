@@ -1018,8 +1018,11 @@ class NixlBaseConnectorWorker:
         caches_data = [(base_addr, total_size, self.device_id, "")]
 
         self.block_len_per_layer = [block_stride]
+        self._region_is_mla = [self.use_mla]
         self.num_regions = 1
         self.num_descs = self.num_blocks
+        self.region_mem_types = [self.nixl_memory_type]
+        self._mixed_mem_types = False
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [base_addr]
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
