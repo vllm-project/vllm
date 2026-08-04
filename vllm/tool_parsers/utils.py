@@ -771,17 +771,13 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     #      Python but a *set* literal, which downstream tool-call AST
     #      handling rejects.
     # Validate the candidate parses, has a body, and contains no Set
-    # nodes (pythonic tool calls always use dicts for `{...}`). A raw
-    # newline inside a string argument is recovered by escaping control
-    # chars in string literals before giving up.
+    # nodes (pythonic tool calls always use dicts for `{...}`). Callers
+    # whose models emit raw control chars inside string arguments must
+    # escape them (see escape_ctrl_chars_in_strings) before calling.
     try:
         module = ast.parse(candidate)
     except SyntaxError:
-        candidate = escape_ctrl_chars_in_strings(candidate)
-        try:
-            module = ast.parse(candidate)
-        except SyntaxError:
-            return None
+        return None
     if not module.body:
         return None
     for node in ast.walk(module):

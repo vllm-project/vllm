@@ -316,12 +316,14 @@ class TestMakeValidPythonStringLiterals:
         with pytest.raises(UnexpectedAstError):
             make_valid_python("[exec(command=data])")
 
-    def test_multiline_string_argument_recovers(self):
-        # A raw newline inside a string argument is invalid Python; the
-        # escaped-retry path must recover the call instead of returning None,
-        # and the escaped value must evaluate back to the original.
+    def test_multiline_string_argument_recovers_after_escape(self):
+        # A raw newline inside a string argument is invalid Python, so
+        # make_valid_python alone returns None; callers pre-escape control
+        # chars (as the lfm2 parser does) and the escaped value must evaluate
+        # back to the original.
         text = "[exec(command='line1\nline2')]"
-        result = make_valid_python(text)
+        assert make_valid_python(text) is None
+        result = make_valid_python(escape_ctrl_chars_in_strings(text))
         assert result is not None
         completed, added = result
         assert added == ""

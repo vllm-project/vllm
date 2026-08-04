@@ -303,10 +303,15 @@ class Lfm2ToolParser(ToolParser):
             return DeltaMessage(content=combined) if combined else None
 
         try:
-            # A parameter named after a Python keyword (`from=1`) can never
-            # parse; rename complete `keyword=` tokens up front (a deterministic
-            # rewrite, so successive chunks stay consistent) and restore the
-            # original names after decoding.
+            # A raw control char inside a string argument would make every
+            # completion candidate a SyntaxError; escape them here rather than
+            # inside make_valid_python so the shared helper keeps its upstream
+            # behavior for the other pythonic parsers. A parameter named after
+            # a Python keyword (`from=1`) can never parse; rename complete
+            # `keyword=` tokens as well. Both rewrites are deterministic, so
+            # successive chunks stay consistent; names are restored after
+            # decoding.
+            tool_text = escape_ctrl_chars_in_strings(tool_text)
             renamed_tool_text, kw_renamed = rename_reserved_kwargs(tool_text)
             if kw_renamed:
                 tool_text = renamed_tool_text
