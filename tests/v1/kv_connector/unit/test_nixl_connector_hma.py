@@ -723,6 +723,29 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 
 @pytest.mark.cpu_test
+def test_get_block_descs_ids_selects_attention_regions_by_group():
+    """Each attention group's blocks address only that group's regions."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=3,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        block_len_per_layer=[100, 100, 100],
+    )
+    worker.region_group_ids = [0, 0, 1]
+
+    result = worker._compute_desc_ids(
+        block_ids=([1, 2], [7]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    assert result.tolist() == [1, 2, 11, 12, 27]
+
+
+@pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
@@ -1532,6 +1555,9 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     kv_cache_config = _make_hybrid_mla_kv_cache_config()
     unified_page = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     vllm_config = create_vllm_config(block_size=12)
+    # The engine rewrites this global value to the smallest scheduler-group
+    # block size. NIXL must retain the transferable groups' 12-token geometry.
+    vllm_config.cache_config.block_size = 4
     # kv_buffer_device defaults to the *real* platform's device type, which on
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared tensors would not be

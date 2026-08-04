@@ -207,6 +207,9 @@ class HiSparseRuntime:
         for coordinator in self.coordinators:
             coordinator.fully_resident_batch = fully_resident
 
+    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+        self.coordinators[0].set_request_state_indices(indices, force=True)
+
     def reset_hot_state(self) -> None:
         for coordinator in self.coordinators:
             coordinator.reset_hot_state()

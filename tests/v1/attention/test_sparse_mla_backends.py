@@ -1489,6 +1489,18 @@ def _hisparse_hot_slot(coordinator: HiSparseCoordinator, row: int, logical: int)
 
 
 @requires_hisparse_ops
+def test_hisparse_request_state_mapping_storage_is_stable():
+    coordinator = _make_hisparse_coordinator(max_num_reqs=4)
+    mapping = torch.tensor([3, 1], dtype=torch.int32, device=DEVICE_TYPE)
+    original_ptr = coordinator.request_state_indices.data_ptr()
+
+    coordinator.set_request_state_indices(mapping, force=True)
+    torch.accelerator.synchronize()
+
+    assert coordinator.request_state_indices.data_ptr() == original_ptr
+    assert coordinator.request_state_indices[:2].tolist() == [3, 1]
+
+
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8

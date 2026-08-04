@@ -134,7 +134,7 @@ class NixlBaseConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
+            for g in transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -149,7 +149,7 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.num_speculative_blocks
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
-            for g in kv_cache_config.kv_cache_groups
+            for g in transfer_groups
         ]
         # Only "all" mode keeps a state per block position; the other modes
         # keep a single running state in the last non-speculative slot.
@@ -260,9 +260,16 @@ class NixlBaseConnectorScheduler:
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
-        if len(block_ids) == len(self.kv_cache_config.kv_cache_groups):
+        if hasattr(self, "kv_cache_config") and len(block_ids) == len(
+            self.kv_cache_config.kv_cache_groups
+        ):
             block_ids = tuple(block_ids[i] for i in self._transfer_group_ids)
-        assert len(block_ids) in (0, len(self._transfer_group_ids)), (
+        num_transfer_groups = (
+            len(self._transfer_group_ids)
+            if hasattr(self, "_transfer_group_ids")
+            else len(block_ids)
+        )
+        assert len(block_ids) in (0, num_transfer_groups), (
             "Number of transferable KV cache groups must match"
         )
         if len(block_ids) == 0 or not self._is_hma_required:

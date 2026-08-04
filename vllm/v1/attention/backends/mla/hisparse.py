@@ -243,6 +243,8 @@ def release_pinned_state() -> None:
     _STATE.coordinators.clear()
     _STATE.group_plans.clear()
     _STATE.copy_streams.clear()
+    _STATE.request_state_indices.clear()
+    _STATE.request_state_source_ptrs.clear()
     _STATE.current_group_leader = None
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
@@ -404,6 +406,10 @@ class _HiSparseProcessState:
     )
     group_plans: dict[tuple[str, int, int], _GroupPlan] = field(default_factory=dict)
     copy_streams: dict[str, torch.Stream] = field(default_factory=dict)
+    request_state_indices: dict[tuple[str, int], torch.Tensor] = field(
+        default_factory=dict
+    )
+    request_state_source_ptrs: dict[tuple[str, int], int] = field(default_factory=dict)
 
 
 _STATE = _HiSparseProcessState()
@@ -425,6 +431,15 @@ def _get_copy_stream(device: torch.device) -> torch.Stream:
         stream = torch.Stream(device=device)
         _STATE.copy_streams[key] = stream
     return stream
+
+
+def _get_request_state_indices(device: torch.device, max_num_reqs: int) -> torch.Tensor:
+    key = (str(device), max_num_reqs)
+    indices = _STATE.request_state_indices.get(key)
+    if indices is None:
+        indices = torch.arange(max_num_reqs, dtype=torch.int32, device=device)
+        _STATE.request_state_indices[key] = indices
+    return indices
 
 
 class HiSparseCoordinator:
@@ -510,8 +525,8 @@ class HiSparseCoordinator:
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
-        self.request_state_indices = torch.arange(
-            max_num_reqs, dtype=torch.int32, device=self.device
+        self.request_state_indices = _get_request_state_indices(
+            self.device, max_num_reqs
         )
 
         # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
@@ -532,13 +547,22 @@ class HiSparseCoordinator:
         self._host_write_event: torch.Event | None = None
         self.eager_host_mirror = False
 
-    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+    def set_request_state_indices(
+        self, indices: torch.Tensor, *, force: bool = False
+    ) -> None:
         if indices.numel() > self.max_num_reqs:
             raise ValueError(
                 "HiSparse request-state mapping exceeds max_num_seqs: "
                 f"{indices.numel()} > {self.max_num_reqs}."
             )
-        self.request_state_indices = indices
+        if torch.cuda.is_current_stream_capturing():
+            return
+        key = (str(self.device), self.max_num_reqs)
+        source_ptr = indices.data_ptr()
+        if not force and _STATE.request_state_source_ptrs.get(key) == source_ptr:
+            return
+        self.request_state_indices[: indices.numel()].copy_(indices)
+        _STATE.request_state_source_ptrs[key] = source_ptr
 
     def join_indexer_group(self, has_indexer: bool) -> None:
         if has_indexer:

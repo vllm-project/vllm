@@ -1445,7 +1445,6 @@ def _get_hisparse_hma_config(
         ): spec
         for name, spec in specs.items()
     }
-    host_group_spec = UniformTypeKVCacheSpecs.from_specs(source_specs)
     # Host pages retain the scheduler block size. The packed GPU slab uses
     # native kernel pages so indexer and hot-cache block IDs share one layout.
     gpu_indexer_specs = {
@@ -1453,13 +1452,7 @@ def _get_hisparse_hma_config(
         for name, spec in indexer_specs.items()
     }
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
-    assert host_group_spec is not None and indexer_group_spec is not None
-    host_group = KVCacheGroupSpec(
-        list(source_specs),
-        host_group_spec,
-        block_pool_id=0,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
-    )
+    assert indexer_group_spec is not None
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
@@ -1559,14 +1552,27 @@ def _get_hisparse_hma_config(
     if current:
         append_hot_group(current)
 
-    regular_groups: list[KVCacheGroupSpec] = []
     remaining_full_specs = {
         name: spec for name, spec in all_full_specs.items() if name not in specs
     }
+    # Full-attention layers retain one scheduler block table so their packed
+    # P/D regions stay aligned. Only source_specs are allocated on host or
+    # bound to the HiSparse runtime; remaining_full_specs stay on GPU.
+    transfer_specs = {**source_specs, **remaining_full_specs}
+    transfer_group_spec = UniformTypeKVCacheSpecs.from_specs(transfer_specs)
+    assert transfer_group_spec is not None
+    transfer_group = KVCacheGroupSpec(
+        list(transfer_specs),
+        transfer_group_spec,
+        block_pool_id=0,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
+
+    gpu_regular_groups: list[KVCacheGroupSpec] = []
     if remaining_full_specs:
         remaining_full_spec = UniformTypeKVCacheSpecs.from_specs(remaining_full_specs)
         assert remaining_full_spec is not None
-        regular_groups.append(
+        gpu_regular_groups.append(
             KVCacheGroupSpec(
                 list(remaining_full_specs),
                 remaining_full_spec,
@@ -1574,7 +1580,19 @@ def _get_hisparse_hma_config(
                 block_pool_id=1,
             )
         )
-    regular_groups.extend(
+    other_regular_groups = [
+        KVCacheGroupSpec(
+            layer_names=regular.layer_names,
+            kv_cache_spec=regular.kv_cache_spec,
+            is_eagle_group=regular.is_eagle_group,
+            block_pool_id=0,
+            enable_prefix_caching=regular.enable_prefix_caching,
+            enable_kv_transfer=regular.enable_kv_transfer,
+            role=regular.role,
+        )
+        for regular in groups[1:]
+    ]
+    gpu_other_regular_groups = [
         KVCacheGroupSpec(
             layer_names=regular.layer_names,
             kv_cache_spec=regular.kv_cache_spec,
@@ -1585,12 +1603,13 @@ def _get_hisparse_hma_config(
             role=regular.role,
         )
         for regular in groups[1:]
-    )
+    ]
     gpu_groups = [
         indexer_group,
         *resident_groups,
         *hot_groups,
-        *regular_groups,
+        *gpu_regular_groups,
+        *gpu_other_regular_groups,
     ]
     gpu_stride, gpu_layers_by_offset = _get_packed_kv_cache_layout(gpu_groups)
     hot_page_alignment = math.lcm(
@@ -1643,11 +1662,11 @@ def _get_hisparse_hma_config(
         num_blocks_by_pool=[host_num_blocks, gpu_num_blocks],
         kv_cache_tensors=tensors,
         kv_cache_groups=[
-            host_group,
+            transfer_group,
             indexer_group,
             *resident_groups,
             *hot_groups,
-            *regular_groups,
+            *other_regular_groups,
         ],
     )
 

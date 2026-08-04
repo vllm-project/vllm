@@ -261,27 +261,45 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         log_layout=False,
     )
 
-    source, indexer, *gpu_groups = cache_config.kv_cache_groups
-    assert source.layer_names == [c4_main, f"{c4_indexer}.hisparse_source"]
-    assert indexer.layer_names == [c4_indexer]
-    assert indexer.kv_cache_spec.block_size == 256
-    assert all(group.block_pool_id == 1 for group in cache_config.kv_cache_groups[1:])
-    regular_names = {
-        name
-        for group in gpu_groups
-        if not isinstance(group.kv_cache_spec, (HiSparseHotSpec, HiSparseResidentSpec))
-        for name in group.layer_names
-    }
-    assert regular_names == {
+    source, indexer, *other_groups = cache_config.kv_cache_groups
+    assert source.layer_names == [
+        c4_main,
+        f"{c4_indexer}.hisparse_source",
         c128_main,
         c128_indexer,
-        "model.layers.2.attn.swa_cache",
+    ]
+    assert indexer.layer_names == [c4_indexer]
+    assert indexer.kv_cache_spec.block_size == 256
+    assert source.block_pool_id == 0
+    hisparse_gpu_groups = [
+        group for group in other_groups if not group.enable_kv_transfer
+    ]
+    assert all(group.block_pool_id == 1 for group in hisparse_gpu_groups)
+    regular_groups = [group for group in other_groups if group.enable_kv_transfer]
+    assert all(group.block_pool_id == 0 for group in regular_groups)
+    assert {name for group in regular_groups for name in group.layer_names} == {
+        "model.layers.2.attn.swa_cache"
     }
+    host_layers = {
+        name
+        for tensor in cache_config.kv_cache_tensors
+        if tensor.host_resident
+        for name in tensor.shared_by
+    }
+    assert host_layers == {c4_main, f"{c4_indexer}.hisparse_source"}
+    device_layers = {
+        name
+        for tensor in cache_config.kv_cache_tensors
+        if not tensor.host_resident
+        for name in tensor.shared_by
+    }
+    assert {c128_main, c128_indexer} <= device_layers
     hot = next(
         group
-        for group in gpu_groups
+        for group in other_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     )
+    assert all(name.startswith(f"{c4_main}.") for name in hot.layer_names)
     assert hot.kv_cache_spec.block_size == 256
     assert hot.kv_cache_spec.blocks_per_request == 16
 
