@@ -366,6 +366,17 @@ class BaseProcessingInfo:
 
         return None
 
+    @property
+    def allow_out_of_band_embeds(self) -> bool:
+        """Whether pre-computed embeddings may arrive outside the request.
+
+        True only on an EC consumer, where an encode/prefill/decode encoder
+        instance publishes them through the connector instead, so the request
+        carries only the metadata that sizes the placeholder range.
+        """
+        mm_config = self.ctx.model_config.multimodal_config
+        return mm_config is not None and mm_config.mm_embeds_out_of_band
+
     def get_data_parser(self) -> MultiModalDataParser:
         """
         Constructs a parser to preprocess multi-modal data items
@@ -378,7 +389,7 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            info=self,
+            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
         )
 
     @cached_property

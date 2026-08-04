@@ -372,7 +372,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.get_target_channels(),
             expected_hidden_size=self._get_expected_hidden_size(),
-            info=self,
+            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
         )
 
     def get_target_channels(self) -> int:

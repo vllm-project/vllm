@@ -52,7 +52,6 @@ arrive through the connector, metadata still in the request).
 if TYPE_CHECKING:
     import PIL.Image as PILImage
 
-    from .processing.context import BaseProcessingInfo
 else:
     PILImage = LazyLoader("PILImage", globals(), "PIL.Image")
 
@@ -572,9 +571,10 @@ class MultiModalDataParser:
             embedding inputs. If provided, validates that user-supplied
             embeddings have the correct hidden size to prevent crashes
             during model inference.
-        info (BaseProcessingInfo, optional): The model's processing info. Pass
-            it to support pre-computed embeddings delivered out of band, e.g.
-            published through an EC connector by an EPD encoder instance.
+        allow_out_of_band_embeds (bool): Whether pre-computed embeddings may be
+            absent from the request because an encode/prefill/decode encoder
+            instance publishes them through an EC connector instead. Derived by
+            `BaseProcessingInfo.allow_out_of_band_embeds`.
     """
 
     embedding_fields: Mapping[str, Mapping[str, EmbeddingFieldRole]] = {}
@@ -587,18 +587,6 @@ class MultiModalDataParser:
 
     A modality absent from this mapping cannot be delivered out of band.
     """
-
-    @property
-    def allow_out_of_band_embeds(self) -> bool:
-        """Whether `*_embeds` may be absent from a pre-computed-embedding input.
-
-        True only on an EC consumer, where the embeddings arrive through the
-        connector instead of the request.
-        """
-        if self.info is None:
-            return False
-        mm_config = self.info.ctx.model_config.multimodal_config
-        return mm_config is not None and mm_config.mm_embeds_out_of_band
 
     @classmethod
     def placeholder_metadata_fields(cls, modality: str) -> set[str]:
@@ -621,13 +609,11 @@ class MultiModalDataParser:
         audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
-        info: "BaseProcessingInfo | None" = None,
+        allow_out_of_band_embeds: bool = False,
     ) -> None:
         super().__init__()
 
-        # Passing the info in is what tells this parser whether out-of-band
-        # delivery is in effect; omitting it means the model never allows it.
-        self.info = info
+        self.allow_out_of_band_embeds = allow_out_of_band_embeds
 
         self.audio_resampler = AudioResampler(
             target_sr=target_sr,

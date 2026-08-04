@@ -854,7 +854,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
-            info=self,
+            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:

@@ -931,7 +931,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return KeyeMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            info=self,
+            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
         )
 
     def get_supported_mm_limits(
