@@ -542,13 +542,13 @@ class Apertus1p5ForConditionalGeneration(
 
         # The vision tower expects a single image with a batch dimension;
         # per-item encoding avoids quality degradation from tokenizer batching.
-        with torch.inference_mode():
-            ids_per_image = []
-            for image in images:
-                image_codes = vision_tower.encode(
-                    image.unsqueeze(0).to(device=target_device, dtype=target_dtype)
-                )
-                ids_per_image.append(image_codes.flatten())
+        ids_per_image = []
+        for image in images:
+            image_codes = vision_tower.encode(
+                image.unsqueeze(0).to(device=target_device, dtype=target_dtype)
+            )
+            ids_per_image.append(image_codes.flatten())
+
         ids_per_image = [
             ids.to(torch.long) + self.image_token_offset for ids in ids_per_image
         ]
@@ -571,15 +571,15 @@ class Apertus1p5ForConditionalGeneration(
 
         # The audio tower expects a single clip with batch/channel dimensions;
         # per-item encoding avoids quality degradation from tokenizer batching.
-        with torch.inference_mode():
-            ids_per_audio = []
-            for audio in audios:
-                audio_codes = audio_tower.encode(
-                    audio.unsqueeze(0)
-                    .unsqueeze(0)
-                    .to(device=target_device, dtype=target_dtype)
-                ).audio_codes
-                ids_per_audio.append(audio_codes.squeeze(0).squeeze(0))
+        ids_per_audio = []
+        for audio in audios:
+            audio_codes = audio_tower.encode(
+                audio.unsqueeze(0)
+                .unsqueeze(0)
+                .to(device=target_device, dtype=target_dtype)
+            ).audio_codes
+            ids_per_audio.append(audio_codes.squeeze(0).squeeze(0))
+
         ids_per_audio = [
             ids.to(torch.long) + self.audio_token_offset for ids in ids_per_audio
         ]
