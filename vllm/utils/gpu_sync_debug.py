@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import sys
+import threading
 import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -57,26 +58,49 @@ def enable_gpu_sync_check() -> None:
         return
     global _sync_check_enabled
     _sync_check_enabled = True
-    _arm_torch_warn_mode()
     _install_compile_time_sync_suppressors()
 
 
-_torch_warn_mode_armed: bool = False
+# Refcount so `torch.cuda`'s sync debug mode is armed only while at least one
+# checked call is in flight. `with_gpu_sync_check` decorates both
+# `execute_model` and `sample_tokens`, which nest, and in principle more than
+# one thread could be checked at once -- a naive save/restore would disarm the
+# check out from under the outer/other caller.
+_arm_lock = threading.Lock()
+_arm_count: int = 0
+_saved_sync_debug_mode: int = 0
 
 
 def _arm_torch_warn_mode() -> None:
-    """Put torch in "warn" mode, once per process.
+    """Put torch in "warn" mode for the duration of a checked call.
 
     "warn" rather than "error": torch's error mode raises on whichever
     thread synced, with no way to exempt one. Warnings are reported on the
     syncing thread too, but as a Python warning we can inspect and drop in
     `_sync_warning_hook`.
+
+    Armed per checked call rather than once per process so that syncs
+    *outside* a checked region emit nothing at all. Leaving warn mode on
+    process-wide made every such sync print a `UserWarning` whenever
+    `_sync_warning_hook` was not the installed handler -- which is most of a
+    pytest run, since `catch_warnings` restores its own.
     """
-    global _torch_warn_mode_armed
-    if _torch_warn_mode_armed:
-        return
-    _torch_warn_mode_armed = True
-    torch.cuda.set_sync_debug_mode("warn")
+    global _arm_count, _saved_sync_debug_mode
+    with _arm_lock:
+        if _arm_count == 0:
+            _saved_sync_debug_mode = torch.cuda.get_sync_debug_mode()
+            torch.cuda.set_sync_debug_mode("warn")
+        _arm_count += 1
+
+
+def _disarm_torch_warn_mode() -> None:
+    """Undo one `_arm_torch_warn_mode()`, restoring the mode when the last
+    checked call in flight completes."""
+    global _arm_count
+    with _arm_lock:
+        _arm_count -= 1
+        if _arm_count == 0:
+            torch.cuda.set_sync_debug_mode(_saved_sync_debug_mode)
 
 
 _prev_showwarning = warnings.showwarning
@@ -107,13 +131,12 @@ def _arm_warning_hook():
     a hook installed at startup would be swapped out for the duration of
     every test, which is exactly when we need it.
 
-    The hook is deliberately left in place afterwards rather than restored:
-    torch stays in "warn" mode process-wide, so without it every sync
-    outside a checked region would print a `UserWarning`. Non-sync warnings
-    are delegated to whatever handler we displaced.
+    The hook is left in place afterwards rather than restored, which is
+    harmless: outside a checked call the sync debug mode is back to whatever
+    it was, so torch emits nothing for it to see. Non-sync warnings are
+    delegated to whatever handler we displaced.
     """
     global _prev_showwarning, _sync_filter_head
-    _arm_torch_warn_mode()
     prev = warnings.showwarning
     if prev is not _sync_warning_hook:
         _prev_showwarning = prev
@@ -279,11 +302,13 @@ if current_platform.is_cuda_alike():
             if not _sync_check_enabled:
                 return fn(*args, **kwargs)
             _arm_warning_hook()
+            _arm_torch_warn_mode()
             token = _checking.set(mode)
             try:
                 return fn(*args, **kwargs)
             finally:
                 _checking.reset(token)
+                _disarm_torch_warn_mode()
 
         return wrapper
 

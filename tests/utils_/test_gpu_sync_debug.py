@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+import warnings
 
 import pytest
 import torch
@@ -120,6 +121,33 @@ def test_suppressing_works_while_compiling(monkeypatch):
 
     suppressed = gsd._suppressing(lambda: torch.ones(4, device="cuda").cpu())
     with_gpu_sync_check(suppressed)()
+
+
+@create_new_process_for_each_test()
+def test_sync_debug_mode_restored_after_checked_call(monkeypatch):
+    """The mode is armed only for the duration of a checked call. Leaving it
+    on process-wide made every sync outside a checked region emit a
+    `UserWarning` whenever our handler was not the installed one."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+
+    before = torch.cuda.get_sync_debug_mode()
+
+    def nested():
+        # `execute_model` -> `sample_tokens` both carry the decorator.
+        assert torch.cuda.get_sync_debug_mode() != 0, "armed inside"
+        with_gpu_sync_check(lambda: None)()
+        assert torch.cuda.get_sync_debug_mode() != 0, "still armed after inner"
+
+    with_gpu_sync_check(nested)()
+    assert torch.cuda.get_sync_debug_mode() == before
+
+    # With the mode back to its original value, torch emits nothing for a
+    # sync outside a checked region.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        torch.ones(4, device="cuda").cpu()
+    assert not [r for r in caught if gsd._TORCH_SYNC_WARNING in str(r.message)]
 
 
 @create_new_process_for_each_test()
