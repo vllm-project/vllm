@@ -296,6 +296,8 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
+    # Transfer-timeout reaping state consulted by _pop_done_transfers.
+    worker._recving_transfers_start = {}
 
     assert worker._pop_done_transfers() == {"tx-release"}
     assert worker.moriio_wrapper.sent == [
