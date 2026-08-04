@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
@@ -670,9 +670,8 @@ class Worker(WorkerBase):
                 GPUModelRunner as GPUModelRunnerV2,
             )
 
-            cast(GPUModelRunnerV2, self.model_runner).init_artifact_connector(
-                kv_cache_config
-            )
+            assert isinstance(self.model_runner, GPUModelRunnerV2)
+            self.model_runner.init_artifact_connector(kv_cache_config)
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

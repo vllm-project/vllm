@@ -57,7 +57,7 @@ class PendingArtifactOutput:
         self._routed_experts_cpu: np.ndarray | None = None
         self._num_rejected_cpu: np.ndarray | None = None
 
-    def copy_to_cpu(self) -> None:
+    def to_cpu_nonblocking(self) -> None:
         self._routed_experts_cpu = self._routed_experts.to(
             "cpu", non_blocking=True
         ).numpy()
@@ -97,6 +97,7 @@ class ArtifactWorkerConnector:
         self._store: BackgroundArtifactStore | None = None
         self._buffer: RoutedExpertsArtifactBuffer | None = None
         self._pending_blocks: dict[str, list[tuple[int, np.ndarray]]] = {}
+        self._capture_cursors: dict[str, int] = {}
         self._emit_cursors: dict[str, int] = {}
         self._generation = -1
         self._pending_requests: dict[str, int] = {}
@@ -195,26 +196,16 @@ class ArtifactWorkerConnector:
             rows: np.ndarray = routed_experts[offset:valid_end].astype(
                 self._dtype, copy=False
             )
+            capture_start = min(
+                request.token_start,
+                self._capture_cursors.get(request_id, request.token_start),
+            )
             emit_start = max(
                 request.emit_start,
                 self._emit_cursors.get(request_id, request.emit_start),
             )
-            local_segments: list[tuple[int, np.ndarray]] = []
-            tail_start = (
-                request.token_start // metadata.block_size * metadata.block_size
-            )
-            if request.emit_output and emit_start < request.token_start:
-                tail_start = max(emit_start, tail_start)
-                if tail_start < request.token_start:
-                    local_segments.append(
-                        (
-                            tail_start,
-                            self._buffer.read(
-                                request_id, tail_start, request.token_start
-                            ),
-                        )
-                    )
-            completed = self._buffer.capture(request_id, request.token_start, rows)
+            completed = self._buffer.capture(request_id, capture_start, rows)
+            self._capture_cursors[request_id] = capture_start + len(rows)
             pending, ready = self._take_available_blocks(
                 request_id,
                 request.block_hashes,
@@ -224,7 +215,7 @@ class ArtifactWorkerConnector:
             if ready:
                 commit_batches.append((request.block_hashes, ready))
                 committed_rows.extend(rows for _, rows in ready)
-            captured.append((request, rows, [*pending, *local_segments], emit_start))
+            captured.append((request, capture_start, rows, pending, emit_start))
             offset = end
         if offset != len(routed_experts):
             raise RuntimeError("artifact capture output has an invalid row count")
@@ -238,12 +229,12 @@ class ArtifactWorkerConnector:
             self._buffer.release_block(rows)
 
         outputs: dict[str, ArtifactRequestOutput] = {}
-        for request, rows, local_segments, emit_start in captured:
-            token_end = request.token_start + len(rows)
+        for request, capture_start, rows, local_segments, emit_start in captured:
+            token_end = capture_start + len(rows)
             if not request.emit_output or emit_start >= token_end:
                 continue
             stored_end = min(
-                request.token_start // metadata.block_size * metadata.block_size,
+                capture_start // metadata.block_size * metadata.block_size,
                 len(request.block_hashes) * metadata.block_size,
             )
             segments: list[tuple[int, np.ndarray]] = []
@@ -260,7 +251,7 @@ class ArtifactWorkerConnector:
                     )
                 )
             segments.extend(local_segments)
-            segments.append((request.token_start, rows))
+            segments.append((capture_start, rows))
             outputs[request.request_id] = ArtifactRequestOutput(
                 emit_start,
                 self._assemble_segments(emit_start, token_end, segments),
@@ -327,6 +318,7 @@ class ArtifactWorkerConnector:
         if metadata.generation != self._generation:
             self._buffer.reset()
             self._pending_blocks.clear()
+            self._capture_cursors.clear()
             self._emit_cursors.clear()
             self._finished_requests.clear()
             self._generation = metadata.generation
@@ -391,6 +383,7 @@ class ArtifactWorkerConnector:
                 f"finished request has uncommitted artifact blocks: {request_id}"
             )
         self._pending_blocks.pop(request_id, None)
+        self._capture_cursors.pop(request_id, None)
         self._emit_cursors.pop(request_id, None)
         self._buffer.discard(request_id)
 

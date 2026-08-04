@@ -59,7 +59,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
             if pending_artifact_output is not None:
-                pending_artifact_output.copy_to_cpu()
+                pending_artifact_output.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
