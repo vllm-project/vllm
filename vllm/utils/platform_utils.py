@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
 from collections.abc import Sequence
 from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache
@@ -72,3 +73,49 @@ def get_device_name_as_file_name(device_id: int = 0) -> str:
     name = current_platform.get_device_name(device_id)
     name = re.sub(r"[\s/]+", "_", name)
     return name
+
+
+def _normalize_config_device_name(name: str) -> str:
+    name = re.sub(r"[^a-z0-9]", "", name.lower())
+    return name.removeprefix("amd").removesuffix("graphics")
+
+
+def resolve_rocm_device_config_file_path(config_file_path: str) -> str:
+    """Resolve a tuned config written under an equivalent device name."""
+    if os.path.exists(config_file_path):
+        return config_file_path
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return config_file_path
+
+    config_dir, config_file_name = os.path.split(config_file_path)
+    match = re.search(r"device_name=([^,]+?)(?=,|\.json$)", config_file_name)
+    if match is None:
+        return config_file_path
+
+    prefix = config_file_name[: match.start(1)]
+    suffix = config_file_name[match.end(1) :]
+    normalized_name = _normalize_config_device_name(match.group(1))
+    if not normalized_name:
+        return config_file_path
+    matching_paths: list[str] = []
+
+    try:
+        entries = os.scandir(config_dir or ".")
+    except OSError:
+        return config_file_path
+
+    with entries:
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if not entry.name.startswith(prefix) or not entry.name.endswith(suffix):
+                continue
+            end = len(entry.name) - len(suffix) if suffix else len(entry.name)
+            candidate_name = entry.name[len(prefix) : end]
+            if _normalize_config_device_name(candidate_name) == normalized_name:
+                matching_paths.append(entry.path)
+
+    return matching_paths[0] if len(matching_paths) == 1 else config_file_path
