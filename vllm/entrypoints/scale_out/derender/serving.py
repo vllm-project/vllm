@@ -333,11 +333,10 @@ class ServingDerender(BaseServing):
             # finalize_generation and engine-based parsers don't, so an
             # unexpected parser failure on malformed (but well typed) state
             # must surface as a 400 here rather than an unhandled 500.
-            logger.debug("derender stream replay failed: %s: %s",
-                         type(exc).__name__, exc)
-            return self.create_error_response(
-                "invalid stream_state: derender failed"
+            logger.debug(
+                "derender stream replay failed: %s: %s", type(exc).__name__, exc
             )
+            return self.create_error_response("invalid stream_state: derender failed")
             # stream_state and on the parser path, the parser state
             # is rebuilt by replaying it is entirely client controlled.
             # Hermes swallows its own streaming exceptions but
