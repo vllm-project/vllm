@@ -8,6 +8,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,8 +20,15 @@ from vllm.v1.core.kv_cache_utils import (
     _sparse_mla_fixed_hbm_bytes,
     _sparse_mla_manifest,
 )
-from vllm.v1.kv_cache_interface import SparseMLAOffloadMemoryPlan
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    SparseMLAOffloadMemoryPlan,
+)
+from vllm.v1.worker.gpu.attn_utils import _allocate_kv_cache
 from vllm.v1.worker.gpu.sparse_mla_offload import SparseMLAOffloadManager
+from vllm.v1.worker.utils import AttentionGroup
 
 _MAIN_LAYERS = ("main.0", "main.1")
 _INDEXER_LAYERS = ("indexer.0", "indexer.1")
@@ -123,7 +131,7 @@ def _sparse_mla_rank(
                 manifest = (replace(host_entry, shape=shape), *plan.manifest[1:])
                 invalid_plan = replace(plan, manifest=manifest)
                 try:
-                    invalid = SparseMLAOffloadManager.create_for_tp_group(
+                    invalid = SparseMLAOffloadManager.create_with_tp_shared_pool(
                         invalid_plan, tp_group, inventory
                     )
                 except RuntimeError as error:
@@ -140,7 +148,9 @@ def _sparse_mla_rank(
             cuda_patch.setattr(torch.cuda, "cudart", fail_cuda_entrypoint)
             cuda_patch.setattr(torch.cuda, "Stream", fail_cuda_entrypoint)
             cuda_patch.setattr(torch.cuda, "Event", fail_cuda_entrypoint)
-        manager = SparseMLAOffloadManager.create_for_tp_group(plan, tp_group, inventory)
+        manager = SparseMLAOffloadManager.create_with_tp_shared_pool(
+            plan, tp_group, inventory
+        )
         handle = manager.pool_handle
         if case == "visibility":
             if tp_group.rank_in_group == 0:
@@ -405,3 +415,948 @@ def test_sparse_mla_manager_owns_local_buffers_and_exposes_borrowed_layer_views(
     assert slab_layout == (True, fixed_bytes, fixed_bytes)
     assert event_rows == (True, True, True, True)
     assert not _backing_path(record[1].backing_name).exists()
+
+
+class _FailingClearDict(dict):
+    def __init__(self, values, failures: int = 0):
+        super().__init__(values)
+        self.failures = failures
+
+    def clear(self) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("clear fault")
+        super().clear()
+
+
+def _make_lifecycle_runner(manager, inventory):
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.sparse_mla_offload_manager = manager
+    runner._sparse_mla_kv_caches_dict = inventory
+    runner._sparse_mla_indexer_layer_names = _INDEXER_LAYERS
+    runner._sparse_mla_shutdown_started = False
+    runner._sparse_mla_terminal_connector_failure = None
+    runner._sparse_mla_connector_shutdown_complete = False
+    runner._sparse_mla_sync_complete = False
+    runner._sparse_mla_graphs_released = False
+    runner._sparse_mla_borrower_step = 0
+    runner._sparse_mla_borrowers_unbound = False
+    runner._sparse_mla_local_closed = False
+    runner._sparse_mla_shared_shutdown_complete = False
+    runner._sparse_mla_local_cleanup_step = 0
+    runner._sparse_mla_local_shutdown_complete = False
+    runner.cudagraph_manager = None
+    runner.speculator = None
+    runner.kv_connector = object()
+    runner.kv_caches = list(inventory.values())
+    runner.attn_groups = []
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={
+            name: SimpleNamespace(kv_cache=tensor) for name, tensor in inventory.items()
+        }
+    )
+    runner.vllm_config = SimpleNamespace()
+    return runner
+
+
+def _patch_lifecycle_runtime(monkeypatch, tp_group, connector_shutdown):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+
+    real_connector_shutdown = model_runner_module.ensure_kv_transfer_shutdown
+
+    def wrapped_connector_shutdown() -> None:
+        real_connector_shutdown()
+        connector_shutdown()
+
+    monkeypatch.setattr(model_runner_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        model_runner_module,
+        "ensure_kv_transfer_shutdown",
+        wrapped_connector_shutdown,
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        model_runner_module, "free_before_shutdown", lambda config: None
+    )
+
+
+def _initialize_lifecycle_tp_group(rank: int, port: int, case: str):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        world_size=2,
+        rank=rank,
+    )
+    tp_group = GroupCoordinator(
+        group_ranks=[[0, 1]],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        use_message_queue_broadcaster=False,
+        group_name=f"c4-lifecycle-{case}",
+    )
+    dist.barrier()
+    tp_group.device = torch.device("cpu")
+    return tp_group
+
+
+def _prepare_initialize_runner(patch, tp_group, plan, inventory, connector_factory):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+
+    runner = _make_lifecycle_runner(None, {})
+    support = SimpleNamespace(min_cg_support=None, min_cg_attn_backend=None)
+    support.narrow = lambda *args: support
+    runner.max_model_len = 16
+    runner.is_encoder_decoder = False
+    runner.scheduler_config = SimpleNamespace(max_num_encoder_input_tokens=0)
+    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace())
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.cache_config = SimpleNamespace(
+        enable_prefix_caching=False, cache_dtype="auto"
+    )
+    runner.device = torch.device("cpu")
+    runner.model_state = SimpleNamespace(get_additional_cg_support=lambda: ())
+    runner.max_num_reqs = 2
+    runner.max_num_tokens = 4
+    runner.parallel_config = SimpleNamespace(tensor_parallel_size=2)
+    runner.supports_mm_inputs = False
+    runner.req_states = SimpleNamespace()
+    runner.decode_query_len = 1
+    runner.lora_capture_cases = [0]
+    runner.input_buffers = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={
+            name: SimpleNamespace(kv_cache=tensor) for name, tensor in inventory.items()
+        },
+        resolve_cudagraph_mode_and_sizes=lambda *args, **kwargs: None,
+    )
+    runner.vllm_config = SimpleNamespace(mamba_config=None)
+
+    kv_cache_spec = SimpleNamespace(block_size=2)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(size=tensor.nbytes, shared_by=[name])
+            for name, tensor in inventory.items()
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=[*_MAIN_LAYERS, *_INDEXER_LAYERS],
+                kv_cache_spec=kv_cache_spec,
+            )
+        ],
+        sparse_mla_offload_plan=plan,
+    )
+    attn_groups = [
+        [
+            AttentionGroup(object, list(_MAIN_LAYERS), kv_cache_spec, 0),
+            AttentionGroup(object, list(_INDEXER_LAYERS), kv_cache_spec, 0),
+        ]
+    ]
+    observations = {}
+
+    def initialize_inventory(
+        kv_caches,
+        forward_context,
+        physical_config,
+        physical_attn_groups,
+        device,
+        *args,
+        **kwargs,
+    ):
+        raw_inventory = _allocate_kv_cache(physical_config, {}, device)
+        allocated_inventory = {
+            name: tensor.view(torch.float32).view(2, 2, 2)
+            for name, tensor in raw_inventory.items()
+        }
+        kv_caches.extend(allocated_inventory.values())
+        observations.update(
+            {
+                "config": physical_config,
+                "attn_groups": physical_attn_groups,
+                "inventory": allocated_inventory,
+                "raw_numel": sum(tensor.numel() for tensor in raw_inventory.values()),
+            }
+        )
+        return allocated_inventory
+
+    patch.setattr(model_runner_module, "get_tp_group", lambda: tp_group)
+    patch.setattr(
+        model_runner_module,
+        "init_attn_backend",
+        lambda *args, **kwargs: (attn_groups, support, [2]),
+    )
+    patch.setattr(model_runner_module, "BlockTables", lambda *args, **kwargs: None)
+    patch.setattr(
+        model_runner_module.pcp, "maybe_build_pcp_manager", lambda *args: None
+    )
+    patch.setattr(
+        model_runner_module, "initialize_mamba_ssu_backend", lambda *args: None
+    )
+    patch.setattr(
+        model_runner_module, "ModelCudaGraphManager", lambda *args, **kwargs: None
+    )
+    patch.setattr(
+        model_runner_module, "check_attention_cp_compatibility", lambda config: None
+    )
+    patch.setattr(model_runner_module, "init_kv_cache", initialize_inventory)
+    patch.setattr(model_runner_module, "get_kv_connector", connector_factory)
+    return runner, kv_cache_config, observations
+
+
+def _lifecycle_init_rank(rank: int, port: int, case: str, results) -> None:
+    import vllm.v1.worker.gpu.sparse_mla_offload as sparse_module
+
+    patch = pytest.MonkeyPatch()
+    tp_group = None
+    manager = None
+    handle = None
+    try:
+        tp_group = _initialize_lifecycle_tp_group(rank, port, case)
+        plan = _make_sparse_mla_plan(2, 1)
+        inventory = {
+            name: torch.arange(8, dtype=torch.float32).view(2, 2, 2)
+            for name in _INDEXER_LAYERS
+        }
+        missing_inventory_error = None
+        missing_inventory_factory_calls = None
+        if case == "success":
+            missing_inventory = dict(inventory)
+            del missing_inventory[_INDEXER_LAYERS[-1]]
+            factory_calls = 0
+            original_factory = SparseMLAOffloadManager.create_with_tp_shared_pool
+
+            def count_factory(cls, *args, **kwargs):
+                nonlocal factory_calls
+                factory_calls += 1
+                return original_factory(*args, **kwargs)
+
+            patch.setattr(
+                SparseMLAOffloadManager,
+                "create_with_tp_shared_pool",
+                classmethod(count_factory),
+            )
+            missing_runner, missing_config, _ = _prepare_initialize_runner(
+                patch,
+                tp_group,
+                plan,
+                missing_inventory,
+                lambda config, kv_caches_dict: object(),
+            )
+            try:
+                missing_runner.initialize_kv_cache(missing_config)
+            except (RuntimeError, ValueError) as error:
+                missing_inventory_error = str(error)
+            missing_inventory_factory_calls = factory_calls
+        if case == "same_host":
+            patch.setattr(
+                sparse_module,
+                "in_the_same_node_as",
+                lambda group, source_rank=0: [rank == 0, rank == 0],
+            )
+        elif case == "creator_failure":
+            original_initialize = SparseMLAOffloadManager._initialize_host_mapping
+
+            def fail_creator(self, pool_handle):
+                if rank == 0 and pool_handle is None:
+                    raise RuntimeError("creator fault")
+                return original_initialize(self, pool_handle)
+
+            patch.setattr(
+                SparseMLAOffloadManager, "_initialize_host_mapping", fail_creator
+            )
+        elif case == "malformed_handle":
+            original_broadcast = sparse_module.dist.broadcast_object_list
+
+            def corrupt_handle(values, *args, **kwargs):
+                original_broadcast(values, *args, **kwargs)
+                if (
+                    rank == 1
+                    and isinstance(values[0], tuple)
+                    and isinstance(values[0][0], sparse_module.SparseMLAPoolHandle)
+                ):
+                    pool_handle, error = values[0]
+                    values[0] = replace(pool_handle, schema_version=2), error
+
+            patch.setattr(sparse_module.dist, "broadcast_object_list", corrupt_handle)
+        elif case == "follower_attach_register_failure":
+            original_register = SparseMLAOffloadManager._register_host_mapping
+
+            def fail_follower_register(self):
+                if rank == 1:
+                    raise RuntimeError("follower register fault")
+                return original_register(self)
+
+            patch.setattr(
+                SparseMLAOffloadManager,
+                "_register_host_mapping",
+                fail_follower_register,
+            )
+
+        connector_inventory_ids = []
+
+        def construct_connector(config, kv_caches_dict):
+            connector_inventory_ids.append(id(kv_caches_dict))
+            return object()
+
+        runner, kv_cache_config, observations = _prepare_initialize_runner(
+            patch, tp_group, plan, inventory, construct_connector
+        )
+        with pytest.raises(
+            AssertionError, match="Some layers are not correctly initialized"
+        ):
+            _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))
+        try:
+            runner.initialize_kv_cache(kv_cache_config)
+        except RuntimeError as error:
+            results.put(
+                {
+                    "rank": rank,
+                    "case": case,
+                    "error": str(error),
+                    "backings": [
+                        path.name
+                        for path in _backing_path("").parent.glob(
+                            "vllm_sparse_mla_*_dp0.mmap"
+                        )
+                    ],
+                }
+            )
+            return
+
+        manager = runner.sparse_mla_offload_manager
+        assert manager is not None
+        handle = manager.pool_handle
+        if rank == 0:
+            manager.main_host_write_view("main.0").fill_(29)
+        dist.barrier(group=tp_group.cpu_group)
+        connector_calls = []
+        _patch_lifecycle_runtime(
+            patch, tp_group, lambda: connector_calls.append("connector")
+        )
+        allocated_inventory = observations["inventory"]
+        exact_inventory = runner._sparse_mla_kv_caches_dict is allocated_inventory
+        exact_connector_inventory = connector_inventory_ids == [id(allocated_inventory)]
+        physical_config = observations["config"]
+        physical_attn_groups = observations["attn_groups"]
+        physical_group_names = [
+            group.layer_names for group in physical_config.kv_cache_groups
+        ]
+        physical_attn_names = [
+            [name for attn_group in groups for name in attn_group.layer_names]
+            for groups in physical_attn_groups
+        ]
+        logical_group_names = [
+            group.layer_names for group in runner.kv_cache_config.kv_cache_groups
+        ]
+        allocated_keys = tuple(sorted(allocated_inventory))
+        allocated_devices = tuple(
+            str(tensor.device) for tensor in allocated_inventory.values()
+        )
+        sentinel = manager.layer_view("main.0").main_host_kv.flatten()[0].item()
+        runner.shutdown_sparse_mla_shared()
+        results.put(
+            {
+                "rank": rank,
+                "case": case,
+                "error": None,
+                "sentinel": sentinel,
+                "exact_inventory": exact_inventory,
+                "exact_connector_inventory": exact_connector_inventory,
+                "allocated_keys": allocated_keys,
+                "allocated_devices": allocated_devices,
+                "allocated_raw_numel": observations["raw_numel"],
+                "expected_raw_numel": sum(
+                    tensor.size for tensor in physical_config.kv_cache_tensors
+                ),
+                "physical_group_names": physical_group_names,
+                "physical_attn_names": physical_attn_names,
+                "logical_group_names": logical_group_names,
+                "connector_calls": len(connector_calls),
+                "manager_cleared": runner.sparse_mla_offload_manager is None,
+                "backing": handle.backing_name,
+                "missing_inventory_error": missing_inventory_error,
+                "missing_inventory_factory_calls": missing_inventory_factory_calls,
+            }
+        )
+        manager = None
+    except BaseException as error:
+        results.put(
+            {
+                "rank": rank,
+                "case": case,
+                "fatal": type(error).__name__,
+                "error": str(error),
+            }
+        )
+        raise
+    finally:
+        if manager is not None:
+            with suppress(BaseException):
+                manager.close()
+            if rank == 0:
+                with suppress(BaseException):
+                    manager.unlink()
+        if tp_group is not None:
+            tp_group.destroy()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        patch.undo()
+
+
+def _lifecycle_shutdown_rank(rank: int, port: int, case: str, results) -> None:
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+    import vllm.v1.worker.gpu_worker as gpu_worker_module
+    from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+
+    patch = pytest.MonkeyPatch()
+    tp_group = None
+    manager = None
+    handle = None
+    original_close = None
+    original_unlink = None
+    try:
+        tp_group = _initialize_lifecycle_tp_group(rank, port, case)
+        real_worker_connector_shutdown = gpu_worker_module.ensure_kv_transfer_shutdown
+        collective_counts = {"gather": 0, "barrier": 0, "broadcast": 0}
+        original_gather = model_runner_module.dist.all_gather_object
+        original_barrier = model_runner_module.dist.barrier
+        original_broadcast = model_runner_module.dist.broadcast_object_list
+
+        def count_gather(*args, **kwargs):
+            collective_counts["gather"] += 1
+            return original_gather(*args, **kwargs)
+
+        def count_barrier(*args, **kwargs):
+            collective_counts["barrier"] += 1
+            return original_barrier(*args, **kwargs)
+
+        def count_broadcast(*args, **kwargs):
+            collective_counts["broadcast"] += 1
+            return original_broadcast(*args, **kwargs)
+
+        patch.setattr(model_runner_module.dist, "all_gather_object", count_gather)
+        patch.setattr(model_runner_module.dist, "barrier", count_barrier)
+        patch.setattr(
+            model_runner_module.dist, "broadcast_object_list", count_broadcast
+        )
+        plan = _make_sparse_mla_plan(2, 1)
+        inventory = {
+            name: torch.arange(8, dtype=torch.float32).view(2, 2, 2)
+            for name in _INDEXER_LAYERS
+        }
+        connector_calls = []
+        generic_connector_calls: list[str] = []
+        connector_fault = [True]
+        lifecycle_unlink_calls = [0]
+        manager_original_unlink = [None]
+        original_manager_factory = SparseMLAOffloadManager.create_with_tp_shared_pool
+
+        def create_counted_manager(cls, *args, **kwargs):
+            created_manager = original_manager_factory(*args, **kwargs)
+            real_unlink = created_manager.unlink
+            manager_original_unlink[0] = real_unlink
+
+            def counted_unlink() -> None:
+                lifecycle_unlink_calls[0] += 1
+                real_unlink()
+
+            created_manager.unlink = counted_unlink
+            return created_manager
+
+        patch.setattr(
+            SparseMLAOffloadManager,
+            "create_with_tp_shared_pool",
+            classmethod(create_counted_manager),
+        )
+        terminal_transition_before = None
+        terminal_transition_delta = None
+
+        def connector_shutdown() -> None:
+            connector_calls.append("connector")
+            if (
+                case
+                in (
+                    "post_factory_registered_connector_failure",
+                    "worker_connector_shutdown_terminal_failure",
+                )
+                and rank == 1
+                and connector_fault[0]
+            ):
+                raise RuntimeError("connector fault")
+
+        _patch_lifecycle_runtime(patch, tp_group, connector_shutdown)
+        errors = []
+        if case == "post_factory_registered_connector_failure":
+
+            def construct_connector(config, kv_caches_dict):
+                nonlocal terminal_transition_before
+                terminal_transition_before = collective_counts.copy()
+                if rank == 1:
+                    raise RuntimeError("init fault")
+                return object()
+
+            runner, kv_cache_config, _ = _prepare_initialize_runner(
+                patch, tp_group, plan, inventory, construct_connector
+            )
+            try:
+                runner.initialize_kv_cache(kv_cache_config)
+            except RuntimeError as error:
+                errors.append(str(error))
+            assert terminal_transition_before is not None
+            terminal_transition_delta = {
+                name: collective_counts[name] - terminal_transition_before[name]
+                for name in collective_counts
+            }
+            manager = runner.sparse_mla_offload_manager
+            assert manager is not None
+        else:
+            manager = SparseMLAOffloadManager.create_with_tp_shared_pool(
+                plan, tp_group, inventory
+            )
+            runner = _make_lifecycle_runner(manager, inventory)
+        handle = manager.pool_handle
+        original_unlink = manager_original_unlink[0]
+        assert original_unlink is not None
+
+        def generic_connector_shutdown() -> None:
+            real_worker_connector_shutdown()
+            generic_connector_calls.append("connector")
+
+        patch.setattr(
+            gpu_worker_module,
+            "ensure_kv_transfer_shutdown",
+            generic_connector_shutdown,
+        )
+        patch.setattr(gpu_worker_module, "ensure_ec_transfer_shutdown", None)
+        patch.setattr(
+            gpu_worker_module.current_platform, "is_cuda_alike", lambda: False
+        )
+        worker = GPUWorker.__new__(GPUWorker)
+        worker.use_v2_model_runner = True
+        worker.model_runner = runner
+        worker.profiler = None
+        worker.weight_transfer_engine = None
+
+        if case in (
+            "post_factory_registered_connector_failure",
+            "worker_connector_shutdown_terminal_failure",
+        ):
+            if case == "worker_connector_shutdown_terminal_failure":
+                terminal_transition_before = collective_counts.copy()
+            calls = (
+                (worker.shutdown, runner.shutdown)
+                if case == "post_factory_registered_connector_failure"
+                else (worker.shutdown, worker.shutdown, runner.shutdown)
+            )
+            terminal_snapshot = None
+            for index, call in enumerate(calls):
+                try:
+                    call()
+                except RuntimeError as error:
+                    errors.append(str(error))
+                if index == 0:
+                    if case == "worker_connector_shutdown_terminal_failure":
+                        assert terminal_transition_before is not None
+                        terminal_transition_delta = {
+                            name: collective_counts[name]
+                            - terminal_transition_before[name]
+                            for name in collective_counts
+                        }
+                    terminal_snapshot = collective_counts.copy()
+            terminal_local_only = terminal_snapshot == collective_counts
+            terminal_unlink_calls = lifecycle_unlink_calls[0]
+            nonconnector_error = None
+            nonconnector_terminal = None
+            nonconnector_complete = None
+            nonconnector_connector_calls = None
+            retained = runner.sparse_mla_offload_manager is manager
+            if case == "post_factory_registered_connector_failure":
+                manager.close()
+                dist.barrier(group=tp_group.cpu_group)
+                if rank == 0:
+                    original_unlink()
+                dist.barrier(group=tp_group.cpu_group)
+                manager = None
+                connector_fault[0] = False
+                connector_calls.clear()
+                retry_inventory = {
+                    name: torch.arange(8, dtype=torch.float32).view(2, 2, 2)
+                    for name in _INDEXER_LAYERS
+                }
+
+                def fail_retry_connector(config, kv_caches_dict):
+                    if rank == 1:
+                        raise RuntimeError("retry init fault")
+                    return object()
+
+                retry_runner, retry_config, _ = _prepare_initialize_runner(
+                    patch,
+                    tp_group,
+                    plan,
+                    retry_inventory,
+                    fail_retry_connector,
+                )
+                patch.setattr(
+                    model_runner_module,
+                    "ModelCudaGraphManager",
+                    lambda *args, **kwargs: SimpleNamespace(
+                        graphs=_FailingClearDict({}, failures=rank),
+                        breakable_cg_runner=object(),
+                    ),
+                )
+                try:
+                    retry_runner.initialize_kv_cache(retry_config)
+                except RuntimeError as error:
+                    nonconnector_error = str(error)
+                nonconnector_terminal = (
+                    retry_runner._sparse_mla_terminal_connector_failure
+                )
+                retry_runner.shutdown_sparse_mla_shared()
+                nonconnector_complete = (
+                    retry_runner._sparse_mla_shared_shutdown_complete
+                )
+                nonconnector_connector_calls = len(connector_calls)
+            results.put(
+                {
+                    "rank": rank,
+                    "case": case,
+                    "errors": errors,
+                    "connector_calls": len(connector_calls),
+                    "generic_connector_calls": len(generic_connector_calls),
+                    "terminal_local_only": terminal_local_only,
+                    "terminal_transition_delta": terminal_transition_delta,
+                    "terminal_unlink_calls": terminal_unlink_calls,
+                    "collective_counts": collective_counts,
+                    "terminal": runner._sparse_mla_terminal_connector_failure,
+                    "retained": retained,
+                    "backing": handle.backing_name,
+                    "nonconnector_error": nonconnector_error,
+                    "nonconnector_terminal": nonconnector_terminal,
+                    "nonconnector_complete": nonconnector_complete,
+                    "nonconnector_connector_calls": nonconnector_connector_calls,
+                }
+            )
+            return
+
+        original_close = manager.close
+        original_unlink = manager.unlink
+        close_calls = 0
+        unlink_calls = 0
+        if case == "retained_borrow_close_retry":
+            runner.cudagraph_manager = SimpleNamespace(
+                graphs=_FailingClearDict({}, failures=rank),
+                breakable_cg_runner=object(),
+            )
+            runner._sparse_mla_kv_caches_dict = _FailingClearDict(
+                inventory, failures=rank
+            )
+
+            def close_with_fault() -> None:
+                nonlocal close_calls
+                close_calls += 1
+                if rank == 1 and close_calls == 1:
+                    raise RuntimeError("close fault")
+                original_close()
+
+            manager.close = close_with_fault
+            for _ in range(4):
+                try:
+                    runner.shutdown_sparse_mla_shared()
+                except RuntimeError as error:
+                    errors.append(str(error))
+            assert runner._sparse_mla_shared_shutdown_complete
+        elif case == "tp0_unlink_failure_retry":
+
+            def unlink_with_fault() -> None:
+                nonlocal unlink_calls
+                unlink_calls += 1
+                if rank == 0 and unlink_calls == 1:
+                    raise RuntimeError("unlink fault")
+                original_unlink()
+
+            manager.unlink = unlink_with_fault
+            for _ in range(2):
+                try:
+                    runner.shutdown_sparse_mla_shared()
+                except RuntimeError as error:
+                    errors.append(str(error))
+            assert runner._sparse_mla_shared_shutdown_complete
+        else:
+            free_calls = 0
+
+            def fail_free_once(config) -> None:
+                nonlocal free_calls
+                free_calls += 1
+                if free_calls == 1:
+                    raise RuntimeError("free fault")
+
+            patch.setattr(model_runner_module, "free_before_shutdown", fail_free_once)
+            try:
+                worker.shutdown()
+            except RuntimeError as error:
+                errors.append(str(error))
+            worker.shutdown()
+            assert runner._sparse_mla_local_shutdown_complete
+            nonoffload_order = []
+            nonoffload_runner = _make_lifecycle_runner(None, {})
+
+            def nonoffload_connector_shutdown() -> None:
+                real_worker_connector_shutdown()
+                nonoffload_order.append("connector")
+
+            patch.setattr(
+                gpu_worker_module,
+                "ensure_kv_transfer_shutdown",
+                nonoffload_connector_shutdown,
+            )
+            patch.setattr(
+                torch.accelerator,
+                "synchronize",
+                lambda: nonoffload_order.append("synchronize"),
+            )
+            patch.setattr(
+                model_runner_module,
+                "free_before_shutdown",
+                lambda config: nonoffload_order.append("free"),
+            )
+            nonoffload_worker = GPUWorker.__new__(GPUWorker)
+            nonoffload_worker.use_v2_model_runner = True
+            nonoffload_worker.model_runner = nonoffload_runner
+            nonoffload_worker.profiler = None
+            nonoffload_worker.weight_transfer_engine = None
+            nonoffload_worker.shutdown()
+        results.put(
+            {
+                "rank": rank,
+                "case": case,
+                "errors": errors,
+                "connector_calls": len(connector_calls),
+                "generic_connector_calls": len(generic_connector_calls),
+                "close_calls": close_calls,
+                "unlink_calls": unlink_calls,
+                "shared_complete": runner._sparse_mla_shared_shutdown_complete,
+                "manager_cleared": runner.sparse_mla_offload_manager is None,
+                "backing": handle.backing_name,
+                "free_calls": free_calls
+                if case == "completed_worker_shutdown_no_collective"
+                else None,
+                "nonoffload_order": nonoffload_order
+                if case == "completed_worker_shutdown_no_collective"
+                else None,
+            }
+        )
+        manager = None
+    except BaseException as error:
+        results.put(
+            {
+                "rank": rank,
+                "case": case,
+                "fatal": type(error).__name__,
+                "error": str(error),
+            }
+        )
+        raise
+    finally:
+        if manager is not None:
+            if original_close is not None:
+                with suppress(BaseException):
+                    original_close()
+            else:
+                with suppress(BaseException):
+                    manager.close()
+            if rank == 0:
+                if original_unlink is not None:
+                    with suppress(BaseException):
+                        original_unlink()
+                else:
+                    with suppress(BaseException):
+                        manager.unlink()
+        if tp_group is not None:
+            tp_group.destroy()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        patch.undo()
+
+
+def _run_lifecycle_case(target, case: str) -> list[dict]:
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue(maxsize=2)
+    port = get_open_port()
+    children = [
+        context.Process(target=target, args=(rank, port, case, results))
+        for rank in range(2)
+    ]
+    try:
+        for child in children:
+            child.start()
+        records = [results.get(timeout=60) for _ in children]
+        for child in children:
+            child.join(timeout=60)
+        assert [child.exitcode for child in children] == [0, 0]
+        assert not any(child.is_alive() for child in children)
+        assert not any("fatal" in record for record in records)
+        return sorted(records, key=lambda record: record["rank"])
+    finally:
+        for child in children:
+            if child.is_alive():
+                child.terminate()
+            child.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "success",
+        "same_host",
+        "creator_failure",
+        "malformed_handle",
+        "follower_attach_register_failure",
+    ],
+)
+def test_gpu_model_runner_v2_sparse_mla_manager_init_and_shared_visibility(
+    case,
+):
+    records = _run_lifecycle_case(_lifecycle_init_rank, case)
+    assert [record["case"] for record in records] == [case, case]
+    assert records[0]["error"] == records[1]["error"]
+    if case == "success":
+        assert [record["sentinel"] for record in records] == [29, 29]
+        assert all(record["exact_inventory"] for record in records)
+        assert all(record["exact_connector_inventory"] for record in records)
+        assert all(record["allocated_keys"] == _INDEXER_LAYERS for record in records)
+        assert all(record["allocated_devices"] == ("cpu", "cpu") for record in records)
+        assert all(
+            record["allocated_raw_numel"] == record["expected_raw_numel"] == 64
+            for record in records
+        )
+        assert all(
+            record["physical_group_names"] == [list(_INDEXER_LAYERS)]
+            for record in records
+        )
+        assert all(
+            record["physical_attn_names"] == [list(_INDEXER_LAYERS)]
+            for record in records
+        )
+        assert all(
+            record["logical_group_names"] == [[*_MAIN_LAYERS, *_INDEXER_LAYERS]]
+            for record in records
+        )
+        assert all(record["connector_calls"] == 1 for record in records)
+        assert all(record["manager_cleared"] for record in records)
+        assert all(
+            record["missing_inventory_error"]
+            == "Sparse MLA physical KV cache is missing planned Indexer layers: "
+            "indexer.1"
+            for record in records
+        )
+        assert all(record["missing_inventory_factory_calls"] == 0 for record in records)
+        assert not _backing_path(records[0]["backing"]).exists()
+    else:
+        expected_errors = {
+            "same_host": "Sparse MLA offload same-host proof failed on TP rank 1: "
+            "RuntimeError: tensor-parallel ranks are not on one host",
+            "creator_failure": "Sparse MLA offload creator mapping failed on TP rank "
+            "0: RuntimeError: creator fault",
+            "malformed_handle": "Sparse MLA offload local initialization failed on "
+            "TP rank 1: ValueError: shared Host pool handle does not match the local "
+            "plan",
+            "follower_attach_register_failure": (
+                "Sparse MLA offload local initialization failed on TP rank 1: "
+                "RuntimeError: follower register fault"
+            ),
+        }
+        assert records[0]["error"] == expected_errors[case]
+        assert not records[0]["backings"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "post_factory_registered_connector_failure",
+        "worker_connector_shutdown_terminal_failure",
+        "retained_borrow_close_retry",
+        "tp0_unlink_failure_retry",
+        "completed_worker_shutdown_no_collective",
+    ],
+)
+def test_gpu_model_runner_v2_sparse_mla_manager_failure_unwind_and_shutdown(
+    case,
+):
+    records = _run_lifecycle_case(_lifecycle_shutdown_rank, case)
+    assert [record["case"] for record in records] == [case, case]
+    if case in (
+        "post_factory_registered_connector_failure",
+        "worker_connector_shutdown_terminal_failure",
+    ):
+        assert records[0]["errors"] == records[1]["errors"]
+        assert len(records[0]["errors"]) == 3
+        if case == "post_factory_registered_connector_failure":
+            assert (
+                "; rollback: Sparse MLA offload connector shutdown"
+                in records[0]["errors"][0]
+            )
+            assert records[0]["errors"][1] == records[0]["errors"][2]
+            assert records[0]["nonconnector_error"] == records[1]["nonconnector_error"]
+            assert (
+                "; rollback: Sparse MLA offload graph release"
+                in records[0]["nonconnector_error"]
+            )
+            assert records[0]["nonconnector_terminal"] is None
+            assert records[1]["nonconnector_terminal"] is None
+            assert all(record["nonconnector_complete"] for record in records)
+            assert all(
+                record["nonconnector_connector_calls"] == 1 for record in records
+            )
+        else:
+            assert len(set(records[0]["errors"])) == 1
+        assert records[0]["terminal"] == records[1]["terminal"]
+        assert all(record["connector_calls"] == 1 for record in records)
+        assert all(record["generic_connector_calls"] == 0 for record in records)
+        assert all(record["terminal_local_only"] for record in records)
+        assert all(record["terminal_unlink_calls"] == 0 for record in records)
+        assert all(
+            record["terminal_transition_delta"]["barrier"] == 1 for record in records
+        )
+        assert all(
+            record["terminal_transition_delta"]["broadcast"] == 1 for record in records
+        )
+        assert records[0]["collective_counts"] == records[1]["collective_counts"]
+        assert all(record["retained"] for record in records)
+        assert not _backing_path(records[0]["backing"]).exists()
+    elif case == "retained_borrow_close_retry":
+        assert records[0]["errors"] == records[1]["errors"]
+        assert len(records[0]["errors"]) == 3
+        assert "graph release" in records[0]["errors"][0]
+        assert "borrower unbind" in records[0]["errors"][1]
+        assert "manager close" in records[0]["errors"][2]
+        assert all(record["connector_calls"] == 1 for record in records)
+        assert all(record["shared_complete"] for record in records)
+        assert not _backing_path(records[0]["backing"]).exists()
+    elif case == "tp0_unlink_failure_retry":
+        assert records[0]["errors"] == records[1]["errors"]
+        assert len(records[0]["errors"]) == 1
+        assert "owner unlink" in records[0]["errors"][0]
+        assert records[0]["unlink_calls"] == 2
+        assert records[1]["unlink_calls"] == 0
+        assert all(record["connector_calls"] == 1 for record in records)
+        assert not _backing_path(records[0]["backing"]).exists()
+    else:
+        assert all(record["shared_complete"] for record in records)
+        assert all(record["manager_cleared"] for record in records)
+        assert all(record["connector_calls"] == 1 for record in records)
+        assert all(record["generic_connector_calls"] == 2 for record in records)
+        assert all(record["free_calls"] == 2 for record in records)
+        assert all(record["errors"] == ["free fault"] for record in records)
+        assert all(
+            record["nonoffload_order"] == ["connector", "synchronize", "free"]
+            for record in records
+        )
+        assert not _backing_path(records[0]["backing"]).exists()

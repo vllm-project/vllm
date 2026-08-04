@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -20,11 +20,13 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
     SparseMLAAllocationManifestEntry,
     SparseMLAAllocationOwner,
     SparseMLAAllocationTier,
     SparseMLAOffloadMemoryPlan,
 )
+from vllm.v1.worker.utils import AttentionGroup
 
 _SCHEMA_VERSION = 1
 _BACKING_PATTERN = re.compile(r"vllm_sparse_mla_([0-9a-f]{32})_dp([0-9]+)\.mmap\Z")
@@ -92,6 +94,80 @@ def _format_failure(status: _FailureStatus) -> str:
     )
 
 
+def _get_sparse_mla_physical_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+) -> tuple[KVCacheConfig, list[list[AttentionGroup]]]:
+    plan = kv_cache_config.sparse_mla_offload_plan
+    assert plan is not None
+    indexer_names = set(plan.indexer_layer_names)
+
+    physical_groups = []
+    grouped_names = []
+    for group in kv_cache_config.kv_cache_groups:
+        layer_names = [name for name in group.layer_names if name in indexer_names]
+        physical_groups.append(replace(group, layer_names=layer_names))
+        grouped_names.extend(layer_names)
+
+    missing_group_names = indexer_names.difference(grouped_names)
+    if missing_group_names:
+        missing = ", ".join(sorted(missing_group_names))
+        raise ValueError(
+            f"Sparse MLA physical KV cache is missing planned Indexer layers: {missing}"
+        )
+    if len(grouped_names) != len(indexer_names):
+        raise ValueError("Sparse MLA physical KV cache has duplicate Indexer layers")
+
+    physical_tensors = []
+    tensor_names = []
+    for tensor in kv_cache_config.kv_cache_tensors:
+        selected = [name for name in tensor.shared_by if name in indexer_names]
+        if not selected:
+            continue
+        if len(selected) != len(tensor.shared_by):
+            raise ValueError("Sparse MLA physical KV cache tensor mixes layer roles")
+        physical_tensors.append(tensor)
+        tensor_names.extend(selected)
+
+    missing_tensor_names = indexer_names.difference(tensor_names)
+    if missing_tensor_names:
+        missing = ", ".join(sorted(missing_tensor_names))
+        raise ValueError(
+            f"Sparse MLA physical KV cache is missing planned Indexer layers: {missing}"
+        )
+    if len(tensor_names) != len(indexer_names):
+        raise ValueError("Sparse MLA physical KV cache has duplicate Indexer tensors")
+
+    if len(attn_groups) != len(physical_groups):
+        raise ValueError("Sparse MLA physical Attention groups are misaligned")
+    physical_attn_groups = []
+    for group_index, (groups, physical_group) in enumerate(
+        zip(attn_groups, physical_groups)
+    ):
+        filtered_groups = []
+        attention_names = []
+        for group in groups:
+            if group.kv_cache_group_id != group_index:
+                raise ValueError("Sparse MLA physical Attention groups are misaligned")
+            layer_names = [name for name in group.layer_names if name in indexer_names]
+            if layer_names:
+                filtered_groups.append(replace(group, layer_names=layer_names))
+                attention_names.extend(layer_names)
+        if sorted(attention_names) != sorted(physical_group.layer_names):
+            raise ValueError("Sparse MLA physical Attention layers are incomplete")
+        physical_attn_groups.append(filtered_groups)
+
+    return (
+        KVCacheConfig(
+            num_blocks=kv_cache_config.num_blocks,
+            kv_cache_tensors=physical_tensors,
+            kv_cache_groups=physical_groups,
+            sparse_mla_offload_plan=plan,
+        ),
+        physical_attn_groups,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SparseMLAPoolHandle:
     schema_version: int
@@ -144,7 +220,7 @@ class SparseMLAOffloadManager:
     _dp_replica_id = 0
 
     @classmethod
-    def create_for_tp_group(
+    def create_with_tp_shared_pool(
         cls,
         plan: SparseMLAOffloadMemoryPlan,
         tp_group: GroupCoordinator,
