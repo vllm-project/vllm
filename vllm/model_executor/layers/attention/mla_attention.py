@@ -769,6 +769,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_len=prefill.max_query_len,
                     seq_len=prefill_max_seq_len,
                 )
+                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
             )
             use_mha = (use_dense_mha or use_masked_mha) and not (
                 self._vllm_config.attention_config.sparse_mla_force_mqa
