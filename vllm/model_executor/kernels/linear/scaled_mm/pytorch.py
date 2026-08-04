@@ -123,7 +123,7 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
             return False, "requires ROCm."
 
         if not _supports_torch_fp8_scaled_mm():
-            return False, "requires ROCm with torch FP8 scaled-MM support."
+            return False, "requires platform with torch FP8 scaled-MM support."
 
         return True, None
 
