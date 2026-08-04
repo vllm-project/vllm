@@ -149,6 +149,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
+    # See context in #50859.
+    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
+    # AITER released, and AITER pin in vLLM increased from 0.1.19.
+    gating_output = patch_gating_output(gating_output, global_num_experts)
+
     if score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
         routing_data, gather_idx, scatter_idx = aiter_routing(
