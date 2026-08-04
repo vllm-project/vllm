@@ -2,15 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod cli;
-mod logging;
 
 use std::env;
 use std::ffi::OsStr;
-use std::process::ExitStatus;
+use std::process::{ExitCode, ExitStatus};
 
 use anyhow::{Context, Result, anyhow, bail};
+use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 
 use crate::cli::{BenchCommand, Cli, Command};
@@ -82,14 +82,14 @@ fn shutdown_signal() -> CancellationToken {
     token
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let process_label =
         match env::args_os().nth(1).as_deref().and_then(OsStr::to_str).unwrap_or_default() {
             "bench" => "Bench",
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    logging::init_tracing(process_label);
+    vllm_tracing::init_tracing(process_label);
 
     let cli = Cli::parse();
 
@@ -99,10 +99,18 @@ fn main() -> Result<()> {
         runtime.worker_threads(worker_threads);
     }
 
-    runtime
+    let result = runtime
         .build()
-        .context("failed to build Tokio runtime")?
-        .block_on(async_main(cli))
+        .context("failed to build Tokio runtime")
+        .and_then(|runtime| runtime.block_on(async_main(cli)));
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!("process failed with error: {:#?}", error.as_report());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
