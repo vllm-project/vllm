@@ -141,17 +141,22 @@ def _apply_attn_res(
     proj: ReplicatedLinear,
     norm: RMSNorm,
     num_valid_blocks: int,
+    *,
+    delta: torch.Tensor | None = None,
+    output_norm: RMSNorm | None = None,
+    block_write_idx: int = -1,
 ) -> torch.Tensor:
-    if num_valid_blocks <= 0:
-        return prefix_sum
-
     return attn_res(
         prefix_sum,
+        delta,
         block_residual,
         norm.weight,
         proj.weight.squeeze(0),
+        None if output_norm is None else output_norm.weight,
         num_valid_blocks,
+        block_write_idx,
         norm.variance_epsilon,
+        0.0 if output_norm is None else output_norm.variance_epsilon,
     )
 
 
@@ -210,7 +215,10 @@ class KimiMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.gate.e_score_correction_bias = nn.Parameter(torch.empty(num_experts))
+        # Preserve FP32 checkpoint values and match FP32 router logits.
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(num_experts, dtype=torch.float32)
+        )
 
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
@@ -607,19 +615,20 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            output_norm=self.input_layernorm,
+            block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
         )
 
         if self.is_block_write_layer:
-            block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self._run_self_attn(positions, hidden_states)
 
-        if prefix_sum is not None:
-            prefix_sum = prefix_sum + hidden_states
-        else:
+        if prefix_sum is None:
             prefix_sum = hidden_states
+            prefix_delta = None
+        else:
+            prefix_delta = hidden_states
 
         mlp_valid_blocks = self.prev_valid_blocks + (
             1 if self.is_block_write_layer else 0
@@ -630,9 +639,10 @@ class KimiDecoderLayer(nn.Module):
             self.mlp_res_proj,
             self.mlp_res_norm,
             mlp_valid_blocks,
+            delta=prefix_delta,
+            output_norm=self.post_attention_layernorm,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         prefix_sum = prefix_sum + hidden_states
         return prefix_sum, block_residual
