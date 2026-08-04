@@ -58,6 +58,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
@@ -817,11 +818,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
+        # Give every dummy request worst-case sampling parameters so the run
+        # exercises the expensive paths (top-k/top-p, penalties, logprobs) and
+        # memory profiling sees their transient allocations; a default-greedy
+        # dummy batch would skip them and undersize the estimate.
         assert self.sampler is not None
-        self.sampler(logits, dummy_input_batch)
+        warmup_params = SamplingParams.for_sampler_warmup()
+        for req_idx in range(num_reqs):
+            self.sampler.add_request(req_idx, 1, warmup_params)
+        self.sampler.apply_staged_writes()
+        try:
+            self.sampler(logits, dummy_input_batch)
+        finally:
+            default_params = SamplingParams()
+            for req_idx in range(num_reqs):
+                self.sampler.add_request(req_idx, 1, default_params)
+            self.sampler.apply_staged_writes()
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:

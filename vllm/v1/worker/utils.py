@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -528,26 +529,116 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
+_MEMORY_RELEASE_WAIT_S = 30.0
+
+
+def _wait_for_memory_release(
+    init_snapshot: MemorySnapshot, requested_memory: int
+) -> None:
+    """Poll until free memory covers the request or stops improving.
+
+    A departing sibling process (e.g. a previous server in the same CI shard)
+    may not have even received its shutdown signal yet, so tolerate a few
+    quiet polls before concluding the memory is genuinely in use.
+    """
+    deadline = time.monotonic() + _MEMORY_RELEASE_WAIT_S
+    best = init_snapshot.free_memory
+    stalls = 0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        free = torch.accelerator.get_memory_info(init_snapshot.device_)[0]
+        if free >= requested_memory:
+            break
+        if free <= best:
+            stalls += 1
+            if stalls >= 10:
+                # No forward progress; the memory is genuinely in use.
+                break
+        else:
+            stalls = 0
+            best = free
+    init_snapshot.measure()
+
+
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
+
+    `gpu_memory_utilization` is always a fraction of the device's *total*
+    memory, so 0.5 reserves half the device whatever else is resident. Sharing
+    is therefore supported, but only deliberately: the default assumes
+    exclusive use and must be set explicitly to share.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
 
     if init_snapshot.free_memory < requested_memory:
+        if cache_config.enable_extensible_kv_cache:
+            # This path reserves address space now and commits after warmup,
+            # clamped to what is measured free then, so exceeding current free
+            # memory over-reserves virtually rather than over-committing. The
+            # shared-device checks below still apply.
+            #
+            # The shortfall is often a previous instance still releasing its
+            # memory (restarts, back-to-back test servers); the old default
+            # left an idle fraction that absorbed that lag. Wait briefly for
+            # the release to land rather than sizing against transient usage.
+            _wait_for_memory_release(init_snapshot, requested_memory)
+            logger.debug(
+                "Requested memory (%s GiB) exceeds free memory (%s GiB); the "
+                "extensible KV cache will commit only what is measured as "
+                "available after warmup.",
+                format_gib(requested_memory),
+                format_gib(init_snapshot.free_memory),
+            )
+        else:
+            raise ValueError(
+                f"Free memory on device {init_snapshot.device_} "
+                f"({format_gib(init_snapshot.free_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+                f"is less than desired GPU memory utilization "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
+                f"utilization or reduce GPU memory used by other processes."
+            )
+
+    # The requested fraction fits, but another process may still be resident
+    # inside the headroom this instance leaves. Detect that by process, not by
+    # free memory: this runs after vLLM has created its own context and
+    # communication buffers, so used memory is not attributable by itself.
+    device_id = init_snapshot.device_.index or 0
+    foreign = current_platform.get_foreign_device_processes(device_id)
+    if not foreign:
+        return requested_memory
+
+    foreign_desc = ", ".join(
+        f"pid {pid} ({format_gib(nbytes)} GiB)" for pid, nbytes in foreign.items()
+    )
+    if (
+        not cache_config.user_specified_gpu_memory_utilization
+        and cache_config.enable_extensible_kv_cache
+    ):
+        # Only the extensible default (utilization 1.0) assumes exclusivity;
+        # the profiling default keeps its historical headroom-sharing
+        # semantics and just warns below.
         raise ValueError(
-            f"Free memory on device {init_snapshot.device_} "
-            f"({format_gib(init_snapshot.free_memory)}/"
-            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
-            f"is less than desired GPU memory utilization "
-            f"({cache_config.gpu_memory_utilization}, "
-            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
-            f"utilization or reduce GPU memory used by other processes."
+            f"Device {init_snapshot.device_} is already in use by another "
+            f"process: {foreign_desc}. The default gpu_memory_utilization "
+            f"({cache_config.gpu_memory_utilization}) assumes exclusive use "
+            f"of the device. To share the device, set gpu_memory_utilization "
+            f"explicitly to the fraction this instance may use."
         )
 
+    logger.warning(
+        "Device %s is shared with another process: %s. This instance keeps to "
+        "gpu_memory_utilization=%s, but the headroom it leaves is shared, so "
+        "usage beyond the profiled budget may run out of memory.",
+        init_snapshot.device_,
+        foreign_desc,
+        cache_config.gpu_memory_utilization,
+    )
     return requested_memory
 
 
