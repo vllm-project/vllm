@@ -14,6 +14,7 @@ import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+import vllm.envs as envs
 from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -285,6 +286,36 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     with vllm_runner("facebook/opt-125m", enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.llm.llm_engine, LLMEngine):
             v1_test_failed_model_execution(vllm_model)
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_raise_on_logit_nans(
+    vllm_runner, monkeypatch, use_v2_model_runner: bool
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_RAISE_ON_LOGIT_NANS", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    envs.disable_envs_cache()
+
+    try:
+        with vllm_runner("facebook/opt-125m", enforce_eager=True) as vllm_model:
+            engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            assert model_runner.vllm_config.use_v2_model_runner is use_v2_model_runner
+            model_cls = type(model_runner.model)
+            original_compute_logits = model_cls.compute_logits
+
+            def compute_nan_logits(self, *args, **kwargs):
+                logits = original_compute_logits(self, *args, **kwargs)
+                logits[0, 0] = float("nan")
+                return logits
+
+            monkeypatch.setattr(model_cls, "compute_logits", compute_nan_logits)
+
+            with pytest.raises(RuntimeError, match="NaNs detected in logits"):
+                vllm_model.generate_greedy(["Hello, my name is"], 1, use_tqdm=False)
+    finally:
+        envs.disable_envs_cache()
 
 
 def v1_test_failed_model_execution(vllm_model):
