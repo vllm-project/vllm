@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     ArmCPUUnquantizedExperts,
     CPUUnquantizedExperts,
+    PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
     select_experts,
 )
@@ -550,6 +551,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         "vec": CPUUnquantizedExperts,
         "amx": X86CPUUnquantizedExperts,
         "neon": ArmCPUUnquantizedExperts,
+        "vsx": PowerCPUUnquantizedExperts,
     }[isa]
     supported, reason = experts_cls.is_supported_config(
         experts_cls,
