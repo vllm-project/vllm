@@ -63,14 +63,7 @@ RUN apt-get update -y && \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install XPUM
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends software-properties-common && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging && \
-    apt-get update -y && \
-    apt-get install -y xpu-smi
-
-# Install UMD, force install libze* to replace the one installed by XPUM
+# Install UMD
 RUN mkdir neo && \
     cd neo && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.34.4/intel-igc-core-2_2.34.4+21428_amd64.deb && \
@@ -81,9 +74,25 @@ RUN mkdir neo && \
     wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/libze-intel-gpu1_26.18.38308.1-0_amd64.deb && \
     wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero_1.28.2+u24.04_amd64.deb && \
     wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero-devel_1.28.2+u24.04_amd64.deb && \
-    dpkg -i --force-overwrite *.deb && \
+    dpkg -i *.deb && \
     cd .. && \
     rm -rf neo
+
+# Install XPU-Manager w/o reinstall libze1/libze-intel-gpu1
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 && \
+    mkdir xpu-m && \
+    cd xpu-m && \
+    wget https://github.com/intel/xpumanager/releases/download/v2.0.0/libxpum2_2.0.0-238.24.04_amd64.deb && \
+    wget https://github.com/intel/xpumanager/releases/download/v2.0.0/xpu-smi_2.0.0-238.24.04_amd64.deb && \
+    dpkg -i --ignore-depends=libze1,libze-intel-gpu1 *.deb && \
+    cd .. && \
+    rm -rf xpu-m && \
+    add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
+    apt-get update -y
 
 ENV PATH="/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
