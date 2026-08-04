@@ -205,93 +205,46 @@ scoped_base_content_ref() {
         "${BASE_REPO}" "${metadata_version}" "${scope}" "${base_hash}"
 }
 
-get_remote_base_label() {
-    local image_ref="$1"
-    local label_key="$2"
-
-    docker buildx imagetools inspect "${image_ref}" \
-        --format "{{ index .Image.Config.Labels \"${label_key}\" }}" \
-        2>/dev/null
-}
-
-validate_base_content_ref() {
-    local image_ref="$1"
-    local expected_hash="$2"
-    local expected_version="$3"
-    local attempts="${ROCM_IMAGE_LABEL_ATTEMPTS:-4}"
-    local delay_secs="${ROCM_IMAGE_LABEL_RETRY_DELAY:-2}"
-    local attempt=0
-    local digest=""
-    local remote_hash=""
-    local remote_version=""
-    local hash_status=0
-    local version_status=0
-
-    if ! digest=$(resolve_image_digest "${image_ref}"); then
-        return 1
-    fi
-    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
-        || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
-        echo "Invalid image label retry configuration" >&2
-        return 1
-    fi
-
-    for ((attempt = 1; attempt <= attempts; attempt++)); do
-        hash_status=0
-        version_status=0
-        remote_hash=$(get_remote_base_label \
-            "${image_ref}@${digest}" "vllm.rocm_base.content_hash") \
-            || hash_status=$?
-        remote_version=$(get_remote_base_label \
-            "${image_ref}@${digest}" "vllm.rocm_base.metadata_version") \
-            || version_status=$?
-        if ((hash_status == 0 && version_status == 0)) \
-            && [[ "${remote_hash}" == "${expected_hash}" \
-            && "${remote_version}" == "${expected_version}" ]]; then
-            printf '%s@%s\n' "${image_ref}" "${digest}"
-            return 0
-        fi
-        if ((attempt < attempts)); then
-            printf \
-                'ROCm base identity lookup incomplete for %s@%s (%d/%d); retrying\n' \
-                "${image_ref}" "${digest}" "${attempt}" "${attempts}" >&2
-            sleep "${delay_secs}"
-        fi
-    done
-
-    if ((hash_status != 0 || version_status != 0)); then
-        echo "Failed to read ROCm base identity labels: ${image_ref}@${digest}" >&2
-        return 1
-    fi
-    echo "ROCm base content ref has unexpected identity: ${image_ref}@${digest}" >&2
-    echo "  expected hash/version: ${expected_hash} / ${expected_version}" >&2
-    echo "  found hash/version:    ${remote_hash:-<missing>} / ${remote_version:-<missing>}" >&2
-    return 2
-}
-
 find_matching_base_content_ref() {
     local expected_hash="$1"
     local expected_version="$2"
     local image_ref=""
+    local digest=""
     local immutable_ref=""
-    local status=0
+    local label_values=""
+    local remote_hash=""
+    local remote_version=""
+    local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
+    local delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
+    local attempt=0
     shift 2
 
     for image_ref in "$@"; do
-        status=0
-        immutable_ref=$(validate_base_content_ref \
-            "${image_ref}" "${expected_hash}" "${expected_version}") || status=$?
-        case "${status}" in
-            0)
-                printf '%s\n' "${immutable_ref}"
-                return 0
-                ;;
-            1)
-                ;;
-            *)
-                return "${status}"
-                ;;
-        esac
+        if ! digest=$(resolve_image_digest "${image_ref}"); then
+            continue
+        fi
+        immutable_ref="${image_ref}@${digest}"
+        label_values=""
+        for ((attempt = 1; attempt <= attempts; attempt++)); do
+            if label_values=$(docker buildx imagetools inspect "${immutable_ref}" \
+                --format '{{ index .Image.Config.Labels "vllm.rocm_base.content_hash" }} {{ index .Image.Config.Labels "vllm.rocm_base.metadata_version" }}' \
+                2>/dev/null) && [[ -n "${label_values}" ]]; then
+                break
+            fi
+            label_values=""
+            ((attempt == attempts)) || sleep "${delay_secs}"
+        done
+        if [[ -z "${label_values}" ]]; then
+            continue
+        fi
+        read -r remote_hash remote_version _ <<< "${label_values}"
+        if [[ "${remote_hash}" == "${expected_hash}" \
+            && "${remote_version}" == "${expected_version}" ]]; then
+            printf '%s\n' "${immutable_ref}"
+            return 0
+        fi
+        echo "ROCm base content ref has unexpected identity: ${immutable_ref}" >&2
+        return 2
     done
     return 1
 }
@@ -546,7 +499,13 @@ trusted_main_tip_matches_build() {
         return 1
     fi
     if [[ "${remote_tip,,}" != "${build_commit,,}" ]]; then
-        echo "Skipping ROCm stable tag: ${build_commit} is no longer ${branch} tip (${remote_tip})" >&2
+        if git fetch --no-tags --depth=1 "${BUILDKITE_REPO}" "${remote_tip}" \
+            >/dev/null 2>&1 \
+            && git diff --quiet "${build_commit}" "${remote_tip}" -- "${DOCKERFILE}"; then
+            echo "Current ${branch} tip has the same ROCm base inputs; publishing completed build"
+            return 0
+        fi
+        echo "Skipping ROCm stable tag: ${branch} changed after ${build_commit} (${remote_tip})" >&2
         return 1
     fi
     return 0
@@ -556,50 +515,16 @@ tag_base_image_aliases() {
     local source_ref="$1"
     local descriptive_tag="$2"
     local stable_tag="$3"
-    local source_name="${source_ref%@*}"
-    local source_digest="${source_ref##*@}"
-    local alias=""
-    local alias_digest=""
-    local stable_alias=""
-    local -a create_args=()
-    local -a aliases=()
+    local -a tags=(-t "${descriptive_tag}")
 
     ROCM_BASE_STABLE_TAG_UPDATED=0
-
-    if [[ "${descriptive_tag}" != "${source_name}" ]]; then
-        create_args+=(-t "${descriptive_tag}")
-        aliases+=("${descriptive_tag}")
+    if should_push_stable_tag && trusted_main_tip_matches_build; then
+        tags+=(-t "${stable_tag}")
+        ROCM_BASE_STABLE_TAG_UPDATED=1
     fi
 
-    if should_push_stable_tag; then
-        if trusted_main_tip_matches_build; then
-            stable_alias="${stable_tag}"
-            if [[ "${stable_tag}" != "${source_name}" ]]; then
-                create_args+=(-t "${stable_tag}")
-                aliases+=("${stable_tag}")
-            fi
-        fi
-    fi
-
-    if [[ ${#create_args[@]} -gt 0 ]]; then
-        docker buildx imagetools create --prefer-index=false \
-            "${create_args[@]}" "${source_ref}"
-    fi
-    for alias in "${aliases[@]}"; do
-        if ! alias_digest=$(resolve_image_digest "${alias}"); then
-            echo "Failed to resolve ROCm base alias after tagging: ${alias}" >&2
-            return 1
-        fi
-        if [[ "${alias_digest}" != "${source_digest}" ]]; then
-            echo "ROCm base alias digest mismatch: ${alias}" >&2
-            echo "  expected: ${source_digest}" >&2
-            echo "  found:    ${alias_digest}" >&2
-            return 1
-        fi
-        if [[ "${alias}" == "${stable_alias}" ]]; then
-            ROCM_BASE_STABLE_TAG_UPDATED=1
-        fi
-    done
+    docker buildx imagetools create --prefer-index=false \
+        "${tags[@]}" "${source_ref}"
 }
 
 setup_builder() {
@@ -663,13 +588,10 @@ build_base_image() {
     local writable_content_tag=""
     local build_ref=""
     local immutable_ref=""
-    local content_digest=""
     local reuse_status=0
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
-    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
-    local -a tags=()
     local -a sccache_args=()
     local -a content_paths=()
 
@@ -771,11 +693,11 @@ build_base_image() {
         echo "Reusing ROCm base image with matching content: ${immutable_ref}"
     else
         build_ref="${writable_content_tag}"
-        tags=(-t "${build_ref}")
         echo "No reusable ROCm base content image found; building ${build_ref}"
         docker buildx build \
             "${ROCM_BASE_CACHE_ARGS[@]}" \
             --pull \
+            --provenance=false \
             --progress "${BUILDKIT_PROGRESS:-plain}" \
             --file "${DOCKERFILE}" \
             --build-arg "BASE_IMAGE=${pinned_base_image}" \
@@ -788,9 +710,6 @@ build_base_image() {
             --label "vllm.rocm_base.content_hash=${base_hash}" \
             --label "vllm.rocm_base.content_files_hash=${content_files_hash}" \
             --label "vllm.rocm_base.dockerfile=${DOCKERFILE}" \
-            --label "vllm.rocm_base.image.content=${build_ref}" \
-            --label "vllm.rocm_base.image.stable=${stable_tag}" \
-            --label "vllm.rocm_base.stable_branch=${ROCM_BASE_STABLE_BRANCH:-main}" \
             --label "vllm.rocm_base.dependency_summary=${dependency_summary}" \
             --label "vllm.rocm_base.base_image=${pinned_base_image}" \
             --label "vllm.rocm_base.base_image_digest=${base_image_digest}" \
@@ -804,44 +723,19 @@ build_base_image() {
             --label "vllm.rocm_base.dependency.aiter=${aiter_arg}" \
             --label "vllm.rocm_base.dependency.mori=${mori_arg}" \
             --label "vllm.rocm_base.pytorch_rocm_arch=${pytorch_rocm_arch_arg}" \
-            "${tags[@]}" \
+            -t "${build_ref}" \
             --push \
             .
-        if ! immutable_ref=$(validate_base_content_ref \
-            "${build_ref}" "${base_hash}" "${metadata_version}"); then
+        if ! immutable_ref=$(find_matching_base_content_ref \
+            "${base_hash}" "${metadata_version}" "${build_ref}"); then
             echo "Published ROCm base image failed identity validation: ${build_ref}" >&2
             return 1
         fi
     fi
 
     tag_base_image_aliases "${immutable_ref}" "${descriptive_tag}" "${stable_tag}"
-    content_digest="${immutable_ref##*@}"
 
     metadata_set "rocm-base-image" "${immutable_ref}"
-    metadata_set "rocm-base-image-content" "${immutable_ref%@*}"
-    metadata_set "rocm-base-image-digest" "${content_digest}"
-    metadata_set "rocm-base-image-descriptive" "${descriptive_tag}"
-    metadata_set "rocm-base-image-stable" "${stable_tag}"
-    metadata_set "rocm-base-image-ci-descriptive" "${ci_descriptive_tag}"
-    metadata_set "rocm-base-metadata-version" "${metadata_version}"
-    metadata_set "rocm-base-content-hash" "${base_hash}"
-    metadata_set "rocm-base-content-files-hash" "${content_files_hash}"
-    metadata_set "rocm-base-content-files" "${content_files}"
-    metadata_set "rocm-base-content-args" "${content_args}"
-    metadata_set "rocm-base-base-image-digest" "${base_image_digest}"
-    metadata_set "rocm-base-dockerfile" "${DOCKERFILE}"
-    metadata_set "rocm-base-descriptor" "${descriptor}"
-    metadata_set "rocm-base-dependency-summary" "${dependency_summary}"
-    metadata_set "rocm-base-dependency-rocm" "${rocm_version}"
-    metadata_set "rocm-base-dependency-python" "${python_version_arg}"
-    metadata_set "rocm-base-dependency-pytorch" "${pytorch_arg}"
-    metadata_set "rocm-base-dependency-torchvision" "${pytorch_vision_arg}"
-    metadata_set "rocm-base-dependency-torchaudio" "${pytorch_audio_arg}"
-    metadata_set "rocm-base-dependency-triton" "${triton_arg}"
-    metadata_set "rocm-base-dependency-flash-attention" "${fa_arg}"
-    metadata_set "rocm-base-dependency-aiter" "${aiter_arg}"
-    metadata_set "rocm-base-dependency-mori" "${mori_arg}"
-    metadata_set "rocm-base-pytorch-rocm-arch" "${pytorch_rocm_arch_arg}"
     metadata_set "rocm-ci-image-descriptive" "${ci_descriptive_tag}"
     metadata_set "rocm-base-push-stable-tag" "${ROCM_BASE_STABLE_TAG_UPDATED}"
     metadata_set "rocm-base-refresh" "1"

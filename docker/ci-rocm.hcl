@@ -405,8 +405,11 @@ target "deepep-rocm-ci" {
 # Uses inline cache metadata on the ci_base image itself instead of exporting a
 # separate registry cache artifact.
 target "ci-base-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm", "_labels"]
+  inherits   = ["_common-rocm"]
   target     = "ci_base"
+  args = {
+    max_jobs = CI_MAX_JOBS
+  }
   cache-from = concat(
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",

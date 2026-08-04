@@ -153,8 +153,7 @@ RUN cd pytorch && python3 tools/amd_build/build_amd.py \
            && sccache --show-stats; \
        fi \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
 
 
@@ -182,8 +181,7 @@ RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/vision/dist/*.whl /app/install
 
 
@@ -206,8 +204,7 @@ RUN cd audio \
            && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
        fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/audio/dist/*.whl /app/install
 
 

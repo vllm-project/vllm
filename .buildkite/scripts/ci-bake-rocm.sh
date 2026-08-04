@@ -15,7 +15,7 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="2"
@@ -807,12 +807,15 @@ compute_ci_base_hash_if_needed() {
     if [[ -z "${CI_BASE_CONTENT_FILES:-}" ]]; then
         return 0
     fi
-    if is_ci_base_target && [[ "${REMOTE_VLLM:-0}" != "0" ]]; then
+    pin_base_image
+    if ! is_ci_base_target; then
+        return 0
+    fi
+    if [[ "${REMOTE_VLLM:-0}" != "0" ]]; then
         echo "Error: content-addressed ci_base builds require REMOTE_VLLM=0" >&2
         return 1
     fi
 
-    pin_base_image
     CI_BASE_CONTENT_HASH=$(compute_ci_base_content_hash)
     export CI_BASE_CONTENT_HASH
     echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}..."
@@ -854,6 +857,12 @@ configure_ci_base_image_refs() {
             return 1
         fi
         CI_BASE_IMAGE="${CI_BASE_IMAGE:-${stable_tag}}"
+        if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+            CI_BASE_IMAGE_TAG_COMMIT_REF=$(
+                ci_base_tag_with_suffix "${stable_tag}" "${BUILDKITE_COMMIT}"
+            )
+            export CI_BASE_IMAGE_TAG_COMMIT_REF
+        fi
         export CI_BASE_IMAGE
         return 0
     fi
@@ -1243,108 +1252,10 @@ prepare_git_cache_metadata() {
     fi
 }
 
-ci_base_metadata_pairs() {
-    local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
-    local stages="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
-    local content_files="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
-    local content_files_hash=""
-    local base_image=""
-    local base_image_digest=""
-    local git_branch=""
-    local -a content_paths=()
-    local -a content_args=()
-
-    read -r -a content_paths <<< "${content_files}"
-    if [[ ${#content_paths[@]} -gt 0 ]]; then
-        if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
-            echo "Failed to hash ci_base metadata content files" >&2
-            return 1
-        fi
-    fi
-    mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
-    )
-
-    base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
-    if [[ -n "${base_image}" ]]; then
-        if ! base_image_digest=$(resolve_image_digest "${base_image}"); then
-            echo "Failed to resolve ci_base metadata digest for ${base_image}" >&2
-            return 1
-        fi
-    fi
-    git_branch="${BUILDKITE_BRANCH:-${VLLM_BRANCH:-}}"
-
-    metadata_pair "vllm.ci_base.metadata_version" "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
-    metadata_pair "vllm.ci_base.content_hash" "${CI_BASE_CONTENT_HASH:-}"
-    metadata_pair "vllm.ci_base.content_files_hash" "${content_files_hash}"
-    metadata_pair "vllm.ci_base.content_files" "${content_files}"
-    metadata_pair "vllm.ci_base.content_args" "$(join_words "${content_args[@]}")"
-    metadata_pair "vllm.ci_base.dockerfile" "${dockerfile}"
-    metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
-    metadata_pair "vllm.ci_base.image.primary" "${CI_BASE_IMAGE_TAG:-}"
-    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}"
-    metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}}"
-    metadata_pair "vllm.ci_base.image.stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
-    metadata_pair "vllm.ci_base.git_commit" "${BUILDKITE_COMMIT:-}"
-    metadata_pair "vllm.ci_base.git_branch" "${git_branch}"
-    metadata_pair "vllm.ci_base.vllm_branch" "${VLLM_BRANCH:-}"
-    metadata_pair "vllm.ci_base.stable_branch" "${CI_BASE_STABLE_BRANCH:-main}"
-
-    metadata_pair "vllm.rocm.base_image" "${base_image}"
-    metadata_pair "vllm.rocm.base_image_digest" "${base_image_digest}"
-    metadata_pair "vllm.rocm.pytorch_rocm_arch" "${PYTORCH_ROCM_ARCH:-}"
-    metadata_pair "vllm.rocm.nic_backend" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIC_BACKEND")"
-    metadata_pair "vllm.rocm.ainic_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "AINIC_VERSION")"
-    metadata_pair "vllm.rocm.ubuntu_codename" "$(resolve_dockerfile_arg_value "${dockerfile}" "UBUNTU_CODENAME")"
-    metadata_pair "vllm.rocm.nixl_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_REPO")"
-    metadata_pair "vllm.rocm.nixl_commit" "${NIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_BRANCH")}"
-    metadata_pair "vllm.rocm.ucx_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_REPO")"
-    metadata_pair "vllm.rocm.ucx_commit" "${UCX_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_BRANCH")}"
-    metadata_pair "vllm.rocm.rocshmem_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_REPO")"
-    metadata_pair "vllm.rocm.rocshmem_commit" "${ROCSHMEM_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_BRANCH")}"
-    metadata_pair "vllm.rocm.deepep_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_REPO")"
-    metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
-    metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
-    metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
-    metadata_pair "vllm.rocm.nixl_cache_key" "${NIXL_CACHE_KEY:-}"
-    metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
-    metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
-
-    metadata_pair "vllm.buildkite.build_number" "${BUILDKITE_BUILD_NUMBER:-}"
-    metadata_pair "vllm.buildkite.build_id" "${BUILDKITE_BUILD_ID:-}"
-}
-
-write_ci_base_metadata_annotations() {
-    local metadata="$1"
-    local key=""
-    local value=""
-    local annotation=""
-
-    [[ -n "${metadata}" ]] || return 0
-    while IFS=$'\t' read -r key value; do
-        [[ -n "${key}" && -n "${value}" ]] || continue
-        annotation="manifest:${key}=${value}"
-        printf '    "%s",\n' "$(hcl_escape_string "${annotation}")"
-    done <<< "${metadata}"
-}
-
-write_ci_base_metadata_labels() {
-    local metadata="$1"
-    local key=""
-    local value=""
-
-    [[ -n "${metadata}" ]] || return 0
-    while IFS=$'\t' read -r key value; do
-        [[ -n "${key}" && -n "${value}" ]] || continue
-        printf '    "%s" = "%s"\n' \
-            "$(hcl_escape_string "${key}")" \
-            "$(hcl_escape_string "${value}")"
-    done <<< "${metadata}"
-}
-
 write_ci_base_label_override() {
     local target_name=""
-    local metadata=""
+    local content_hash=""
+    local metadata_version=""
     local -a ci_base_targets=()
 
     if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
@@ -1362,7 +1273,10 @@ write_ci_base_label_override() {
         return 0
     fi
 
-    metadata=$(ci_base_metadata_pairs)
+    content_hash=$(hcl_escape_string "${CI_BASE_CONTENT_HASH}")
+    metadata_version=$(
+        hcl_escape_string "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
+    )
 
     : > "${CI_BASE_LABEL_OVERRIDE_PATH}"
     for target_name in "${ci_base_targets[@]}"; do
@@ -1370,15 +1284,13 @@ write_ci_base_label_override() {
 target "${target_name}" {
   annotations = [
     "manifest:org.opencontainers.image.revision=",
-EOF
-        write_ci_base_metadata_annotations "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
-        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
+    "manifest:vllm.ci_base.metadata_version=${metadata_version}",
+    "manifest:vllm.ci_base.content_hash=${content_hash}",
   ]
   labels = {
     "org.opencontainers.image.revision" = ""
-EOF
-        write_ci_base_metadata_labels "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
-        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
+    "vllm.ci_base.metadata_version" = "${metadata_version}"
+    "vllm.ci_base.content_hash" = "${content_hash}"
   }
 }
 
@@ -1525,18 +1437,6 @@ hcl_escape_string() {
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
     printf '%s' "${value}"
-}
-
-join_words() {
-    local IFS=" "
-    printf '%s' "$*"
-}
-
-metadata_pair() {
-    local key="$1"
-    local value="${2:-}"
-
-    printf '%s\t%s\n' "${key}" "${value}"
 }
 
 write_hcl_string_list() {
