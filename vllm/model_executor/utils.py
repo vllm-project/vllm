@@ -55,8 +55,11 @@ def replace_parameter(
     Called within implementations of the `process_weights_after_loading` method.
 
     Custom attributes set on ``new_data`` (e.g. kernel dispatch flags such as
-    ``is_shuffled``) are carried over to the replacement parameter; attributes set
-    on the existing parameter are not, except for ``weight_loader``.
+    ``is_shuffled``) are carried over to the replacement parameter, except
+    ``weight_loader``, which is always taken from the existing parameter.
+
+    Attributes of the existing parameter are otherwise dropped when a new
+    parameter is registered, but kept when ``prefer_copy`` reuses it in place.
 
     This function should not be called on weights which are tied/shared
 
@@ -83,8 +86,11 @@ def replace_parameter(
     new_data_attrs = dict(new_data.__dict__)
 
     # `weight_loader` is the only attribute not ported over from new_data,
-    # old_param.weight_loader only is supported.
+    # old_param.weight_loader only is supported. `_weight_loader` is
+    # `BasevLLMParameter`'s backing field for its `weight_loader` property, so
+    # a loader riding along under that name has to be dropped as well.
     new_data_attrs.pop("weight_loader", None)
+    new_data_attrs.pop("_weight_loader", None)
 
     if isinstance(new_data, torch.nn.Parameter):
         new_data = new_data.data
