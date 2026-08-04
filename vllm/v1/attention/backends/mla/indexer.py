@@ -22,6 +22,7 @@ from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -40,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 
 logger = init_logger(__name__)
 
