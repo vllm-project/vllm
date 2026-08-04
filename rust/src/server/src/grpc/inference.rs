@@ -73,6 +73,11 @@ impl InferenceServiceImpl {
 
             let media = convert::media_parts_from_request(media)?;
             if !media.is_empty() {
+                if text_request.truncate_prompt_tokens.is_some() {
+                    return Err(Status::invalid_argument(
+                        "truncate_prompt_tokens is not supported with multimodal requests",
+                    ));
+                }
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
                         "multimodal gRPC requests must provide token_ids input",

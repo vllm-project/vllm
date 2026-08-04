@@ -274,6 +274,9 @@ impl TextRequest {
                 value: n,
             });
         }
+        if self.mm_features.is_some() && self.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
         Ok(())
     }
 }

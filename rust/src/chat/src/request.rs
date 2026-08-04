@@ -554,6 +554,9 @@ impl ChatRequest {
                 value: n,
             }));
         }
+        if self.has_multimodal() && self.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
         Ok(())
     }
 
