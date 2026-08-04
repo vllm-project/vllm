@@ -446,6 +446,29 @@ class TestHandleSingleToolNegativeNumbers:
         assert json.loads(tool.function.arguments) == {"quantity_delta": -20}
 
 
+class TestGetParameterValueFString:
+    # A placeholder-free f-string is a plain string constant, but ast parses
+    # it as JoinedStr; it must not drop the call. Real placeholders are not
+    # literals and must still be rejected.
+    def test_constant_fstring(self):
+        assert _value_of("f'hello world'") == "hello world"
+
+    def test_empty_fstring(self):
+        assert _value_of("f''") == ""
+
+    def test_constant_fstring_in_list(self):
+        assert _value_of("[f'a', 'b']") == ["a", "b"]
+
+    def test_fstring_with_placeholder_still_raises(self):
+        with pytest.raises(UnexpectedAstError):
+            _value_of("f'{x}'")
+
+    def test_constant_fstring_end_to_end(self):
+        call = _first_call("[send(msg=f'hello')]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"msg": "hello"}
+
+
 class TestGetParameterValueTuple:
     # JSON has no tuple type, so a tuple argument is decoded as a list rather
     # than dropping the whole call.

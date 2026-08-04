@@ -471,6 +471,17 @@ def get_parameter_value(val: ast.expr) -> Any:
         # is treated as a list so it round-trips through ``json.dumps``.
         # Without this the whole call is dropped.
         return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.JoinedStr) and all(
+        isinstance(part, ast.Constant) for part in val.values
+    ):
+        # An f-string without placeholders (``f'hello'``) is a plain string
+        # constant, but Python parses it as JoinedStr rather than Constant;
+        # without this branch the whole call is dropped. F-strings with real
+        # placeholders still fall through to the raise below.
+        return "".join(
+            str(part.value)  # type: ignore
+            for part in val.values
+        )
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
     elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):
