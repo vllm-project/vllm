@@ -4,9 +4,7 @@
 
 import torch
 
-import vllm.envs as envs
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
 
 _TD_ALLOCATOR_DEVICES: set[torch.device] = set()
@@ -222,10 +220,8 @@ def triton_scaled_mm(
     accumulator_dtype = tl.float32 if input.is_floating_point() else tl.int32
 
     # TD operand loads; gated on inner-dim contiguity and 16-byte tile alignment.
-    td_override = use_td if use_td is not None else envs.VLLM_TRITON_SCALED_MM_USE_TD
-    use_td = current_platform.is_xpu() if td_override is None else td_override
     use_td = (
-        use_td
+        use_tensor_descriptor(use_td)
         and input.stride(1) == 1
         and weight.stride(1) == 1
         and (K * input.element_size()) % 16 == 0
