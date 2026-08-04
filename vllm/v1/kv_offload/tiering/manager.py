@@ -302,12 +302,14 @@ class TieringOffloadingManager(OffloadingManager):
                     )
                     self._update_backpressure(tier, job_metadata)
 
-    def _should_store_to_tier(self, tier: SecondaryTierManager) -> bool:
+    def _should_store_to_tier(
+        self, tier: SecondaryTierManager, num_blocks: int
+    ) -> bool:
         detector = self._bp_detectors.get(tier)
         if detector is None:
             return True
         if not self._bp_policy.should_store(tier, detector):
-            self._bp_policy.on_store_skipped(tier)
+            self._bp_policy.on_store_skipped(tier, num_blocks)
             return False
         return True
 
@@ -631,7 +633,7 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier in request_level_tiers:
-            if not self._should_store_to_tier(tier):
+            if not self._should_store_to_tier(tier, len(ready_keys)):
                 continue
             job_metadata = self.create_store_job(ready_keys, req_context)
             tier.submit_store(job_metadata)
@@ -671,7 +673,7 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier in self.secondary_tiers:
-                if not self._should_store_to_tier(tier):
+                if not self._should_store_to_tier(tier, len(keys)):
                     continue
                 job_metadata = self.create_store_job(keys, req_context)
                 tier.submit_store(job_metadata)
@@ -896,16 +898,24 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier, detector in self._bp_detectors.items():
             label = (f"{self._tier_index[tier]}_{tier.tier_type}",)
-            self._stats.set_gauge(
-                TieringOffloadingMetrics.BACKPRESSURE_ACTIVE,
-                int(detector.is_under_pressure()),
-                labelvalues=label,
-            )
-            dropped = self._bp_policy.pop_stores_dropped(tier)
-            if dropped > 0:
+            ema = detector.stats.get("store_latency_ema")
+            if ema is not None:
+                self._stats.set_gauge(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA,
+                    ema,
+                    labelvalues=label,
+                )
+            stores_dropped, blocks_dropped = self._bp_policy.pop_stores_dropped(tier)
+            if stores_dropped > 0:
                 self._stats.increase_counter(
                     TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
-                    dropped,
+                    stores_dropped,
+                    labelvalues=label,
+                )
+            if blocks_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED,
+                    blocks_dropped,
                     labelvalues=label,
                 )
 

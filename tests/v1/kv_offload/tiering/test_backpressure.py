@@ -277,42 +277,38 @@ class TestBackpressure:
         bp = self.manager._bp_detectors[self.tier]
         bp._under_pressure = True
         policy = self.manager._bp_policy
-        assert policy.pop_stores_dropped(self.tier) == 0
+        assert policy.pop_stores_dropped(self.tier) == (0, 0)
 
         self._store_blocks(to_keys([80]))
         assert policy._stores_dropped.get(self.tier, 0) == 1
+        assert policy._blocks_dropped.get(self.tier, 0) == 1
 
-        self._store_blocks(to_keys([81]))
+        self._store_blocks(to_keys([81, 82]))
         assert policy._stores_dropped.get(self.tier, 0) == 2
+        assert policy._blocks_dropped.get(self.tier, 0) == 3
 
     def test_metrics_reported_via_get_stats(self, setup):
         bp = self.manager._bp_detectors[self.tier]
         bp._under_pressure = True
+        bp.store_latency_ema = 2.5
         policy = self.manager._bp_policy
         policy._stores_dropped[self.tier] = 5
+        policy._blocks_dropped[self.tier] = 12
 
         stats = self.manager.get_stats()
         assert stats is not None
         reduced = stats.reduce()
 
-        gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
-        counter_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
-        assert reduced[f"{gauge_key}:('0_delayed',)"] == 1
-        assert reduced[f"{counter_key}:('0_delayed',)"] == 5
+        ema_key = TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA
+        stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
+        blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
+        assert reduced[f"{ema_key}:('0_delayed',)"] == pytest.approx(2.5)
+        assert reduced[f"{stores_key}:('0_delayed',)"] == 5
+        assert reduced[f"{blocks_key}:('0_delayed',)"] == 12
 
-        # Dropped count resets after get_stats.
+        # Dropped counts reset after get_stats.
         assert policy._stores_dropped.get(self.tier, 0) == 0
-
-    def test_metrics_gauge_zero_when_no_pressure(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
-        bp._under_pressure = False
-
-        stats = self.manager.get_stats()
-        assert stats is not None
-        reduced = stats.reduce()
-
-        gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
-        assert reduced[f"{gauge_key}:('0_delayed',)"] == 0
+        assert policy._blocks_dropped.get(self.tier, 0) == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
         bp = self.manager._bp_detectors[self.tier]

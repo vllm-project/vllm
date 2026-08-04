@@ -142,11 +142,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 has_backpressure = True
 
         if has_backpressure:
-            metrics[TieringOffloadingMetrics.BACKPRESSURE_ACTIVE] = (
+            metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
                 OffloadingGaugeMetadata(
                     documentation=(
-                        "Indicates when a secondary tier is experiencing "
-                        "back-pressure (1 = active, 0 = inactive)."
+                        "Exponential moving average of store latency "
+                        "for back-pressure detection, in seconds."
                     ),
                     labelnames=("tier",),
                 )
@@ -156,6 +156,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     documentation=(
                         "Number of store operations dropped due to "
                         "back-pressure on a secondary tier."
+                    ),
+                    labelnames=("tier",),
+                )
+            )
+            metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
+                OffloadingCounterMetadata(
+                    documentation=(
+                        "Number of blocks dropped due to back-pressure "
+                        "on a secondary tier."
                     ),
                     labelnames=("tier",),
                 )

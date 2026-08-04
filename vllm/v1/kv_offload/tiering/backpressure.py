@@ -109,10 +109,14 @@ class BackpressurePolicy(ABC):
     ) -> bool: ...
 
     @abstractmethod
-    def on_store_skipped(self, tier_key: SecondaryTierManager) -> None: ...
+    def on_store_skipped(
+        self, tier_key: SecondaryTierManager, num_blocks: int
+    ) -> None: ...
 
     @abstractmethod
-    def pop_stores_dropped(self, tier_key: SecondaryTierManager) -> int: ...
+    def pop_stores_dropped(self, tier_key: SecondaryTierManager) -> tuple[int, int]:
+        """Return and reset (stores_dropped, blocks_dropped) for a tier."""
+        ...
 
     @abstractmethod
     def reset(self) -> None: ...
@@ -123,17 +127,24 @@ class DropStorePolicy(BackpressurePolicy):
 
     def __init__(self):
         self._stores_dropped: dict[SecondaryTierManager, int] = {}
+        self._blocks_dropped: dict[SecondaryTierManager, int] = {}
 
     def should_store(self, tier_key, detector) -> bool:
         return not detector.is_under_pressure()
 
-    def on_store_skipped(self, tier_key) -> None:
+    def on_store_skipped(self, tier_key, num_blocks) -> None:
         self._stores_dropped[tier_key] = self._stores_dropped.get(tier_key, 0) + 1
+        self._blocks_dropped[tier_key] = (
+            self._blocks_dropped.get(tier_key, 0) + num_blocks
+        )
 
-    def pop_stores_dropped(self, tier_key) -> int:
-        count = self._stores_dropped.get(tier_key, 0)
+    def pop_stores_dropped(self, tier_key) -> tuple[int, int]:
+        stores = self._stores_dropped.get(tier_key, 0)
+        blocks = self._blocks_dropped.get(tier_key, 0)
         self._stores_dropped[tier_key] = 0
-        return count
+        self._blocks_dropped[tier_key] = 0
+        return stores, blocks
 
     def reset(self) -> None:
         self._stores_dropped.clear()
+        self._blocks_dropped.clear()
