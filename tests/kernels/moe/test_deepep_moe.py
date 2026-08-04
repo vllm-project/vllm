@@ -11,7 +11,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from tests.kernels.moe.utils import check_accuracy, make_dummy_moe_config
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -367,14 +367,6 @@ def assert_deepep_close(
     k: int,
     use_fp8_dispatch: bool,
 ) -> None:
-    if use_fp8_dispatch and current_platform.is_fp8_fnuz():
-        # ROCm e4m3fnuz rounds differently than the reference quant,
-        # so DeepEP's fp8 dispatch can yield a few outliers even with
-        # a correct kernel; allow a small fraction of mismatches here.
-        atol = rtol = 1.5e-1
-        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
-        return
-
     torch.testing.assert_close(
         expected,
         actual,
