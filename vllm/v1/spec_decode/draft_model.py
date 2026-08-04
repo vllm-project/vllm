@@ -6,6 +6,7 @@ import torch.nn as nn
 from typing_extensions import override
 
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
@@ -55,9 +56,15 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # Draft models may be quantized or on different parallelism,
         # so we load them with a modified vllm config
         from vllm.compilation.backends import set_model_tag
+        from vllm.model_executor.model_loader.weight_utils import collective_load_group
 
         temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
-        with set_model_tag("draft_model"):
+        # Same reason as EagleProposer._get_model: only the last PP rank loads a
+        # drafter, so a collective loader must not synchronize over the world.
+        load_group = (
+            get_tp_group().device_group if get_pp_group().world_size > 1 else None
+        )
+        with set_model_tag("draft_model"), collective_load_group(load_group):
             model = get_model(
                 vllm_config=temp_vllm_config,
                 prefix="draft_model",

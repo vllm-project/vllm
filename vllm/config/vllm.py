@@ -700,6 +700,22 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
+                if self.parallel_config.pipeline_parallel_size > 1:
+                    raise ValueError(
+                        "Async scheduling is not supported with speculative "
+                        "decoding under pipeline parallelism. Plain PP + async "
+                        "scheduling is fine, but speculative decoding needs two "
+                        "more things from the sampled-token broadcast that it does "
+                        "not currently do: the broadcast happens before "
+                        "`propose_draft_token_ids`, so it carries "
+                        "`[num_reqs, 1 + num_spec_tokens]` rather than the "
+                        "per-request last-accepted token the earlier stages need; "
+                        "and those stages also need the previous step's draft token "
+                        "ids to fill the speculative slots of `input_ids`, which "
+                        "only ever exist on the last PP rank. Making this work means "
+                        "moving the broadcast after drafting and adding a second "
+                        "`[num_reqs, num_spec_tokens]` broadcast."
+                    )
             if not executor_supports_async_sched:
                 raise ValueError(
                     "Currently, async scheduling only supports `mp`, `uni`, or "
@@ -726,6 +742,21 @@ class VllmConfig:
                 logger.warning_once(
                     "Async scheduling is not compatible with "
                     "disable_padded_drafter_batch=True and will be disabled.",
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                # Plain PP + async scheduling is supported; speculative decoding on
+                # top of it is not (see the matching raise in the explicit-request
+                # branch above for what the broadcast is still missing). Auto-disable
+                # rather than raise, so a PP + MTP server that never asked for async
+                # scheduling still starts.
+                logger.warning_once(
+                    "Async scheduling is not supported with speculative decoding "
+                    "under pipeline parallelism and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False

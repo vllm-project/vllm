@@ -432,6 +432,17 @@ class MultiprocExecutor(Executor):
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size > 1 and self.speculative_config is not None:
+            # Speculative decoding cannot run ahead of its own verification:
+            # a batch's rejected draft tokens roll `num_computed_tokens` back
+            # in `Scheduler.update_from_output`. If the scheduler has already
+            # built the next batch by then, that batch was sized and filled as
+            # if every draft had been accepted, and the request's token stream
+            # silently drifts (the first PP stage, which owns the embedding,
+            # ends up feeding stale token ids). Keep one batch in flight so
+            # every batch is scheduled against a settled state. This costs the
+            # PP pipeline overlap, which is the price of correctness here.
+            return 1
         return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:

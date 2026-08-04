@@ -902,6 +902,32 @@ def pt_weights_iterator(
         del state
 
 
+_collective_load_group: "torch.distributed.ProcessGroup | None" = None
+
+
+@contextmanager
+def collective_load_group(
+    group: "torch.distributed.ProcessGroup | None",
+) -> Generator[None, None, None]:
+    """Restrict collective weight loading to `group` instead of the world group.
+
+    The InstantTensor reader shards file reads across a process group and
+    all-gathers the pieces, so every rank in that group must enter the load.
+    That holds for the target model, which all ranks load, but not for a draft
+    model: with pipeline parallelism the drafter lives only on the last PP rank
+    (see `GPUModelRunner.__init__`), so a world-group load hangs on ranks that
+    never call it. Callers that load a model on a subset of ranks must wrap the
+    load in this context manager with the group that subset forms.
+    """
+    global _collective_load_group
+    old_group = _collective_load_group
+    _collective_load_group = group
+    try:
+        yield
+    finally:
+        _collective_load_group = old_group
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -920,13 +946,23 @@ def instanttensor_weights_iterator(
     if not current_platform.is_cuda():
         raise ValueError("InstantTensor requires NVIDIA GPUs")
 
-    try:
-        world_group = get_world_group()
-    except AssertionError:
-        # Entering here only in unit tests where the world group is not initialized.
-        process_group = None
+    if _collective_load_group is not None:
+        process_group = (
+            _collective_load_group
+            if torch.distributed.get_world_size(_collective_load_group) > 1
+            else None
+        )
     else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
+        try:
+            world_group = get_world_group()
+        except AssertionError:
+            # Entering here only in unit tests where the world group is not
+            # initialized.
+            process_group = None
+        else:
+            process_group = (
+                world_group.device_group if world_group.world_size > 1 else None
+            )
 
     device = current_platform.current_device()
 

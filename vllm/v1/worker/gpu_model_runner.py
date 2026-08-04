@@ -490,14 +490,18 @@ class GPUModelRunner(
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
+        # NOTE: stays None on the non-last PP ranks, which hold no drafter at
+        # all. Every drafter access outside the last rank must be guarded by
+        # `self.drafter is not None`, not by `self.speculative_config`.
+        self.drafter: (
+            NgramProposer  # noqa: F823
+            | SuffixDecodingProposer
+            | EagleProposer
+            | DraftModelProposer
+            | MedusaProposer
+            | None
+        ) = None
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter: (
-                NgramProposer  # noqa: F823
-                | SuffixDecodingProposer
-                | EagleProposer
-                | DraftModelProposer
-                | MedusaProposer
-            )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -1219,7 +1223,7 @@ class GPUModelRunner(
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
-            if not is_last_rank:
+            if not is_last_rank and new_token_ids:
                 # Add new_token_ids to token_ids_cpu.
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
@@ -1227,6 +1231,17 @@ class GPUModelRunner(
                     req_index, start_token_index:end_token_index
                 ] = new_token_ids
                 self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+            # NOTE: `new_token_ids` is empty exactly when PP runs with async
+            # scheduling, where the scheduler deliberately omits the payload and the
+            # sampled tokens arrive by GPU broadcast instead. Running the block above
+            # with an empty list wrote nothing but still set
+            #   num_tokens_no_spec = num_computed_tokens
+            # which for a request still being chunk-prefilled is far below its prompt
+            # length, breaking this field's invariant of covering the valid extent of
+            # token_ids_cpu (`add_request` sets it to prompt + output). `condense()`
+            # then uses it as the copy length when it moves a row, so relocating a
+            # mid-prefill request truncated its prompt and left the tail as garbage.
+            # Silent: the model just reads a corrupted context.
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
@@ -2116,7 +2131,7 @@ class GPUModelRunner(
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
+            if self.drafter is not None and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -4476,7 +4491,7 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
-                if hasattr(self, "drafter"):
+                if self.drafter is not None:
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
                     if (
@@ -5248,12 +5263,15 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
+            if (
+                self.drafter is not None
+                and self.speculative_config is not None
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                )
             ):
                 assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
-                assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
                 # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
@@ -6021,7 +6039,11 @@ class GPUModelRunner(
         )
 
         # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
-        if self.speculative_config and self.speculative_config.use_eagle():
+        if (
+            self.drafter is not None
+            and self.speculative_config is not None
+            and self.speculative_config.use_eagle()
+        ):
             assert isinstance(self.drafter, EagleProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
@@ -6504,9 +6526,13 @@ class GPUModelRunner(
             kv_cache_config, kernel_block_sizes
         )
 
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        if (
+            self.drafter is not None
+            and self.speculative_config is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
             # validate all draft model layers belong to the same kv cache

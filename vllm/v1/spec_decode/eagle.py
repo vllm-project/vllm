@@ -15,7 +15,7 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -1470,8 +1470,16 @@ class SpecDecodeBaseProposer:
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
+        from vllm.model_executor.model_loader.weight_utils import collective_load_group
 
-        with set_model_tag("eagle_head"):
+        # The drafter is built only on the last PP rank, so a collective loader
+        # (e.g. InstantTensor, which shards reads across a group and all-gathers)
+        # must synchronize over just those ranks -- the world group would hang
+        # waiting for the earlier PP stages, which never load a drafter.
+        load_group = (
+            get_tp_group().device_group if get_pp_group().world_size > 1 else None
+        )
+        with set_model_tag("eagle_head"), collective_load_group(load_group):
             model = get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.speculative_config.draft_model_config,

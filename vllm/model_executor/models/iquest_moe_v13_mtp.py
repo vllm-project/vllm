@@ -18,12 +18,17 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsPP
 from .iquest_moe_v13 import (
     IquestMoeAttention,
     IquestMoEBlock,
     IquestMoeRMSNorm,
 )
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import (
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -263,7 +268,19 @@ class IquestMoeV13MultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class IquestMoeV13MTP(nn.Module):
+class IquestMoeV13MTP(nn.Module, SupportsPP):
+    """Draft head for IquestMoeV13.
+
+    NOTE on pipeline parallelism: the whole draft head lives on the last PP
+    rank (see ``GPUModelRunner.__init__``), so it is never itself split across
+    stages. ``SupportsPP`` is declared because the draft model inherits the
+    target's ``pipeline_parallel_size`` in
+    ``SpeculativeConfig.create_draft_parallel_config``, and
+    ``ModelConfig.verify_with_parallel_config`` rejects any model without the
+    interface once PP > 1. Same approach as ``Glm4MoeLiteMTP`` /
+    ``NemotronHMTP``.
+    """
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -279,6 +296,12 @@ class IquestMoeV13MTP(nn.Module):
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.mtp_start_layer_idx = self.config.num_hidden_layers
+        # Never exercised while the draft head is confined to the last PP rank,
+        # but keep a real implementation instead of the `SupportsPP` stub so a
+        # future caller does not silently get `None`.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
