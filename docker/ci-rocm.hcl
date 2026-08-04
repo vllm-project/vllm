@@ -113,13 +113,12 @@ variable "DEEPEP_CACHE_KEY" {
 # manifest, including inherited base layers (~7.25GB ROCm runtime).
 # Docker Hub auto-creates the repo on first push.
 #
-# Final-image cache stays commit-scoped. Branch-to-branch reuse for the test
-# image comes from importing the parent and merge-base commit cache refs.
+# Final-image cache is exported per commit and per branch; imports also include
+# parent and merge-base commit refs as stable fallbacks.
 #
-# The source-scoped native cache is exported both per-commit and per-branch so
-# ROCm extension rebuilds are shareable within the same commit reruns and across
-# consecutive commits on the same branch without depending on a single global
-# latest tag.
+# The source-scoped native cache is exported by content and by branch so exact
+# inputs are reusable across PRs while changed inputs can reuse the preceding
+# branch build without depending on a single global latest tag.
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
@@ -231,10 +230,8 @@ function "get_cache_from_rocm_csrc" {
 function "get_cache_to_rocm_csrc" {
   params = []
   result = compact([
-    # Export the exact-commit native cache for same-commit reruns.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
     # Export the branch-scoped native cache so later commits on the same branch
-    # can reuse compiled ROCm objects even when the exact parent cache is absent.
+    # can reuse compiled ROCm objects when the content-addressed cache changes.
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
   ])
 }
@@ -256,9 +253,8 @@ function "get_cache_from_rocm_rust" {
 function "get_cache_to_rocm_rust" {
   params = []
   result = compact([
-    # Export exact-commit and branch-scoped Rust caches. A content-addressed
-    # cache ref is appended by ci-bake-rocm.sh when that wrapper is used.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
+    # A content-addressed cache ref is appended by ci-bake-rocm.sh. Keep one
+    # rolling mode=max ref for incremental reuse when the Rust inputs change.
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
   ])
 }

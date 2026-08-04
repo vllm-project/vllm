@@ -652,8 +652,11 @@ done
     content_dir = hash_repo / "content"
     content_dir.mkdir(parents=True)
     tracked = content_dir / "tracked.txt"
+    executable = content_dir / "executable.sh"
     tracked.write_text("first")
-    run_bash("git init -q\ngit add content/tracked.txt", cwd=hash_repo)
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    run_bash("git init -q\ngit add content", cwd=hash_repo)
 
     def content_hash() -> str:
         return run_sourced(
@@ -661,10 +664,49 @@ done
         ).stdout.strip()
 
     original_hash = content_hash()
+    tracked.chmod(0o777)
+    executable.chmod(0o600)
+    assert content_hash() != original_hash
+    run_sourced(
+        CI_BAKE,
+        "init_config test-ci\nnormalize_ci_worktree_modes",
+        cwd=hash_repo,
+        env={"BUILDKITE": "true", "REMOTE_VLLM": "0"},
+    )
+    assert tracked.stat().st_mode & 0o777 == 0o644
+    assert executable.stat().st_mode & 0o777 == 0o755
+    assert content_hash() == original_hash
+    assert (
+        run_sourced(
+            CI_BAKE,
+            "init_config test-ci\nnormalize_ci_worktree_modes",
+            cwd=tmp_path,
+            env={"BUILDKITE": "true", "REMOTE_VLLM": "0"},
+            check=False,
+        ).returncode
+        != 0
+    )
+    assert (
+        run_sourced(
+            CI_BAKE,
+            "init_config test-ci\n"
+            'git() { [[ "$1" != ls-files ]] || return 42; command git "$@"; }\n'
+            "normalize_ci_worktree_modes",
+            cwd=hash_repo,
+            env={"BUILDKITE": "true", "REMOTE_VLLM": "0"},
+            check=False,
+        ).returncode
+        != 0
+    )
     (content_dir / "untracked.txt").write_text("residue")
     assert content_hash() == original_hash
     tracked.write_text("changed")
     assert content_hash() != original_hash
+
+    main_body = CI_BAKE.read_text().split("main() {", 1)[1]
+    assert main_body.index("normalize_ci_worktree_modes") < main_body.index(
+        "compute_ci_base_hash_if_needed"
+    )
 
 
 @pytest.mark.parametrize("script", [CI_BAKE, ROCM_BASE_REFRESH])
@@ -1002,6 +1044,7 @@ upload_wheel_artifacts_if_present >/dev/null
     assert "uv pip install --system -r requirements/rocm.txt" not in csrc
     assert build_vllm.startswith("FROM build_vllm_dependencies AS build_vllm")
     assert "COPY --from=fetch_vllm ${COMMON_WORKDIR}/vllm " in build_vllm
+    assert 'cd "${COMMON_WORKDIR}/vllm"' in build_vllm
     assert "uv pip install --system -r requirements/rocm.txt" not in build_vllm
 
     export_stage = docker_stage(dockerfile, "export_vllm")

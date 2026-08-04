@@ -324,7 +324,7 @@ COPY --from=rust-build ${COMMON_WORKDIR}/vllm/vllm/vllm-rs ${COMMON_WORKDIR}/vll
 COPY --from=rust-build ${COMMON_WORKDIR}/vllm/vllm/_rust_*.so ${COMMON_WORKDIR}/vllm/vllm/
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    cd vllm \
+    cd "${COMMON_WORKDIR}/vllm" \
     && export VLLM_USE_PRECOMPILED=1 \
     && export VLLM_PRECOMPILED_WHEEL_LOCATION="$(ls /precompiled-wheels/*.whl)" \
     && export VLLM_DOCKER_BUILD_CONTEXT=1 \

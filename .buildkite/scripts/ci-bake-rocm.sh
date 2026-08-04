@@ -262,6 +262,79 @@ compute_content_hash() {
     done | sha256sum | cut -d' ' -f1
 }
 
+normalize_ci_worktree_modes() {
+    local entry=""
+    local metadata=""
+    local mode=""
+    local stage=""
+    local path=""
+    local index_modes_file=""
+    local -a regular_files=()
+    local -a executable_files=()
+
+    [[ "${BUILDKITE:-false}" == "true" ]] || return 0
+    [[ "${REMOTE_VLLM:-0}" == "0" ]] || return 0
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "A Git worktree is required to normalize the CI Docker context" >&2
+        return 1
+    fi
+    if [[ -z "${SCRIPT_TMP_DIR}" || ! -d "${SCRIPT_TMP_DIR}" ]]; then
+        echo "A script temporary directory is required to normalize the CI Docker context" >&2
+        return 1
+    fi
+    index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
+    if ! git ls-files --stage -z > "${index_modes_file}"; then
+        echo "Failed to read Git index modes for the CI Docker context" >&2
+        return 1
+    fi
+
+    # Some CI workspaces expose every checked-out file as executable. Restore
+    # the Git index modes before hashing or sending the local Docker context so
+    # equivalent commits produce equivalent cache keys and image layers.
+    while IFS= read -r -d '' entry; do
+        if [[ "${entry}" != *$'\t'* ]]; then
+            echo "Malformed git index entry while normalizing Docker context" >&2
+            return 1
+        fi
+        metadata="${entry%%$'\t'*}"
+        mode="${metadata%% *}"
+        stage="${metadata##* }"
+        path="${entry#*$'\t'}"
+        if [[ "${stage}" != "0" ]]; then
+            echo "Unmerged git index entry cannot be used as Docker context: ${path}" >&2
+            return 1
+        fi
+
+        case "${mode}" in
+            100644|100755)
+                if [[ ! -f "${path}" || -L "${path}" ]]; then
+                    echo "Tracked Docker context file is missing or invalid: ${path}" >&2
+                    return 1
+                fi
+                if [[ "${mode}" == "100755" ]]; then
+                    executable_files+=("${path}")
+                else
+                    regular_files+=("${path}")
+                fi
+                ;;
+            120000|160000)
+                ;;
+            *)
+                echo "Unsupported git index mode ${mode} for ${path}" >&2
+                return 1
+                ;;
+        esac
+    done < "${index_modes_file}"
+
+    if [[ ${#regular_files[@]} -gt 0 ]]; then
+        chmod 0644 -- "${regular_files[@]}"
+    fi
+    if [[ ${#executable_files[@]} -gt 0 ]]; then
+        chmod 0755 -- "${executable_files[@]}"
+    fi
+    echo "Normalized $((${#regular_files[@]} + ${#executable_files[@]})) Git-tracked file modes for the Docker context"
+}
+
 compose_dependency_cache_key() {
     local prefix="$1"
     local material="$2"
@@ -1914,7 +1987,9 @@ validate_content_cache_export_mode() {
 should_export_content_cache_ref() {
     local cache_ref="$1"
     local cache_name="$2"
+    local trusted_ref="${3:-${cache_ref}}"
     local mode="${ROCM_CONTENT_CACHE_EXPORT_MODE:-missing}"
+    local existing_ref=""
 
     case "${mode}" in
         always)
@@ -1926,8 +2001,14 @@ should_export_content_cache_ref() {
             return 1
             ;;
         missing|"")
-            if docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1; then
-                echo "${cache_name} content cache exists; not re-exporting ${cache_ref}"
+            if docker buildx imagetools inspect "${trusted_ref}" >/dev/null 2>&1; then
+                existing_ref="${trusted_ref}"
+            elif [[ "${cache_ref}" != "${trusted_ref}" ]] \
+                && docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1; then
+                existing_ref="${cache_ref}"
+            fi
+            if [[ -n "${existing_ref}" ]]; then
+                echo "${cache_name} content cache exists at ${existing_ref}; not re-exporting ${cache_ref}"
                 return 1
             fi
             echo "${cache_name} content cache missing; will export ${cache_ref}"
@@ -1955,8 +2036,6 @@ write_rocm_cache_override() {
     local -a rust_cache_to=()
     local -a rocm_cache_to=()
     local -a export_wheel_cache_to=()
-    local export_csrc_cache=1
-    local export_rust_cache=1
 
     if ! uses_rocm_csrc_cache && ! uses_rocm_rust_cache; then
         return 0
@@ -1983,12 +2062,13 @@ write_rocm_cache_override() {
                 "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"
             )
         fi
-        if should_export_content_cache_ref "${ROCM_CSRC_CONTENT_CACHE_REF}" "ROCm csrc"; then
+        if should_export_content_cache_ref \
+            "${ROCM_CSRC_CONTENT_CACHE_REF}" \
+            "ROCm csrc" \
+            "${ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF}"; then
             csrc_cache_to+=(
                 "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=${csrc_cache_to_mode},ignore-error=true"
             )
-        else
-            export_csrc_cache=0
         fi
     fi
 
@@ -2002,12 +2082,13 @@ write_rocm_cache_override() {
                 "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF}"
             )
         fi
-        if should_export_content_cache_ref "${ROCM_RUST_CONTENT_CACHE_REF}" "ROCm Rust"; then
+        if should_export_content_cache_ref \
+            "${ROCM_RUST_CONTENT_CACHE_REF}" \
+            "ROCm Rust" \
+            "${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}"; then
             rust_cache_to+=(
                 "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${rust_cache_to_mode},ignore-error=true"
             )
-        else
-            export_rust_cache=0
         fi
     fi
 
@@ -2016,32 +2097,18 @@ write_rocm_cache_override() {
     # Docker Hub cache exports are best-effort. A cache-only target failure can
     # otherwise cancel the sibling image target before its manifest is pushed.
     if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
-        if [[ ${export_csrc_cache} -eq 1 ]]; then
-            csrc_cache_to+=(
-                "type=registry,ref=${cache_repo}:csrc-rocm-${namespace}-${BUILDKITE_COMMIT}${write_suffix},mode=${csrc_cache_to_mode},ignore-error=true"
-            )
-        fi
-        if [[ ${export_rust_cache} -eq 1 ]]; then
-            rust_cache_to+=(
-                "type=registry,ref=${cache_repo}:rust-rocm-${namespace}-${BUILDKITE_COMMIT}${write_suffix},mode=${rust_cache_to_mode},ignore-error=true"
-            )
-        fi
         rocm_cache_to+=(
             "type=registry,ref=${cache_repo}:rocm-${namespace}-${BUILDKITE_COMMIT}${write_suffix},mode=${rocm_cache_to_mode},ignore-error=true"
         )
     fi
 
     if [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
-        if [[ ${export_csrc_cache} -eq 1 ]]; then
-            csrc_cache_to+=(
-                "type=registry,ref=${cache_repo}:csrc-rocm-${namespace}-branch-${ROCM_CACHE_BRANCH_TAG}${write_suffix},mode=${csrc_cache_to_mode},ignore-error=true"
-            )
-        fi
-        if [[ ${export_rust_cache} -eq 1 ]]; then
-            rust_cache_to+=(
-                "type=registry,ref=${cache_repo}:rust-rocm-${namespace}-branch-${ROCM_CACHE_BRANCH_TAG}${write_suffix},mode=${rust_cache_to_mode},ignore-error=true"
-            )
-        fi
+        csrc_cache_to+=(
+            "type=registry,ref=${cache_repo}:csrc-rocm-${namespace}-branch-${ROCM_CACHE_BRANCH_TAG}${write_suffix},mode=${csrc_cache_to_mode},ignore-error=true"
+        )
+        rust_cache_to+=(
+            "type=registry,ref=${cache_repo}:rust-rocm-${namespace}-branch-${ROCM_CACHE_BRANCH_TAG}${write_suffix},mode=${rust_cache_to_mode},ignore-error=true"
+        )
         rocm_cache_to+=(
             "type=registry,ref=${cache_repo}:rocm-${namespace}-branch-${ROCM_CACHE_BRANCH_TAG}${write_suffix},mode=${rocm_cache_to_mode},ignore-error=true"
         )
@@ -2609,6 +2676,7 @@ main() {
     configure_cache_write_scope
     print_header
     validate_inputs
+    normalize_ci_worktree_modes
     load_ci_hcl
     init_bake_files
     compute_ci_base_hash_if_needed
