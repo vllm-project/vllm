@@ -41,14 +41,11 @@ from vllm.v1.worker.block_table import get_block_table_width
 logger = init_logger(__name__)
 
 
-@triton.jit(do_not_specialize=["n_blocks"])
+@triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
-    n_blocks,
-    N_SEGS: tl.constexpr,
-    MAX_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
@@ -66,16 +63,14 @@ def _zero_kv_blocks_kernel(
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
-    Programs are mapped as (block_index, seg_index, chunk_index).
+    The grid is (chunk_index, seg_index, block_index).  A flat 1-D grid
+    would multiply the three out into a single dimension, which AMD caps at
+    ``(2**32 - 1) // threads_per_block`` work groups; a 3-D grid keeps each
+    extent small because only the x dimension is scaled by the block size.
     """
-    pid = tl.program_id(0)
-    work_per_block = N_SEGS * MAX_CHUNKS
-    block_index = pid // work_per_block
-    if block_index >= n_blocks:
-        return
-    remainder = pid % work_per_block
-    seg_index = remainder // MAX_CHUNKS
-    chunk_index = remainder % MAX_CHUNKS
+    chunk_index = tl.program_id(0)
+    seg_index = tl.program_id(1)
+    block_index = tl.program_id(2)
     page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
     if chunk_index >= page_size_el // BLOCK_SIZE:
         return
@@ -194,16 +189,12 @@ class KVBlockZeroer:
         if not block_ids or self._meta is None:
             return
         seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
-        n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks * n_segs * max_chunks,)
+        grid = (max_chunks, n_segs, len(block_ids))
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
             seg_page_sizes,
             idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
         )
 
