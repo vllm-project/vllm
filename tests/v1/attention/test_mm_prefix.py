@@ -38,9 +38,11 @@ requires_fa4 = pytest.mark.skipif(
 # Imported conditionally because these pull in CuTe / FA4 build artifacts that
 # are absent wherever requires_fa4 skips.
 if _fa4_available():
+    from types import MethodType
+
     from tests.v1.attention.test_attention_backends import (
+        MockAttentionLayer,
         create_and_prepopulate_kv_cache,
-        run_attention_backend,
     )
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -49,11 +51,13 @@ if _fa4_available():
         create_vllm_config,
     )
     from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
     from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionImpl,
         FlashAttentionMetadataBuilder,
         _make_mm_prefix_mask_mod,
     )
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
     from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = torch.device("cuda:0")
@@ -489,14 +493,31 @@ def test_decode_only_batch_reports_no_ranges():
 
 
 @requires_fa4
-def test_mm_prefix_kv_cache_path():
+@pytest.mark.parametrize(
+    "head_size",
+    [
+        # 128: FA4's default SM100 path (not the dedicated hd256 kernel), so
+        # paged KV + seqused_k works on B200 and H100. Non-paged mm_prefix
+        # cases in this file already use HEAD_SIZE=128.
+        pytest.param(128, id="hd128"),
+        # 512: Gemma4 global head dim; FA4 resolves on H100, skips on
+        # Blackwell (TMEM).
+        pytest.param(512, id="global_512"),
+    ],
+)
+def test_mm_prefix_kv_cache_path(head_size: int):
     """FA4 + mask_mod + block_table matches a dense reference.
 
-    The pooling deployment that validated this feature runs with
-    ``disable_pooling_kv_cache=True``, so the ``flash_attn_varlen_func`` call
-    that takes a ``block_table`` has never run with a ``mask_mod`` attached.
-    Driving the real builder is also the only place ``seq_lens_cpu_upper_bound``
-    and the packed query offsets interact.
+    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
+    512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
+    dedicated hd256 2CTA kernel asserts away ``seqused_k``, which paged KV
+    requires.
+
+    Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
+    ``head_size`` — ``run_attention_backend`` / ``create_standard_kv_cache_spec``
+    read ``get_head_size()`` (=512 for Gemma4), so this test builds them
+    explicitly. The sliding window is set on the impl; mm_prefix encodes it in
+    mask_mod and clears FA's built-in window at forward time.
     """
     torch.manual_seed(0)
     vllm_config = _enable_mm_prefix(
@@ -510,15 +531,30 @@ def test_mm_prefix_kv_cache_path():
     assert vllm_config.model_config.is_mm_prefix_lm
 
     mc = vllm_config.model_config
+    # Keep every get_head_size() reader (builder helpers, etc.) on the same dim.
+    mc.get_head_size = MethodType(lambda self: head_size, mc)
+
+    # Skip under the same config Gemma4 forces (flash_attn_version=4), so the
+    # check matches FlashAttentionImpl's get_flash_attn_version call.
+    with set_current_vllm_config(vllm_config):
+        if get_flash_attn_version(head_size=head_size) != 4:
+            pytest.skip(f"FA4 does not support head_size={head_size} on this device")
+
     num_heads = mc.get_num_attention_heads(vllm_config.parallel_config)
     num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
-    head_size = mc.get_head_size()
     scale = head_size**-0.5
 
     batch = BatchSpec(
         seq_lens=PAGED_SEQ_LENS, query_lens=PAGED_QUERY_LENS, name="mm_prefix_mixed"
     )
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=mc.dtype,
+        sliding_window=SLIDING_WINDOW,
+        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
+    )
     common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
     common.mm_req_doc_ranges = PAGED_MM_RANGES
 
@@ -537,6 +573,8 @@ def test_mm_prefix_kv_cache_path():
         new_vs.append(v_full[ctx:])
 
     query = torch.cat(qs)
+    key = torch.cat(new_ks)
+    value = torch.cat(new_vs)
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_ctxs,
         v_contexts=v_ctxs,
@@ -550,19 +588,40 @@ def test_mm_prefix_kv_cache_path():
         randomize_blocks=True,
     )
 
+    # Packed KV layout is [..., 2 * head_size]; impl.split(head_size) needs match.
+    assert kv_cache.shape[-1] == 2 * head_size
+
+    layer_names = ["model.layers.0.self_attn.attn"]
     with set_current_vllm_config(vllm_config):
-        actual = run_attention_backend(
-            AttentionBackendEnum.FLASH_ATTN,
-            kv_cache_spec,
-            ["model.layers.0.self_attn.attn"],
-            vllm_config,
-            DEVICE,
-            common,
-            query,
-            torch.cat(new_ks),
-            torch.cat(new_vs),
-            kv_cache,
+        builder = FlashAttentionMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, DEVICE
+        )
+        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        # head_size=128 keeps FA4 under local attention on Blackwell (the
+        # FA4→FA2 demotion is only for local+256). Window is still encoded in
+        # mask_mod at forward; FA's built-in window is cleared there.
+        impl = FlashAttentionImpl(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
             sliding_window=SLIDING_WINDOW,
+            kv_cache_dtype="auto",
+        )
+        assert impl.vllm_flash_attn_version == 4, (
+            f"expected FA4, got FA{impl.vllm_flash_attn_version} for "
+            f"head_size={head_size}"
+        )
+        assert impl.head_size == head_size == kv_cache_spec.head_size
+
+        mock_layer = MockAttentionLayer(DEVICE)
+        output = torch.empty_like(query)
+        impl.do_kv_cache_update(
+            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+        )
+        actual = impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
         )
 
     ref_args = (query, k_fulls, v_fulls, PAGED_QUERY_LENS, PAGED_SEQ_LENS)

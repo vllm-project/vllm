@@ -1015,13 +1015,16 @@ class FlashAttentionImpl(AttentionImpl):
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    # Sliding window value in Triton convention
-                    # (1 + window_size[0]).  Global-attention layers
-                    # store (-1, -1) → sw stays None / 0.
+                    # Use the layer impl's window, not attn_metadata's. The
+                    # metadata field comes from kv_cache_spec (model-wide, e.g.
+                    # Gemma4's 512), while the impl holds the per-layer window
+                    # the mask_mod must encode (e.g. a test override).
+                    # Triton convention: 1 + window_size[0]. Global layers store
+                    # (-1, -1) → sw stays None.
+                    layer_window = self.sliding_window
                     sw_val = (
-                        1 + sliding_window_size[0]
-                        if sliding_window_size is not None
-                        and sliding_window_size[0] >= 0
+                        1 + layer_window[0]
+                        if layer_window is not None and layer_window[0] >= 0
                         else None
                     )
                     # Gemma4: also clamp the bidirectional block to the
