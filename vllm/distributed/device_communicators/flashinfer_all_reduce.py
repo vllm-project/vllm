@@ -370,9 +370,8 @@ class FlashInferAllReduce:
             self.max_num_tokens = self.max_workspace_size // (
                 hidden_dim * dtype.itemsize
             )
-        # Always go through the accessor rather than caching only on first use:
-        # the workspaces are process-wide singletons that destroy_fi_ar_workspace()
-        # can clear underneath us.
+        # Re-fetch each call; destroy_fi_ar_workspace() may have cleared the
+        # process-wide singleton since last time.
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
@@ -406,23 +405,16 @@ class FlashInferAllReduce:
                 hidden_dim * input_tensor.dtype.itemsize
             )
 
-        # Cheap upper bound: no workspace can hold more than the whole size
-        # budget, so reject obviously over-sized tensors before paying for
-        # workspace creation. Not authoritative -- see below.
+        # Cheap reject before paying to create a workspace; not authoritative.
         if num_tokens > self.max_num_tokens:
             return False
 
         if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
             return False
 
-        # Authoritative capacity check. max_workspace_size budgets the whole
-        # *allocation*, but a backend may only devote a fraction of it to any one
-        # all-reduce: mnnvl is Lamport-based and splits its allocation into three
-        # buffers, so only about a third of the budget is usable per call. Ask the
-        # workspace instead of reimplementing that arithmetic -- otherwise tensors
-        # sized between the real capacity and the budget pass this gate and then
-        # abort the engine inside flashinfer with "The buffer size in the given
-        # workspace is insufficient for the given problem size".
+        # Authoritative: a backend may devote only a fraction of the budget to
+        # one call (mnnvl splits its allocation into three Lamport buffers), so
+        # ask the workspace rather than trusting the token-count bound above.
         return self.workspace.is_buffer_size_sufficient(
             tp_size=self.world_size,
             num_tokens=num_tokens,

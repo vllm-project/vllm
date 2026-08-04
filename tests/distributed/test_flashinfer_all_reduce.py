@@ -15,6 +15,11 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 )
 from vllm.utils.math_utils import round_up
 
+# These tests stub the workspace and never allocate on device, so skip the
+# global GPU teardown -- on non-CUDA hosts it drives torch.accelerator into an
+# uninitialized allocator and errors during teardown.
+pytestmark = pytest.mark.skip_global_cleanup
+
 # The repro from the bug report: DeepSeek-V4 hidden size, TP8, bf16, and the 2MB
 # per-rank budget FI_ALLREDUCE_FUSION_MAX_SIZE_MB gives TP8 on sm103.
 HIDDEN_DIM = 7168
