@@ -7543,7 +7543,7 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
 def test_nan_fault_tolerance_aborts_request():
     """NaN fault tolerance aborts requests with NaN logits."""
     scheduler = create_scheduler()
-    scheduler.observability_config.enable_nan_fault_tolerance = True
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
     scheduler.observability_config.enable_detect_nans_in_logits = True
 
     requests = create_requests(num_requests=2)
@@ -7576,7 +7576,7 @@ def test_nan_fault_tolerance_disabled_does_not_abort():
     """Without fault tolerance, NaN logits are recorded but not aborted."""
     scheduler = create_scheduler()
     scheduler.observability_config.enable_detect_nans_in_logits = True
-    scheduler.observability_config.enable_nan_fault_tolerance = False
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = False
 
     requests = create_requests(num_requests=2)
     for req in requests:
@@ -7609,7 +7609,7 @@ def test_nan_fault_tolerance_chunked_prefill():
         max_num_batched_tokens=15,
         enable_chunked_prefill=True,
     )
-    scheduler.observability_config.enable_nan_fault_tolerance = True
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
     scheduler.observability_config.enable_detect_nans_in_logits = True
 
     requests = create_requests(num_requests=1, num_tokens=30)
@@ -7636,10 +7636,12 @@ def test_nan_fault_tolerance_chunked_prefill():
 
 def test_nan_fault_tolerance_implies_detect():
     """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
-    from vllm.config.observability import ObservabilityConfig
+    from vllm.engine.arg_utils import EngineArgs
 
-    config = ObservabilityConfig(enable_nan_fault_tolerance=True)
-    assert config.enable_detect_nans_in_logits is True
+    args = EngineArgs(model="facebook/opt-125m",
+                      enable_nan_fault_tolerance=True)
+    assert args.enable_detect_nans_in_logits is True
+    assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
 
 
 def test_nan_env_var_deprecation():
