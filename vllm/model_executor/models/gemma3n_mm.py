@@ -24,6 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models.audio_utils import batch_audio_features
 from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.gemma3n_audio_utils import (
     adjust_audio_features_to_expected_length,
@@ -92,8 +93,12 @@ class Gemma3nAudioInputs(TensorSchema):
     """
 
     type: Literal["audio"] = "audio"
-    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
-    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
+    input_features_padded: Annotated[
+        torch.Tensor, TensorShape("bn", "s", "f", dynamic_dims={"s"})
+    ]
+    input_features_mask: Annotated[
+        torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
+    ]
 
 
 Gemma3nImageInputs = Gemma3nImagePixelInputs
@@ -615,8 +620,10 @@ class Gemma3nForConditionalGeneration(
         audio_input: Gemma3nAudioInputs,
     ) -> list[torch.Tensor]:
         # Run on padded features to enable batching
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
         audio_outputs = self.audio_tower(input_features, ~input_features_mask)
         audio_encodings = audio_outputs.last_hidden_state
         audio_mask = audio_outputs.audio_mel_mask
