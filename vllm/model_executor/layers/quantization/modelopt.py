@@ -1783,6 +1783,7 @@ class Role(Enum):
 WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
+
 @dataclass(frozen=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
