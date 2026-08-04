@@ -1059,7 +1059,14 @@ class NixlBaseConnectorWorker:
                     )
                 ]
             else:
-                block_stride = cache.stride(0) * cache.element_size()
+                if cache.ndim == 1:
+                    # Flat byte view: HMA tensors shared between layer types
+                    # carry no block dimension, so stride(0) is 1 byte rather
+                    # than a block stride. Consecutive blocks abut here, so the
+                    # stride is the page size.
+                    block_stride = physical_page_size
+                else:
+                    block_stride = cache.stride(0) * cache.element_size()
                 storage_is_block_major = num_blocks * block_stride == storage.nbytes()
                 hnc_contiguous = (
                     cache.ndim == 4
@@ -1093,6 +1100,13 @@ class NixlBaseConnectorWorker:
 
             for base_addr, block_len, block_stride in region_specs:
                 if base_addr in seen_base_addresses:
+                    if is_mla_region:
+                        # Dual-purpose HMA tensor: an MLA layer shares a region
+                        # a non-MLA layer registered first. MLA is not
+                        # head-sharded, so the region must be flagged MLA
+                        # regardless of which layer type got here first.
+                        idx = seen_base_addresses.index(base_addr)
+                        self._region_is_mla[idx] = True
                     continue
                 seen_base_addresses.append(base_addr)
                 self.block_len_per_layer.append(block_len)
