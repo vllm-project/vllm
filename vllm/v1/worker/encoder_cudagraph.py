@@ -19,6 +19,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
     EncoderItemSpec,
@@ -294,7 +295,10 @@ class EncoderCudaGraphManager:
 
     def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         """Get item specs from the model."""
-        return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+        # Implementations read per-item grid/patch counts off device tensors
+        # to size the cudagraph buffers, so the D2H is inherent here.
+        with gpu_sync_allowed():
+            return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""

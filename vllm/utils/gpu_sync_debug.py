@@ -136,7 +136,11 @@ def _suppressing(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        with gpu_sync_allowed():
+        # `_allow_syncs()` rather than `gpu_sync_allowed()`: everything
+        # wrapped here runs *during* compilation, and `gpu_sync_allowed()`
+        # short-circuits to a no-op when `torch.compiler.is_compiling()`,
+        # so it would never open the allow region these entry points need.
+        with _allow_syncs():
             return fn(*args, **kwargs)
 
     return wrapper

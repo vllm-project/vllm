@@ -47,6 +47,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
@@ -1254,29 +1255,32 @@ def _commit_eplb_maps_for_layer(
     visible to the model.
     """
 
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map[layer]
-    assert src.shape == dst.shape, (
-        "The number of physical experts must stay the same while running Async EPLB. "
-        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
-        f"experts {src.shape[0]}."
-    )
-    dst.copy_(src, non_blocking=True)
+    # Committing the CPU-computed maps into the device-side map tensors
+    # is inherently H2D; the sources are pageable so the copies block.
+    with gpu_sync_allowed():
+        # Commit physical_to_logical_map
+        src = new_physical_to_logical_map
+        dst = model_state.physical_to_logical_map[layer]
+        assert src.shape == dst.shape, (
+            "The number of physical experts must stay the same while running "
+            f"Async EPLB. Current number of physical experts: {dst.shape[0]}. "
+            f"New number of physical experts {src.shape[0]}."
+        )
+        dst.copy_(src, non_blocking=True)
 
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map[layer],
-    )
+        num_logical_experts = model_state.logical_to_physical_map.shape[1]
+        new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+        # Commit logical_to_physical_map
+        _pad_out_tensor(
+            src=new_logical,
+            dst=model_state.logical_to_physical_map[layer],
+        )
 
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count[layer]
-    assert src.shape == dst.shape
-    dst.copy_(src, non_blocking=True)
+        # Commit logical_replica_count
+        src = new_replica_count
+        dst = model_state.logical_replica_count[layer]
+        assert src.shape == dst.shape
+        dst.copy_(src, non_blocking=True)
 
 
 def _commit_eplb_maps(

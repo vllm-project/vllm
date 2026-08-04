@@ -19,6 +19,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -977,7 +978,10 @@ def _run_mamba_prefix_cache_mrv2(
                 yield forward_context[layer_name].kv_cache[-1], block_table
 
     def temporal_block(temporal_state, block_table, col):
-        return temporal_state[int(block_table[0, col].item())]
+        # Resolving the block id for assertions is a deliberate D2H.
+        with gpu_sync_allowed():
+            block_id = int(block_table[0, col].item())
+        return temporal_state[block_id]
 
     def wrapped_preprocess_state(
         self: MambaHybridModelState,
@@ -1001,10 +1005,13 @@ def _run_mamba_prefix_cache_mrv2(
             self, input_batch, block_tables, kv_cache_config, num_computed_tokens
         )
         if cur_step_action is not None:
-            req_idx = int(input_batch.idx_mapping[0].item())
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            off = int(self._mamba_src_off_gpu[req_idx].item())
-            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            # Reading the GPU-side copy state back to assert on it is a
+            # deliberate D2H.
+            with gpu_sync_allowed():
+                req_idx = int(input_batch.idx_mapping[0].item())
+                src_col = int(self._mamba_src_col_gpu[req_idx].item())
+                off = int(self._mamba_src_off_gpu[req_idx].item())
+                dst = int(self._mamba_state_idx_gpu[req_idx].item())
             actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
             assert actual == expected, (
                 f"V2 align preprocess copy: expected={expected}, "
@@ -1068,10 +1075,10 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_execute_model(self, scheduler_output, *args, **kwargs)
         if cur_step_action is not None and self.execute_model_state is not None:
             input_batch = self.execute_model_state.input_batch
-            assert (
-                cur_step_action.num_computed_tokens_start
-                == input_batch.positions[input_batch.query_start_loc[0]].item()
-            )
+            # Reading positions back to assert on them is a deliberate D2H.
+            with gpu_sync_allowed():
+                start_pos = input_batch.positions[input_batch.query_start_loc[0]].item()
+            assert cur_step_action.num_computed_tokens_start == start_pos
         return ret
 
     def fake_sample(

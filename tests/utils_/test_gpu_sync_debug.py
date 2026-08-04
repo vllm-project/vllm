@@ -109,6 +109,20 @@ def test_allow_on_other_thread_does_not_disarm(monkeypatch):
 
 
 @create_new_process_for_each_test()
+def test_suppressing_works_while_compiling(monkeypatch):
+    """`_suppressing` wraps torch compile entry points, which run with
+    `torch.compiler.is_compiling()` true. `gpu_sync_allowed()` deliberately
+    no-ops in that state, so `_suppressing` must not route through it."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    # Emulate being inside a torch compile, as inductor passes are.
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+
+    suppressed = gsd._suppressing(lambda: torch.ones(4, device="cuda").cpu())
+    with_gpu_sync_check(suppressed)()
+
+
+@create_new_process_for_each_test()
 def test_without_env_set(monkeypatch):
     # Env unset: the decorator is a pass-through, no sync is detected.
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", None)
