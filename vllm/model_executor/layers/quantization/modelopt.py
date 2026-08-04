@@ -413,6 +413,13 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
             )
 
+    def has_blocked_weights(self) -> bool:
+        # Gates "+quant_fp8" in VllmConfig. FP8_PB_WO runs the block-scaled
+        # kernels, whose DeepGEMM path needs UE8M0-packed group scales; without
+        # the op enabled QuantFP8 falls back to forward_native, which emits
+        # unpacked fp32 scales and the GEMM fails to launch.
+        return self.quant_method == "FP8_PB_WO"
+
     def get_name(self) -> QuantizationMethods:
         return "modelopt"
 
