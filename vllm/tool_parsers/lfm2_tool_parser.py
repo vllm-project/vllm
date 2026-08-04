@@ -187,14 +187,15 @@ class Lfm2ToolParser(ToolParser):
             kw_renamed = False
             try:
                 module = ast.parse(tool_text)
-            except SyntaxError:
+            except (SyntaxError, ValueError):
                 # A raw newline/tab inside a string argument (e.g. a multi-line
-                # shell command) is invalid Python; escape control chars inside
-                # string literals and retry instead of dropping the call.
+                # shell command) is invalid Python, and a NUL byte anywhere is
+                # a ValueError; escape control chars inside string literals and
+                # retry instead of dropping the call.
                 escaped = escape_ctrl_chars_in_strings(tool_text)
                 try:
                     module = ast.parse(escaped)
-                except SyntaxError:
+                except (SyntaxError, ValueError):
                     # A parameter named after a Python keyword (`from=1`) is
                     # also a SyntaxError; rename it, parse, restore below.
                     renamed, kw_renamed = rename_reserved_kwargs(escaped)

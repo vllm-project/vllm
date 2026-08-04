@@ -90,6 +90,13 @@ MULTILINE_FUNCTION_CALL = FunctionCall(
     name="exec",
     arguments='{"command": "cat > f.py << EOF\\nimport csv\\nprint(1)\\nEOF"}',
 )
+# A NUL byte inside a string argument makes ast.parse raise ValueError (not
+# SyntaxError) for the whole source; the escape path must recover the call.
+NUL_BYTE_FUNCTION_OUTPUT = "exec(command='printf a\x00b')"
+NUL_BYTE_FUNCTION_CALL = FunctionCall(
+    name="exec",
+    arguments='{"command": "printf a\\u0000b"}',
+)
 
 
 @pytest.fixture(scope="module")
@@ -272,6 +279,22 @@ TEST_CASES = [
         [MULTILINE_FUNCTION_CALL],
         None,
         id="multiline_string_arg_nonstreaming",
+    ),
+    # NUL byte in a string argument (ValueError from ast.parse, not
+    # SyntaxError)
+    pytest.param(
+        True,
+        _wrap(NUL_BYTE_FUNCTION_OUTPUT),
+        [NUL_BYTE_FUNCTION_CALL],
+        None,
+        id="nul_byte_string_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(NUL_BYTE_FUNCTION_OUTPUT),
+        [NUL_BYTE_FUNCTION_CALL],
+        None,
+        id="nul_byte_string_arg_nonstreaming",
     ),
 ]
 

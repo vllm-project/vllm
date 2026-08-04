@@ -370,6 +370,19 @@ class TestEscapeCtrlCharsInStrings:
         call = ast.parse(escaped).body[0].value
         assert call.keywords[0].value.value == raw
 
+    def test_nul_byte_inside_string_escaped(self):
+        # ast.parse raises ValueError (not SyntaxError) on NUL anywhere in
+        # the source, so an unescaped NUL in a string arg is unrecoverable.
+        raw = "printf a\x00b"
+        escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
+        assert "\x00" not in escaped
+        call = ast.parse(escaped).body[0].value
+        assert call.keywords[0].value.value == raw
+
+    def test_nul_byte_outside_strings_untouched(self):
+        text = "f(a=1,\x00b=2)"
+        assert escape_ctrl_chars_in_strings(text) == text
+
 
 def _value_of(expr: str):
     """Parse a single Python expression and run get_parameter_value on it."""

@@ -553,9 +553,11 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
     line break). That is invalid Python — ``ast.parse`` fails with "unterminated
     string literal" — so the call would be dropped even though the intent is
-    unambiguous. Escaping ``\\n``/``\\r``/``\\t`` only *inside* string literals
-    makes the text parseable while preserving the argument value exactly
-    (the escape sequences evaluate back to the original control chars).
+    unambiguous. A NUL byte is worse: ``ast.parse`` rejects it anywhere in the
+    source with ``ValueError``. Escaping ``\\n``/``\\r``/``\\t``/``\\x00`` only
+    *inside* string literals makes the text parseable while preserving the
+    argument value exactly (the escape sequences evaluate back to the original
+    control chars).
 
     Text outside string literals is returned unchanged.
     """
@@ -582,6 +584,8 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
             out.append("\\r")
         elif char == "\t":
             out.append("\\t")
+        elif char == "\x00":
+            out.append("\\x00")
         else:
             out.append(char)
         index += 1
