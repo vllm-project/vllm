@@ -5799,6 +5799,7 @@ def test_nan_fault_tolerance_chunked_prefill():
     """NaN abort fires during chunked prefill intermediate chunks."""
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
+        max_num_seqs=15,
         enable_chunked_prefill=True,
     )
     scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
