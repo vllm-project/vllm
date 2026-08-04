@@ -215,6 +215,36 @@ def test_per_request_metrics_requires_log_stats(serve_parser):
 
 
 @pytest.mark.parametrize(
+    "cli_args, expected",
+    [
+        ([], 0),
+        (["--sse-keep-alive-interval", "0"], 0),
+        (["--sse-keep-alive-interval", "15"], 15),
+    ],
+)
+def test_sse_keep_alive_interval_valid(serve_parser, cli_args, expected):
+    """The default is 0 and zero or positive integers parse exactly."""
+    args = serve_parser.parse_args(args=cli_args)
+    assert args.sse_keep_alive_interval == expected
+    validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize("value", ["-1", "-5"])
+def test_sse_keep_alive_interval_negative(serve_parser, value):
+    """Negative intervals are rejected by validation."""
+    args = serve_parser.parse_args(args=["--sse-keep-alive-interval", value])
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0.5", "abc"])
+def test_sse_keep_alive_interval_non_integer(serve_parser, value):
+    """Non-integer values fail argparse's int parsing with SystemExit."""
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(args=["--sse-keep-alive-interval", value])
+
+
+@pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [
         (
