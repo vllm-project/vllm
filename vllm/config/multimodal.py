@@ -231,14 +231,14 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
-    mm_embeds_out_of_band: bool = False
+    mm_embeds_from_ec_connector: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
 
     In an encode/prefill/decode (EPD) deployment the encoder instance publishes
     embeddings through the EC connector, so the request that reaches the
     prefill/decode instance only needs to carry the grid/size metadata that
-    sizes the placeholder range — the embeddings themselves arrive out of band
-    and are keyed by `mm_hash`.
+    sizes the placeholder range — the embeddings themselves come from the
+    connector, keyed by `mm_hash`.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
     exactly on EC consumers. Everywhere else it stays False so that a request

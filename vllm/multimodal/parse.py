@@ -554,10 +554,10 @@ class MultiModalDataParser:
             embedding inputs. If provided, validates that user-supplied
             embeddings have the correct hidden size to prevent crashes
             during model inference.
-        allow_out_of_band_embeds (bool): Whether pre-computed embeddings may be
+        embeds_from_ec_connector (bool): Whether pre-computed embeddings may be
             absent from the request because an encode/prefill/decode encoder
             instance publishes them through an EC connector instead. Derived by
-            `BaseProcessingInfo.allow_out_of_band_embeds`.
+            `BaseProcessingInfo.embeds_from_ec_connector`.
     """
 
     embedding_fields: Mapping[str, Mapping[str, EmbeddingFieldRole]] = {}
@@ -568,7 +568,7 @@ class MultiModalDataParser:
     builds `DictEmbeddingItems` never runs, yet the producer still has to know
     which processed keys to publish. One declaration, both sides, no drift.
 
-    A modality absent from this mapping cannot be delivered out of band.
+    A modality absent from this mapping can only be sent whole in the request.
     """
 
     @classmethod
@@ -594,7 +594,7 @@ class MultiModalDataParser:
         """
         metadata = self.placeholder_metadata_fields(modality)
         values = set(self.embedding_fields.get(modality, {})) - metadata
-        if self.allow_out_of_band_embeds:
+        if self.embeds_from_ec_connector:
             return metadata, values
         return metadata | values, set()
 
@@ -606,11 +606,11 @@ class MultiModalDataParser:
         audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
-        allow_out_of_band_embeds: bool = False,
+        embeds_from_ec_connector: bool = False,
     ) -> None:
         super().__init__()
 
-        self.allow_out_of_band_embeds = allow_out_of_band_embeds
+        self.embeds_from_ec_connector = embeds_from_ec_connector
 
         self.audio_resampler = AudioResampler(
             target_sr=target_sr,

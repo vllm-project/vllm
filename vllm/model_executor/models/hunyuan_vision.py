@@ -599,7 +599,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return HunYuanVLMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:

@@ -101,7 +101,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
             spatial_merge_size,
             video_needs_metadata=self._supports_video,
             expected_hidden_size=self._get_expected_hidden_size(),
-            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
 

@@ -1279,7 +1279,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
-            allow_out_of_band_embeds=self.allow_out_of_band_embeds,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_hf_processor(self, **kwargs: object):

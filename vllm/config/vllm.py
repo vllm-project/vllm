@@ -1491,7 +1491,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._resolve_mm_embeds_out_of_band()
+        self._resolve_mm_embeds_from_ec_connector()
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
@@ -2170,8 +2170,8 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _resolve_mm_embeds_out_of_band(self) -> None:
-        """Allow `*_embeds` to be omitted only where they arrive out of band.
+    def _resolve_mm_embeds_from_ec_connector(self) -> None:
+        """Allow `*_embeds` to be omitted only where the connector supplies them.
 
         That is exactly an EC consumer: the encoder instance publishes the
         embeddings through the EC connector, so the request only has to carry
@@ -2189,10 +2189,10 @@ class VllmConfig:
         ec_config = self.ec_transfer_config
         # Derived, so overwrite unconditionally rather than honouring a value
         # that was set by hand.
-        mm_config.mm_embeds_out_of_band = (
+        mm_config.mm_embeds_from_ec_connector = (
             ec_config is not None and ec_config.is_ec_consumer
         )
-        if mm_config.mm_embeds_out_of_band:
+        if mm_config.mm_embeds_from_ec_connector:
             logger.info_once(
                 "EC consumer: pre-computed-embedding inputs may omit the "
                 "embedding tensor; embeddings are loaded from the EC connector."
