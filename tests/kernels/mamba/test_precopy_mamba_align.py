@@ -428,18 +428,19 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
 
 
 if __name__ == "__main__":
-    for nr in (1, 4, 16):
-        for tb in (0, 1, 2):
-            for mapping in (True, False):
-                for dim_first in (False, True):
-                    for tt in (1, _TEMPORAL_TILES):
-                        for cbs in _COPY_BLOCK_SIZES:
-                            test_precopy_matches_v1_copy_specs(
-                                nr, tb, mapping, dim_first, tt, cbs
-                            )
-                            print(
-                                f"OK num_reqs={nr} token_bias={tb} "
-                                f"has_idx_mapping={mapping} conv_dim_first={dim_first}"
-                                f"temporal_tiles={tt} "
-                                f"copy_block_size={cbs}"
-                            )
+    from itertools import product
+
+    _CASES = product(
+        (1, 4, 16),  # num_reqs
+        (0, 1, 2),  # token_bias
+        (True, False),  # has_idx_mapping
+        (False, True),  # conv_state_dim_first
+        (1, _TEMPORAL_TILES),  # temporal_tiles
+        _COPY_BLOCK_SIZES,  # copy_block_size
+    )
+    for nr, tb, mapping, dim_first, tt, cbs in _CASES:
+        test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt, cbs)
+        print(
+            f"OK num_reqs={nr} token_bias={tb} has_idx_mapping={mapping} "
+            f"conv_dim_first={dim_first} temporal_tiles={tt} copy_block_size={cbs}"
+        )
