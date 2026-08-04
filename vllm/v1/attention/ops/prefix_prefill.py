@@ -56,6 +56,8 @@ def _paged_kv_cache_offsets(
     stride_v_cache_d,
     stride_v_cache_bl,
     PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr = 0,
     MASK_BLOCK_TABLE: tl.constexpr = False,
 ):
     """Compute paged K/V cache element offsets for a tile of token positions.
@@ -65,7 +67,9 @@ def _paged_kv_cache_offsets(
     tiles), then the physical element offsets are built with the same layout the
     kernel uses everywhere:
       K cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
-      V cache: [num_blocks, num_kv_heads, head_size, block_size]
+      V cache: [num_blocks, num_kv_heads, head_size, block_size], or the
+        interleaved layout [num_blocks, num_kv_heads, block_size // x,
+        head_size, x] when `INTERLEAVED_V_PACK_FACTOR` (= x) > 0.
     Returns `(off_k, off_v)` with shapes [D, N] and [N, D] respectively.
 
     When `MASK_BLOCK_TABLE` is set, the block-table load is masked with
@@ -94,12 +98,25 @@ def _paged_kv_cache_offsets(
         + internal[None, :] * stride_k_cache_bl
         + (offs_d[:, None] % x) * stride_k_cache_x
     )
-    off_v = (
-        bn[:, None] * stride_v_cache_bs
-        + cur_kv_head * stride_v_cache_h
-        + offs_d[None, :] * stride_v_cache_d
-        + internal[:, None] * stride_v_cache_bl
-    )
+    if INTERLEAVED_V_PACK_FACTOR > 0:
+        # Interleaved V-cache: [num_blocks, num_kv_heads, block_size/x,
+        # head_size, x] flattened onto the 4D stride layout.
+        off_v = (
+            bn[:, None] * stride_v_cache_bs
+            + cur_kv_head * stride_v_cache_h
+            + (internal[:, None] // INTERLEAVED_V_PACK_FACTOR)
+            * BLOCK_DMODEL
+            * INTERLEAVED_V_PACK_FACTOR
+            + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+            + (internal[:, None] % INTERLEAVED_V_PACK_FACTOR)
+        )
+    else:
+        off_v = (
+            bn[:, None] * stride_v_cache_bs
+            + cur_kv_head * stride_v_cache_h
+            + offs_d[None, :] * stride_v_cache_d
+            + internal[:, None] * stride_v_cache_bl
+        )
     return off_k, off_v
 
 
@@ -240,44 +257,6 @@ def _fwd_kernel(
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
-        bn_logical_indices = token_indices // PHYSICAL_BLOCK_SIZE
-
-        # 2. Vectorized loading of physical block IDs from B_Loc
-        bn = tl.load(
-            B_Loc + cur_batch * stride_b_loc_b + bn_logical_indices * stride_b_loc_s
-        ).to(tl.int64)
-
-        # 3. Calculate the exact offset of
-        # each token within its physical block.
-        internal_offsets = token_indices % PHYSICAL_BLOCK_SIZE
-
-        # Addressing of K (5D)
-        off_k = (
-            bn[None, :] * stride_k_cache_bs
-            + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // x) * stride_k_cache_d
-            + internal_offsets[None, :] * stride_k_cache_bl
-            + (offs_d[:, None] % x) * stride_k_cache_x
-        )
-
-        # Addressing of V (4D, or interleaved 5D mapped to flat)
-        if INTERLEAVED_V_PACK_FACTOR > 0:
-            off_v = (
-                bn[:, None] * stride_v_cache_bs
-                + cur_kv_head * stride_v_cache_h
-                + (internal_offsets[:, None] // INTERLEAVED_V_PACK_FACTOR)
-                * BLOCK_DMODEL
-                * INTERLEAVED_V_PACK_FACTOR
-                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
-                + (internal_offsets[:, None] % INTERLEAVED_V_PACK_FACTOR)
-            )
-        else:
-            off_v = (
-                bn[:, None] * stride_v_cache_bs
-                + cur_kv_head * stride_v_cache_h
-                + offs_d[None, :] * stride_v_cache_d
-                + internal_offsets[:, None] * stride_v_cache_bl
-            )
         # Context tokens are always followed by the current chunk, so the tile
         # never steps past this batch's block-table row; the block-table load
         # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
@@ -302,6 +281,8 @@ def _fwd_kernel(
             stride_v_cache_d,
             stride_v_cache_bl,
             PHYSICAL_BLOCK_SIZE,
+            BLOCK_DMODEL,
+            INTERLEAVED_V_PACK_FACTOR,
         )
 
         if (
@@ -442,6 +423,8 @@ def _fwd_kernel(
                 stride_v_cache_d,
                 stride_v_cache_bl,
                 PHYSICAL_BLOCK_SIZE,
+                BLOCK_DMODEL,
+                INTERLEAVED_V_PACK_FACTOR,
                 MASK_BLOCK_TABLE=True,
             )
             k_cur_load = tl.load(
