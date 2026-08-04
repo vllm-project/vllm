@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from functools import partial
@@ -77,39 +78,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     def _is_video_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "video_processor")
-
-    def _get_audio_token_id(self) -> int:
-        processor = self.get_hf_processor()
-        if hasattr(processor, "audio_token_id"):
-            return processor.audio_token_id
-        config = self.get_hf_config()
-        val = getattr_iter(config, ("audio_token_id", "audio_token_index"))
-        if val is not None:
-            return val
-        if hasattr(processor, "audio_token"):
-            tokenizer = self.get_tokenizer()
-            vocab = tokenizer.get_vocab()
-            if processor.audio_token in vocab:
-                return vocab[processor.audio_token]
-        raise ValueError("Cannot find audio_token_id on processor or model config")
-
-    def _get_image_token_id(self) -> int:
-        tokenizer = self.get_tokenizer()
-        image_token = getattr(tokenizer, "image_token", None)
-        if image_token is not None:
-            return tokenizer.get_vocab()[image_token]
-        processor = self.get_hf_processor()
-        if hasattr(processor, "image_token_id"):
-            return processor.image_token_id
-        config = self.get_hf_config()
-        val = getattr_iter(config, ("image_token_id", "image_token_index"))
-        if val is not None:
-            return val
-        if hasattr(processor, "image_token"):
-            vocab = tokenizer.get_vocab()
-            if processor.image_token in vocab:
-                return vocab[processor.image_token]
-        raise ValueError("Cannot find image_token_id on processor or model config")
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -187,7 +155,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             processor = self.info.get_hf_processor()
             audio_token = getattr(processor, "audio_token", "")
-            text += " ".join([audio_token] * num_audios)
+            text += audio_token * num_audios
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
             processor = self.info.get_hf_processor()
             if "gemma3" in processor.__class__.__name__.lower():
@@ -248,29 +216,28 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         for each multi-modal item.
         """
 
-        def get_replacement(item_idx: int, modality: str, token_id: int):
+        def get_target(item_idx: int, modality: str):
+            out_item = out_mm_kwargs[modality][item_idx]
+            return out_item[f"{modality}_target_ids"].data.tolist()
+
+        def get_replacement(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
             repl_ids = out_item[f"{modality}_placeholder_ids"].data.tolist()
-            return PromptUpdateDetails.select_token_id(repl_ids, token_id)
+            embed_id = Counter(repl_ids).most_common(1)[0][0]
+            return PromptUpdateDetails.select_token_id(repl_ids, embed_id)
 
-        processor = self.info.get_hf_processor()
-        embed_ids: dict[str, int] = {}
-        targets: dict[str, str] = {}
+        modalities: list[str] = []
         if self.info._is_audio_model():
-            embed_ids["audio"] = self.info._get_audio_token_id()
-            targets["audio"] = processor.audio_token
+            modalities.append("audio")
         if self.info._is_image_model():
-            embed_ids["image"] = self.info._get_image_token_id()
-            targets["image"] = processor.image_token
+            modalities.append("image")
         return [
             PromptReplacement(
                 modality=modality,
-                target=targets[modality],
-                replacement=partial(
-                    get_replacement, modality=modality, token_id=embed_id
-                ),
+                target=partial(get_target, modality=modality),
+                replacement=partial(get_replacement, modality=modality),
             )
-            for modality, embed_id in embed_ids.items()
+            for modality in modalities
         ]
 
     def _get_mm_fields_config(
@@ -340,6 +307,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_fields[f"{modality}_placeholder_ids"] = (
             MultiModalFieldConfig.flat_from_sizes(modality, sizes, keep_on_cpu=True)
         )
+        mm_fields[f"{modality}_target_ids"] = MultiModalFieldConfig.batched(
+            modality, keep_on_cpu=True
+        )
 
     def _get_hf_mm_data(
         self,
@@ -404,9 +374,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
         tokenizer = self.info.get_tokenizer()
         repl_ids: dict[str, list[list[int]]] = {}
+        target_ids: dict[str, list[list[int]]] = {}
         for off in offsets[0]:
             ids = tokenizer.encode(off["replacement"], add_special_tokens=False)
             repl_ids.setdefault(off["type"], []).append(ids)
+            target = tokenizer.encode(off["text"], add_special_tokens=False)
+            target_ids.setdefault(off["type"], []).append(target)
         for modality, per_item in repl_ids.items():
             processed_data[f"{modality}_placeholder_ids"] = torch.tensor(
                 [i for ids in per_item for i in ids]
@@ -414,10 +387,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             processed_data[f"num_{modality}_placeholders"] = torch.tensor(
                 [len(ids) for ids in per_item]
             )
+            processed_data[f"{modality}_target_ids"] = torch.tensor(
+                target_ids[modality]
+            )
         if "audio" in repl_ids:
-            audio_token_id = self.info._get_audio_token_id()
             processed_data["num_audio_tokens"] = torch.tensor(
-                [ids.count(audio_token_id) for ids in repl_ids["audio"]]
+                [Counter(ids).most_common(1)[0][1] for ids in repl_ids["audio"]]
             )
 
 
@@ -648,6 +623,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         for modality in ("image", "audio"):
             kwargs.pop(f"{modality}_placeholder_ids", None)
             kwargs.pop(f"num_{modality}_placeholders", None)
+            kwargs.pop(f"{modality}_target_ids", None)
 
         embeddings: tuple[torch.Tensor, ...] = ()
         if "input_features" in kwargs or "input_values" in kwargs:
