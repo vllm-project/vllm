@@ -2247,16 +2247,17 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.fmt = format_scheme or FormatScheme()
         self.wkey = SCHEME_FOR[spec.weight]
         self.akey = None if spec.activation is None else SCHEME_FOR[spec.activation]
-        self.out_dtype = torch.get_default_dtype()
         # Only the fp8/mxfp8 kernels read input_dtype; nvfp4 ignores it. During
         # real serving model_config is always set; fall back defensively when
         # there is no config context (bare unit-test dispatch).
         model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
-        self.input_dtype = (
+        dtype = (
             model_config.dtype
             if model_config is not None
             else torch.get_default_dtype()
         )
+        self.out_dtype = dtype
+        self.input_dtype = dtype
         self.marlin_input_dtype = None
         # Kernel/backend are chosen in create_weights (after get_quant_method),
         # so the front-end marlin poke stays dormant here — same as the old
