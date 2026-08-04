@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.kv_cache_interface import (
     SparseMLAAllocationManifestEntry,
     SparseMLAAllocationOwner,
@@ -111,6 +112,7 @@ class SparseMLALayerView:
     layer_index: int
     is_host_writer: bool
     main_host_kv: torch.Tensor
+    main_host_kv_uva: torch.Tensor | None
     local_buffers: Mapping[str, torch.Tensor]
     side_stream: torch.cuda.Stream | None
     fork_ready_events: tuple[torch.cuda.Event | None, ...]
@@ -260,6 +262,8 @@ class SparseMLAOffloadManager:
                 self._side_stream.synchronize()
             except Exception as error:
                 first_error = error
+        self._layer_views = {}
+        gc.collect()
         if self._registered:
             result = torch.cuda.cudart().cudaHostUnregister(self._host_base_ptr)
             if result.value != 0:
@@ -274,7 +278,7 @@ class SparseMLAOffloadManager:
         self._local_buffers = self._indexer_inventory = {}
         self._device_slab = None
         if not self._registered:
-            self._layer_views = self._host_views = {}
+            self._host_views = {}
             gc.collect()
             if self._mmap is not None:
                 try:
@@ -453,6 +457,31 @@ class SparseMLAOffloadManager:
             )
         self._device_slab = slab
         self._local_buffers = local_buffers
+        for name in (
+            "resident_logical_ids",
+            "resident_generation",
+            "newest_logical_ids",
+            "newest_generation",
+            "request_block_ids",
+            "topk_logical_ids",
+            "topk_physical_ids",
+            "miss_logical_ids",
+            "miss_victim_slots",
+            "provisional_slots",
+        ):
+            local_buffers[name].fill_(-1)
+        for name in (
+            "resident_last_access",
+            "request_num_blocks",
+            "request_num_tokens",
+            "request_generation",
+            "miss_counts",
+            "accepted_counts",
+            "tp_fence_token",
+        ):
+            local_buffers[name].zero_()
+        local_buffers["request_active"].zero_()
+        local_buffers["topk_hit_mask"].zero_()
         main_count = len(self._plan.main_layer_names)
         newest_width = local_buffers["newest_main_kv"].shape[2]
         if self._tp_group.device.type == "cuda":
@@ -567,6 +596,12 @@ class SparseMLAOffloadManager:
     def _build_layer_views(self) -> None:
         views = {}
         for index, name in enumerate(self._plan.main_layer_names):
+            main_host_kv = self._host_views[name]
+            main_host_kv_uva = None
+            if self._tp_group.device.type == "cuda":
+                if not main_host_kv.is_pinned():
+                    raise RuntimeError("registered Main KV mapping is not pinned")
+                main_host_kv_uva = get_accelerator_view_from_cpu_tensor(main_host_kv)
             buffers = {
                 key: value[index] if key in _PER_LAYER_BUFFERS else value
                 for key, value in self._local_buffers.items()
@@ -575,7 +610,8 @@ class SparseMLAOffloadManager:
                 layer_name=name,
                 layer_index=index,
                 is_host_writer=self._is_host_writer,
-                main_host_kv=self._host_views[name],
+                main_host_kv=main_host_kv,
+                main_host_kv_uva=main_host_kv_uva,
                 local_buffers=MappingProxyType(buffers),
                 side_stream=self._side_stream,
                 fork_ready_events=self._fork_ready_events[index],

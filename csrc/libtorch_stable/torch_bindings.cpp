@@ -33,6 +33,31 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
 
+  ops.def(
+      "sparse_mla_cache_plan("
+      "Tensor current_main_kv, Tensor request_block_ids, "
+      "Tensor request_num_blocks, Tensor request_num_tokens, "
+      "Tensor request_generation, Tensor request_active, "
+      "Tensor req_id_per_token, Tensor topk_logical_ids, "
+      "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
+      "Tensor! resident_last_access, Tensor! resident_generation, "
+      "Tensor! newest_main_kv, Tensor! newest_logical_ids, "
+      "Tensor! newest_generation, Tensor! topk_physical_ids, "
+      "Tensor! topk_hit_mask, Tensor! miss_logical_ids, "
+      "Tensor! miss_victim_slots, Tensor! miss_counts, Tensor! hit_counts, "
+      "int num_host_blocks) -> ()");
+  ops.def(
+      "sparse_mla_offload_transfer("
+      "Tensor! main_host_kv_uva, Tensor request_block_ids, "
+      "Tensor request_num_blocks, Tensor request_num_tokens, "
+      "Tensor request_generation, Tensor request_active, "
+      "Tensor req_id_per_token, Tensor newest_main_kv, "
+      "Tensor newest_logical_ids, Tensor miss_logical_ids, "
+      "Tensor miss_victim_slots, Tensor miss_counts, Tensor hit_counts, "
+      "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
+      "Tensor! resident_last_access, Tensor! resident_generation, "
+      "bool is_host_writer, int block_size) -> ()");
+
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
   // But since they are set back to zero once the kernel is finished we can
@@ -702,6 +727,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
 
 #ifndef USE_ROCM
+  ops.impl("sparse_mla_cache_plan", TORCH_BOX(&sparse_mla_cache_plan));
+  ops.impl("sparse_mla_offload_transfer",
+           TORCH_BOX(&sparse_mla_offload_transfer));
+
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));

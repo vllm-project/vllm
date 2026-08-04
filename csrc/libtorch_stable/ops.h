@@ -662,6 +662,49 @@ void concat_mla_q(
     torch::stable::Tensor& q_out);   // [num_tokens, num_heads, nope_dim +
                                      // rope_dim]
 
+void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
+                           const torch::stable::Tensor& request_block_ids,
+                           const torch::stable::Tensor& request_num_blocks,
+                           const torch::stable::Tensor& request_num_tokens,
+                           const torch::stable::Tensor& request_generation,
+                           const torch::stable::Tensor& request_active,
+                           const torch::stable::Tensor& req_id_per_token,
+                           const torch::stable::Tensor& topk_logical_ids,
+                           torch::stable::Tensor& resident_main_kv,
+                           torch::stable::Tensor& resident_logical_ids,
+                           torch::stable::Tensor& resident_last_access,
+                           torch::stable::Tensor& resident_generation,
+                           torch::stable::Tensor& newest_main_kv,
+                           torch::stable::Tensor& newest_logical_ids,
+                           torch::stable::Tensor& newest_generation,
+                           torch::stable::Tensor& topk_physical_ids,
+                           torch::stable::Tensor& topk_hit_mask,
+                           torch::stable::Tensor& miss_logical_ids,
+                           torch::stable::Tensor& miss_victim_slots,
+                           torch::stable::Tensor& miss_counts,
+                           torch::stable::Tensor& hit_counts,
+                           int64_t num_host_blocks);
+
+void sparse_mla_offload_transfer(
+    torch::stable::Tensor& main_host_kv_uva,
+    const torch::stable::Tensor& request_block_ids,
+    const torch::stable::Tensor& request_num_blocks,
+    const torch::stable::Tensor& request_num_tokens,
+    const torch::stable::Tensor& request_generation,
+    const torch::stable::Tensor& request_active,
+    const torch::stable::Tensor& req_id_per_token,
+    const torch::stable::Tensor& newest_main_kv,
+    const torch::stable::Tensor& newest_logical_ids,
+    const torch::stable::Tensor& miss_logical_ids,
+    const torch::stable::Tensor& miss_victim_slots,
+    const torch::stable::Tensor& miss_counts,
+    const torch::stable::Tensor& hit_counts,
+    torch::stable::Tensor& resident_main_kv,
+    torch::stable::Tensor& resident_logical_ids,
+    torch::stable::Tensor& resident_last_access,
+    torch::stable::Tensor& resident_generation, bool is_host_writer,
+    int64_t block_size);
+
 // Extract function to gather quantized K cache
 void cp_gather_indexer_k_quant_cache(
     const torch::stable::Tensor& kv_cache,      // [num_blocks, block_size,
