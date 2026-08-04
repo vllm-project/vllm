@@ -1347,6 +1347,7 @@ def get_kv_cache_config_from_groups(
             num_blocks=1,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
+            force_zeroing=vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance,
         )
 
     # Determine how model runners should initialize the KV cache tensors.
@@ -1406,6 +1407,7 @@ def get_kv_cache_config_from_groups(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+        force_zeroing=vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance,
     )
 
 

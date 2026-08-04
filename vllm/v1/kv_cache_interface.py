@@ -1001,6 +1001,9 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    force_zeroing: bool = False
+    """Force zeroing of newly allocated KV cache blocks, regardless of model
+    type. Set by --enable-nan-fault-tolerance."""
 
     @property
     def has_mamba_layers(self) -> bool:
@@ -1033,4 +1036,8 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return (
+            self.has_mamba_layers
+            or self.has_mixed_precision_kv_cache
+            or self.force_zeroing
+        )

@@ -4,7 +4,6 @@
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
@@ -37,9 +36,10 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        detect_nans_in_logits: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
-        self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
+        self.compute_nans = detect_nans_in_logits
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states

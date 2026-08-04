@@ -379,6 +379,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+                detect_nans_in_logits=(
+                    self.observability_config.enable_detect_nans_in_logits
+                ),
             )
             custom = self.model_state.custom_sampler(self.sampler)
 

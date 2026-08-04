@@ -5730,3 +5730,142 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     # Must resume at the convergent boundary (block 0), not the deep FA hit.
     assert replay.num_tokens - num_scheduled == block_size
+
+
+def test_nan_fault_tolerance_aborts_request():
+    """NaN fault tolerance aborts requests with NaN logits."""
+    scheduler = create_scheduler()
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+
+    requests = create_requests(num_requests=2)
+    for req in requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100], [200]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={
+            requests[0].request_id: 3,
+            requests[1].request_id: 0,
+        },
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == requests[1].request_id
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+
+
+def test_nan_fault_tolerance_disabled_does_not_abort():
+    """Without fault tolerance, NaN logits are recorded but not aborted."""
+    scheduler = create_scheduler()
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = False
+
+    requests = create_requests(num_requests=2)
+    for req in requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100], [200]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={
+            requests[0].request_id: 5,
+            requests[1].request_id: 0,
+        },
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 2
+    assert requests[0].num_nans_in_logits == 5
+    assert requests[1].num_nans_in_logits == 0
+
+
+def test_nan_fault_tolerance_chunked_prefill():
+    """NaN abort fires during chunked prefill intermediate chunks."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=15,
+        max_num_seqs=15,
+        enable_chunked_prefill=True,
+    )
+    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
+    scheduler.observability_config.enable_detect_nans_in_logits = True
+
+    requests = create_requests(num_requests=1, num_tokens=30)
+    scheduler.add_request(requests[0])
+
+    output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[requests[0].request_id]
+    assert num_scheduled < 30
+
+    model_output = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={requests[0].request_id: 2},
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert len(scheduler.running) == 0
+    assert requests[0].status == RequestStatus.FINISHED_ERROR
+
+
+def test_nan_fault_tolerance_implies_detect():
+    """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    args = EngineArgs(model="facebook/opt-125m",
+                      enable_nan_fault_tolerance=True)
+    assert args.enable_detect_nans_in_logits is True
+    assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
+
+
+def test_nan_env_var_deprecation():
+    """VLLM_COMPUTE_NANS_IN_LOGITS sets the config flag with a warning."""
+    import os
+    import warnings
+
+    from vllm.config.observability import ObservabilityConfig
+
+    old_val = os.environ.get("VLLM_COMPUTE_NANS_IN_LOGITS")
+    try:
+        os.environ["VLLM_COMPUTE_NANS_IN_LOGITS"] = "1"
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config = ObservabilityConfig()
+            deprecation_warnings = [
+                x for x in w if issubclass(x.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) >= 1
+            assert "deprecated" in str(deprecation_warnings[0].message).lower()
+
+        assert config.enable_detect_nans_in_logits is True
+    finally:
+        if old_val is None:
+            os.environ.pop("VLLM_COMPUTE_NANS_IN_LOGITS", None)
+        else:
+            os.environ["VLLM_COMPUTE_NANS_IN_LOGITS"] = old_val
+        importlib.reload(vllm.envs)

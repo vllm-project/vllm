@@ -83,6 +83,11 @@ class ObservabilityConfig:
     """Log every monitored JIT compile with runtime details. This can emit many
     logs and add overhead, so it is intended for debugging."""
 
+    enable_detect_nans_in_logits: bool = False
+    """Check for NaN values in output logits after each step. Useful for
+    debugging hardware or numerical issues. Adds a small compute overhead
+    per step."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -156,4 +161,20 @@ class ObservabilityConfig:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_nan_detection(self):
+        import vllm.envs as envs
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            import warnings
+
+            warnings.warn(
+                "VLLM_COMPUTE_NANS_IN_LOGITS is deprecated, use "
+                "--enable-detect-nans-in-logits instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.enable_detect_nans_in_logits = True
         return self

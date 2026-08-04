@@ -3736,7 +3736,7 @@ class GPUModelRunner(
         list[int],
     ]:
         num_nans_in_logits = {}
-        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+        if self.observability_config.enable_detect_nans_in_logits:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
         num_reqs = self.input_batch.num_reqs

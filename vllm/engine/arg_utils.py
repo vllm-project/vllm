@@ -662,6 +662,10 @@ class EngineArgs:
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
+    enable_detect_nans_in_logits: bool = (
+        ObservabilityConfig.enable_detect_nans_in_logits
+    )
+    enable_nan_fault_tolerance: bool = FaultToleranceConfig.enable_nan_fault_tolerance
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -779,6 +783,9 @@ class EngineArgs:
             self.fault_tolerance_config = FaultToleranceConfig(
                 **self.fault_tolerance_config
             )
+        if self.enable_nan_fault_tolerance:
+            self.fault_tolerance_config.enable_nan_fault_tolerance = True
+            self.enable_detect_nans_in_logits = True
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 
@@ -1185,6 +1192,11 @@ class EngineArgs:
         parallel_group.add_argument(
             "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
         )
+        ft_kwargs = get_kwargs(FaultToleranceConfig)
+        parallel_group.add_argument(
+            "--enable-nan-fault-tolerance",
+            **ft_kwargs["enable_nan_fault_tolerance"],
+        )
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1454,7 +1466,10 @@ class EngineArgs:
             "--jit-monitor-verbose",
             **observability_kwargs["jit_monitor_verbose"],
         )
-
+        observability_group.add_argument(
+            "--enable-detect-nans-in-logits",
+            **observability_kwargs["enable_detect_nans_in_logits"],
+        )
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
         scheduler_group = parser.add_argument_group(
@@ -1887,6 +1902,7 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
+            enable_detect_nans_in_logits=self.enable_detect_nans_in_logits,
         )
 
     def create_engine_config(
