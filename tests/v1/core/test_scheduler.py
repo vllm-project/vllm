@@ -1107,7 +1107,7 @@ def test_preemption_re_records_prefix_cache_query():
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
 
-    scheduler.schedule()
+    scheduler_output = scheduler.schedule()
     stats = scheduler.kv_cache_manager.prefix_cache_stats
     assert stats is not None
     assert (stats.requests, stats.preempted_requests) == (1, 0)
@@ -1115,6 +1115,21 @@ def test_preemption_re_records_prefix_cache_query():
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
     assert request.status == RequestStatus.PREEMPTED
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert request.num_stale_output_tokens == 0
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
 
     scheduler.schedule()
     assert request.status == RequestStatus.RUNNING

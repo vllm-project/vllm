@@ -289,7 +289,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert a1.size(0) == num_experts
             num_tokens = a1.size(1)
 
-        return meta1.num_experts, num_tokens, meta1.shape_n // 2, meta1.shape_k, top_k
+        return (
+            meta1.num_experts,
+            num_tokens,
+            # Logical intermediate width for both gated and non-gated activations
+            self.layer.intermediate_size_per_partition,
+            meta1.shape_k,
+            top_k,
+        )
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
         from vllm.utils.humming import GemmType as HummingGemmType
@@ -327,7 +334,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             real_shape_m = M * topk
             output_shape = (M, K)
 
-        down_input_size = N if activation.is_gated else (N * 2)
+        gate_up_size = N * (2 if activation.is_gated else 1)
+        down_input_size = N
         a_dtype = self.layer.humming_metas["w13"].a_dtype
         c_dtype = self.layer.humming_metas["w13"].c_dtype
         num_bits = a_dtype.num_bits
@@ -347,7 +355,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "dtype": torch_dtype_map[a_dtype],
             },
             "gate_up_output": {
-                "shape": (real_shape_m, N * 2),
+                "shape": (real_shape_m, gate_up_size),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "activation_output": {
@@ -654,11 +662,8 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            outputs=buffers["output"],
+            outputs=output,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class HummingGroupedExperts(HummingExpertsBase):
@@ -769,15 +774,12 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
 
         moe_unpermute(
-            out=buffers["output"],
+            out=output,
             permuted_hidden_states=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
@@ -872,13 +874,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             layer=self.layer,
             inputs=inputs,
             input_scale=input_scale,
-            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
+            outputs=output.view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
             sublayer_name="w2",
         )
-
-        # Note: output is already written to buffers["down_output"]
-        # which aliases workspace13/output

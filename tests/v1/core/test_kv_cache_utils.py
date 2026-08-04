@@ -1257,6 +1257,34 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+@pytest.mark.parametrize(
+    "layer_type,dcp_size,expected_width",
+    [
+        ("mla", 1, 64),
+        ("mla", 2, 32),
+        # Mamba state is replicated, not DCP-sharded, and its width is the
+        # resident state block count rather than cdiv(max_len, block_size).
+        ("mamba", 2, 3),
+    ],
+)
+def test_uniform_type_spec_block_table_width_matches_layer_spec(
+    layer_type, dcp_size, expected_width
+):
+    # The runner sizes the block table from the group spec while the metadata
+    # builders are constructed from the per-layer spec, so the aggregate must
+    # report the same width as the layers it wraps.
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    layer_spec = new_mla_spec() if layer_type == "mla" else new_mamba_spec()
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=layer_spec.block_size,
+        kv_cache_specs={"layer1": layer_spec, "layer2": layer_spec},
+    )
+
+    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
@@ -2069,6 +2097,33 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
+def test_mixed_precision_kv_cache_with_uniform_type_specs():
+    fp8_spec = new_kv_cache_spec(dtype=torch.float8_e4m3fn)
+    bf16_spec = new_kv_cache_spec(dtype=torch.bfloat16)
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fp8_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"fp8_layer": fp8_spec}
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["bf16_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"bf16_layer": bf16_spec}
+                ),
+            ),
+        ],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    assert worker_config.needs_kv_cache_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing
+
+
 def new_mla_spec(cache_dtype_str=None, block_size=16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
@@ -2156,7 +2211,7 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
     # compute sliding-window while promoting only its allocation semantics lets
     # every layer share the target's block table and remain contiguous.
@@ -2179,7 +2234,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
     assert promoted_draft.block_size == 64
     assert promoted_draft.sliding_window == draft.sliding_window
     assert specs["draft.0"] is draft
-    assert "attention compute is unchanged" in caplog.text
+    assert "attention compute is unchanged" in caplog_vllm.text
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
