@@ -62,6 +62,39 @@ ThinkingTokenBudget = Annotated[
 
 
 class SamplingType(IntEnum):
+    """Enum that categorises how tokens are selected during sampling.
+
+    This value is derived from the :class:`SamplingParams` that were supplied
+    for a request and controls which sampling kernel is used by the scheduler.
+
+    Members:
+        GREEDY: Deterministic argmax decoding.  Selected when
+            ``temperature`` is effectively zero (< 1e-5).
+        RANDOM: Non-deterministic multinomial sampling with no fixed seed.
+            Selected when ``temperature`` is non-zero and no ``seed`` is set.
+        RANDOM_SEED: Reproducible multinomial sampling driven by a user-
+            supplied ``seed``.  Selected when ``temperature`` is non-zero
+            *and* a ``seed`` value is provided.
+
+    Example::
+
+        >>> from vllm.sampling_params import SamplingParams, SamplingType
+        >>> # Greedy decoding (temperature = 0)
+        >>> p = SamplingParams(temperature=0.0)
+        >>> p.sampling_type
+        <SamplingType.GREEDY: 0>
+        >>> # Random sampling
+        >>> p = SamplingParams(temperature=0.8)
+        >>> p.sampling_type
+        <SamplingType.RANDOM: 1>
+        >>> # Seeded random sampling
+        >>> p = SamplingParams(temperature=0.8, seed=42)
+        >>> p.sampling_type
+        <SamplingType.RANDOM_SEED: 2>
+
+    # Co-authored-by: Hermes Agent <hermes-agent@nousresearch.com>
+    """
+
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2

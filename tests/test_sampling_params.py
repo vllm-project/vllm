@@ -49,3 +49,40 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Tests for SamplingType enum
+# Co-authored-by: Hermes Agent <hermes-agent@nousresearch.com>
+# ---------------------------------------------------------------------------
+from vllm.sampling_params import SamplingType  # noqa: E402
+
+
+def test_sampling_type_greedy():
+    """temperature=0 should yield GREEDY sampling."""
+    p = SamplingParams(temperature=0.0)
+    assert p.sampling_type is SamplingType.GREEDY
+
+
+def test_sampling_type_random():
+    """Non-zero temperature with no seed should yield RANDOM sampling."""
+    p = SamplingParams(temperature=0.8)
+    assert p.sampling_type is SamplingType.RANDOM
+
+
+def test_sampling_type_random_seed():
+    """Non-zero temperature with a seed should yield RANDOM_SEED sampling."""
+    p = SamplingParams(temperature=0.8, seed=42)
+    assert p.sampling_type is SamplingType.RANDOM_SEED
+
+
+def test_sampling_type_values():
+    """Enum integer values must remain stable (they are used as array indices)."""
+    assert int(SamplingType.GREEDY) == 0
+    assert int(SamplingType.RANDOM) == 1
+    assert int(SamplingType.RANDOM_SEED) == 2
+
+
+def test_sampling_type_docstring():
+    """SamplingType must have a non-empty docstring."""
+    assert SamplingType.__doc__ and len(SamplingType.__doc__.strip()) > 0
