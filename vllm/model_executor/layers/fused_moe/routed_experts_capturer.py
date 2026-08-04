@@ -68,7 +68,6 @@ class RoutedExpertsCapturer:
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
-        model_config = vllm_config.model_config
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
             "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
@@ -76,7 +75,7 @@ class RoutedExpertsCapturer:
             max_num_batched_tokens,
             num_layers,
             num_experts_per_tok,
-            getattr(model_config.hf_text_config, "model_type", "unknown"),
+            vllm_config.model_config.hf_text_config.model_type,
         )
         self.device_buffer = torch.zeros(
             (
