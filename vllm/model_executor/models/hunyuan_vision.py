@@ -551,6 +551,11 @@ def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 
 class HunYuanVLMultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
@@ -559,8 +564,7 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=self.metadata_fields("image"),
-                out_of_band_fields={"image_embeds"},
+                required_fields=self.embedding_fields["image"],
                 allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_hunyuan_vl_field_config,
             )
@@ -596,12 +600,6 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
             expected_hidden_size=self._get_expected_hidden_size(),
             info=self,
         )
-
-    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
-        # The patch grid is what sizes the placeholder range.
-        if modality == "image":
-            return {"image_grid_thw"}
-        return set()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

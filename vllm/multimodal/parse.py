@@ -40,6 +40,15 @@ from .media import MediaWithBytes
 _T = TypeVar("_T")
 _I = TypeVar("_I")
 
+EmbeddingFieldRole: TypeAlias = Literal["values", "metadata"]
+"""What a field of a pre-computed-embedding input carries.
+
+`"values"` is the embedding tensor itself; `"metadata"` is a key that sizes the
+prompt's placeholder range. The distinction is what lets one declaration serve
+both an ordinary request (everything present) and an EC consumer (embeddings
+arrive through the connector, metadata still in the request).
+"""
+
 if TYPE_CHECKING:
     import PIL.Image as PILImage
 
@@ -252,28 +261,26 @@ class DictEmbeddingItems(
         self,
         data: Mapping[str, torch.Tensor],
         modality: str,
-        required_fields: set[str],
+        required_fields: Set[str] | Mapping[str, EmbeddingFieldRole],
         fields_factory: Callable[
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
-        out_of_band_fields: Set[str] = frozenset(),
         allow_out_of_band: bool = False,
     ) -> None:
         """
         Args:
             data: The dictionary of tensors for this modality.
             modality: The modality these items belong to.
-            required_fields: Fields the data must always contain. For an item
-                that carries pre-computed embeddings this is the metadata that
-                sizes the prompt's placeholder range, e.g. `"image_grid_thw"`.
+            required_fields: Fields the data must contain, either as a plain set
+                (all of them, always) or as a field -> role mapping. `"values"`
+                marks the pre-computed embeddings, which an encode/prefill/decode
+                encoder instance may instead publish through the EC connector, so
+                they may be absent from `data` when `allow_out_of_band` is set.
+                `"metadata"` marks the keys that size the prompt's placeholder
+                range, e.g. `"image_grid_thw"`; those stay required either way,
+                since out of band they are all the consumer has left.
             fields_factory: Builds the field config from the data.
-            out_of_band_fields: Fields whose values reach the engine through a
-                channel other than this request -- an encode/prefill/decode
-                encoder instance publishes embeddings through the EC connector
-                -- so they may be absent from `data` when `allow_out_of_band`
-                is set. Declared explicitly rather than matched by name so the
-                class never has to guess which key holds the embeddings.
             allow_out_of_band: Whether out-of-band delivery is actually in
                 effect, i.e. whether this instance consumes an EC connector.
         """
@@ -281,24 +288,31 @@ class DictEmbeddingItems(
 
         super().__init__(data, modality)
 
-        declared_fields = required_fields | set(out_of_band_fields)
+        roles: Mapping[str, EmbeddingFieldRole] = (
+            required_fields
+            if isinstance(required_fields, Mapping)
+            else dict.fromkeys(required_fields, "metadata")
+        )
+        declared_fields = set(roles)
+        out_of_band_fields = {f for f, role in roles.items() if role == "values"}
+        in_band_fields = declared_fields - out_of_band_fields
 
         # Relaxing the last field would leave nothing to size the placeholder
         # range from, so the item would parse into zero entries and silently
         # produce a wrong prompt instead of failing here.
         if (
             allow_out_of_band
-            and (set(out_of_band_fields) - data.keys())
-            and not required_fields
+            and (out_of_band_fields - data.keys())
+            and not in_band_fields
         ):
             raise ValueError(
                 f"Cannot accept {modality!r} embeddings out of band: "
                 f"{sorted(out_of_band_fields)} are the only declared fields, so "
                 "nothing left in the request sizes the placeholder range. The "
-                "sizing metadata has to be listed in `required_fields`."
+                'sizing metadata has to be declared with the "metadata" role.'
             )
 
-        effective_required = required_fields if allow_out_of_band else declared_fields
+        effective_required = in_band_fields if allow_out_of_band else declared_fields
 
         missing_required_data_keys = effective_required - data.keys()
         if missing_required_data_keys:
@@ -563,6 +577,17 @@ class MultiModalDataParser:
             published through an EC connector by an EPD encoder instance.
     """
 
+    embedding_fields: Mapping[str, Mapping[str, EmbeddingFieldRole]] = {}
+    """Per-modality field roles for pre-computed-embedding inputs.
+
+    Declared here rather than inside `_parse_*_data` so an EC producer can read
+    it too: on a producer the request carries real media, so the branch that
+    builds `DictEmbeddingItems` never runs, yet the producer still has to know
+    which processed keys to publish. One declaration, both sides, no drift.
+
+    A modality absent from this mapping cannot be delivered out of band.
+    """
+
     @property
     def allow_out_of_band_embeds(self) -> bool:
         """Whether `*_embeds` may be absent from a pre-computed-embedding input.
@@ -575,17 +600,18 @@ class MultiModalDataParser:
         mm_config = self.info.ctx.model_config.multimodal_config
         return mm_config is not None and mm_config.mm_embeds_out_of_band
 
-    def metadata_fields(self, modality: str) -> set[str]:
+    @classmethod
+    def placeholder_metadata_fields(cls, modality: str) -> set[str]:
         """The keys that size `modality`'s placeholder range.
 
-        These stay required even when the embeddings arrive out of band, since
-        they are all the consumer has left to work from. Declared once by
-        `BaseProcessingInfo.get_placeholder_metadata_fields` so that an EC
-        connector reporting them and a parser requiring them cannot drift apart.
+        What an EC producer publishes alongside the embedding, and what a
+        consumer keeps requiring once the embedding itself is gone.
         """
-        if self.info is None:
-            return set()
-        return set(self.info.get_placeholder_metadata_fields(modality))
+        return {
+            field
+            for field, role in cls.embedding_fields.get(modality, {}).items()
+            if role == "metadata"
+        }
 
     def __init__(
         self,
@@ -599,9 +625,8 @@ class MultiModalDataParser:
     ) -> None:
         super().__init__()
 
-        # Passing the info in is what enables out-of-band embedding delivery for
-        # this model: both `allow_out_of_band_embeds` and `metadata_fields` are
-        # read from it. Omitting it means the model does not support that path.
+        # Passing the info in is what tells this parser whether out-of-band
+        # delivery is in effect; omitting it means the model never allows it.
         self.info = info
 
         self.audio_resampler = AudioResampler(

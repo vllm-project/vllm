@@ -320,6 +320,12 @@ def _keye_field_config(
 
 
 class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {"video_embeds": "values", "video_grid_thw": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
@@ -328,8 +334,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=self.metadata_fields("image"),
-                out_of_band_fields={"image_embeds"},
+                required_fields=self.embedding_fields["image"],
                 allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )
@@ -344,8 +349,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields=self.metadata_fields("video"),
-                out_of_band_fields={"video_embeds"},
+                required_fields=self.embedding_fields["video"],
                 allow_out_of_band=self.allow_out_of_band_embeds,
                 fields_factory=_keye_field_config,
             )

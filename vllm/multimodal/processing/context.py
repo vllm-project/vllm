@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -389,23 +388,6 @@ class BaseProcessingInfo:
     @property
     def skip_prompt_length_check(self) -> bool:
         return False
-
-    @abstractmethod
-    def get_placeholder_metadata_fields(self, modality: str) -> set[str]:
-        """Processed-output keys a consumer needs to size the placeholder range.
-
-        When embeddings are delivered out of band -- an encode/prefill/decode
-        encoder instance publishes them through the EC connector -- the request
-        that reaches the consumer carries no pixels and no embeddings, only this
-        metadata. It is therefore both what the consumer must require and what
-        the producer has to report, so it is declared here once and read by both:
-        `MultiModalDataParser` uses it as `required_fields`, and an EC connector
-        selects which processed keys to publish alongside the embedding.
-
-        Returning an empty set (the default) means this modality cannot be
-        delivered out of band, because nothing would be left to size the range.
-        """
-        return set()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """

@@ -171,10 +171,10 @@ class ECExampleConnector(ECConnectorBase):
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Which processed keys this model needs published for `modality`.
 
-        Read from `BaseProcessingInfo.get_placeholder_metadata_fields`, the same
-        declaration the consumer's parser requires, so the two cannot drift. An
-        empty set means the modality cannot be delivered out of band, and the
-        consumer will process the media itself.
+        Read from `MultiModalDataParser.embedding_fields`, the same declaration
+        the consumer's parser requires, so the two cannot drift. An empty set
+        means the modality cannot be delivered out of band, and the consumer
+        will process the media itself.
         """
         if modality in self._metadata_fields_cache:
             return self._metadata_fields_cache[modality]
@@ -184,7 +184,7 @@ class ECExampleConnector(ECConnectorBase):
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
             info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
-            fields = info.get_placeholder_metadata_fields(modality)
+            fields = info.data_parser.placeholder_metadata_fields(modality)
         except Exception:
             # Reporting nothing is a safe degradation: the consumer falls back to
             # processing the media itself.
