@@ -182,6 +182,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        # Apply top-level backpressure defaults to tiers without overrides.
+        bp_defaults = self.extra_config.get("backpressure")
+        if bp_defaults is not None:
+            for tier_cfg in self.secondary_tier_configs:
+                tier_cfg.setdefault("backpressure", bp_defaults)
+
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 

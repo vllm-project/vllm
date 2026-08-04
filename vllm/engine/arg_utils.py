@@ -738,6 +738,8 @@ class EngineArgs:
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
+    kv_backpressure_high_water: float | None = None
+    kv_backpressure_low_water: float | None = None
     tokens_only: bool = False
 
     shutdown_timeout: int = 0
@@ -1586,6 +1588,24 @@ class EngineArgs:
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
+        vllm_group.add_argument(
+            "--kv-backpressure-high-water",
+            type=float,
+            default=None,
+            help="Back-pressure high water mark in seconds. "
+            "When store latency EMA exceeds this, stores to secondary "
+            "tiers are dropped. Applies to all secondary tiers unless "
+            "overridden by per-tier backpressure config.",
+        )
+        vllm_group.add_argument(
+            "--kv-backpressure-low-water",
+            type=float,
+            default=None,
+            help="Back-pressure low water mark in seconds. "
+            "When store latency EMA drops below this, stores resume. "
+            "Applies to all secondary tiers unless overridden by "
+            "per-tier backpressure config.",
+        )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
@@ -1888,6 +1908,22 @@ class EngineArgs:
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
         )
+
+    def _merge_backpressure_config(self) -> "KVTransferConfig | None":
+        if self.kv_transfer_config is None:
+            return None
+        if (
+            self.kv_backpressure_high_water is not None
+            or self.kv_backpressure_low_water is not None
+        ):
+            bp: dict = self.kv_transfer_config.kv_connector_extra_config.setdefault(
+                "backpressure", {}
+            )
+            if self.kv_backpressure_high_water is not None:
+                bp.setdefault("high_water_s", self.kv_backpressure_high_water)
+            if self.kv_backpressure_low_water is not None:
+                bp.setdefault("low_water_s", self.kv_backpressure_low_water)
+        return self.kv_transfer_config
 
     def create_engine_config(
         self,
@@ -2471,7 +2507,7 @@ class EngineArgs:
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
-            kv_transfer_config=self.kv_transfer_config,
+            kv_transfer_config=self._merge_backpressure_config(),
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             reasoning_config=self.reasoning_config,
