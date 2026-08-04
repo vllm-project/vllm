@@ -7,7 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -28,13 +27,9 @@ from vllm.model_executor.parameter import (
 )
 from vllm.scalar_type import scalar_types
 
-logger = init_logger(__name__)
-
 
 class QuarkW4A16Int4(QuarkScheme):
     """Quark packed INT4 weight-only linear scheme via MPLinearKernel."""
-
-    _kernel_backends_being_used: set[str] = set()
 
     def __init__(
         self,
@@ -47,7 +42,7 @@ class QuarkW4A16Int4(QuarkScheme):
         if input_config is not None:
             raise NotImplementedError(
                 "QuarkW4A16Int4 does not support activation quantization; "
-                "input_tensors must be null."
+                f"input_tensors must be None, got {input_config}."
             )
         if weight_config is not None:
             if weight_config.get("qscheme", "per_group") != "per_group":
@@ -90,7 +85,9 @@ class QuarkW4A16Int4(QuarkScheme):
         if input_size_per_partition % group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized weight shape. "
-                "This can be caused by too large tensor parallel size."
+                "This can be caused by too large tensor parallel size. "
+                f"input_size_per_partition={input_size_per_partition}, "
+                f"group_size={group_size}."
             )
 
         output_size_per_partition = sum(output_partition_sizes)
@@ -113,9 +110,6 @@ class QuarkW4A16Int4(QuarkScheme):
             has_g_idx=False,
         )
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for QuarkW4A16Int4", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
 
         def weight_scale_loader(
             param: torch.nn.Parameter,
