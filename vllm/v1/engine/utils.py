@@ -364,6 +364,26 @@ def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
         )
 
 
+class _EngineAddressBroker:
+    """Ray actor holding the engine ZMQ addresses until the front-end has
+    bound its sockets and published the final (kernel-assigned) ports."""
+
+    def __init__(self):
+        import asyncio
+
+        self._addresses: EngineZmqAddresses | None = None
+        self._event = asyncio.Event()
+
+    async def set_addresses(self, addresses: EngineZmqAddresses) -> None:
+        self._addresses = addresses
+        self._event.set()
+
+    async def get_addresses(self) -> EngineZmqAddresses:
+        await self._event.wait()
+        assert self._addresses is not None
+        return self._addresses
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -381,6 +401,7 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
+        defer_addresses: bool = False,
     ):
         import copy
 
@@ -421,6 +442,14 @@ class CoreEngineActorManager:
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
             ray.init()
+
+        # With deferred front-end ports, actors wait on the broker for the
+        # final addresses (published after the front-end binds its sockets).
+        self.address_broker = None
+        if defer_addresses:
+            self.address_broker = (
+                ray.remote(_EngineAddressBroker).options(num_cpus=0).remote()
+            )
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_elastic_ep:
@@ -497,6 +526,7 @@ class CoreEngineActorManager:
                     addresses=addresses,
                     dp_rank=index,
                     local_dp_rank=local_index,
+                    address_broker=self.address_broker,
                 )
             )
             if local_client:
@@ -506,13 +536,31 @@ class CoreEngineActorManager:
             self.placement_group_is_local.append(local_client)
             refs.append(actor.wait_for_init.remote())
 
-        ray.get(refs)
         self.run_refs = []
         self.actor_run_ref_dict = dict()
+        self._init_refs = refs
+        # Actors waiting on the address broker cannot finish init until
+        # publish_addresses() runs, so defer the readiness wait until then.
+        if not defer_addresses:
+            self._finish_startup()
+
+    def _finish_startup(self) -> None:
+        import ray
+
+        ray.get(self._init_refs)
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
+
+    def publish_addresses(self, addresses: EngineZmqAddresses) -> None:
+        """Publish the front-end's final bound addresses to waiting actors."""
+        import ray
+
+        self.addresses = addresses
+        if self.address_broker is not None:
+            ray.get(self.address_broker.set_addresses.remote(addresses))
+            self._finish_startup()
 
     @staticmethod
     def create_dp_placement_groups(
@@ -1072,6 +1120,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
+    defer_engine_addresses: bool = False,
 ) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
@@ -1126,6 +1175,7 @@ def launch_core_engines(
             addresses=addresses,
             executor_class=executor_class,
             log_stats=log_stats,
+            defer_addresses=defer_engine_addresses,
         )
 
         yield CoreEngineLaunch(

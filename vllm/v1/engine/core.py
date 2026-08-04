@@ -2307,6 +2307,7 @@ class EngineCoreActorMixin:
         addresses: EngineZmqAddresses,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
+        address_broker=None,
     ):
         # Initialize tracer for distributed tracing if configured.
         maybe_init_worker_tracer(
@@ -2316,6 +2317,7 @@ class EngineCoreActorMixin:
         )
 
         self.addresses = addresses
+        self._address_broker = address_broker
         vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank
 
@@ -2396,10 +2398,14 @@ class EngineCoreActorMixin:
         client_handshake_address: str | None,
     ):
         """
-        For Ray, we don't need to actually perform handshake.
-        All addresses information is known before the actor creation.
-        Therefore, we simply yield these addresses.
+        Ray actors receive their addresses at creation instead of via the
+        zmq handshake. When the front-end defers its port binding, wait on
+        the address broker for the final (post-bind) addresses.
         """
+        if self._address_broker is not None:
+            import ray
+
+            self.addresses = ray.get(self._address_broker.get_addresses.remote())
         yield self.addresses
 
     def wait_for_init(self):
@@ -2440,11 +2446,12 @@ class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
         log_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
+        address_broker=None,
     ):
         vllm_config.parallel_config.data_parallel_rank = dp_rank
 
         EngineCoreActorMixin.__init__(
-            self, vllm_config, addresses, dp_rank, local_dp_rank
+            self, vllm_config, addresses, dp_rank, local_dp_rank, address_broker
         )
         DPEngineCoreProc.__init__(
             self, vllm_config, local_client, "", executor_class, log_stats
@@ -2463,10 +2470,11 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
         log_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
+        address_broker=None,
     ):
         vllm_config.parallel_config.reconfigure_for_independent_dp_rank()
         EngineCoreActorMixin.__init__(
-            self, vllm_config, addresses, dp_rank, local_dp_rank
+            self, vllm_config, addresses, dp_rank, local_dp_rank, address_broker
         )
         EngineCoreProc.__init__(
             self,
