@@ -21,6 +21,27 @@ def _get_num_tokens(output_shape: list) -> int:
     return math.prod(output_shape[:-1])
 
 
+def _rocm_torch_fp8_scaled_mm_supported() -> bool:
+    from vllm.platforms.rocm import on_gfx12x, on_gfx942, on_gfx950, on_gfx1250
+
+    return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
+
+
+def _supports_torch_fp8_scaled_mm() -> bool:
+    if current_platform.is_cpu():
+        return True
+    if current_platform.is_xpu():
+        return True
+    if not current_platform.is_cuda_alike():
+        return False
+
+    # TODO: Use torch.cuda.is_scaled_mm_supported once it is in the supported
+    # PyTorch baseline.
+    if current_platform.is_rocm():
+        return _rocm_torch_fp8_scaled_mm_supported()
+    return current_platform.supports_fp8()
+
+
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """
     Base class for FP8 linear kernels using Torch.
@@ -32,17 +53,10 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            return False, "requires ROCm, CUDA, CPU or XPU."
+        if _supports_torch_fp8_scaled_mm():
+            return True, None
 
-        if compute_capability is not None and compute_capability < 89:
-            return False, "requires compute capability 89 and above."
-
-        return True, None
+        return False, "requires a platform with torch FP8 scaled-MM support."
 
     def get_output_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
@@ -108,13 +122,8 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import get_cdna_version
-
-        if get_cdna_version() <= 2:
-            return False, "requires CDNA3+"
-
-        if compute_capability is not None and compute_capability < 94:
-            return False, "requires compute capability 94 and above."
+        if not _supports_torch_fp8_scaled_mm():
+            return False, "requires ROCm with torch FP8 scaled-MM support."
 
         return True, None
 
