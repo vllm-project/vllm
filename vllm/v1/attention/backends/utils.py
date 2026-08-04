@@ -87,7 +87,7 @@ def get_kv_cache_layout():
     cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.info_once(
+        logger.debug_once(
             "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
             "Setting KV cache layout to %s.",
             cache_layout,

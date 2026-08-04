@@ -71,7 +71,10 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
-GDN_AITER_TRITON_AVAILABLE = rocm_aiter_ops.are_gdn_triton_kernels_available()
+GDN_AITER_TRITON_AVAILABLE = (
+    rocm_aiter_ops.are_gdn_triton_kernels_available()
+    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+)
 GDN_AITER_PREFILL_AVAILABLE = rocm_aiter_ops.is_gdn_prefill_split_qkv_available()
 _AITER_GDN_PREFILL_MIN_TOKENS = 8192
 
