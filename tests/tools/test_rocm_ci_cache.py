@@ -359,6 +359,7 @@ def test_ci_base_and_native_cache_identities(tmp_path: Path) -> None:
     cache_from = target.split("cache-from =", 1)[1].split("cache-to =", 1)[0]
     tags = next(line for line in target.splitlines() if "tags" in line)
     assert "CI_BASE_STABLE_CACHE_REF" in cache_from
+    assert "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" not in cache_from
     assert "CI_BASE_IMAGE_TAG_STABLE" not in cache_from
     assert "CI_BASE_IMAGE_TAG_STABLE" not in tags
     assert "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" in tags
@@ -496,6 +497,7 @@ ci_base_output_refs
     assert pr_values["trusted"] == trusted_values["trusted"]
     assert pr_values["trusted"] in pr_candidates
     assert pr_values["content"] in pr_outputs
+    assert f"example/base:ci_base-{pr_env['BUILDKITE_COMMIT']}" in pr_outputs
     assert pr_values["trusted"] not in pr_outputs
     assert trusted_values["content"] in trusted_outputs
     for name in ("csrc", "rust", "dependency"):
@@ -814,7 +816,7 @@ printf 'source:%s@%s\ncontent:%s\ncommit:%s\n' \
 maybe_reuse_matching_ci_base_ref || printf 'rebuild\n' >> "$TRACE"
 """,
         env={
-            "BUILDKITE_COMMIT": "deadbeef",
+            "BUILDKITE_COMMIT": "d" * 40,
             "BUILDKITE_BRANCH": "feature",
             "BUILDKITE_PULL_REQUEST": "48646",
             "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/example/vllm.git",
@@ -1014,23 +1016,30 @@ def test_rocm_wheel_artifact_records_native_and_build_bases(
     wheel_dir.mkdir()
     (wheel_dir / "vllm-test.whl").write_text("wheel")
     immutable_base = f"rocm/example:ci_base-content@{DIGEST_A}"
+    commit = "d" * 40
     run_sourced(
         CI_BAKE,
         """
 buildkite-agent() { [[ "$1 $2" == 'artifact upload' ]]; }
+resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
 TARGET=artifact
 configure_ci_base_image_refs
 upload_wheel_artifacts_if_present >/dev/null
 """,
         cwd=tmp_path,
         env={
-            "BUILDKITE_COMMIT": "deadbeef",
+            "BUILDKITE": "true",
+            "BUILDKITE_COMMIT": commit,
             "CI_BASE_IMAGE": immutable_base,
             "CI_BASE_IMAGE_TAG": "rocm/example:ci_base",
+            "DIGEST_A": DIGEST_A,
+            "ROCM_IMAGE_DIGEST_ATTEMPTS": "1",
         },
     )
     metadata = tmp_path / "artifacts/vllm-rocm-install"
-    assert (metadata / "native-base-image.txt").read_text().strip() == immutable_base
+    assert (metadata / "native-base-image.txt").read_text().strip() == (
+        f"rocm/example:ci_base-{commit}"
+    )
     assert (metadata / "ci-base-image.txt").read_text().strip() == immutable_base
 
     dockerfile = ROCM_DOCKERFILE.read_text()

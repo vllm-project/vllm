@@ -439,7 +439,6 @@ target "ci-base-rocm-ci" {
   cache-from = concat(
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
-      CI_BASE_IMAGE_TAG_COMMIT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT_EXTRA}" : "",
       CI_BASE_TRUSTED_CONTENT_REF != "" ? "type=registry,ref=${CI_BASE_TRUSTED_CONTENT_REF}" : "",
       CI_BASE_STABLE_CACHE_REF != "" ? "type=registry,ref=${CI_BASE_STABLE_CACHE_REF}" : "",
     ]),

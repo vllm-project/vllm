@@ -1122,6 +1122,20 @@ configure_ci_base_image_refs() {
     CI_BASE_STABLE_CACHE_REF="${CI_BASE_STABLE_CACHE_REF:-${stable_tag}-v${metadata_version}}"
     export CI_BASE_STABLE_CACHE_REF
 
+    if [[ "${BUILDKITE:-false}" == "true" ]] \
+        && ! is_full_git_sha "${BUILDKITE_COMMIT:-}"; then
+        echo "Invalid Buildkite commit for ci_base handoff: ${BUILDKITE_COMMIT:-<empty>}" >&2
+        return 1
+    fi
+    if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+        # The external AMD pod template consumes ci_base-$BUILDKITE_COMMIT
+        # before repository code can run. Keep this exact compatibility
+        # handoff while content/cache writes remain trust-scoped.
+        commit_tag=$(ci_base_tag_with_suffix "${stable_tag}" "${BUILDKITE_COMMIT}")
+    fi
+    CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
+    export CI_BASE_IMAGE_TAG_COMMIT_REF
+
     if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
         if is_ci_base_target; then
             echo "Error: ci_base builds require a content hash" >&2
@@ -1141,19 +1155,11 @@ configure_ci_base_image_refs() {
         content_tag="${trusted_content_tag}"
     fi
     CI_BASE_IMAGE_TAG_CONTENT_REF="${content_tag}"
-    if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
-        if [[ -n "${scope}" ]]; then
-            commit_tag=$(ci_base_tag_with_suffix \
-                "${stable_tag}" "v${metadata_version}-${scope}-${BUILDKITE_COMMIT}")
-        else
-            commit_tag=$(ci_base_tag_with_suffix "${stable_tag}" "${BUILDKITE_COMMIT}")
-        fi
-    fi
-    CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
     CI_BASE_TRUSTED_CONTENT_REF="${trusted_content_tag}"
 
-    # Content tags are canonical. Untrusted jobs write only scoped content and
-    # commit aliases, while still importing the trusted canonical content ref.
+    # Content tags are canonical. Untrusted jobs write content under scoped
+    # refs while still importing the trusted canonical content ref. The exact
+    # commit handoff cannot affect another commit's content discovery.
     # The stable alias is promoted after the build, with a fresh main-tip check.
     CI_BASE_STABLE_PROMOTION_REF="${stable_tag}"
     CI_BASE_IMAGE_TAG="${content_tag}"
@@ -1165,7 +1171,6 @@ configure_ci_base_image_refs() {
     export CI_BASE_IMAGE_TAG
     export CI_BASE_IMAGE_TAG_COMMIT_EXTRA
     export CI_BASE_IMAGE_TAG_CONTENT_REF
-    export CI_BASE_IMAGE_TAG_COMMIT_REF
     export CI_BASE_TRUSTED_CONTENT_REF
     export CI_BASE_STABLE_PROMOTION_REF
 
@@ -2609,7 +2614,10 @@ upload_wheel_artifacts_if_present() {
     local artifact_dir="artifacts/vllm-rocm-install"
     local archive_name="vllm-rocm-install.tar.gz"
     local metadata_dir="${wheel_dir}/.vllm-ci-artifact"
+    local build_base_digest=""
+    local expected_native_base_image=""
     local native_base_image=""
+    local native_base_digest=""
     local whl=""
     local whl_name=""
     local -a wheels=()
@@ -2627,15 +2635,33 @@ upload_wheel_artifacts_if_present() {
     fi
     whl="${wheels[0]}"
     whl_name=$(basename "${whl}")
-    native_base_image="${CI_BASE_IMAGE:-${CI_BASE_IMAGE_TAG_COMMIT_REF:-}}"
+    native_base_image="${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE:-}}"
     if [[ -z "${native_base_image}" ]]; then
         echo "Native ROCm artifact requires a ci_base image reference" >&2
         return 1
     fi
-    if [[ "${BUILDKITE:-false}" == "true" \
-        && ! "${native_base_image}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-        echo "Native ROCm artifact requires an immutable ci_base handoff: ${native_base_image}" >&2
-        return 1
+    if [[ "${BUILDKITE:-false}" == "true" ]]; then
+        expected_native_base_image=$(ci_base_tag_with_suffix \
+            "${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}" "${BUILDKITE_COMMIT:-}")
+        if [[ "${native_base_image}" != "${expected_native_base_image}" ]]; then
+            echo "Native ROCm artifact requires the exact ci_base commit handoff: ${native_base_image}" >&2
+            return 1
+        fi
+        if [[ ! "${CI_BASE_IMAGE:-}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+            echo "ROCm artifact build base must be digest-pinned: ${CI_BASE_IMAGE:-<empty>}" >&2
+            return 1
+        fi
+        build_base_digest="${CI_BASE_IMAGE##*@}"
+        if ! native_base_digest=$(resolve_image_digest "${native_base_image}"); then
+            echo "Could not resolve native ci_base handoff: ${native_base_image}" >&2
+            return 1
+        fi
+        if [[ "${native_base_digest}" != "${build_base_digest}" ]]; then
+            echo "Native ci_base handoff does not match the artifact build base" >&2
+            echo "  native: ${native_base_image}@${native_base_digest}" >&2
+            echo "  build:  ${CI_BASE_IMAGE}" >&2
+            return 1
+        fi
     fi
 
     echo "--- :package: Uploading ROCm vLLM install artifact"
