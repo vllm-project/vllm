@@ -118,6 +118,20 @@ def serialize_messages(msgs):
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
+def _is_forced_tool_choice(tool_choice: Any) -> bool:
+    """Whether the request forces a tool call (required or named).
+
+    In that case the tool-calling schema replaces the user's response
+    format in ``adjust_request``, so the user format must not reach the
+    prompt (it would instruct the model to emit an incompatible schema).
+    """
+    if tool_choice == "required":
+        return True
+    if isinstance(tool_choice, dict):
+        return tool_choice.get("type") == "function"
+    return getattr(tool_choice, "type", None) == "function"
+
+
 def _text_format_to_chat_response_format(
     text: ResponseTextConfig | None,
 ) -> dict[str, Any] | None:
@@ -369,8 +383,13 @@ class ResponsesRequest(OpenAIBaseModel):
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
             # Forward the response format so templates that render it into
-            # the prompt can see it.
-            response_format=_text_format_to_chat_response_format(self.text),
+            # the prompt can see it. Suppressed for forced tool calls: the
+            # tool-calling schema replaces it in adjust_request.
+            response_format=(
+                None
+                if _is_forced_tool_choice(self.tool_choice)
+                else _text_format_to_chat_response_format(self.text)
+            ),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

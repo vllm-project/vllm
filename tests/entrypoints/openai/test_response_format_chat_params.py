@@ -181,3 +181,48 @@ class TestResponsesResponseFormatForwarding:
         )
         params = request.build_chat_params(None, "auto")
         assert params.response_format == {"type": "text", "json_schema": None}
+
+    def test_response_format_suppressed_for_required_tool_choice(self):
+        # Forced tool call: the tool-calling schema replaces the user format
+        # in adjust_request, so the user format must not reach the prompt.
+        request = self._build_responses_request(
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice="required",
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "weather",
+                    "schema": _WEATHER_SCHEMA,
+                }
+            },
+        )
+        params = request.build_chat_params(None, "auto")
+        assert params.response_format is None
+
+    def test_response_format_kept_for_auto_tool_choice(self):
+        request = self._build_responses_request(
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice="auto",
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "weather",
+                    "schema": _WEATHER_SCHEMA,
+                }
+            },
+        )
+        params = request.build_chat_params(None, "auto")
+        assert params.response_format is not None
+        assert params.response_format["type"] == "json_schema"
