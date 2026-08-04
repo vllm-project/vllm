@@ -269,24 +269,95 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def _resolve_refs(
+    schema: Any,
+    defs: dict[str, Any],
+    ref_prefix: str = "#/$defs/",
+    seen: frozenset[str] = frozenset(),
+) -> Any:
+    """Recursively resolve ``$ref`` pointers against *defs*.
+
+    Handles both ``#/$defs/<name>`` (Pydantic v2) and ``#/definitions/<name>``
+    (JSON Schema draft-07) forms via *ref_prefix*.  JSON Pointer token
+    escapes (``~0`` → ``~``, ``~1`` → ``/``) are decoded.  *seen* bounds
+    recursive schemas so cyclic references are preserved as-is.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    if "$ref" in schema:
+        ref_path = schema["$ref"]
+        if (
+            isinstance(ref_path, str)
+            and ref_path.startswith(ref_prefix)
+            and ref_path not in seen
+        ):
+            def_name = ref_path[len(ref_prefix) :].replace("~1", "/").replace("~0", "~")
+            if def_name in defs:
+                resolved = dict(defs[def_name])
+                for k, v in schema.items():
+                    if k != "$ref":
+                        resolved.setdefault(k, v)
+                return _resolve_refs(resolved, defs, ref_prefix, seen | {ref_path})
+        return schema
+
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+            result[key] = [
+                _resolve_refs(item, defs, ref_prefix, seen) for item in value
+            ]
+        elif key == "properties" and isinstance(value, dict):
+            result[key] = {
+                k: _resolve_refs(v, defs, ref_prefix, seen) for k, v in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            result[key] = _resolve_refs(value, defs, ref_prefix, seen)
+        else:
+            result[key] = value
+    return result
+
+
+def _resolved_tool_properties(
+    params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return properties with local ``$defs`` and ``definitions`` resolved."""
+    params = params or {}
+    properties = params.get("properties", {})
+    defs = params.get("$defs", {})
+    if defs:
+        properties = {k: _resolve_refs(v, defs) for k, v in properties.items()}
+    legacy_defs = params.get("definitions", {})
+    if legacy_defs:
+        properties = {
+            k: _resolve_refs(v, legacy_defs, "#/definitions/")
+            for k, v in properties.items()
+        }
+    return properties
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its properties dict, or {}."""
+    """Find a tool by name and return its properties dict, or {}.
+
+    ``$ref`` pointers are resolved against ``$defs``/``definitions`` so
+    callers always receive concrete type information.
+    """
     if not tools:
         return {}
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
-                    return (params or {}).get("properties", {})
+                    return _resolved_tool_properties(params)
             continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            return _resolved_tool_properties(params)
     return {}
 
 
@@ -337,7 +408,7 @@ def _get_tool_schema_defs(
         _, params = _extract_tool_info(tool)
         if params is None:
             continue
-        defs = params.pop("$defs", {})
+        defs = params.get("$defs", {})
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
                 raise ValueError(
