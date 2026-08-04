@@ -310,7 +310,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.block_table is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
-            num_decode_tokens, self.window_size
+            num_decode_tokens, swa_metadata.decode_swa_width
         )
         decode_compressed_topk_lens = None
         decode_compressed_indices_are_local = False
@@ -405,7 +405,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_metadata.block_size,
                 compressed_block_table,
                 compressed_block_size,
-                self.window_size,
+                swa_metadata.decode_swa_width,
                 self.compress_ratio,
                 top_k,
                 decode_compressed_indices_are_local=decode_compressed_indices_are_local,

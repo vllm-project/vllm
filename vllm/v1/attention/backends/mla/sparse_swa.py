@@ -170,8 +170,10 @@ class DeepseekSparseSWAMetadata:
 
     is_valid_token: torch.Tensor | None = None  # [num_tokens]
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
-    decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, window_size]
+    decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, width]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
+    # window_size (causal) or noncausal_index_width (DSpark non-causal).
+    decode_swa_width: int = 0
     # Paged-coordinate prefill SWA indices/lens (FP8 paged-direct prefill).
     prefill_swa_indices: torch.Tensor | None = (
         None  # [num_prefill_tokens, 1, window_size]
@@ -530,6 +532,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         is_valid_token.copy_(slot_mapping >= 0)
 
         non_causal = not common_attn_metadata.causal
+        decode_swa_width = (
+            self.noncausal_index_width if non_causal else self.window_size
+        )
         decode_swa_indices = self.decode_swa_indices
         if num_decode_tokens > 0:
             self.decode_swa_lens[num_decode_tokens:] = 0
@@ -628,6 +633,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
+            decode_swa_width=decode_swa_width,
             prefill_swa_indices=(
                 self.prefill_swa_indices[:num_prefill_tokens]
                 if num_prefill_tokens > 0
