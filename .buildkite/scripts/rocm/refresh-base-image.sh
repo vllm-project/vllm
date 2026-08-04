@@ -3,7 +3,8 @@
 #
 # Normal AMD CI builds should not pay for this path. The script no-ops unless
 # docker/Dockerfile.rocm_base changed relative to the branch base, the previous
-# main commit, or ROCM_BASE_REFRESH_FORCE=1 is set.
+# main commit, the trusted stable image is missing/stale, the comparison is
+# known to be unavailable, or ROCM_BASE_REFRESH_FORCE=1 is set.
 
 set -euo pipefail
 
@@ -217,7 +218,14 @@ find_matching_base_content_ref() {
     local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
     local delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
     local attempt=0
+    local inspect_status=0
     shift 2
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ \
+        || ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid image identity retry configuration" >&2
+        return 1
+    fi
 
     for image_ref in "$@"; do
         if ! digest=$(resolve_image_digest "${image_ref}"); then
@@ -226,25 +234,35 @@ find_matching_base_content_ref() {
         immutable_ref="${image_ref}@${digest}"
         label_values=""
         for ((attempt = 1; attempt <= attempts; attempt++)); do
-            if label_values=$(docker buildx imagetools inspect "${immutable_ref}" \
+            inspect_status=0
+            label_values=$(docker buildx imagetools inspect "${immutable_ref}" \
                 --format '{{ index .Image.Config.Labels "vllm.rocm_base.content_hash" }} {{ index .Image.Config.Labels "vllm.rocm_base.metadata_version" }}' \
-                2>/dev/null) && [[ -n "${label_values}" ]]; then
-                break
+                2>/dev/null) || inspect_status=$?
+            remote_hash=""
+            remote_version=""
+            if ((inspect_status == 0)) && [[ -n "${label_values}" ]]; then
+                read -r remote_hash remote_version _ <<< "${label_values}"
+                if [[ "${remote_hash}" == "${expected_hash}" \
+                    && "${remote_version}" == "${expected_version}" ]]; then
+                    printf '%s\n' "${immutable_ref}"
+                    return 0
+                fi
             fi
-            label_values=""
-            ((attempt == attempts)) || sleep "${delay_secs}"
+            if ((attempt < attempts)); then
+                printf \
+                    'ROCm base identity lookup incomplete or mismatched for %s (%d/%d); retrying\n' \
+                    "${immutable_ref}" "${attempt}" "${attempts}" >&2
+                sleep "${delay_secs}"
+            fi
         done
-        if [[ -z "${label_values}" ]]; then
-            continue
+        if ((inspect_status == 0)) \
+            && [[ -n "${remote_hash}" && -n "${remote_version}" ]]; then
+            echo "ROCm base content ref has unexpected identity: ${immutable_ref}" >&2
+            echo "  expected hash/version: ${expected_hash} / ${expected_version}" >&2
+            echo "  found hash/version:    ${remote_hash} / ${remote_version}" >&2
+            return 2
         fi
-        read -r remote_hash remote_version _ <<< "${label_values}"
-        if [[ "${remote_hash}" == "${expected_hash}" \
-            && "${remote_version}" == "${expected_version}" ]]; then
-            printf '%s\n' "${immutable_ref}"
-            return 0
-        fi
-        echo "ROCm base content ref has unexpected identity: ${immutable_ref}" >&2
-        return 2
+        echo "Failed to read complete ROCm base identity labels: ${immutable_ref}" >&2
     done
     return 1
 }
@@ -297,7 +315,16 @@ rocm_version_from_base_image() {
 
 git_diff_changed_base() {
     local range="$1"
-    [[ -n "$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null)" ]]
+    local changed_files=""
+    local status=0
+
+    changed_files=$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null) \
+        || status=$?
+    if ((status != 0)); then
+        echo "Unable to compare ROCm base inputs over ${range}" >&2
+        return 2
+    fi
+    [[ -n "${changed_files}" ]]
 }
 
 short_git_ref() {
@@ -398,21 +425,109 @@ rocm_base_changed_in_range() {
     local context="$1"
     local range="$2"
     local old_ref="$3"
+    local diff_status=0
 
-    if git_diff_changed_base "${range}"; then
-        log_rocm_base_rebuild_reason "${context}" "${range}" "${old_ref}"
+    git_diff_changed_base "${range}" || diff_status=$?
+    case "${diff_status}" in
+        0)
+            log_rocm_base_rebuild_reason "${context}" "${range}" "${old_ref}"
+            return 0
+            ;;
+        1)
+            log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
+            echo "Decision: ROCm base refresh not required; ${DOCKERFILE} is unchanged."
+            return 1
+            ;;
+        *)
+            echo "ROCm base refresh check failed; refusing to treat the base as unchanged" >&2
+            return 2
+            ;;
+    esac
+}
+
+find_base_merge_base() {
+    local base_branch="$1"
+    local base_ref="$2"
+    local initial_depth="${ROCM_BASE_DIFF_FETCH_DEPTH:-200}"
+    local deepen_by="${ROCM_BASE_DIFF_FETCH_DEEPEN:-1000}"
+    local merge_base=""
+
+    if [[ ! "${initial_depth}" =~ ^[1-9][0-9]*$ \
+        || ! "${deepen_by}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Invalid ROCm base diff fetch depth configuration" >&2
+        return 2
+    fi
+    if ! git fetch --no-tags --depth="${initial_depth}" origin \
+        "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1; then
+        echo "Unable to fetch base branch ${base_branch} for ROCm base comparison" >&2
+        return 2
+    fi
+
+    merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
+    if [[ -n "${merge_base}" ]]; then
+        printf '%s\n' "${merge_base}"
         return 0
     fi
 
-    log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
-    echo "Decision: ROCm base refresh not required; ${DOCKERFILE} is unchanged."
+    if git rev-parse --is-shallow-repository 2>/dev/null | grep -qx true; then
+        echo "Deepening checkout by ${deepen_by} commits for ROCm base comparison" >&2
+        if ! git fetch --no-tags --deepen="${deepen_by}" origin \
+            "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1; then
+            echo "Unable to deepen checkout for ROCm base comparison" >&2
+            return 2
+        fi
+        merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
+    fi
+
+    if [[ -z "${merge_base}" ]]; then
+        echo "Unable to determine merge base with ${base_ref} after bounded fetch/deepen" >&2
+        return 2
+    fi
+    printf '%s\n' "${merge_base}"
+}
+
+trusted_stable_base_is_current() {
+    local use_sccache="${ROCM_BASE_USE_SCCACHE:-${USE_SCCACHE:-0}}"
+    local base_image_arg=""
+    local base_image_digest=""
+    local expected_hash=""
+    local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
+    local stable_ref="${BASE_REPO}:base"
+
+    if [[ ! -f "${DOCKERFILE}" ]]; then
+        echo "Cannot validate stable ROCm base without ${DOCKERFILE}" >&2
+        return 2
+    fi
+    base_image_arg=$(extract_arg_default BASE_IMAGE)
+    if [[ -z "${base_image_arg}" ]] \
+        || ! base_image_digest=$(resolve_image_digest "${base_image_arg}"); then
+        echo "Could not resolve the ROCm base parent while checking ${stable_ref}" >&2
+        return 2
+    fi
+    if ! expected_hash=$(compute_base_content_hash \
+        "${use_sccache}" "${base_image_digest}"); then
+        echo "Could not calculate the expected stable ROCm base identity" >&2
+        return 2
+    fi
+
+    if find_matching_base_content_ref \
+        "${expected_hash}" "${metadata_version}" "${stable_ref}" >/dev/null; then
+        echo "Trusted stable ROCm base already matches current inputs"
+        return 0
+    fi
+    echo "Trusted stable ROCm base is missing or stale; refreshing it"
     return 1
 }
 
 rocm_base_changed() {
     local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
     local base_ref="refs/remotes/origin/${base_branch}"
+    local context=""
+    local range=""
+    local old_ref=""
     local merge_base=""
+    local change_status=0
+    local stable_status=0
 
     if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
         echo "ROCM_BASE_REFRESH_SKIP=1 set; skipping ROCm base refresh"
@@ -424,49 +539,66 @@ rocm_base_changed() {
         return 0
     fi
 
+    if [[ "${ROCM_BASE_REFRESH_DIFF_UNAVAILABLE:-0}" == "1" ]]; then
+        echo "ROCM_BASE_REFRESH_DIFF_UNAVAILABLE=1 set; refreshing ROCm base image"
+        return 0
+    fi
+
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "Not in a git checkout; skipping ROCm base refresh unless forced"
-        return 1
+        echo "Not in a git checkout; cannot safely determine ROCm base changes" >&2
+        return 2
     fi
 
-    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        git fetch --no-tags --depth=200 origin \
-            "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1 || true
-        merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-        if [[ -z "${merge_base}" ]]; then
-            echo "Unable to determine merge base with PR base ${base_ref}; skipping ROCm base refresh unless forced"
-            return 1
+    if [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" \
+        && "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            if ! git fetch --no-tags --deepen="${ROCM_BASE_DIFF_FETCH_DEPTH:-200}" \
+                origin >/dev/null 2>&1 \
+                || ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+                echo "Unable to establish previous stable-branch commit; refusing to skip ROCm base refresh" >&2
+                return 2
+            fi
         fi
-        if rocm_base_changed_in_range \
-            "pull request build against ${base_ref}" \
-            "${merge_base}...HEAD" \
-            "${merge_base}"; then
-            return 0
-        fi
-    elif [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] \
-        && git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-        if rocm_base_changed_in_range \
-            "stable branch build; comparing against previous ${ROCM_BASE_STABLE_BRANCH:-main} commit" \
-            "HEAD~1..HEAD" \
-            "HEAD~1"; then
-            return 0
-        fi
+        context="stable branch build; comparing against previous ${ROCM_BASE_STABLE_BRANCH:-main} commit"
+        range="HEAD~1..HEAD"
+        old_ref="HEAD~1"
     else
-        git fetch --no-tags --depth=200 origin \
-            "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1 || true
-        merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-        if [[ -z "${merge_base}" ]]; then
-            echo "Unable to determine merge base with branch base ${base_ref}; skipping ROCm base refresh unless forced"
-            return 1
+        if ! merge_base=$(find_base_merge_base "${base_branch}" "${base_ref}"); then
+            echo "Unable to establish base comparison; refusing to skip ROCm base refresh" >&2
+            return 2
         fi
-        if rocm_base_changed_in_range \
-            "branch build against ${base_ref}" \
-            "${merge_base}...HEAD" \
-            "${merge_base}"; then
-            return 0
+        if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+            context="pull request build against ${base_ref}"
+        else
+            context="branch build against ${base_ref}"
         fi
+        range="${merge_base}...HEAD"
+        old_ref="${merge_base}"
     fi
 
+    rocm_base_changed_in_range "${context}" "${range}" "${old_ref}" \
+        || change_status=$?
+    if ((change_status != 1)); then
+        return "${change_status}"
+    fi
+
+    # A failed build at commit N must be repaired by N+1 even when N+1 does
+    # not touch the Dockerfile. On trusted main, cheaply validate the published
+    # stable identity before accepting an unchanged git diff.
+    if is_trusted_main_build; then
+        trusted_stable_base_is_current || stable_status=$?
+        case "${stable_status}" in
+            0)
+                return 1
+                ;;
+            1)
+                return 0
+                ;;
+            *)
+                return "${stable_status}"
+                ;;
+        esac
+    fi
     return 1
 }
 
@@ -745,12 +877,23 @@ build_base_image() {
 }
 
 main() {
+    local change_status=0
+
     metadata_set "rocm-base-refresh" "0"
 
-    if ! rocm_base_changed; then
-        echo "ROCm base Dockerfile did not change; skipping base image refresh"
-        return 0
-    fi
+    rocm_base_changed || change_status=$?
+    case "${change_status}" in
+        0)
+            ;;
+        1)
+            echo "ROCm base Dockerfile did not change; skipping base image refresh"
+            return 0
+            ;;
+        *)
+            echo "Failed to determine whether the ROCm base image needs refresh" >&2
+            return "${change_status}"
+            ;;
+    esac
 
     setup_builder
     build_base_image

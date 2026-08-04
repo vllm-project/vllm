@@ -459,9 +459,10 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
-  optional: true
+  optional: false
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - .buildkite/ci_config_rocm.yaml
   - .buildkite/hardware_tests/amd.yaml
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh

@@ -20,6 +20,8 @@ steps:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
+        - exit_status: 2  # Transient git/registry identity failure
+          limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
