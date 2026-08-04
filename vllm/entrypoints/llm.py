@@ -55,6 +55,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
+from ..renderers import ChatParams
 from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
@@ -221,17 +222,6 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     ) -> None:
         """LLM constructor."""
 
-        if "swap_space" in kwargs:
-            kwargs.pop("swap_space")
-            import warnings
-
-            warnings.warn(
-                "The 'swap_space' parameter is deprecated and ignored. "
-                "It will be removed in a future version.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -363,11 +353,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         self.chat_template = load_chat_template(chat_template)
         self.input_processor = self.llm_engine.input_processor
 
+        self.renderer.warmup(ChatParams(chat_template=self.chat_template))
+
         # The renderer thread pool is only consumed by the async renderer
         # path; the synchronous `LLM` entrypoint runs multimodal
         # preprocessing serially. Warn so the setting is not a silent
         # no-op. See vllm-project/vllm#42901.
-        if self.model_config.renderer_num_workers > 1:
+        if self.model_config.renderer_num_workers > 1 and self.runner_type != "pooling":
             logger.warning_once(
                 "`renderer_num_workers=%d` was set, but the offline `LLM` "
                 "entrypoint uses the synchronous renderer path and runs "
@@ -873,12 +865,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        self.llm_engine.collective_rpc("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -895,9 +888,19 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            self.llm_engine.set_weight_version(weight_version)
+
+    def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        self.llm_engine.set_weight_version(new_version)
+
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

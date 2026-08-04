@@ -31,10 +31,19 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import FunctionCall, FunctionDefinition
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
+from vllm.tool_parsers.utils import (
+    build_responses_tool_call_name_map,
+    flat_namespace_tool_name,
+    iter_response_function_tool_dicts,
+    resolve_responses_tool_call_name,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -45,9 +54,10 @@ def build_response_output_items(
     content: str | None,
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
-    tool_call_id_type: str = "random",
+    tools: list[Tool] | None = None,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
+    tool_call_name_map = build_responses_tool_call_name_map(tools)
 
     if reasoning:
         outputs.append(
@@ -82,19 +92,18 @@ def build_response_output_items(
 
     if tool_calls:
         for idx, tool_call in enumerate(tool_calls):
+            call_name = resolve_responses_tool_call_name(
+                tool_call.name, tool_call_name_map=tool_call_name_map
+            )
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
                     call_id=tool_call.id
-                    if tool_call.id
-                    else make_tool_call_id(
-                        id_type=tool_call_id_type,
-                        func_name=tool_call.name,
-                        idx=idx,
-                    ),
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
-                    name=tool_call.name,
+                    name=call_name.name,
+                    namespace=call_name.namespace,
                     arguments=tool_call.arguments,
                 )
             )
@@ -225,10 +234,13 @@ def _construct_message_from_response_item(
     )
 
     if isinstance(item, ResponseFunctionToolCall):
+        tool_name = item.name
+        if item.namespace:
+            tool_name = flat_namespace_tool_name(item.namespace, item.name)
         tool_call = ChatCompletionMessageToolCallParam(
             id=item.call_id,
             function=FunctionCallTool(
-                name=item.name,
+                name=tool_name,
                 arguments=item.arguments,
             ),
             type="function",
@@ -324,7 +336,17 @@ def _construct_message_from_response_item(
 
 
 def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
-    return frozenset(tool.name for tool in tools if tool.type == "function")
+    names = []
+    for tool in tools:
+        if tool.type == "function":
+            names.append(tool.name)
+        elif tool.type == "namespace":
+            names.extend(
+                flat_namespace_tool_name(tool.name, namespaced_tool.name)
+                for namespaced_tool in tool.tools
+                if namespaced_tool.type == "function"
+            )
+    return frozenset(names)
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
@@ -344,27 +366,30 @@ def extract_tool_types(tools: list[Tool]) -> set[str]:
     return tool_types
 
 
-def convert_tool_responses_to_completions_format(tool: dict) -> dict:
+def convert_tool_responses_to_completions_format(
+    tool: dict,
+) -> ChatCompletionToolsParam:
     """
-    Convert a flat tool schema:
+    Convert a flat Responses tool schema:
         {"type": "function", "name": "...", "description": "...", "parameters": {...}}
-    into:
-        {"type": "function", "function": {...}}
+    into a Chat Completions tool param for chat-template rendering.
     """
-    return {
-        "type": "function",
-        "function": tool,
-    }
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition.model_validate(
+            {k: v for k, v in tool.items() if k != "type"}
+        ),
+    )
 
 
 def construct_tool_dicts(
-    tools: list[Tool], tool_choice: ToolChoice
+    tools: list[Tool],
+    tool_choice: ToolChoice,
+    exclude_tools_when_tool_choice_none: bool = False,
 ) -> list[dict[str, Any]] | None:
-    if not tools or (tool_choice == "none"):
-        tool_dicts = None
-    else:
-        tool_dicts = [
-            convert_tool_responses_to_completions_format(tool.model_dump())
-            for tool in tools
-        ]
-    return tool_dicts
+    if not tools or (tool_choice == "none" and exclude_tools_when_tool_choice_none):
+        return None
+    return [
+        convert_tool_responses_to_completions_format(tool).model_dump()
+        for tool in iter_response_function_tool_dicts(tools)
+    ]

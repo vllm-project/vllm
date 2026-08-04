@@ -20,6 +20,11 @@ except ImportError as e:
     ) from e
 
 
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    Citation,
+    CitationSource,
+    CohereDeltaMessage,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -404,6 +409,83 @@ def _schema_dict_from_structured_outputs(
     )
 
 
+def _melody_sources_to_vllm(
+    raw_sources: Any,
+    position_to_source: Mapping[tuple[int, int], CitationSource] | None,
+) -> list[CitationSource]:
+    """Convert melody's ``Source`` objects into resolved :class:`CitationSource`.
+
+    Melody's ``Source`` shape is
+    ``{tool_call_index, tool_result_indices, document_ids}``. Without
+    :meth:`PyFilterOptions.with_message_history` the ``document_ids``
+    list is empty, so we resolve the numeric address ourselves using
+    ``position_to_source``, which is
+    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
+    applied to the inbound request and forwarded through
+    ``chat_template_kwargs`` at parser-construction time. Each melody
+    source with ``tool_result_indices=[i, j, ...]`` fans out to one
+    :class:`CitationSource` per resolved position, populating the
+    wire-shape ``type`` / ``id`` / ``document`` / ``tool_output``
+    fields; unresolved positions are silently skipped (the calling
+    citation is dropped at wire-coercion time if every source in it
+    ends up unresolved -- see ``_to_wire_citation`` in
+    :mod:`vllm.entrypoints.cohere.serving`).
+
+    When ``position_to_source`` is ``None`` (parser wired outside of
+    :class:`CohereServingChatV2`, e.g. a plain OpenAI chat completion
+    request that happens to hit a cohere reasoning parser) sources
+    can't be resolved and get dropped; citations then never reach any
+    citation-aware handler downstream.
+    """
+    if not position_to_source:
+        return []
+    out: list[CitationSource] = []
+    for s in raw_sources or []:
+        bucket = getattr(s, "tool_call_index", None)
+        indices = list(getattr(s, "tool_result_indices", None) or [])
+        if bucket is None or not indices:
+            continue
+        for idx in indices:
+            info = position_to_source.get((bucket, idx))
+            if info is not None:
+                out.append(info)
+    return out
+
+
+def _melody_citations_to_vllm(
+    raw_citations: Any,
+    position_to_source: Mapping[tuple[int, int], CitationSource] | None,
+) -> list[Citation] | None:
+    """Convert melody's ``FilterCitation`` objects into :class:`Citation`.
+
+    Resolves each source in-place via ``position_to_source`` (see
+    :func:`_melody_sources_to_vllm`). Citations whose sources all fail
+    to resolve are still emitted here with ``sources=[]``; the serving
+    layer drops them at wire-coercion time so the fail-closed policy
+    lives in exactly one place.
+    """
+    if not raw_citations:
+        return None
+    out: list[Citation] = []
+    for c in raw_citations:
+        out.append(
+            Citation(
+                start=getattr(c, "start_index", None),
+                end=getattr(c, "end_index", None),
+                text=getattr(c, "text", None),
+                sources=_melody_sources_to_vllm(
+                    getattr(c, "sources", None), position_to_source
+                ),
+                type=(
+                    "THINKING_CONTENT"
+                    if getattr(c, "is_thinking", False)
+                    else "TEXT_CONTENT"
+                ),
+            )
+        )
+    return out
+
+
 class BaseCohereCommandReasoningParser(ReasoningParser):
     def __init__(
         self,
@@ -414,10 +496,38 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         **kwargs,
     ):
         super().__init__(tokenizer, *args, **kwargs)
+        self.start_token_id = tokenizer.convert_tokens_to_ids("<|START_THINKING|>")
         self.end_token_id = tokenizer.convert_tokens_to_ids("<|END_THINKING|>")
+        self.chatbot_token_id = tokenizer.convert_tokens_to_ids("<|CHATBOT_TOKEN|>")
         self.unary_opts = unary_opts
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
+        # Citations extracted by the most recent ``extract_reasoning`` call.
+        # Citation-aware handlers (e.g. :class:`CohereServingChatV2` via its
+        # ``_finalize_response_message`` hook) read this back from the
+        # parser instance (which is constructed per-request) and attach
+        # the result to :class:`CohereChatMessage.citations`. ``None`` when
+        # the last parse produced no citations.
+        self.last_unary_citations: list[Citation] | None = None
+        # Request-scoped ``(tool_call_index, tool_result_idx) -> resolved
+        # CitationSource`` map, forwarded from
+        # :meth:`CohereServingChatV2._apply_cohere_template_kwargs` via
+        # ``chat_template_kwargs``. See :func:`_melody_sources_to_vllm`
+        # for how it's consumed. Absent for parser instances that
+        # weren't created by ``CohereServingChatV2`` (e.g. an OpenAI
+        # chat completion request routed through a cohere reasoning
+        # parser); citations from those requests are dropped since we
+        # have no way to attribute their sources.
+        ctk = kwargs.get("chat_template_kwargs") or {}
+        # Lazy import: ``renderers.cohere`` transitively imports
+        # ``cohere_melody`` and other heavy deps; hoisting the constant
+        # to module scope would tie parser importability to that graph.
+        from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
+
+        raw_map = ctk.get(POSITION_TO_SOURCE_KEY)
+        self._position_to_source: Mapping[tuple[int, int], CitationSource] | None = (
+            raw_map if isinstance(raw_map, Mapping) else None
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -437,9 +547,22 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         r = self.melody_streaming.write_decoded(delta_text)
-        if r.content is None and r.reasoning is None and not r.tool_calls:
+        citations = _melody_citations_to_vllm(
+            getattr(r, "citations", None), self._position_to_source
+        )
+        if (
+            r.content is None
+            and r.reasoning is None
+            and not r.tool_calls
+            and not citations
+        ):
             return None
-        msg = DeltaMessage()
+        # Always emit CohereDeltaMessage so citations reach the wire via
+        # ``SerializeAsAny[DeltaMessage]`` on the streaming choice envelope.
+        # When ``citations`` is unset, ``CohereDeltaMessage._serialize``
+        # drops the field so the emitted shape matches plain
+        # :class:`DeltaMessage`
+        msg = CohereDeltaMessage()
         if r.content is not None:
             msg.content = r.content
         if r.reasoning is not None:
@@ -454,12 +577,23 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
                 )
                 for tc in r.tool_calls
             ]
+        if citations:
+            msg.citations = citations
         return msg
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         result = self.melody_unary.process_full_text(model_output)
+        # Cache citations so citation-aware handlers can surface them
+        # on :class:`CohereChatMessage.citations`. The base
+        # :meth:`ReasoningParser.extract_reasoning` contract only
+        # returns ``(reasoning, content)``, so citations are passed
+        # back via parser-instance state -- safe because the parser is
+        # constructed per-request.
+        self.last_unary_citations = _melody_citations_to_vllm(
+            getattr(result, "citations", None), self._position_to_source
+        )
         return result.reasoning, result.content
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -478,7 +612,21 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return content_ids
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return any(tid == self.end_token_id for tid in reversed(input_ids))
+        chatbot = self.chatbot_token_id
+        start = self.start_token_id
+        end = self.end_token_id
+        has_end_token = False
+
+        for i in reversed(range(len(input_ids))):
+            tid = input_ids[i]
+            if tid == start:
+                return has_end_token
+            if tid == chatbot:
+                return False
+            if tid == end:
+                has_end_token = True
+
+        return has_end_token
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -533,12 +681,25 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return request
 
 
+# melody's streaming filter only buffers a partial ``<co: ...>`` citation
+# across ``write_decoded`` calls when ``stream_non_grounded_answer`` is
+# set: otherwise, the moment an opening ``<co`` is seen without a
+# closing ``</co: ...>`` in the same delta, the filter emits the partial
+# marker bytes verbatim as plain content. In vLLM's streaming path the
+# parser is fed one token (1-4 chars) per call, so an unbuffered filter
+# will leak ``<co: 0>``-style markers into ``delta.content`` and never
+# emit a ``FilterCitation`` for them. Enabling the flag flips the
+# partial-match branch in melody's ``parse_citations`` (see
+# ``src/parsing/citations_filter.rs``) to ``return (None, 0)`` -- i.e.
+# keep buffering -- which lets a full citation eventually resolve.
+# Non-streaming (unary) parsing receives the whole output in one call so
+# the flag is a no-op there and we leave ``unary_opts`` alone.
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd3(),
+            streaming_opts=PyFilterOptions().cmd3().stream_non_grounded_answer(),
             unary_opts=PyFilterOptions().cmd3().no_tools(),
             **kwargs,
         )
@@ -549,7 +710,7 @@ class CohereCommand4ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd4(),
+            streaming_opts=PyFilterOptions().cmd4().stream_non_grounded_answer(),
             unary_opts=PyFilterOptions().cmd4().no_tools(),
             **kwargs,
         )
