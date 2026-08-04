@@ -86,15 +86,9 @@ class SharedOffloadRegion:
             try:
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
-            except (RuntimeError, OSError) as e:
+            except (RuntimeError, OSError):
                 os.unlink(self.mmap_path)
                 os.close(self.fd)
-                if isinstance(e, RuntimeError):
-                    raise RuntimeError(
-                        f"{e} Reduce the CPU KV offloading capacity by lowering "
-                        "`--kv-offloading-size`, or `cpu_bytes_to_use` in "
-                        "`kv_connector_extra_config`."
-                    ) from e
                 raise
             self._creator = True
             logger.info(

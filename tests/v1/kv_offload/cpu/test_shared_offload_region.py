@@ -638,7 +638,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="kv_connector_extra_config"):
+    with pytest.raises(RuntimeError, match="Insufficient space"):
         SharedOffloadRegion(
             engine_id=engine_id,
             num_blocks=4,
