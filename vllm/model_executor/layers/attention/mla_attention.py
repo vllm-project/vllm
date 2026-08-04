@@ -344,6 +344,20 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _get_kv_b_proj_input_dtype(
+    kv_b_proj: ColumnParallelLinear, use_fp8_prefill: bool
+) -> torch.dtype | None:
+    weight = getattr(kv_b_proj, "weight", None)
+    weight_dtype = weight.dtype if weight is not None else kv_b_proj.params_dtype
+    if weight_dtype == torch.int32:
+        return kv_b_proj.params_dtype
+    if weight_dtype == torch.uint8:
+        return None
+    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
+        return None
+    return weight_dtype
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -2310,12 +2324,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
-        fp8_dtype = current_platform.fp8_dtype()
-        use_fp8_prefill = prefill_metadata.q_data_type == fp8_dtype
-        kv_b_proj_weight = getattr(self.kv_b_proj, "weight", None)
-        preserve_kv_b_proj_input_dtype = use_fp8_prefill and (
-            kv_b_proj_weight is not None
-            and kv_b_proj_weight.dtype in (fp8_dtype, torch.uint8)
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
         )
 
         output = None
@@ -2362,8 +2373,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            if not preserve_kv_b_proj_input_dtype:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2433,12 +2444,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
         assert prefill_metadata.chunked_context.chunk_size is not None
 
-        fp8_dtype = current_platform.fp8_dtype()
-        use_fp8_prefill = prefill_metadata.q_data_type == fp8_dtype
-        kv_b_proj_weight = getattr(self.kv_b_proj, "weight", None)
-        preserve_kv_b_proj_input_dtype = use_fp8_prefill and (
-            kv_b_proj_weight is not None
-            and kv_b_proj_weight.dtype in (fp8_dtype, torch.uint8)
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
         )
         output = None
         merge_output = None
@@ -2521,8 +2529,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 chunk_idx=i,
                 toks=toks,
             )
-            if not preserve_kv_b_proj_input_dtype:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.params_dtype)
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
