@@ -37,7 +37,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9
+    from vllm.platforms.rocm import on_cdna
 
     # AMD RDNA doesn't have MFMA but WMMA
     WMMA_TILE = 16
@@ -366,7 +366,7 @@ def get_rocm_tuning_space(use_fp16):
         "waves_per_eu": waves_per_eu_range,
     }
     # RDNA doesn't use matrix_instr_nonkdim nor kpack
-    if use_fp16 and on_gfx9():
+    if use_fp16 and on_cdna():
         param_ranges["matrix_instr_nonkdim"] = [16, 32]
         param_ranges["kpack"] = [1, 2]
 
@@ -513,8 +513,9 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
                 continue
 
         # RDNA (gfx11/gfx12): reject configs that exceed 256 VGPRs per wave.
-        # WMMA is 16x16, and 8 VGPRs are needed for fp32 accumulator
-        if on_gfx1x():
+        # WMMA is 16x16; the accumulator is 8 VGPRs per tile in wave32 mode
+        # regardless of dtype (MoE always accumulates in fp32/int32).
+        if not on_cdna():
             accum_vgprs = (
                 (BLOCK_SIZE_M // WMMA_TILE)
                 * (BLOCK_SIZE_N // WMMA_TILE)
