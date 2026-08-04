@@ -589,9 +589,9 @@ def _has_flashinfer_msa_platform() -> bool:
     return current_platform.is_device_capability_family(120) and has_flashinfer_msa()
 
 
-# Parity of the SM120/SM121 FlashInfer indexer against the Triton impl,
-# driven through the real metadata builders. The short decode request covers
-# the -1 clamp; local_blocks=1 covers the local-window bias, with cache values
+# The SM120/SM121 FlashInfer indexer must match the Triton impl when driven
+# through the real metadata builders. The short decode request covers the -1
+# clamp; local_blocks=1 covers the local-window bias, with cache values
 # decreasing by block id so the window never wins on score alone.
 @pytest.mark.skipif(
     not _has_flashinfer_msa_platform(),
