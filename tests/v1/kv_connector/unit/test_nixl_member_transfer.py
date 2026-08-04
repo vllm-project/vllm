@@ -82,6 +82,30 @@ def test_plan_member_transfer_filters_and_reorders_a_pp_stage():
     assert prepared.block_lens == [65536, 32768]
 
 
+def test_plan_member_transfer_routes_kimi_unified_mla_ssm_regions():
+    metadata = _metadata(
+        [
+            ["model.layers.1.kda"],
+            ["model.layers.4.mla", "model.layers.5.kda"],
+            ["model.layers.8.mla"],
+        ],
+        [0xA000, 0xB000, 0xC000],
+        [4096, 4096, 4096],
+    )
+
+    prepared, plan = plan_member_transfer(
+        metadata,
+        [["model.layers.4.mla", "model.layers.5.kda"]],
+        {"model.layers.4.mla": 0, "model.layers.5.kda": 1},
+    )
+
+    assert plan.member_names == ("model.layers.4.mla", "model.layers.5.kda")
+    assert plan.local_regions == (0, 0)
+    assert plan.group_ids == (0, 1)
+    assert prepared.kv_caches_base_addr == [0xB000, 0xB000]
+    assert prepared.block_lens == [4096, 4096]
+
+
 def test_plan_member_transfer_rejects_missing_local_member():
     metadata = _metadata([["l0"]], [0xA000], [128])
 

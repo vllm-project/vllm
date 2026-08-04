@@ -50,7 +50,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import make_nixl_push_scheduler
@@ -1152,6 +1156,7 @@ def _member_worker(
 def test_member_plan_routes_descriptor_blocks():
     worker = _StubWriterWorker.fresh()
     worker._has_mamba = False
+    worker._group_spec_types = (FullAttentionSpec, FullAttentionSpec)
     worker.num_regions = 3
     desc_ids = worker._compute_desc_ids(
         block_ids=[[1, 2], [5]],
@@ -1161,6 +1166,52 @@ def test_member_plan_routes_descriptor_blocks():
         region_group_ids=(0, 1, 0),
     )
     assert desc_ids.tolist() == [1, 2, 15, 21, 22]
+
+
+def test_kimi_member_plan_routes_mla_and_all_ssm_subregions():
+    worker = _StubWriterWorker.fresh()
+    worker._has_mamba = True
+    worker._conv_decomp = MagicMock(local_conv_offsets=((0, 8), (8, 8), (16, 8)))
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
+
+    desc_ids = worker._compute_desc_ids(
+        block_ids=[[1, 2], [3]],
+        dst_num_blocks=20,
+        block_size_ratio=None,
+        physical_blocks_per_logical=2,
+        region_group_ids=(0, 1, 1, 1, 1),
+    )
+
+    assert desc_ids.tolist() == [1, 2, 23, 33, 43, 53]
+
+
+def test_kimi_member_local_descriptors_stay_within_unified_pages():
+    worker = _StubWriterWorker.fresh()
+    worker._has_mamba = True
+    worker.transfer_topo = MagicMock()
+    worker._conv_decomp = MagicMock(local_conv_offsets=((0, 8), (8, 8), (16, 8)))
+    worker._mamba_ssm_size = (24, 40)
+    worker._logical_num_blocks = 2
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.num_blocks = 2
+    worker.device_id = 0
+    worker.block_len_per_layer = [128]
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
+    plan = MemberTransferPlan(
+        member_names=("mla", "kda"),
+        local_regions=(0, 0),
+        group_ids=(0, 1),
+    )
+
+    descriptors = worker._build_member_local([1000], 1, plan)
+
+    assert len(descriptors) == 10
+    assert descriptors[:2].tolist() == [[1000, 128, 0], [1128, 128, 0]]
+    pages = ((1000, 1128), (1128, 1256))
+    assert all(
+        any(lo <= int(addr) and int(addr + length) <= hi for lo, hi in pages)
+        for addr, length, _device in descriptors
+    )
 
 
 def test_member_identity_gate_preserves_the_non_hma_path():
@@ -1189,6 +1240,14 @@ def test_member_identity_gate_preserves_the_non_hma_path():
     assert not worker._use_member_identity(metadata)
 
 
+def test_member_identity_gate_includes_kimi_mamba_hybrid():
+    metadata = _agent_metadata([["mla", "kda"]], [0xA000], [4096])
+    worker = _member_worker([["mla", "kda"]], {"mla": 0, "kda": 1})
+    worker._has_mamba = True
+
+    assert worker._use_member_identity(metadata)
+
+
 def test_attention_member_routing_rejects_decode_tp_fanout():
     metadata = _agent_metadata([["a"]], [0xA000], [128])
     worker = _member_worker([["a"]], {"a": 0})
@@ -1213,6 +1272,7 @@ def test_remote_cleanup_releases_member_handle():
                 local_regions=(0,),
                 group_ids=(0,),
             ),
+            descriptor_group_ids=(0,),
         )
     }
     worker.kv_caches_base_addr = {"remote": {0: [0x1000]}}
@@ -1234,6 +1294,7 @@ def test_remote_cleanup_releases_member_handle():
 
 def test_member_state_rejects_divergent_remote_ranks():
     worker = _StubWriterWorker.fresh()
+    worker._group_spec_types = (FullAttentionSpec, FullAttentionSpec)
     worker.register_local_xfer_handler = MagicMock(return_value=(99, []))
     plan_a = MemberTransferPlan(
         member_names=("a", "b"),
@@ -1255,3 +1316,20 @@ def test_member_state_rejects_divergent_remote_ranks():
     # A rank whose member order differs is rejected before any registration.
     with pytest.raises(RuntimeError, match="inconsistent member layouts"):
         worker._check_member_plan_consistency("eng", plan_b)
+
+
+def test_kimi_member_state_expands_ssm_descriptor_groups():
+    worker = _StubWriterWorker.fresh()
+    worker._has_mamba = True
+    worker._conv_decomp = MagicMock(local_conv_offsets=((0, 8), (8, 8), (16, 8)))
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
+    worker.register_local_xfer_handler = MagicMock(return_value=(99, []))
+    plan = MemberTransferPlan(
+        member_names=("mla", "kda"),
+        local_regions=(0, 0),
+        group_ids=(0, 1),
+    )
+
+    worker._register_member_state("eng", plan, 16)
+
+    assert worker._member_xfer_state["eng"].descriptor_group_ids == (0, 1, 1, 1, 1)

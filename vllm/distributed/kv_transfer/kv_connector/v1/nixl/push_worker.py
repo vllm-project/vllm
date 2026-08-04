@@ -507,7 +507,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
         member_state = self._member_xfer_state.get(engine_id)
         member_groups = (
-            member_state.plan.group_ids if member_state is not None else None
+            member_state.descriptor_group_ids if member_state is not None else None
         )
 
         # Expand D's logical IDs using the ratio learned during the

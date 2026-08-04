@@ -10,9 +10,9 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
@@ -99,6 +99,7 @@ class _MemberTransferState:
 
     handle: int
     plan: MemberTransferPlan
+    descriptor_group_ids: tuple[int, ...]
 
 
 class NixlBaseConnectorWorker:
@@ -117,6 +118,27 @@ class NixlBaseConnectorWorker:
         region_group_ids: tuple[int, ...] | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
+        num_blocks = dst_num_blocks
+        if block_size_ratio is not None:
+            num_blocks = int(num_blocks * block_size_ratio)
+
+        if region_group_ids is not None:
+            # Member-major descriptors, using each descriptor region's KV
+            # cache group. SSM descriptors use logical blocks while attention
+            # descriptors use kernel-granularity blocks.
+            out: list[np.ndarray] = []
+            offset = 0
+            for group_id in region_group_ids:
+                is_ssm = _is_ssm_spec(self._group_spec_types[group_id])
+                stride = (
+                    dst_num_blocks // physical_blocks_per_logical
+                    if is_ssm
+                    else num_blocks
+                )
+                out.append(np.asarray(block_ids[group_id], dtype=np.int64) + offset)
+                offset += stride
+            return np.concatenate(out) if out else np.empty(0, dtype=np.int64)
+
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
@@ -124,18 +146,6 @@ class NixlBaseConnectorWorker:
             # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
-
-        num_blocks = dst_num_blocks
-        if block_size_ratio is not None:
-            num_blocks = int(num_blocks * block_size_ratio)
-
-        if region_group_ids is not None:
-            # Member-major descriptors, using each member's KV-cache group.
-            out = [
-                np.asarray(block_ids[g], dtype=np.int64) + k * num_blocks
-                for k, g in enumerate(region_group_ids)
-            ]
-            return np.concatenate(out) if out else np.empty(0, dtype=np.int64)
 
         num_fa_descs = self.num_regions * num_blocks
 
@@ -289,7 +299,6 @@ class NixlBaseConnectorWorker:
             self._supports_member_identity
             and self.pp_size > 1
             and self._is_hma_required
-            and not self._has_mamba
         )
 
     def _use_member_identity(self, nixl_agent_meta: NixlAgentMetadata) -> bool:
@@ -356,9 +365,21 @@ class NixlBaseConnectorWorker:
         if engine_id in self._member_xfer_state:
             return
         handle = self.register_local_xfer_handler(remote_block_size, member_plan)[0]
+        descriptor_group_ids: list[int] = []
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            ssm_regions = len(self._conv_decomp.local_conv_offsets) + 1
+        else:
+            ssm_regions = 1
+        for group_id in member_plan.group_ids:
+            repeats = (
+                ssm_regions if _is_ssm_spec(self._group_spec_types[group_id]) else 1
+            )
+            descriptor_group_ids.extend([group_id] * repeats)
         self._member_xfer_state[engine_id] = _MemberTransferState(
             handle=handle,
             plan=member_plan,
+            descriptor_group_ids=tuple(descriptor_group_ids),
         )
 
     def __init__(
@@ -561,13 +582,8 @@ class NixlBaseConnectorWorker:
                 "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                 "for PP + HMA."
             )
-        # PP push routes HMA (hybrid) attention layouts by pooled-member
-        # identity; Mamba/SSM hybrids are not yet supported under PP.
-        if self.pp_size > 1 and self._has_mamba:
-            raise NotImplementedError(
-                "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                "with Mamba/SSM hybrid KV cache layouts yet."
-            )
+        # PP push routes HMA layouts, including unified MLA+SSM pages, by
+        # pooled-member identity.
         # Decode-side PP is unsupported (completions counted per consumer rank).
         if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and self.pp_size > 1:
             raise NotImplementedError(
@@ -1231,11 +1247,7 @@ class NixlBaseConnectorWorker:
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses: list[int] = []
 
-        track_region_members = (
-            self._supports_member_identity
-            and self._is_hma_required
-            and not self._has_mamba
-        )
+        track_region_members = self._supports_member_identity and self._is_hma_required
         region_members: list[list[str]] = []
 
         # K and V are packed into the content dim, so each attention layer is a
@@ -1426,7 +1438,11 @@ class NixlBaseConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
-    def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
+    def _build_mamba_local(
+        self,
+        base_addresses: list[int],
+        region_indices: Sequence[int] | None = None,
+    ) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
         local mamba blocks with DS conv layout, as an Nx3 uint64 array.
 
@@ -1469,7 +1485,12 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
 
         parts: list[np.ndarray] = []
-        for i, base_addr in enumerate(base_addresses):
+        if region_indices is None:
+            regions: Sequence[int] = range(len(base_addresses))
+        else:
+            regions = region_indices
+        for i in regions:
+            base_addr = base_addresses[i]
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = self.block_len_per_layer[i] * physical_per_logical
@@ -1485,6 +1506,7 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
+        region_indices: Sequence[int] | None = None,
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
@@ -1513,7 +1535,13 @@ class NixlBaseConnectorWorker:
         parts: list[np.ndarray] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+        regions = (
+            region_indices
+            if region_indices is not None
+            else range(len(nixl_agent_meta.kv_caches_base_addr))
+        )
+        for i in regions:
+            base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             blk_addrs = base_addr + block_arange * page_stride
             for off, sz in conv_offsets:
@@ -1530,6 +1558,78 @@ class NixlBaseConnectorWorker:
         out[:, 1] = length
         out[:, 2] = device_id
         return out
+
+    def _build_member_local(
+        self,
+        base_addresses: list[int],
+        block_size_ratio: int,
+        member_plan: MemberTransferPlan,
+    ) -> np.ndarray:
+        """Build member-major descriptors for a hybrid MLA+SSM page."""
+        parts: list[np.ndarray] = []
+        for local_region, group_id in zip(
+            member_plan.local_regions, member_plan.group_ids
+        ):
+            if _is_attention_spec(self._group_spec_types[group_id]):
+                parts.append(
+                    self._build_fa_local(
+                        base_addresses,
+                        block_size_ratio,
+                        MemberTransferPlan(("",), (local_region,), (group_id,)),
+                    )
+                )
+            elif _is_ssm_spec(self._group_spec_types[group_id]):
+                parts.append(self._build_mamba_local(base_addresses, (local_region,)))
+            else:
+                raise ValueError(
+                    f"Unknown spec type {self._group_spec_types[group_id]} "
+                    f"for member {member_plan.member_names[len(parts)]!r}"
+                )
+        return np.concatenate(parts)
+
+    def _build_member_remote(
+        self,
+        plan: TPMapping,
+        nixl_agent_meta: NixlAgentMetadata,
+        block_size_ratio: int,
+        member_plan: MemberTransferPlan,
+        tp_ratio: int,
+        transfer_info: EngineTransferInfo,
+    ) -> np.ndarray:
+        """Build remote member-major descriptors for a hybrid MLA+SSM page."""
+        parts: list[np.ndarray] = []
+        for remote_region, (local_region, group_id) in enumerate(
+            zip(member_plan.local_regions, member_plan.group_ids)
+        ):
+            if _is_attention_spec(self._group_spec_types[group_id]):
+                single_plan = MemberTransferPlan(("",), (local_region,), (group_id,))
+                single_meta = replace(
+                    nixl_agent_meta,
+                    kv_caches_base_addr=[
+                        nixl_agent_meta.kv_caches_base_addr[remote_region]
+                    ],
+                    block_lens=[nixl_agent_meta.block_lens[remote_region]],
+                )
+                parts.append(
+                    self._build_fa_remote(
+                        plan, single_meta, block_size_ratio, single_plan
+                    )
+                )
+            elif _is_ssm_spec(self._group_spec_types[group_id]):
+                parts.append(
+                    self._build_mamba_remote(
+                        nixl_agent_meta,
+                        tp_ratio,
+                        transfer_info,
+                        (remote_region,),
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"Unknown spec type {self._group_spec_types[group_id]} "
+                    f"for member {member_plan.member_names[remote_region]!r}"
+                )
+        return np.concatenate(parts)
 
     def _build_fa_local(
         self,
@@ -1627,11 +1727,16 @@ class NixlBaseConnectorWorker:
         block_size_ratio = self.block_size // block_size
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
-        blocks_data = self._build_fa_local(
-            local_base_addresses,
-            block_size_ratio,
-            member_plan,
-        )
+        if self._has_mamba and member_plan is not None:
+            blocks_data = self._build_member_local(
+                local_base_addresses, block_size_ratio, member_plan
+            )
+        else:
+            blocks_data = self._build_fa_local(
+                local_base_addresses,
+                block_size_ratio,
+                member_plan,
+            )
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
@@ -1639,7 +1744,7 @@ class NixlBaseConnectorWorker:
             self.tp_rank,
             self.device_id,
         )
-        if self._has_mamba:
+        if self._has_mamba and member_plan is None:
             assert self.num_descs * block_size_ratio == len(blocks_data)
             # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
             # is unnecessary — a single conv desc per block suffices.  Consider
@@ -1845,9 +1950,19 @@ class NixlBaseConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        blocks_data = self._build_fa_remote(
-            plan, nixl_agent_meta, block_size_ratio, member_plan
-        )
+        if self._has_mamba and member_plan is not None:
+            blocks_data = self._build_member_remote(
+                plan,
+                nixl_agent_meta,
+                block_size_ratio,
+                member_plan,
+                tp_ratio,
+                transfer_info,
+            )
+        else:
+            blocks_data = self._build_fa_remote(
+                plan, nixl_agent_meta, block_size_ratio, member_plan
+            )
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1855,7 +1970,7 @@ class NixlBaseConnectorWorker:
             remote_tp_rank,
             self.tp_rank,
         )
-        if self._has_mamba:
+        if self._has_mamba and member_plan is None:
             logger.debug(
                 "Registering remote Mamba blocks for engine %s rank %s",
                 engine_id,
@@ -2000,12 +2115,20 @@ class NixlBaseConnectorWorker:
             # match up to the kernel block size ratio even under
             # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == [
+            local_lens = (
+                [
+                    self.block_len_per_layer[region]
+                    for region in member_plan.local_regions
+                ]
+                if member_plan is not None
+                else self.block_len_per_layer
+            )
+            assert local_lens == [
                 block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
             ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
                 f"between P and D (block_size_ratio={block_size_ratio}): "
-                f"local={self.block_len_per_layer}, "
+                f"local={local_lens}, "
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
