@@ -12,8 +12,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    MarlinNvFp4LinearKernel,
-    NvFp4LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -58,11 +56,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
+    process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -409,7 +405,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -454,7 +450,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -547,7 +543,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -604,8 +600,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
+            layer.weight, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
@@ -641,7 +640,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             static=True, group_shape=GroupShape(block_n, block_k)
         )
 
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -779,16 +778,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             "logic. This function should not be called."
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -905,6 +894,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -951,6 +941,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -1244,16 +1235,16 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
     4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
-    directly (no on-disk conversion) and dispatches to the FP4 Marlin GEMM:
+    directly (no on-disk conversion) and dispatches to a W4A16 GEMM:
 
         weight          uint8     packed NVFP4 (2 nibbles/byte along input dim)
         weight_scale    fp8-e4m3  per 16-elem group along input dim
         weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
 
-    No activation quantization. Marlin expects the global scale in the same
-    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
-    weight_global_scale **without reciprocation** -- the CT W4A16 path
-    reciprocates only because CT stores the inverse on disk.
+    No activation quantization. ModelOpt stores the global scale as
+    amax/2688, so we rename weight_scale_2 -> weight_global_scale without
+    reciprocation. The selected kernel converts it to its runtime format.
+    The CT W4A16 path reciprocates because CT stores the inverse on disk.
 
     We also register a placeholder input_scale parameter so that W4A4-shaped
     checkpoints (which contain *_proj.input_scale tensors) can be loaded
@@ -1264,17 +1255,12 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
-        # Vestigial slot mirrored from ModelOptNvFp4LinearMethod: the parent
-        # config's get_quant_method only fills marlin_input_dtype when
-        # backend == "marlin"; we don't set that since we pin the kernel
-        # below, but we keep the attribute for shape parity.
         self.marlin_input_dtype = None
-        # Direct-instantiate the Marlin NVFP4 adapter rather than going through
-        # init_nvfp4_linear_kernel(): the latter's priority list returns a
-        # cutlass W4A4 kernel as first-pick on this hardware, which would
-        # silently try to quantize activations (we have no input_scale). For
-        # W4A16 there is exactly one valid kernel, so we pin it.
-        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+        # `init_nvfp4_linear_kernel(use_a16=True)` is best of both worlds:
+        # 1. `use_a16=True` forces  `Marlin`: https://github.com/vllm-project/vllm/commit/e68988a#diff-7135ab92aa94dfacb1ad3c77fc13f9c4ffe0b977f8eac5d86c2afe243e5f92a6R842-R889
+        # for `--linear-backend=auto`, avoiding a W4A4 kernel that requires input_scale.
+        # 2. Specifying e.g. `--linear-backend=humming` will override.
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
 
     def create_weights(
         self,
@@ -1297,6 +1283,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1352,6 +1339,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
+
         # Discard the input_scale placeholder. Whether it carries values
         # (W4A4 ckpt loaded as W4A16) or is uninitialized (native W4A16
         # ckpt), W4A16 mode does not quantize activations, so this is unused.
@@ -1602,7 +1592,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1616,6 +1608,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     @property
@@ -2005,90 +1998,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
                     f"Expected {name} dtype {expected_dtype}, got {actual}."
                 )
 
-    def _shuffle_weights_for_trtllm(self, layer: torch.nn.Module) -> None:
-        """Shuffle weights and scales into FlashInfer TRTLLM MXFP8 layout."""
-        from flashinfer import (
-            reorder_rows_for_gated_act_gemm,
-            shuffle_matrix_a,
-            shuffle_matrix_sf_a,
-        )
-
-        epilogue_tile_m = 128
-        num_experts = layer.w13_weight.shape[0]
-        is_gated = self.moe.is_act_and_mul
-        intermediate_size_factor = 2 if is_gated else 1
-
-        w13_weight = layer.w13_weight.data
-        w13_scale = layer.w13_weight_scale.data
-        if is_gated:
-            # FI TRTLLM gated kernels use W31 ordering. Model checkpoints store
-            # gated projection as W13, so convert once before shuffling.
-            w13_weight = swap_w13_to_w31(w13_weight)
-            w13_scale = swap_w13_to_w31(w13_scale)
-
-        w13_weight_shuffled = []
-        w2_weight_shuffled = []
-        w13_scale_shuffled = []
-        w2_scale_shuffled = []
-        for i in range(num_experts):
-            w13_i = w13_weight[i].reshape(
-                intermediate_size_factor * layer.intermediate_size_per_partition, -1
-            )
-            w13_sf_i = w13_scale[i].reshape(
-                intermediate_size_factor * layer.intermediate_size_per_partition, -1
-            )
-            if is_gated:
-                # Reorder rows for gated activation layout expected by TRTLLM.
-                w13_i = reorder_rows_for_gated_act_gemm(w13_i.clone())
-                w13_sf_i = reorder_rows_for_gated_act_gemm(w13_sf_i.clone())
-
-            w13_shuffled_i = shuffle_matrix_a(w13_i.view(torch.uint8), epilogue_tile_m)
-            w2_shuffled_i = shuffle_matrix_a(
-                layer.w2_weight.data[i].view(torch.uint8), epilogue_tile_m
-            )
-            w13_weight_shuffled.append(
-                w13_shuffled_i.contiguous().view(MXFP8_VALUE_DTYPE)
-            )
-            w2_weight_shuffled.append(
-                w2_shuffled_i.contiguous().view(MXFP8_VALUE_DTYPE)
-            )
-            w13_sf_shuffled_i = shuffle_matrix_sf_a(
-                w13_sf_i.view(torch.uint8).reshape(
-                    intermediate_size_factor * layer.intermediate_size_per_partition,
-                    -1,
-                ),
-                epilogue_tile_m,
-            )
-            w2_sf_shuffled_i = shuffle_matrix_sf_a(
-                layer.w2_weight_scale.data[i]
-                .view(torch.uint8)
-                .reshape(layer.hidden_size, -1),
-                epilogue_tile_m,
-            )
-            w13_scale_shuffled.append(
-                w13_sf_shuffled_i.contiguous().view(MXFP8_SCALE_DTYPE)
-            )
-            w2_scale_shuffled.append(
-                w2_sf_shuffled_i.contiguous().view(MXFP8_SCALE_DTYPE)
-            )
-
-        replace_parameter(
-            layer, "w13_weight", torch.stack(w13_weight_shuffled).contiguous()
-        )
-        replace_parameter(
-            layer, "w2_weight", torch.stack(w2_weight_shuffled).contiguous()
-        )
-        replace_parameter(
-            layer,
-            "w13_weight_scale",
-            torch.stack(w13_scale_shuffled).contiguous(),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_scale",
-            torch.stack(w2_scale_shuffled).contiguous(),
-        )
-
     def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
@@ -2162,6 +2071,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             fp8_backend=self.mxfp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
@@ -2184,16 +2094,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             "logic. This function should not be called."
         )
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
@@ -2207,6 +2107,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -2442,7 +2343,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(prefix_dot):
                     return info["quant_algo"].upper()
 
-        # FusedMoE expert prefix is e.g. "...moe.experts", while ModelOpt's
+        # RoutedExperts expert prefix is e.g. "...moe.experts", while ModelOpt's
         # quantized_layers entries use "...moe.gate_proj" / "...moe.up_proj".
         if prefix.endswith(".experts"):
             parent_dot = prefix.rsplit(".experts", 1)[0] + "."
@@ -2450,16 +2351,29 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
-        # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
-        for candidate in self._quantized_layer_prefix_candidates(prefix):
-            parent_dot = candidate.rsplit(".", 1)[0] + "."
-            algos = {
-                info["quant_algo"].upper()
-                for key, info in self.quantized_layers.items()
-                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
-            }
-            if len(algos) == 1:
-                return algos.pop()
+        # 4. Parent-prefix fallback for fused projections whose config lists
+        # shard names instead of vLLM's packed module name.
+        fused_projection_shards = {
+            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+            "gate_up_proj": ("gate_proj", "up_proj"),
+        }
+        shard_names = fused_projection_shards.get(proj_name)
+        if shard_names is not None:
+            for candidate in self._quantized_layer_prefix_candidates(prefix):
+                parent_dot = candidate.rsplit(".", 1)[0] + "."
+                shard_algos: set[str] = set()
+                for shard_name in shard_names:
+                    shard_prefix = f"{parent_dot}{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        shard_algos.add(algo)
+                if len(shard_algos) == 1:
+                    return shard_algos.pop()
+                if len(shard_algos) > 1:
+                    raise ValueError(
+                        f"Mixed quant_algo within fused layer {prefix}: "
+                        f"{shard_algos}. All shards must use the same quantization."
+                    )
 
         return None
 

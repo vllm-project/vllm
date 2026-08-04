@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use thiserror_ext::AsReport as _;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
@@ -7,7 +10,10 @@ use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+    resolve_session_id,
+};
 
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
@@ -98,6 +104,11 @@ pub(super) fn prepare_completion_request(
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
+    let session_id = resolve_session_id(
+        &ctx,
+        request.session_id.as_deref(),
+        request.vllm_xargs.as_ref(),
+    );
 
     let text_request = TextRequest {
         request_id: request_id.clone(),
@@ -117,6 +128,7 @@ pub(super) fn prepare_completion_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
+            repetition_detection: request.repetition_detection,
             stop_token_ids: request.stop_token_ids,
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
@@ -126,7 +138,7 @@ pub(super) fn prepare_completion_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -141,8 +153,10 @@ pub(super) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
 
     Ok(PreparedRequest {
@@ -194,11 +208,12 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
-    use vllm_text::tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::completions::types::CompletionRequest;
+    use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
@@ -212,32 +227,8 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-            Ok(text.bytes().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<String> {
-            Ok(
-                String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                    .into_owned(),
-            )
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn test_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -274,6 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_coerces_null_max_tokens_to_default() {
+        // An absent `max_tokens` already gets the serde default.
+        let absent: CompletionRequest =
+            serde_json::from_value(base_request_json()).expect("parse request");
+        assert_eq!(absent.max_tokens, Some(16));
+
+        // An explicit `null` deserializes to `None`, bypassing the default;
+        // `normalize` must coerce it back to match Python vLLM.
+        let mut request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "max_tokens": null
+        }))
+        .expect("parse request");
+        assert_eq!(request.max_tokens, None);
+
+        request.normalize();
+        assert_eq!(request.max_tokens, Some(16));
+    }
+
+    #[test]
     fn prepare_completion_request_maps_sampling_fields() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -297,7 +310,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -340,7 +353,7 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
-                &TestTokenizer,
+                &test_tokenizer(),
             )
             .expect("prepare")
             .text_request
@@ -374,7 +387,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -399,7 +412,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -422,7 +435,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -446,7 +459,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -471,7 +484,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -498,7 +511,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -523,7 +536,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -549,7 +562,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
@@ -574,10 +587,80 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
+    }
+
+    #[test]
+    fn prepare_completion_request_threads_body_session_id() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "session_id": "body-session",
+            "vllm_xargs": {"session_id": "xargs-session"},
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "header-session".parse().unwrap());
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.text_request.session_id.as_deref(),
+            Some("body-session")
+        );
+    }
+
+    #[test]
+    fn prepare_completion_request_uses_vllm_xargs_session_id_fallback() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "vllm_xargs": {"session_id": "xargs-session"},
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(
+            prepared.text_request.session_id.as_deref(),
+            Some("xargs-session")
+        );
+    }
+
+    #[test]
+    fn prepare_completion_request_ignores_empty_and_non_string_session_id_values() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "session_id": "",
+            "vllm_xargs": {"session_id": 7},
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.session_id, None);
     }
 
     #[test]
@@ -593,7 +676,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);

@@ -79,12 +79,18 @@ setup_buildx_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+annotate_image_tags() {
+    .buildkite/scripts/annotate-image-build.sh \
+        "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
+}
+
 check_and_skip_if_image_exists() {
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "--- :mag: Checking if image exists"
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
+            annotate_image_tags
             exit 0
         fi
         echo "Image not found, proceeding with build"
@@ -171,6 +177,18 @@ BRANCH=$4
 IMAGE_TAG=$5
 IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
 
+# When TORCH_NIGHTLY=1, build the base CI image against PyTorch nightly so the
+# entire existing pipeline runs on nightly torch (CUDA/GPU lane only). Delegate
+# to the dedicated nightly build (PYTORCH_NIGHTLY=1, CUDA 13.0) and tag it at the
+# normal IMAGE_TAG that every test step already pulls -- no separate image tag,
+# no duplicate "vLLM Against PyTorch Nightly" pipeline section.
+if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+    echo "--- :warning: TORCH_NIGHTLY=1 -- building base image on PyTorch nightly"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec "${SCRIPT_DIR}/image_build_torch_nightly.sh" \
+        "${REGISTRY}" "${REPO}" "${BUILDKITE_COMMIT}" "${BRANCH}" "${IMAGE_TAG}"
+fi
+
 # build config
 TARGET="test-ci"
 VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
@@ -254,3 +272,5 @@ echo "--- :docker: Building ${TARGET}"
 docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
 echo "--- :white_check_mark: Build complete"
+
+annotate_image_tags

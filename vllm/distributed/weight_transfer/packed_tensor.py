@@ -10,8 +10,7 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-# Default values for packed tensor configuration.
-# These are imported by NCCLWeightTransferUpdateInfo and trainer_send_weights.
+# Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
@@ -186,6 +185,7 @@ def packed_nccl_broadcast_consumer(
     post_unpack_func: Callable[[list[tuple[str, torch.Tensor]]], None],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    device: torch.device | str = "cuda",
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -199,6 +199,8 @@ def packed_nccl_broadcast_consumer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
+        device: Device for the receive buffers. Must match the device the NCCL
+                communicator was created on (the worker's assigned device).
 
     """
     target_packed_tensor_size = buffer_size_bytes
@@ -211,7 +213,7 @@ def packed_nccl_broadcast_consumer(
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [
-        torch.empty(0, dtype=torch.uint8, device="cuda") for _ in range(num_buffers)
+        torch.empty(0, dtype=torch.uint8, device=device) for _ in range(num_buffers)
     ]
 
     while True:
@@ -234,7 +236,7 @@ def packed_nccl_broadcast_consumer(
                         break
                 # Create a packed tensor and broadcast it
                 packed_tensors[buffer_idx] = torch.empty(
-                    packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device="cuda"
+                    packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
                 )
                 group.broadcast(packed_tensors[buffer_idx], src=src)
                 # Load the packed tensor into the model
@@ -259,7 +261,7 @@ def packed_nccl_broadcast_consumer(
                     packed_tensors[buffer_idx] = torch.empty(
                         packing_tensor_sizes[buffer_idx],
                         dtype=torch.uint8,
-                        device="cuda",
+                        device=device,
                     )
                     group.broadcast(packed_tensors[buffer_idx], src=src)
                     # Load the packed tensor into the model

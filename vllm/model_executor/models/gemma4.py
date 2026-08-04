@@ -38,7 +38,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -83,6 +83,12 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+_GEMMA4_EXPERT_PARENT_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(r"(?<!\.moe)\.experts$"): ".moe.experts",
+    }
+)
 
 
 def _remap_gemma4_expert_weight_name(name: str) -> str:
@@ -299,14 +305,14 @@ class Gemma4Router(nn.Module):
 
 
 class Gemma4MoE(nn.Module):
-    """Mixture of Experts for Gemma4 using vLLM's FusedMoE.
+    """Mixture of Experts for Gemma4 using vLLM's MoERunner.
 
-    Wraps FusedMoE with custom routing. The router projection is
+    Wraps MoERunner with custom routing. The router projection is
     external (Gemma4Router) — this class only handles expert dispatch.
 
     Gemma4 routing: softmax over ALL experts → top-k → renormalize.
     per_expert_scale is folded into routing weights for mathematical
-    correctness with FusedMoE's fused kernel.
+    correctness with MoERunner's fused kernel.
     """
 
     def __init__(
@@ -320,11 +326,11 @@ class Gemma4MoE(nn.Module):
         self.num_experts = config.num_experts
 
         # Per-expert output scale folded into routing weights so that
-        # FusedMoE's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
+        # MoERunner's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
         self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
 
         # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-        # FusedMoE's built-in fused_topk scopes softmax differently, so
+        # MoERunner's built-in fused_topk scopes softmax differently, so
         # a custom routing function is needed for numerical correctness.
         # NOTE: self.per_expert_scale is read at call time (not captured into
         # a local) so that torch.func.functional_call parameter substitution
@@ -344,8 +350,8 @@ class Gemma4MoE(nn.Module):
                 gating_output, topk, self.per_expert_scale
             )
 
-        # FusedMoE experts with custom Gemma4 routing
-        self.experts = FusedMoE(
+        # MoERunner experts with custom Gemma4 routing
+        self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.top_k_experts,
             hidden_size=config.hidden_size,
@@ -499,6 +505,13 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            # Gemma4 vision bidi: on sliding layers the bidirectional image
+            # block must stay within the sliding window, matching HF's
+            # (causal OR blockwise) AND sliding_window. Without this the image
+            # span (~1100 soft tokens at max_soft_tokens=1120) exceeds the 1024
+            # window; the runner keeps the full range and the kernel bounds it
+            # per-query here.
+            mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
 
@@ -1369,10 +1382,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # MoE expert weight mapping: checkpoint can have either:
         #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
         #   2. Already per-expert 2D weights (if quantized)
-        # Map to FusedMoE parameters:
-        #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
-        #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
-        #   moe.experts.{id}.down_proj → FusedMoE w2
+        # Map to MoERunner parameters:
+        #   moe.experts.{id}.gate_proj → MoERunner w1 (shard of w13)
+        #   moe.experts.{id}.up_proj   → MoERunner w3 (shard of w13)
+        #   moe.experts.{id}.down_proj → MoERunner w2
         num_experts = getattr(self.config, "num_experts", None) or 0
         # Strategy A: dot-separated suffix
         # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
@@ -1462,7 +1475,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         continue
                     param = params_dict[moe_name]
                     # Expert weights are already in the correct
-                    # orientation for FusedMoE after _weight_iterator:
+                    # orientation for MoERunner after _weight_iterator:
                     #   gate/up: [I, H] → w1/w3 expects [I, H]
                     #   down:    [H, I] → w2 expects [H, I]
                     # Scales and other quantization params may be 1D or scalar.
@@ -1501,7 +1514,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             # Gemma4ForConditionalGeneration already loads the text stack
             # from `model.language_model.*`. We reuse that same checkpoint
@@ -1655,19 +1668,19 @@ class Gemma4ForCausalLM(
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for
-                # FusedMoE weight_loader.
+                # MoERunner weight_loader.
                 #
                 # Checkpoint format:
                 #   moe.gate_up_proj: [E, 2*I, H]  (fused gate + up)
                 #   moe.down_proj:    [E, H, I]
                 #
-                # FusedMoE expects per-expert:
+                # MoERunner expects per-expert:
                 #   w1 (gate): [I, H]   — first half of gate_up
                 #   w3 (up):   [I, H]   — second half of gate_up
                 #   w2 (down): [H, I]   — as-is from checkpoint
                 #
                 # No transpose needed: checkpoint orientation already
-                # matches FusedMoE's expected layout.
+                # matches MoERunner's expected layout.
                 if "moe.gate_up_proj" in name and weight.dim() == 3:
                     num_experts = weight.size(0)
                     intermediate_size = weight.size(1) // 2

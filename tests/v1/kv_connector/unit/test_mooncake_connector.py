@@ -33,14 +33,37 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [
+                    "model.layers.0.self_attn",
+                    "model.layers.1.self_attn",
+                    "model.layers.0.mla_attn",
+                    "model.layers.1.eagle_attn",
+                ],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
 
 
 class FakeMooncakeWrapper:
@@ -126,6 +149,8 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
 
     block_len = 256
@@ -206,6 +231,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
         req_blocks={"d-req-pp": (transfer_id, [[20, 21]])},
         kv_caches_base_addr=[region.base_addr for region in remote_regions],
         block_lens=[region.block_len for region in remote_regions],
+        kv_block_lens=[region.kv_block_len for region in remote_regions],
         registered_layer_names=[region.layer_name for region in remote_regions],
         registered_layer_indices=[region.layer_index for region in remote_regions],
     )
@@ -263,9 +289,9 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         prefill_worker = prefill_connector.connector_worker
 
         block_len = 4096
-        kv_half = block_len // 2
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [block_len]
         prefill_worker.registered_layer_names = ["model.layers.1.self_attn"]
         prefill_worker.registered_layer_indices = [1]
 
@@ -294,6 +320,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             req_blocks={"d-req-layer-align": (transfer_id, [[20]])},
             kv_caches_base_addr=[0xA000, 0xB000],
             block_lens=[block_len, block_len],
+            kv_block_lens=[block_len, block_len],
             registered_layer_names=[
                 "model.layers.0.self_attn",
                 "model.layers.1.self_attn",
@@ -310,15 +337,9 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
         src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-        assert src_ptrs == [
-            0x1000 + 10 * block_len,
-            0x1000 + 10 * block_len + kv_half,
-        ]
-        assert dst_ptrs == [
-            0xB000 + 20 * block_len,
-            0xB000 + 20 * block_len + kv_half,
-        ]
-        assert lengths == [kv_half, kv_half]
+        assert src_ptrs == [0x1000 + 10 * block_len]
+        assert dst_ptrs == [0xB000 + 20 * block_len]
+        assert lengths == [block_len]
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
@@ -805,6 +826,7 @@ async def test_kv_producer(monkeypatch):
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [block_len]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -832,6 +854,7 @@ async def test_kv_producer(monkeypatch):
             req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
             registered_layer_names=["model.layers.0.self_attn"],
             registered_layer_indices=[0],
         )
@@ -843,26 +866,18 @@ async def test_kv_producer(monkeypatch):
         with patch.object(
             prefill_worker, "_send_blocks", return_value=0
         ) as mock_send_blocks:
-            # With blocks-first layout, each block is virtually split
-            # into K and V halves, producing non-coalesced transfers.
-            kv_half = block_len // 2
 
-            def expected_split_transfers(src_base, dst_base, src_blocks, dst_blocks):
-                """Build expected (src_ptrs, dst_ptrs, lengths) for
-                virtual-split K/V transfers."""
-                src_ptrs, dst_ptrs, lengths = [], [], []
-                for kv_offset in (0, kv_half):
-                    for sb, db in zip(src_blocks, dst_blocks):
-                        src_ptrs.append(src_base + sb * block_len + kv_offset)
-                        dst_ptrs.append(dst_base + db * block_len + kv_offset)
-                        lengths.append(kv_half)
-                return src_ptrs, dst_ptrs, lengths
+            def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
+                n = len(src_blocks)
+                return (
+                    [src_base + src_blocks[0] * block_len],
+                    [dst_base + dst_blocks[0] * block_len],
+                    [n * block_len],
+                )
 
             # Normal case: 2 blocks to 2 blocks
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
-            src, dst, lens = expected_split_transfers(
-                0x1000, 0x2000, [10, 11], [20, 21]
-            )
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [10, 11], [20, 21])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
                 src,
@@ -894,7 +909,7 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct: 11 to 20
-            src, dst, lens = expected_split_transfers(0x1000, 0x2000, [11], [20])
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [11], [20])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
                 src,
@@ -981,6 +996,7 @@ async def test_kv_consumuer(monkeypatch):
         decode_worker = decode_connector.connector_worker
         decode_worker.kv_caches_base_addr = [0x1000]
         decode_worker.block_len_per_layer = [4096]
+        decode_worker.kv_block_len_per_layer = [4096]
         decode_worker.registered_layer_names = ["model.layers.0.self_attn"]
         decode_worker.registered_layer_indices = [0]
         decode_worker.rpc_port = 54321
@@ -1236,6 +1252,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [local_block_len]
+        prefill_worker.kv_block_len_per_layer = [local_block_len]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -1283,6 +1300,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     },
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
+                    kv_block_lens=[remote_block_len],
                     registered_layer_names=["model.layers.0.self_attn"],
                     registered_layer_indices=[0],
                 )
@@ -1304,47 +1322,31 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 flat_remote = [b for g in remote_block_ids for b in g]
                 num_blocks = len(flat_local)
 
-                # With blocks-first layout, virtual split halves block
-                # lengths and doubles transfer regions (K + V).
-                local_kv_block_len = local_block_len // 2
-                remote_kv_block_len = remote_block_len // 2
+                assert len(src_ptrs) == num_blocks
+                assert len(dst_ptrs) == num_blocks
+                assert len(lengths) == num_blocks
 
-                assert len(src_ptrs) == 2 * num_blocks
-                assert len(dst_ptrs) == 2 * num_blocks
-                assert len(lengths) == 2 * num_blocks
-
-                # Compute expected offsets using kv_block_len
                 if d_tp_size <= P_TP_SIZE:
                     tp_ratio = P_TP_SIZE // d_tp_size
                     expected_src_off = 0
-                    expected_dst_off = (P_TP_RANK % tp_ratio) * local_kv_block_len
-                    expected_xfer_len = local_kv_block_len
+                    expected_dst_off = (P_TP_RANK % tp_ratio) * local_block_len
+                    expected_xfer_len = local_block_len
                 else:
                     ratio_abs = d_tp_size // P_TP_SIZE
-                    expected_src_off = (d_rank % ratio_abs) * remote_kv_block_len
+                    expected_src_off = (d_rank % ratio_abs) * remote_block_len
                     expected_dst_off = 0
-                    expected_xfer_len = remote_kv_block_len
+                    expected_xfer_len = remote_block_len
 
-                # First num_blocks entries are K region,
-                # next num_blocks are V region.
-                for region_idx in range(2):
-                    local_region_base = 0x1000 + region_idx * local_kv_block_len
-                    remote_region_base = 0x2000 + region_idx * remote_kv_block_len
-                    for blk_idx, (lblk, rblk) in enumerate(
-                        zip(flat_local, flat_remote)
-                    ):
-                        idx = region_idx * num_blocks + blk_idx
-                        assert src_ptrs[idx] == (
-                            local_region_base
-                            + lblk * local_block_len
-                            + expected_src_off
-                        )
-                        assert dst_ptrs[idx] == (
-                            remote_region_base
-                            + rblk * remote_block_len
-                            + expected_dst_off
-                        )
-                        assert lengths[idx] == expected_xfer_len
+                local_region_base = 0x1000
+                remote_region_base = 0x2000
+                for blk_idx, (lblk, rblk) in enumerate(zip(flat_local, flat_remote)):
+                    assert src_ptrs[blk_idx] == (
+                        local_region_base + lblk * local_block_len + expected_src_off
+                    )
+                    assert dst_ptrs[blk_idx] == (
+                        remote_region_base + rblk * remote_block_len + expected_dst_off
+                    )
+                    assert lengths[blk_idx] == expected_xfer_len
 
                 # Verify successful response sent back to consumer
                 mock_socket.send_multipart.assert_called_once()

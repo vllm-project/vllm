@@ -38,15 +38,20 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
     kInt4Static,
+    kInt8DynamicTokenSym,
     kInt8Static,
+    kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
+    kNvfp4Dynamic,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -61,9 +66,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_humming_moe_gemm_type() -> str | None:
+def get_humming_moe_gemm_type() -> str:
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
-    gemm_type = None
+    gemm_type = "indexed"
     if env_gemm_type is not None:
         env_gemm_type = env_gemm_type.lower()
         if env_gemm_type == "indexed":
@@ -87,7 +92,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         num_dispatchers: int | None = None,
     ):
         self.layer = layer
-        self.num_experts = self.layer.num_experts
+        self.num_experts = self.layer.local_num_experts
         self.global_num_experts = self.layer.global_num_experts
         self.init_humming_moe()
 
@@ -186,6 +191,24 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kInt4Static, kFp8DynamicTokenSym),
             (kInt8Static, None),
             (kInt8Static, kFp8DynamicTokenSym),
+            # Checkpoint-driven (weight, activation) pairs the dense/MoE oracles
+            # pass. Humming defers input quant (see expects_unquantized_inputs),
+            # so the activation key does not constrain support.
+            # fp8 (compressed-tensors / native / modelopt)
+            (kFp8StaticChannelSym, kFp8StaticTensorSym),
+            (kFp8StaticChannelSym, kFp8Dynamic128Sym),
+            (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8Dynamic128Sym),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            # int8 (compressed-tensors w8a8 / experts_int8)
+            (kInt8StaticChannelSym, None),
+            (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+            # nvfp4 (compressed-tensors / modelopt / quark)
+            (kNvfp4Static, kNvfp4Dynamic),
+            # mxfp8 (compressed-tensors / modelopt / online)
+            (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -228,6 +251,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -266,7 +290,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert a1.size(0) == num_experts
             num_tokens = a1.size(1)
 
-        return meta1.num_experts, num_tokens, meta1.shape_n // 2, meta1.shape_k, top_k
+        return (
+            meta1.num_experts,
+            num_tokens,
+            # Logical intermediate width for both gated and non-gated activations
+            self.layer.intermediate_size_per_partition,
+            meta1.shape_k,
+            top_k,
+        )
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
         from vllm.utils.humming import GemmType as HummingGemmType
@@ -304,7 +335,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             real_shape_m = M * topk
             output_shape = (M, K)
 
-        down_input_size = N if activation.is_gated else (N * 2)
+        gate_up_size = N * (2 if activation.is_gated else 1)
+        down_input_size = N
         a_dtype = self.layer.humming_metas["w13"].a_dtype
         c_dtype = self.layer.humming_metas["w13"].c_dtype
         num_bits = a_dtype.num_bits
@@ -324,7 +356,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "dtype": torch_dtype_map[a_dtype],
             },
             "gate_up_output": {
-                "shape": (real_shape_m, N * 2),
+                "shape": (real_shape_m, gate_up_size),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "activation_output": {
@@ -463,13 +495,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
             preferred_gemm_type = get_humming_moe_gemm_type()
-            if preferred_gemm_type is not None:
-                supported = preferred_gemm_type.lower() == gemm_type
-                if not supported:
-                    reason = (
-                        f"preferred gemm type {preferred_gemm_type} != "
-                        f"supported gemm type {gemm_type}"
-                    )
+            supported = preferred_gemm_type.lower() == gemm_type
+            if not supported:
+                reason = (
+                    f"preferred gemm type {preferred_gemm_type} != "
+                    f"supported gemm type {gemm_type}"
+                )
 
         return supported, reason
 
@@ -632,11 +663,8 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            outputs=buffers["output"],
+            outputs=output,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class HummingGroupedExperts(HummingExpertsBase):
@@ -747,15 +775,12 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
 
         moe_unpermute(
-            out=buffers["output"],
+            out=output,
             permuted_hidden_states=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
@@ -850,13 +875,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             layer=self.layer,
             inputs=inputs,
             input_scale=input_scale,
-            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
+            outputs=output.view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
             sublayer_name="w2",
         )
-
-        # Note: output is already written to buffers["down_output"]
-        # which aliases workspace13/output

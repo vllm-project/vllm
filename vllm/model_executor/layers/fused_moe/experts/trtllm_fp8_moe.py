@@ -15,7 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
+from vllm.model_executor.layers.fused_moe.utils import (
+    fi_moe_largest_bucket,
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -56,6 +59,35 @@ class TrtLlmFp8ExpertsBase:
         self.moe_config = moe_config
         self.quant_config = quant_config
 
+        # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
+        device = torch.accelerator.current_device_index()
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_alpha = None
+
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_beta = None
+
+        if quant_config.gemm1_clamp_limit is not None:
+            self.gemm1_clamp_limit = torch.tensor(
+                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -77,8 +109,12 @@ class TrtLlmFp8ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports SiLU, SwiGLU-OAI (uninterleaved), and RELU^2 non-gated."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -86,7 +122,9 @@ class TrtLlmFp8ExpertsBase:
         return (
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
-        ) and not moe_parallel_config.enable_eplb
+        ) and not (
+            moe_parallel_config.enable_eplb or moe_parallel_config.is_sequence_parallel
+        )
 
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
@@ -100,6 +138,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             not moe_parallel_config.use_all2all_kernels
             or moe_parallel_config.use_ag_rs_all2all_kernels
             or moe_parallel_config.use_deepep_v2_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+            or moe_parallel_config.use_fi_nvl_two_sided_kernels
         ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
@@ -198,6 +238,9 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -213,6 +256,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
             output=output,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
 
 
@@ -220,6 +264,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     """
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
+
+    def supports_routing_replay_capture(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -327,7 +374,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
         assert not apply_router_weight_on_input
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
         activation_type = activation_to_flashinfer_int(activation)
         assert self.topk <= global_num_experts
         assert global_num_experts % 4 == 0
@@ -347,13 +398,18 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or None
             selected_topk_group = topk_group or None
         else:
-            assert self.topk <= 10
+            assert self.topk <= 32
             fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
+
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
 
         kwargs = dict(
             routing_logits=router_logits,
@@ -362,6 +418,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -376,10 +435,16 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            routing_replay_out=routing_replay_out,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
-        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result
 
     def _apply_per_tensor(
         self,
@@ -412,6 +477,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         else:
             assert not apply_router_weight_on_input
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -432,6 +502,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
             activation_type=activation_type,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            routing_replay_out=routing_replay_out,
+        )
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
         return out
 
