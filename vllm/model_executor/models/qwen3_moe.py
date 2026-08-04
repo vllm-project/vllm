@@ -42,7 +42,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -201,7 +201,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             self.shared_expert_gate = None
             self.shared_expert = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             gate=self.gate,
             num_experts=self.n_routed_experts,
@@ -227,7 +227,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The gate/router runs inside the FusedMoE class
+        # The gate/router runs inside the MoERunner class
         final_hidden_states = self.experts(hidden_states)
 
         if self.is_sequence_parallel:

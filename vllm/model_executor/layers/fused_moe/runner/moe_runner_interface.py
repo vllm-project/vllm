@@ -33,6 +33,7 @@ class MoERunnerInterface(PluggableLayer, ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -48,7 +49,7 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     ########################################################################
     #
-    # FusedMoE layer methods
+    # FusedMoEFactory layer methods
     #
     ########################################################################
 
