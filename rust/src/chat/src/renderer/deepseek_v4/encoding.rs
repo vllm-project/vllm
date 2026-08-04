@@ -130,21 +130,24 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 /// `reasoning_effort`; the generic template-kwargs map is left for HF
 /// templates.
 fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
-    let mut reasoning_effort_prompt = "";
+    let mut reasoning_effort_prompt = REASONING_EFFORT_HIGH;
 
     match request.chat_options.reasoning_effort {
         Some(ReasoningEffort::None) => thinking_mode = ThinkingMode::Chat,
-        Some(ReasoningEffort::Max | ReasoningEffort::XHigh) => {
+        Some(ReasoningEffort::Max) => {
             reasoning_effort_prompt = REASONING_EFFORT_MAX;
         }
-        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::High) => {
+        Some(ReasoningEffort::XHigh | ReasoningEffort::High) => {
             reasoning_effort_prompt = REASONING_EFFORT_HIGH;
         }
-        Some(_) | None => {}
+        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
+            reasoning_effort_prompt = "";
+        }
+        None => {}
     }
 
     Ok((thinking_mode, reasoning_effort_prompt))

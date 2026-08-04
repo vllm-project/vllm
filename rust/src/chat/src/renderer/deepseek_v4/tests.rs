@@ -22,7 +22,9 @@ fn render_request(request: &ChatRequest) -> String {
 }
 
 fn fixture_request(input_name: &str) -> ChatRequest {
-    fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options())
+    let mut request = fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options());
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request
 }
 
 fn deepseek_fixture_options() -> FixtureRequestOptions {
@@ -108,6 +110,49 @@ fn reasoning_effort_high_adds_0731_high_prefix() {
 }
 
 #[test]
+fn omitted_thinking_and_effort_default_to_high() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn reasoning_effort_xhigh_maps_to_high() {
+    let mut request = ChatRequest {
+        messages: vec![ChatMessage::user("solve it")],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::XHigh);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn minimal_and_medium_reasoning_effort_map_to_low() {
+    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Medium] {
+        let mut request = ChatRequest {
+            messages: vec![ChatMessage::user("solve it")],
+            ..ChatRequest::for_test()
+        };
+        request.chat_options.reasoning_effort = Some(effort);
+
+        let rendered = render_request(&request);
+
+        expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"]
+            .assert_eq(&rendered);
+    }
+}
+
+#[test]
 fn reasoning_effort_low_keeps_the_default_prompt() {
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("solve it")],
@@ -159,12 +204,13 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
     let rendered = render_request(&request);
 
-    expect!["<｜begin▁of▁sentence｜><｜User｜>solve it<｜Assistant｜><think>"].assert_eq(&rendered);
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.ends_with("<｜Assistant｜><think>"));
 }
 
 #[test]
 fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
-    let request = ChatRequest {
+    let mut request = ChatRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![
                 AssistantContentBlock::ToolCall(AssistantToolCall {
@@ -183,6 +229,11 @@ fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
         ],
         ..ChatRequest::for_test()
     };
+
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
 
     let rendered = render_request(&request);
 
@@ -226,6 +277,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
         .chat_options
         .template_kwargs
         .insert("drop_thinking".to_string(), Value::Bool(false));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
 
     let rendered = render_request(&request);
 
@@ -237,7 +289,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
 
 #[test]
 fn continue_final_assistant_omits_final_eos() {
-    let request = ChatRequest {
+    let mut request = ChatRequest {
         messages: vec![
             ChatMessage::user("write"),
             ChatMessage::assistant_text("partial answer"),
@@ -248,6 +300,10 @@ fn continue_final_assistant_omits_final_eos() {
         },
         ..ChatRequest::for_test()
     };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
 
     let rendered = render_request(&request);
 
