@@ -157,8 +157,8 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        # Unique identifier for allreduce shared memory ("/" is invalid in shm names)
+        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.replace("/", "_")
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,

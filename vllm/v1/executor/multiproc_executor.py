@@ -3,13 +3,13 @@
 import multiprocessing
 import os
 import pickle
-import tempfile
-import uuid
 import queue
 import signal
+import tempfile
 import threading
 import time
 import traceback
+import uuid
 import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -123,14 +123,11 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs()
 
-        # Use a unique temp-file path per executor so that concurrent
-        # MultiprocExecutors (e.g. two DP engine cores) never collide.
-        # get_open_port() closes the probe socket before returning, leaving
-        # a TOCTOU window where two callers can both observe the same port
-        # as free and then both try to bind it → EADDRINUSE.  A UUID-keyed
-        # file:// rendezvous is guaranteed unique with no port binding at all.
-        self._init_file = os.path.join(tempfile.gettempdir(),
-                                       f"vllm_dist_{uuid.uuid4().hex}")
+        # Workers are all local processes: rendezvous via a unique temp file
+        # instead of a TCP port to avoid probe-then-bind port races.
+        self._init_file = os.path.join(
+            tempfile.gettempdir(), f"vllm_dist_{uuid.uuid4().hex}"
+        )
         distributed_init_method = f"file://{self._init_file}"
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None

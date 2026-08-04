@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import tempfile
+import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
+from contextlib import suppress
 from multiprocessing import Lock
 from typing import Any
 
@@ -12,7 +15,6 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
@@ -70,7 +72,12 @@ class UniProcExecutor(Executor):
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
-        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
+        # The only worker is a local process; rendezvous via a unique temp
+        # file instead of a TCP port to avoid probe-then-bind port races.
+        self._init_file = os.path.join(
+            tempfile.gettempdir(), f"vllm_dist_{uuid.uuid4().hex}"
+        )
+        distributed_init_method = f"file://{self._init_file}"
         # set local rank as the device index if specified
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
@@ -141,6 +148,10 @@ class UniProcExecutor(Executor):
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()
+        with suppress(OSError):
+            if init_file := getattr(self, "_init_file", None):
+                os.remove(init_file)
+                self._init_file = None
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
