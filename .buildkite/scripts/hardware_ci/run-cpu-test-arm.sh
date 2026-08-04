@@ -56,10 +56,11 @@ function cpu_tests() {
     set -e
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m"
 
-  # Run model tests
+  # Test encoder-decoder and encoder-only models
   docker exec cpu-test bash -c "
     set -e
-    pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model"
+    pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
+    pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 
   # Run quantized model tests
   docker exec cpu-test bash -c "

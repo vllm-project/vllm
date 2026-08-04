@@ -38,10 +38,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     sequence_parallel_chunk,
 )
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 
-from .attention import DeepseekV32Attention
-from .fused_ops import fused_allreduce_rms_norm
+from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
 
 def _all_gather_sp_states(
@@ -405,6 +406,11 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """
 
     model_cls = DeepseekV32Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if self.config.model_type == "glm_moe_dsa":
+            enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
