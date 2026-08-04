@@ -9,10 +9,18 @@
 #define CPU_CAPABILITY_AVX512
 #endif
 
+#if defined(__riscv_v_min_vlen) && (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+#define CPU_CAPABILITY_RVV
+#endif
+
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
 #if defined(CPU_CAPABILITY_AVX512)
 #include <immintrin.h>
+#endif
+
+#if defined(CPU_CAPABILITY_RVV)
+#include "../cpu_types_riscv_defs.hpp"
 #endif
 namespace {
 
@@ -24,11 +32,11 @@ inline Vectorized<scalar_t> convert_from_float_ext(const Vectorized<float>& a, c
 }
 
 template <typename scalar_t>
-inline void convert_from_float_and_store(scalar_t* out, const Vectorized<float>& a) {
-  float out_buffer[at::vec::Vectorized<float>::size()];
+inline void store_from_float_ext(scalar_t* out, const Vectorized<float>& a) {
+  float out_buffer[Vectorized<float>::size()];
   a.store(out_buffer);
-  for (int i = 0; i < 16; i++) {
-    out[i] = (scalar_t)out_buffer[i];
+  for (int i = 0; i < Vectorized<float>::size(); ++i) {
+    out[i] = static_cast<scalar_t>(out_buffer[i]);
   }
 }
 
@@ -51,6 +59,17 @@ inline std::tuple<Vectorized<float>, Vectorized<float>> load_float_vec2(const fl
   return std::make_tuple(x0, x1);
 }
 
+template <typename scalar_t, typename std::enable_if_t<is_reduced_floating_point_v<scalar_t>, int> = 1>
+inline at::vec::Vectorized<float> load_float_vec(const scalar_t* __restrict__ data) {
+  at::vec::Vectorized<float> out;
+  if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+    at::vec::load_fp32_from_bf16(data, out);
+  } else {
+    at::vec::load_fp32_from_fp16(data, out);
+  }
+  return out;
+}
+
 #if defined(CPU_CAPABILITY_AVX512)
 
 // `at::vec::convert_from_float<>` from PyTorch doesn't have avx512-bf16 intrinsics
@@ -62,8 +81,14 @@ convert_from_float_ext<at::BFloat16>(const Vectorized<float>& a, const Vectorize
 }
 
 template <>
-inline void convert_from_float_and_store<at::BFloat16>(at::BFloat16* out, const Vectorized<float>& a) {
-  _mm256_storeu_si256((__m256i*)out, (__m256i)(_mm512_cvtneps_pbh(__m512(a))));
+inline void store_from_float_ext<at::BFloat16>(at::BFloat16* out, const Vectorized<float>& a) {
+  _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), (__m256i)(_mm512_cvtneps_pbh(__m512(a))));
+}
+
+template <>
+inline void store_from_float_ext<at::Half>(at::Half* out, const Vectorized<float>& a) {
+  _mm256_storeu_si256(
+      reinterpret_cast<__m256i*>(out), _mm512_cvtps_ph(__m512(a), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
 }
 
 #define CVT_BF16_TO_FP32(a) _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(a), 16))
@@ -245,7 +270,7 @@ quantize_row_int8(uint8_t* __restrict__ Aq, float& As, const scalar_t* __restric
 
   for (int64_t k = 0; k < K; ++k) {
     const float val = static_cast<float>(A[k]) * inv_scale;
-    Aq[k] = (uint8_t)(std::round(val)) + 128;
+    Aq[k] = static_cast<uint8_t>(static_cast<int32_t>(std::round(val)) + 128);
   }
   As = scale;
 }
@@ -293,6 +318,77 @@ inline void quantize_row_int8<at::BFloat16>(
 // transpose utils
 // taken from my PR in ggml: https://github.com/ggml-org/llama.cpp/pull/8998
 #if defined(CPU_CAPABILITY_AVX512)
+inline void transpose_16x16_16bit(__m256i* v) {
+  __m256i v1[16];
+  v1[0] = _mm256_unpacklo_epi16(v[0], v[1]);
+  v1[1] = _mm256_unpackhi_epi16(v[0], v[1]);
+  v1[2] = _mm256_unpacklo_epi16(v[2], v[3]);
+  v1[3] = _mm256_unpackhi_epi16(v[2], v[3]);
+  v1[4] = _mm256_unpacklo_epi16(v[4], v[5]);
+  v1[5] = _mm256_unpackhi_epi16(v[4], v[5]);
+  v1[6] = _mm256_unpacklo_epi16(v[6], v[7]);
+  v1[7] = _mm256_unpackhi_epi16(v[6], v[7]);
+  v1[8] = _mm256_unpacklo_epi16(v[8], v[9]);
+  v1[9] = _mm256_unpackhi_epi16(v[8], v[9]);
+  v1[10] = _mm256_unpacklo_epi16(v[10], v[11]);
+  v1[11] = _mm256_unpackhi_epi16(v[10], v[11]);
+  v1[12] = _mm256_unpacklo_epi16(v[12], v[13]);
+  v1[13] = _mm256_unpackhi_epi16(v[12], v[13]);
+  v1[14] = _mm256_unpacklo_epi16(v[14], v[15]);
+  v1[15] = _mm256_unpackhi_epi16(v[14], v[15]);
+
+  v[0] = _mm256_unpacklo_epi32(v1[0], v1[2]);
+  v[1] = _mm256_unpackhi_epi32(v1[0], v1[2]);
+  v[2] = _mm256_unpacklo_epi32(v1[1], v1[3]);
+  v[3] = _mm256_unpackhi_epi32(v1[1], v1[3]);
+  v[4] = _mm256_unpacklo_epi32(v1[4], v1[6]);
+  v[5] = _mm256_unpackhi_epi32(v1[4], v1[6]);
+  v[6] = _mm256_unpacklo_epi32(v1[5], v1[7]);
+  v[7] = _mm256_unpackhi_epi32(v1[5], v1[7]);
+  v[8] = _mm256_unpacklo_epi32(v1[8], v1[10]);
+  v[9] = _mm256_unpackhi_epi32(v1[8], v1[10]);
+  v[10] = _mm256_unpacklo_epi32(v1[9], v1[11]);
+  v[11] = _mm256_unpackhi_epi32(v1[9], v1[11]);
+  v[12] = _mm256_unpacklo_epi32(v1[12], v1[14]);
+  v[13] = _mm256_unpackhi_epi32(v1[12], v1[14]);
+  v[14] = _mm256_unpacklo_epi32(v1[13], v1[15]);
+  v[15] = _mm256_unpackhi_epi32(v1[13], v1[15]);
+
+  v1[0] = _mm256_unpacklo_epi64(v[0], v[4]);
+  v1[1] = _mm256_unpackhi_epi64(v[0], v[4]);
+  v1[2] = _mm256_unpacklo_epi64(v[1], v[5]);
+  v1[3] = _mm256_unpackhi_epi64(v[1], v[5]);
+  v1[4] = _mm256_unpacklo_epi64(v[2], v[6]);
+  v1[5] = _mm256_unpackhi_epi64(v[2], v[6]);
+  v1[6] = _mm256_unpacklo_epi64(v[3], v[7]);
+  v1[7] = _mm256_unpackhi_epi64(v[3], v[7]);
+  v1[8] = _mm256_unpacklo_epi64(v[8], v[12]);
+  v1[9] = _mm256_unpackhi_epi64(v[8], v[12]);
+  v1[10] = _mm256_unpacklo_epi64(v[9], v[13]);
+  v1[11] = _mm256_unpackhi_epi64(v[9], v[13]);
+  v1[12] = _mm256_unpacklo_epi64(v[10], v[14]);
+  v1[13] = _mm256_unpackhi_epi64(v[10], v[14]);
+  v1[14] = _mm256_unpacklo_epi64(v[11], v[15]);
+  v1[15] = _mm256_unpackhi_epi64(v[11], v[15]);
+
+  v[0] = _mm256_permute2x128_si256(v1[0], v1[8], 0x20);
+  v[1] = _mm256_permute2x128_si256(v1[1], v1[9], 0x20);
+  v[2] = _mm256_permute2x128_si256(v1[2], v1[10], 0x20);
+  v[3] = _mm256_permute2x128_si256(v1[3], v1[11], 0x20);
+  v[4] = _mm256_permute2x128_si256(v1[4], v1[12], 0x20);
+  v[5] = _mm256_permute2x128_si256(v1[5], v1[13], 0x20);
+  v[6] = _mm256_permute2x128_si256(v1[6], v1[14], 0x20);
+  v[7] = _mm256_permute2x128_si256(v1[7], v1[15], 0x20);
+  v[8] = _mm256_permute2x128_si256(v1[0], v1[8], 0x31);
+  v[9] = _mm256_permute2x128_si256(v1[1], v1[9], 0x31);
+  v[10] = _mm256_permute2x128_si256(v1[2], v1[10], 0x31);
+  v[11] = _mm256_permute2x128_si256(v1[3], v1[11], 0x31);
+  v[12] = _mm256_permute2x128_si256(v1[4], v1[12], 0x31);
+  v[13] = _mm256_permute2x128_si256(v1[5], v1[13], 0x31);
+  v[14] = _mm256_permute2x128_si256(v1[6], v1[14], 0x31);
+  v[15] = _mm256_permute2x128_si256(v1[7], v1[15], 0x31);
+}
+
 inline void transpose_16x16_32bit(__m512i* v) {
   __m512i v1[16];
   v1[0] = _mm512_unpacklo_epi32(v[0], v[1]);
@@ -386,6 +482,62 @@ inline std::tuple<__m512i, __m512i> transpose_2x32_16bit(__m512i r0, __m512i r1)
 }
 #pragma GCC diagnostic pop
 
+// Note: mapped from aten exp_u20
+inline __attribute__((always_inline)) __m512 _mm512_exp_u20_ps(const __m512 values) {
+  const __m512 vec_factorial_1 = _mm512_set1_ps(0.999999701f);
+  const __m512 vec_factorial_2 = _mm512_set1_ps(0.499991506f);
+  const __m512 vec_factorial_3 = _mm512_set1_ps(0.166676521f);
+  const __m512 vec_factorial_4 = _mm512_set1_ps(0.0418978221f);
+  const __m512 vec_factorial_5 = _mm512_set1_ps(0.00828929059f);
+  const __m512 vec_exp_log2ef = _mm512_castsi512_ps(_mm512_set1_epi32(0x3fb8aa3b));  // log2(e)
+  const __m512 vec_half = _mm512_set1_ps(0.5f);
+  const __m512 vec_one = _mm512_set1_ps(1.f);
+  const __m512 vec_zero = _mm512_set1_ps(0.f);
+  const __m512 vec_two = _mm512_set1_ps(2.f);
+  const __m512 vec_ln2f = _mm512_castsi512_ps(_mm512_set1_epi32(0x3f317218));
+  const __m512 vec_ln_flt_min = _mm512_castsi512_ps(_mm512_set1_epi32(0xc2aeac50));
+  const __m512 vec_ln_flt_max = _mm512_castsi512_ps(_mm512_set1_epi32(0x42b17218));
+  const __m512i vec_127 = _mm512_set1_epi32(0x0000007f);
+  const int n_mantissa_bits = 23;
+
+  // exp(x) =
+  // = exp(n * ln(2) + r) // divide x by ln(2) and get quot and rem
+  // = 2^n * exp(r) // simplify the exp(n*ln(2)) expression
+
+  auto less_ln_flt_min_mask = _mm512_cmp_ps_mask(values, vec_ln_flt_min, 1 /*_CMP_LT_OS*/);
+  auto vec_src = _mm512_min_ps(values, vec_ln_flt_max);
+  vec_src = _mm512_max_ps(vec_src, vec_ln_flt_min);
+
+  // fx = floorf(x * log2ef + 0.5)
+  auto vec_fx = _mm512_fmadd_ps(vec_src, vec_exp_log2ef, vec_half);
+  auto vec_fx_i = _mm512_cvt_roundps_epi32(vec_fx, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);
+  vec_fx = _mm512_cvtepi32_ps(vec_fx_i);
+
+  // x = x - fx * ln2
+  auto vec_exp_poly = _mm512_fnmadd_ps(vec_fx, vec_ln2f, vec_src);
+
+  // compute polynomial
+  auto vec_res = _mm512_fmadd_ps(vec_exp_poly, vec_factorial_5, vec_factorial_4);
+  vec_res = _mm512_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_3);
+  vec_res = _mm512_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_2);
+  vec_res = _mm512_fmadd_ps(vec_exp_poly, vec_res, vec_factorial_1);
+  vec_res = _mm512_fmadd_ps(vec_exp_poly, vec_res, vec_one);
+
+  // compute 2^(n-1)
+  auto vec_exp_number = _mm512_sub_ps(vec_fx, vec_one);
+  auto vec_exp_number_i = _mm512_cvtps_epi32(vec_exp_number);
+  auto vec_two_pow_n_i = _mm512_add_epi32(vec_exp_number_i, vec_127);
+  vec_two_pow_n_i = _mm512_slli_epi32(vec_two_pow_n_i, n_mantissa_bits);
+  auto vec_two_pow_n = _mm512_castsi512_ps(vec_two_pow_n_i);
+  vec_two_pow_n = _mm512_mask_blend_ps(less_ln_flt_min_mask, vec_two_pow_n, vec_zero);
+
+  // y = y * 2^n
+  vec_res = _mm512_mul_ps(vec_res, vec_two_pow_n);
+  vec_res = _mm512_mul_ps(vec_res, vec_two);
+  return vec_res;
+}
+
+// Note: mapped from aten fexp_u20
 inline __attribute__((always_inline)) __m512 _mm512_fexp_u20_ps(const __m512 values) {
   const __m512 vec_c0 = _mm512_set1_ps(0.00010703434948458272f);
   const __m512 vec_c1 = _mm512_set1_ps(0.30354260500649682f);
@@ -436,6 +588,51 @@ inline __attribute__((always_inline)) __m512 _mm512_fexp_u20_ps(const __m512 val
   // final interpretation to float
   return _mm512_castsi512_ps(casted_integer);
 }
+
+// sigmoid(x) = 1 / (1 + exp(-x)); avoid vdivps via rcp14
+inline __attribute__((always_inline)) __m512 _mm512_rcp14_sigmoid_ps(__m512 x) {
+  __m512 minus_x = _mm512_xor_ps(_mm512_set1_ps(-0.f), x);
+  __m512 denom = _mm512_add_ps(_mm512_exp_u20_ps(minus_x), _mm512_set1_ps(1.f));
+  return _mm512_rcp14_ps(denom);
+}
+
+// SiLU(x) = x * sigmoid(x)
+inline __attribute__((always_inline)) __m512 _mm512_rcp14_silu_ps(__m512 x) {
+  return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(x));
+}
+
+// x * sigmoid(x * alpha) for clamped SwiGLU
+inline __attribute__((always_inline)) __m512 _mm512_rcp14_sigmoid_glu_ps(__m512 x, __m512 alpha) {
+  __m512 xa = _mm512_mul_ps(x, alpha);
+  return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(xa));
+}
+
 #endif
+
+inline at::vec::Vectorized<float> fast_sigmoid(const at::vec::Vectorized<float>& x) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return at::vec::Vectorized<float>(_mm512_rcp14_sigmoid_ps(x));
+#else
+  const auto one = at::vec::Vectorized<float>(1.f);
+  return one / (one + x.neg().exp_u20());
+#endif
+}
+
+inline at::vec::Vectorized<float> fast_silu(const at::vec::Vectorized<float>& x) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return at::vec::Vectorized<float>(_mm512_rcp14_silu_ps(x));
+#else
+  return x * fast_sigmoid(x);
+#endif
+}
+
+inline at::vec::Vectorized<float>
+fast_sigmoid_glu(const at::vec::Vectorized<float>& x, const at::vec::Vectorized<float>& alpha) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return at::vec::Vectorized<float>(_mm512_rcp14_sigmoid_glu_ps(x, alpha));
+#else
+  return x * fast_sigmoid(x * alpha);
+#endif
+}
 
 }  // anonymous namespace

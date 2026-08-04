@@ -24,8 +24,8 @@ class FileMapper:
         self,
         root_dir: str,
         model_name: str,
-        hash_block_size: int,
-        gpu_blocks_per_file: int,
+        tokens_per_hash: int,
+        blocks_per_file: int,
         tp_size: int,
         pp_size: int,
         pcp_size: int,
@@ -35,6 +35,7 @@ class FileMapper:
         kv_cache_groups: list[dict] | None = None,
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
+        replicated_layout: bool = False,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -48,8 +49,8 @@ class FileMapper:
         self.rank: int = rank
         self.fields: dict = {
             "model_name": model_name,
-            "hash_block_size": hash_block_size,
-            "gpu_blocks_per_file": gpu_blocks_per_file,
+            "tokens_per_hash": tokens_per_hash,
+            "blocks_per_file": blocks_per_file,
             "tp_size": tp_size,
             "pp_size": pp_size,
             "pcp_size": pcp_size,
@@ -58,6 +59,12 @@ class FileMapper:
             "kv_cache_groups": kv_cache_groups or [],
             "inference_engine": inference_engine,
         }
+        if not parallel_agnostic:
+            self.fields["parallel_agnostic"] = False
+        # Only written when True so existing deployments' hashed fields are
+        # unchanged (False is the historical default and must not appear).
+        if replicated_layout:
+            self.fields["replicated_layout"] = True
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -65,35 +72,36 @@ class FileMapper:
         cls,
         root_dir: str,
         offloading_spec: OffloadingSpec,
-        gpu_blocks_per_file: int = 1,
+        blocks_per_file: int = 1,
         parallel_agnostic: bool = False,
     ) -> "FileMapper":
         """Build a FileMapper from an OffloadingSpec."""
-        vllm_config = offloading_spec.vllm_config
-        kv_cache_config = offloading_spec.kv_cache_config
-
-        parallel_config = vllm_config.parallel_config
-        dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
+        config = offloading_spec.config
         kv_cache_groups = [
             {
-                "block_size": group.kv_cache_spec.block_size,
+                "tokens_per_block": group.tokens_per_block,
                 "layer_names": list(group.layer_names),
             }
-            for group in kv_cache_config.kv_cache_groups
+            for group in config.groups
         ]
+        parallel = config.parallel
         return cls(
             root_dir=root_dir,
-            model_name=vllm_config.model_config.model,
-            hash_block_size=vllm_config.cache_config.block_size,
-            gpu_blocks_per_file=gpu_blocks_per_file,
-            tp_size=parallel_config.tensor_parallel_size,
-            pp_size=parallel_config.pipeline_parallel_size,
-            pcp_size=parallel_config.prefill_context_parallel_size,
-            dcp_size=parallel_config.decode_context_parallel_size,
-            rank=parallel_config.rank,
-            dtype=dtype,
+            model_name=config.model.name,
+            tokens_per_hash=config.cache.tokens_per_hash,
+            blocks_per_file=blocks_per_file,
+            tp_size=parallel.tp_size,
+            pp_size=parallel.pp_size,
+            pcp_size=parallel.pcp_size,
+            dcp_size=parallel.dcp_size,
+            rank=parallel.rank,
+            dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
-            parallel_agnostic=parallel_agnostic,
+            parallel_agnostic=(
+                parallel_agnostic
+                and (parallel.is_parallelism_agnostic or config.replicated_layout)
+            ),
+            replicated_layout=(parallel_agnostic and config.replicated_layout),
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

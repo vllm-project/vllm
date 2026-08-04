@@ -9,11 +9,11 @@ from tempfile import TemporaryDirectory
 
 import pytest
 import torch
-from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 prompts = [
     "Hello, my name is",
@@ -52,7 +52,7 @@ def test_filter_subtensors():
 
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
-    input_dir = snapshot_download(
+    input_dir = hf_api().snapshot_download(
         "meta-llama/Llama-3.2-1B-Instruct", ignore_patterns=["*.bin*", "original/*"]
     )
 
@@ -97,7 +97,7 @@ def test_sharded_state_loader(
     ctx = mp.get_context("spawn")
 
     platform_args = {}
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() or current_platform.is_xpu():
         platform_args["max_num_seqs"] = 1
 
     # Run in separate processes for memory & CUDA isolation

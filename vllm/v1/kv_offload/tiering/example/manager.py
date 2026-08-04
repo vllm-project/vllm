@@ -11,11 +11,17 @@ TieringOffloadingManager without requiring actual storage or network backends.
 
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    Medium,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -36,6 +42,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     - Stores blocks in a dictionary (key -> True)
     - Completes transfers immediately (synchronous)
     """
+
+    medium: ClassVar[Medium] = Medium.CPU
 
     def __init__(
         self,
@@ -67,7 +75,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         self.completed_jobs: list[JobResult] = []
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a block exists in this secondary tier.
 
@@ -76,9 +84,9 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             req_context: Per-request context.
 
         Returns:
-            True if the block is present, False if not found.
+            HIT if the block is present, MISS if not found.
         """
-        return key in self.blocks
+        return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
@@ -141,6 +149,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
+
+    @override
+    def drain_jobs(self) -> None:
+        """Synchronous tier — submit_*() returns only after the operation
+        completes, so there is nothing to wait for."""
+        return
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

@@ -7,9 +7,7 @@ import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils.platform_utils import is_pin_memory_available
-
-pin_memory = is_pin_memory_available()
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 @dataclass
@@ -134,7 +132,7 @@ class PoolingMetadata:
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
         if query_start_loc_gpu is None:
             cumsum = torch.zeros(
-                n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
+                n_seq + 1, dtype=torch.int64, pin_memory=PIN_MEMORY, device="cpu"
             )
             torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
             cumsum = cumsum.to(device, non_blocking=True)

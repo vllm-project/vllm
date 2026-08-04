@@ -26,10 +26,6 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    is_workspace_manager_initialized,
-)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -117,13 +113,16 @@ def _dcp_a2a_send_recv_buffers(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if is_workspace_manager_initialized():
-        send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
-            (shape, dtype),
-            (shape, dtype),
-        )
-        return send_buffer, recv_buffer
-
+    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
+    # buffer address at capture, but the workspace is growable and sized only to
+    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
+    # with a bigger batch regrows it, freeing that address and poisoning every
+    # captured graph -> illegal memory access on replay. This bites the very
+    # first request: the post-capture warmup runs an eager decode at
+    # max_num_seqs (> the cap), so the graphs are already dangling before the
+    # server is ready. torch.empty buffers instead live in the graph's private
+    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
+    # AG+RS combine path already rely on).
     return (
         torch.empty(shape, device=device, dtype=dtype),
         torch.empty(shape, device=device, dtype=dtype),
@@ -427,6 +426,10 @@ def dcp_a2a_lse_reduce(
     if H % world_size != 0:
         raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
     H_per_rank = H // world_size
+    # The pack kernel bit-casts the LSE as fp32; some MLA backends return it in
+    # the activation dtype (bf16/fp16), so enforce the documented fp32 contract.
+    if cp_attn_lse.dtype != torch.float32:
+        cp_attn_lse = cp_attn_lse.to(torch.float32)
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(

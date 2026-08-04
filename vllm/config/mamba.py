@@ -27,6 +27,7 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
+    CPU = "cpu"
 
 
 @config

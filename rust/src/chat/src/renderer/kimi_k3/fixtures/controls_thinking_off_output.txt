@@ -1,0 +1,2 @@
+<|open|>message role="user"<|sep|>json pls<|close|>message<|sep|><|end_of_msg|><|open|>message role="system" type="response-format"<|sep|>The system is invoked with `response_format=json_object`.
+Your response must be raw JSON data without markdown code blocks (```json) or any additional formatting.<|close|>message<|sep|><|end_of_msg|><|open|>message role="assistant"<|sep|><|open|>response<|sep|>

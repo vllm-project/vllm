@@ -21,6 +21,7 @@ from vllm.v1.worker.mamba_utils import (
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     preprocess_mamba,
+    stage_postprocess_inputs_to_gpu,
 )
 
 MambaStateCopyFunc = Callable[..., Any]
@@ -369,6 +370,123 @@ def _make_gpu_ctx(
         device=device,
         make_buffer=make_buffer,
     )
+
+
+# -----------------------------------------------------------------------------
+# stage_postprocess_inputs_to_gpu: single-pass staging into pinned views
+# -----------------------------------------------------------------------------
+
+
+def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
+    """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
+    per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
+    ctx = MagicMock()
+    ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_draft_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    return ctx
+
+
+def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
+    """stage_postprocess_inputs_to_gpu writes each request's state_idx and
+    scheduled/computed/draft counts into slot `i` for `req_ids[i]`, leaves
+    slots past `num_reqs` untouched, and mirrors the values to the GPU buffers."""
+    device = torch.device("cpu")
+    max_num_reqs = 8
+    ctx = _make_staging_ctx(max_num_reqs, device)
+
+    # Any negative int32 works as a sentinel: all staged values (state_idx,
+    # scheduled/computed/draft token counts) are non-negative, so a negative
+    # entry surviving in slots [num_reqs:] proves the loop didn't overrun.
+    sentinel = np.int32(-1)
+    bufs = (
+        ctx.mamba_state_idx_buf,
+        ctx.num_scheduled_tokens_buf,
+        ctx.num_computed_tokens_buf,
+        ctx.num_draft_tokens_buf,
+    )
+    for buf in bufs:
+        buf.np[:] = sentinel
+
+    req_ids = ["req_a", "req_b", "req_c"]
+    num_reqs = len(req_ids)
+    scheduler_output = _make_postprocess_scheduler_output(
+        req_ids=req_ids,
+        num_scheduled_tokens={"req_a": 5, "req_b": 12, "req_c": 3},
+        # req_b intentionally absent -> defaults to 0 drafts.
+        scheduled_spec_decode_tokens={
+            "req_a": [1, 2],
+            "req_c": [1, 2, 3, 4],
+        },
+    )
+    requests = _make_requests(
+        req_ids=req_ids,
+        num_computed_tokens=[10, 20, 30],
+        block_ids_per_req=[[0], [0], [0]],
+    )
+    mamba_state_idx = {"req_a": 100, "req_b": 200, "req_c": 300}
+    # A trailing entry past num_reqs must not be read.
+    req_ids_padded = req_ids + ["not_scheduled"]
+
+    stage_postprocess_inputs_to_gpu(
+        ctx,
+        scheduler_output,
+        req_ids_padded,
+        num_reqs,
+        requests,
+        mamba_state_idx,
+    )
+
+    np.testing.assert_array_equal(
+        ctx.mamba_state_idx_buf.np[:num_reqs], [100, 200, 300]
+    )
+    np.testing.assert_array_equal(
+        ctx.num_scheduled_tokens_buf.np[:num_reqs], [5, 12, 3]
+    )
+    np.testing.assert_array_equal(
+        ctx.num_computed_tokens_buf.np[:num_reqs], [10, 20, 30]
+    )
+    np.testing.assert_array_equal(ctx.num_draft_tokens_buf.np[:num_reqs], [2, 0, 4])
+    for buf in bufs:
+        assert (buf.np[num_reqs:] == sentinel).all()
+
+    assert torch.equal(
+        ctx.mamba_state_idx_buf.gpu[:num_reqs],
+        torch.tensor([100, 200, 300], dtype=torch.int32),
+    )
+    assert torch.equal(
+        ctx.num_draft_tokens_buf.gpu[:num_reqs],
+        torch.tensor([2, 0, 4], dtype=torch.int32),
+    )
+
+
+def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
+    """If preprocess_mamba didn't populate mamba_state_idx for a req in the
+    batch, staging must fail loudly rather than silently writing a stale index."""
+    device = torch.device("cpu")
+    ctx = _make_staging_ctx(max_num_reqs=4, device=device)
+    scheduler_output = _make_postprocess_scheduler_output(
+        req_ids=["req_a"],
+        num_scheduled_tokens={"req_a": 1},
+    )
+    requests = _make_requests(["req_a"], [0], [[0]])
+
+    # mamba_state_idx has an entry for a *different* request but not for
+    # req_a (the one being staged). This is the realistic failure mode:
+    # preprocess_mamba ran, populated some reqs, but missed this one.
+    # The safety assert in stage_postprocess_inputs_to_gpu must fire on
+    # req_a's missing entry rather than silently writing None.
+    mamba_state_idx: dict[str, int] = {"other_req": 42}
+    with pytest.raises(AssertionError, match="mamba_state_idx missing entry"):
+        stage_postprocess_inputs_to_gpu(
+            ctx,
+            scheduler_output,
+            ["req_a"],
+            1,
+            requests,
+            mamba_state_idx,
+        )
 
 
 def _run_gpu_postprocess(
@@ -2131,4 +2249,119 @@ class TestPostprocessMambaFusedKernel:
             gpu_ctx.num_accepted_tokens_out[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
+        )
+
+    def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
+        self, device, test_config, monkeypatch
+    ):
+        """DS conv postprocess should match SD when accept_token_bias > 0."""
+        from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
+
+        cfg = test_config
+        torch.manual_seed(38898)
+
+        req_ids = ["req_0"]
+        num_computed_tokens = [30]
+        num_scheduled_tokens = {"req_0": 1}
+        num_draft_tokens: dict[str, int] = {}
+        num_accepted_tokens = [2]  # Results in accept_token_bias = 1
+        mamba_state_idx = [1]  # src_block_idx = 1 = dest_block_idx
+        block_ids_per_req = [list(range(8))]
+
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+
+        num_reqs = len(req_ids)
+        block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
+        block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
+
+        # Same logical conv state in SD and DS layouts.
+        sd_source_conv = torch.randn(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+            device=device,
+        )
+        ds_source_conv = sd_source_conv.permute(0, 2, 1).contiguous()
+        sd_source_temporal = torch.randn(
+            cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
+        )
+
+        # SD GPU path. Default layout is SD.
+        model_mamba_utils.get_conv_state_layout.cache_clear()
+        sd_conv = sd_source_conv.clone()
+        sd_temporal = sd_source_temporal.clone()
+        forward_context_sd = {
+            "layer_0": _make_mock_attention(sd_conv, sd_temporal),
+        }
+        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device)
+        _run_gpu_postprocess(
+            gpu_ctx_sd,
+            kv_cache_config=kv_cache_config,
+            forward_context=forward_context_sd,
+            copy_funcs=_COPY_FUNCS,
+            block_table=block_table_gpu,
+            req_ids=req_ids,
+            num_accepted_tokens=num_accepted_tokens,
+            mamba_state_idx=mamba_state_idx,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_computed_tokens=num_computed_tokens,
+            num_draft_tokens=num_draft_tokens,
+            device=device,
+        )
+        torch.accelerator.synchronize()
+
+        # Sanity: SD path actually modified the state (copy was performed).
+        assert not torch.equal(sd_conv, sd_source_conv), (
+            "SD baseline did not modify conv state; test setup is wrong"
+        )
+
+        # DS GPU path on the DS twin.
+        monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+        model_mamba_utils.get_conv_state_layout.cache_clear()
+        try:
+            ds_conv = ds_source_conv.clone()
+            ds_temporal = sd_source_temporal.clone()
+            forward_context_ds = {
+                "layer_0": _make_mock_attention(ds_conv, ds_temporal),
+            }
+            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device)
+            _run_gpu_postprocess(
+                gpu_ctx_ds,
+                kv_cache_config=kv_cache_config,
+                forward_context=forward_context_ds,
+                copy_funcs=_COPY_FUNCS,
+                block_table=block_table_gpu,
+                req_ids=req_ids,
+                num_accepted_tokens=num_accepted_tokens,
+                mamba_state_idx=mamba_state_idx,
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_computed_tokens=num_computed_tokens,
+                num_draft_tokens=num_draft_tokens,
+                device=device,
+            )
+            torch.accelerator.synchronize()
+        finally:
+            # Reset the lru cache so other tests see the default layout again.
+            model_mamba_utils.get_conv_state_layout.cache_clear()
+
+        # DS bytes, un-permuted, should match the SD result.
+        torch.testing.assert_close(
+            ds_conv.permute(0, 2, 1).contiguous(),
+            sd_conv,
+            msg=(
+                "DS conv post-kernel does not match SD baseline; the DS "
+                "row-loop in postprocess_mamba_fused_kernel is wrong."
+            ),
+        )
+        torch.testing.assert_close(
+            ds_temporal,
+            sd_temporal,
+            msg="DS temporal state diverged from SD",
+        )
+        torch.testing.assert_close(
+            gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            msg="DS num_accepted_tokens diverged from SD",
         )

@@ -15,8 +15,7 @@
 # limitations under the License.
 """Inference-only K-EXAONE-236B-A22B model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -30,33 +29,32 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
-from .exaone4 import Exaone4Attention as ExaoneMoeAttention
 from .exaone4 import Exaone4GatedMLP as ExaoneMoeGatedMLP
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -67,6 +65,7 @@ class ExaoneMoe(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -127,12 +126,13 @@ class ExaoneMoe(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                swiglu_limit=swiglu_limit,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=self.n_routed_experts,
@@ -141,6 +141,8 @@ class ExaoneMoe(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
+            activation="silu",
+            swiglu_limit=swiglu_limit,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -165,13 +167,138 @@ class ExaoneMoe(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+class ExaoneMoeAttention(nn.Module):
+    def __init__(
+        self,
+        config,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position_embeddings: int = 8192,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        cache_config: CacheConfig | None = None,
+        prefix: str = "",
+        is_mtp: bool = False,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
+        self.head_dim = getattr(config, "head_dim", None)
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+
+        self.o_proj = RowParallelLinear(
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        is_neox_style = True
+        if quant_config is not None and quant_config.get_name() == "gguf":
+            is_neox_style = False
+
+        layer_idx = extract_layer_index(prefix)
+
+        if config.sliding_windows is not None:
+            self.sliding_window_size = config.sliding_windows[layer_idx]
+
+        if config.layer_types[layer_idx] == "full_attention":
+            self.sliding_window_size = None
+
+        if is_mtp:
+            self.sliding_window = (
+                config.mtp_layer_types[layer_idx] == "sliding_attention"
+            )
+            if config.mtp_sliding_windows is not None:
+                self.sliding_window_size = config.mtp_sliding_windows[layer_idx]
+
+            if config.mtp_layer_types[layer_idx] == "full_attention":
+                self.sliding_window_size = None
+
+        # apply rotary embeddings to every layer in full attention models
+        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
+
+        set_default_rope_theta(config, default_theta=1000000)
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+            is_neox_style=is_neox_style,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=self.sliding_window_size,
+            prefix=f"{prefix}.attn",
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+        q = self.q_norm(q)
+        q = q.flatten(-2, -1)
+        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+        k = self.k_norm(k)
+        k = k.flatten(-2, -1)
+
+        if self.sliding_window_size or self.apply_rope_all_layers:
+            q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
 class ExaoneMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        mtp_layer: bool = None,
+        is_mtp: bool = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -179,7 +306,6 @@ class ExaoneMoeDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -196,17 +322,29 @@ class ExaoneMoeDecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            is_mtp=is_mtp,
         )
 
-        if config.is_moe_layer[layer_idx] and not mtp_layer:
+        swiglu_limits = getattr(config, "swiglu_limits", None)
+        if swiglu_limits is not None:
+            swiglu_limit = swiglu_limits[layer_idx]
+            swiglu_limit = swiglu_limit if swiglu_limit > 0 else None
+        else:
+            swiglu_limit = None
+
+        if config.mlp_layer_types[layer_idx] == "sparse" and not is_mtp:
             self.mlp = ExaoneMoe(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                swiglu_limit=swiglu_limit,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = ExaoneMoeGatedMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
+                swiglu_limit=swiglu_limit,
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
@@ -326,142 +464,21 @@ class ExaoneMoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-
-        # Skip loading extra parameters for GPTQ/modelopt models.
-        ignore_suffixes = (
-            ".bias",
-            "_bias",
-            ".k_scale",
-            "_k_scale",
-            ".v_scale",
-            "_v_scale",
-            ".weight_scale",
-            "_weight_scale",
-            ".input_scale",
-            "_input_scale",
-        )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        for name, loaded_weight in weights:
-            if name.startswith("mtp."):
-                continue
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
-                    is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if (
-                        name_mapped.endswith(ignore_suffixes)
-                        and name_mapped not in params_dict
-                    ):
-                        continue
-
-                    param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        }
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -555,5 +572,18 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             skip_prefixes=(
                 ["lm_head.", "mtp."] if self.config.tie_word_embeddings else ["mtp."]
             ),
+            # Skip loading extra parameters for GPTQ/modelopt models.
+            ignore_unexpected_suffixes=[
+                ".bias",
+                "_bias",
+                ".k_scale",
+                "_k_scale",
+                ".v_scale",
+                "_v_scale",
+                ".weight_scale",
+                "_weight_scale",
+                ".input_scale",
+                "_input_scale",
+            ],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

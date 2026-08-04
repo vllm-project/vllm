@@ -139,7 +139,7 @@ class RerankRequest(ScoringRequestMixin):
     # --8<-- [start:rerank-request-params]
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
-    top_n: int = Field(default_factory=lambda: 0)
+    top_n: int = Field(default=0, ge=0)
     # --8<-- [end:rerank-request-params]
 
 

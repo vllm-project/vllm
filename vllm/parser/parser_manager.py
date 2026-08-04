@@ -79,6 +79,7 @@ class ParserManager:
         reasoning_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
+        is_harmony: bool = False,
     ) -> type[Parser] | None:
         """
         Get a Parser that handles both reasoning and tool parsing.
@@ -91,6 +92,8 @@ class ParserManager:
             reasoning_parser_name: The name of the reasoning parser.
             enable_auto_tools: Whether auto tool choice is enabled.
             model_name: The model name for parser-specific warnings.
+            is_harmony: Whether the selected model uses the Harmony format.
+                        If True, HarmonyParser is always returned.
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -106,14 +109,24 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        from vllm.utils.mistral import is_mistral_tool_parser
+        if is_harmony:
+            from vllm.parser.harmony import HarmonyParser
 
-        if is_mistral_tool_parser(tool_parser_cls):
-            from vllm.parser.mistral import MistralParser
+            HarmonyParser.reasoning_parser_cls = reasoning_parser_cls
+            HarmonyParser.tool_parser_cls = tool_parser_cls
+            return HarmonyParser
 
-            MistralParser.reasoning_parser_cls = reasoning_parser_cls
-            MistralParser.tool_parser_cls = tool_parser_cls
-            return MistralParser
+        if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
+            from vllm.parser.kimi_k3 import KimiK3Parser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _KimiK3Parser(KimiK3Parser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+
+            return _KimiK3Parser
 
         from vllm.parser.abstract_parser import DelegatingParser
 

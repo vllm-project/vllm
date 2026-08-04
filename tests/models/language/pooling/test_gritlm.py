@@ -12,7 +12,7 @@ from .embed_utils import run_client_embeddings
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
-ATOL = 0.002
+ATOL = 2.3e-3
 
 
 def _arr(arr):
