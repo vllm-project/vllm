@@ -293,6 +293,9 @@ class Lfm2ToolParser(ToolParser):
         # Strip the end token if present (entire call arrived at once).
         if TOOL_CALL_END in tool_text:
             tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
+        # Leading whitespace after the start token would make every completion
+        # candidate an IndentationError (the non-streaming path strips it too).
+        tool_text = tool_text.lstrip()
 
         def _content_only_or_none() -> DeltaMessage | None:
             """Return a content-only delta if any content arrived in this

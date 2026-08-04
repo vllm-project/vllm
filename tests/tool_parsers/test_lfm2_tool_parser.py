@@ -301,6 +301,28 @@ def test_tool_call(
         assert actual.function == expected
 
 
+def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
+    """Whitespace between <|tool_call_start|> and the opening bracket must
+    not break parsing. The streaming path used to feed the indented text to
+    ast.parse verbatim, so every completion candidate raised
+    IndentationError and the call was silently dropped (non-streaming
+    stripped it and succeeded)."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START} [{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer), model_output, streaming=False
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+    reconstructor = run_tool_extraction_streaming(
+        cls(lfm2_tokenizer), [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
 def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     model_output_deltas = [
