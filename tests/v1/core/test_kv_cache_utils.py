@@ -45,6 +45,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -2235,6 +2236,39 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert promoted_draft.sliding_window == draft.sliding_window
     assert specs["draft.0"] is draft
     assert "attention compute is unchanged" in caplog_vllm.text
+
+
+def test_hidden_states_with_tp_scales_page_size():
+    """When TP shrinks KV pages below the hidden-state per-token cost,
+    get_kv_cache_groups must scale up target block sizes so that the
+    common page accommodates the unsharded hidden states."""
+    # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
+    # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
+    #         = 16 * 2 * 64 * 2 = 4096 bytes.
+    kv_spec = new_kv_cache_spec(
+        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16,
+    )
+    # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
+    #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
+    hs_spec = HiddenStateCacheSpec(
+        block_size=16, num_kv_heads=6, head_size=512, dtype=torch.bfloat16,
+    )
+    specs = {
+        "target.0.attn": kv_spec,
+        "target.1.attn": kv_spec,
+        "cache_only_layers.48": hs_spec,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    # The hidden-state layer should be present and no assertion should fire.
+    all_layers = {name for g in groups for name in g.layer_names}
+    assert "cache_only_layers.48" in all_layers
+
+    # The target group block sizes must have been scaled up.
+    for g in groups:
+        if "cache_only_layers.48" not in g.layer_names:
+            assert g.kv_cache_spec.block_size > kv_spec.block_size
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
