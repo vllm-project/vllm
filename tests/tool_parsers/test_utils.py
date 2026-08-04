@@ -519,6 +519,28 @@ class TestGetParameterValueTuple:
         assert json.loads(tool.function.arguments) == {"size": [800, 600]}
 
 
+class TestGetParameterValueNonJsonConstants:
+    # bytes/Ellipsis/complex are ast.Constant but have no JSON form; they
+    # must raise UnexpectedAstError (like other unsupported nodes) instead
+    # of surfacing later as a TypeError inside json.dumps.
+    @pytest.mark.parametrize("expr", ["b'abc'", "...", "1j"])
+    def test_non_json_constant_raises(self, expr):
+        with pytest.raises(UnexpectedAstError):
+            _value_of(expr)
+
+    def test_handle_single_tool_raises_ast_error_not_type_error(self):
+        call = _first_call("[f(x=b'abc')]")
+        with pytest.raises(UnexpectedAstError):
+            handle_single_tool(call)
+
+    @pytest.mark.parametrize(
+        "expr, expected",
+        [("'s'", "s"), ("1", 1), ("1.5", 1.5), ("True", True), ("None", None)],
+    )
+    def test_json_constants_still_pass(self, expr, expected):
+        assert _value_of(expr) == expected
+
+
 class TestNormalizeLeadingZeroInts:
     # Zero-padded ints (month=07) are a SyntaxError no other recovery path
     # handles; the rewrite must strip the padding without touching tokens
@@ -583,8 +605,7 @@ class TestRenameReservedKwargs:
         text, changed = rename_reserved_kwargs('[search(in="docs/", from=0)]')
         assert changed
         args = json.loads(
-            handle_single_tool(ast.parse(text).body[0].value.elts[0])
-            .function.arguments
+            handle_single_tool(ast.parse(text).body[0].value.elts[0]).function.arguments
         )
         assert restore_reserved_kwarg_names(args) == {"in": "docs/", "from": 0}
 

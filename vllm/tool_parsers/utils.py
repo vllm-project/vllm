@@ -452,7 +452,16 @@ def get_parameter_value(val: ast.expr) -> Any:
         UnexpectedAstError: If the AST node is not a supported literal type.
     """
     if isinstance(val, ast.Constant):
-        return val.value
+        if val.value is None or isinstance(val.value, (str, int, float)):
+            return val.value
+        # bytes/Ellipsis/complex constants have no JSON representation and
+        # would otherwise surface as a TypeError deep inside json.dumps;
+        # reject them explicitly like other unsupported nodes.
+        logger.warning(
+            "Non-JSON-representable constant in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be JSON values")
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             logger.warning(
