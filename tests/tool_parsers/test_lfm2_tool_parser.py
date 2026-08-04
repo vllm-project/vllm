@@ -344,6 +344,25 @@ def test_tool_call(
         assert actual.function == expected
 
 
+@pytest.mark.parametrize("body", ["", " "])
+def test_empty_tool_call_block(body: str, lfm2_tokenizer: TokenizerLike):
+    """An empty block ([] or [ ]) means the model called no tools; it must
+    not report tools_called=True with zero tool calls (the invariant
+    run_tool_extraction asserts)."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    model_output = f"{TOOL_CALL_START}[{body}]{TOOL_CALL_END}"
+
+    content, tool_calls = run_tool_extraction(
+        cls(lfm2_tokenizer), model_output, streaming=False
+    )
+    assert len(tool_calls) == 0
+
+    reconstructor = run_tool_extraction_streaming(
+        cls(lfm2_tokenizer), [model_output], assert_one_tool_per_delta=False
+    )
+    assert len(reconstructor.tool_calls) == 0
+
+
 def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
     """Whitespace between <|tool_call_start|> and the opening bracket must
     not break parsing. The streaming path used to feed the indented text to

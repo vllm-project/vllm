@@ -203,8 +203,12 @@ class Lfm2ToolParser(ToolParser):
                         raise
                     module = ast.parse(renamed)
             parsed = getattr(module.body[0], "value", None)
-            if isinstance(parsed, ast.List) and all(
-                isinstance(e, ast.Call) for e in parsed.elts
+            # An empty block ([]) must not report tools_called=True with zero
+            # calls, so require at least one element.
+            if (
+                isinstance(parsed, ast.List)
+                and parsed.elts
+                and all(isinstance(e, ast.Call) for e in parsed.elts)
             ):
                 tool_calls = [
                     handle_single_tool(e)  # type: ignore
