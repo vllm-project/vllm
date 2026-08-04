@@ -673,7 +673,6 @@ def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monke
         local_blocks=local_blocks,
     )
 
-    # Both impls write the shared buffer token-major [T, H, topk].
     (fi_impl, triton_impl), _ = _run_indexer_impl_pair(
         vllm_config,
         device,
