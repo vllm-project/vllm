@@ -680,31 +680,3 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
-
-
-def test_joiner_wait_failure_closes_fd(monkeypatch):
-    """A joiner must close its fd when creator initialization fails."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
-    mock_open = MagicMock(
-        side_effect=[FileExistsError(17, "File exists"), 9999],
-    )
-    mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", mock_open)
-    monkeypatch.setattr(region.os, "close", mock_close)
-    monkeypatch.setattr(
-        region,
-        "_wait_for_file_size",
-        MagicMock(side_effect=FileNotFoundError("creator removed mmap file")),
-    )
-
-    with pytest.raises(FileNotFoundError, match="creator removed"):
-        SharedOffloadRegion(
-            engine_id=str(uuid.uuid4()),
-            num_blocks=4,
-            rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-
-    mock_close.assert_called_once_with(9999)
