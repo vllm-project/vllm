@@ -21,8 +21,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    if request.n.unwrap_or(1) > 1 && !request.use_beam_search {
+        bail_invalid_request!(param = "n", "n > 1 is only supported with use_beam_search.");
     }
 
     if request.top_logprobs.is_some() && !request.logprobs {
@@ -46,6 +46,13 @@ pub(super) fn validate_request_compat(
                 "prompt_logprobs are not available when stream=true."
             );
         }
+
+        if request.use_beam_search {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not supported with beam search."
+            );
+        }
     }
 
     if let Some(tools) = request.tools.as_ref() {
@@ -61,21 +68,23 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if request.use_beam_search {
+    if request.use_beam_search && request.stream {
         bail_invalid_request!(
             param = "use_beam_search",
-            "use_beam_search is not supported."
+            "Streaming is not currently supported with beam search."
+        );
+    }
+
+    if request.use_beam_search && request.structured_outputs.is_some() {
+        bail_invalid_request!(
+            param = "structured_outputs",
+            "Structured outputs are not currently supported with beam search."
         );
     }
 
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    reject_non_default(
-        request.length_penalty.as_ref(),
-        "length_penalty",
-        "length_penalty is not supported.",
-    )?;
     if !request.spaces_between_special_tokens {
         bail_invalid_request!(
             param = "spaces_between_special_tokens",

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -75,7 +76,7 @@ pub struct EngineCoreRequest {
     pub request_id: String,
     pub prompt_token_ids: Option<Vec<u32>>,
     /// Multimodal features attached to the request.
-    pub mm_features: Option<MmFeatures>,
+    pub mm_features: Option<Arc<MmFeatures>>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
     /// Pooling parameters are preserved in the schema but not yet strongly
     /// typed.

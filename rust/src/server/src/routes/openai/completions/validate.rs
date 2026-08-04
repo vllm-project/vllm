@@ -23,8 +23,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    if request.n.unwrap_or(1) > 1 && !request.use_beam_search {
+        bail_invalid_request!(param = "n", "n > 1 is only supported with use_beam_search.");
     }
 
     if request.max_tokens == Some(0) && !request.echo {
@@ -55,6 +55,13 @@ pub(super) fn validate_request_compat(
             );
         }
 
+        if request.use_beam_search {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not supported with beam search."
+            );
+        }
+
         if prompt_logprobs < 0 && prompt_logprobs != -1 {
             bail_invalid_request!(
                 param = "prompt_logprobs",
@@ -63,19 +70,23 @@ pub(super) fn validate_request_compat(
         }
     }
 
-    if request.use_beam_search {
+    if request.use_beam_search && request.stream {
         bail_invalid_request!(
             param = "use_beam_search",
-            "use_beam_search is not supported."
+            "Streaming is not currently supported with beam search."
+        );
+    }
+
+    if request.use_beam_search && request.structured_outputs.is_some() {
+        bail_invalid_request!(
+            param = "structured_outputs",
+            "Structured outputs are not currently supported with beam search."
         );
     }
 
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.length_penalty.is_some() {
-        bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
-    }
     if !request.spaces_between_special_tokens {
         bail_invalid_request!(
             param = "spaces_between_special_tokens",
