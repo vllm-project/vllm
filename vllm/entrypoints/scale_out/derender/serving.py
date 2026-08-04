@@ -334,7 +334,7 @@ class ServingDerender(BaseServing):
             # unexpected parser failure on malformed (but well typed) state
             # must surface as a 400 here rather than an unhandled 500.
             return self.create_error_response(
-                f"invalid stream_state: derender failed ({exc!r})"
+                f"invalid stream_state: derender failed ({exc})"
             )
 
         logger.debug(
@@ -375,7 +375,7 @@ class ServingDerender(BaseServing):
             return self.create_error_response(str(exc))
         except (KeyError, IndexError) as exc:
             return self.create_error_response(
-                f"invalid stream_state: detokenization failed ({exc!r})"
+                f"invalid stream_state: detokenization failed ({exc})"
             )
 
         logger.debug(
