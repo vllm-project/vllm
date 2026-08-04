@@ -484,12 +484,12 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
-                    # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
                         params=sp,
                         resumable=True,
+                        skip_params_validation=(sp is sampling_params),
                         **inputs,  # type: ignore[arg-type]
                     )
                     req.external_req_id = request_id
