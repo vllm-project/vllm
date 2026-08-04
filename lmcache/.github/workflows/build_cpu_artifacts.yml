@@ -1,0 +1,125 @@
+name: Build CPU Artifacts
+
+# Build LMCache with NO_GPU_EXT=1 (common C++ extensions only).
+# Gates the CPU-only build path against regression.
+
+on:
+    workflow_call:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'setup.py'
+            - 'pyproject.toml'
+            - 'csrc/**'
+            - 'requirements/common.txt'
+            - 'requirements/build.txt'
+            - 'lmcache/__init__.py'
+            - '.github/workflows/build_cpu_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+# Cancel stale runs per ref.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-cpu-artifacts:
+        name: Build CPU artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Remove non-release tags
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling and CPU torch
+              run: |
+                python -m pip install --upgrade pip
+                pip install --index-url https://download.pytorch.org/whl/cpu torch
+                # Pre-install build deps for --no-isolation below.
+                pip install -r requirements/build.txt
+                pip install build
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Build CPU-only wheel (common C++ extensions, no GPU backend)
+              # --skip-dependency-check: the pre-installed CPU torch may not
+              # match pyproject.toml's exact build-system pin, but is ABI-
+              # compatible for compiling CppExtensions.
+              run: |
+                NO_GPU_EXT=1 python -m build --wheel --no-isolation \
+                  --skip-dependency-check
+
+            - name: Verify CPU wheel contents
+              run: |
+                set -e
+                # Required: common C++ extensions.
+                for mod in native_storage_ops lmcache_redis lmcache_fs; do
+                  if ! unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
+                    echo "::error::missing common C++ extension: ${mod}"
+                    exit 1
+                  fi
+                done
+                # Forbidden: GPU extensions.
+                for mod in c_ops xpu_ops; do
+                  if unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
+                    echo "::error::unexpected GPU extension in CPU wheel: ${mod}"
+                    exit 1
+                  fi
+                done
+
+            - name: Smoke-test CPU wheel
+              # Run from $RUNNER_TEMP so Python resolves `lmcache` from the
+              # installed wheel, not the checkout on CWD.
+              working-directory: ${{ runner.temp }}
+              run: |
+                set -e
+                pip install ${{ github.workspace }}/dist/lmcache-*.whl
+                python -c "
+                import lmcache
+                assert lmcache.torch_device_type == 'cpu', lmcache.torch_device_type
+                "
+                python -c "import lmcache.native_storage_ops"
+                python -c "import lmcache.lmcache_redis"
+                python -c "import lmcache.lmcache_fs"
+                # On CPU, `import lmcache.c_ops` resolves to the synthetic shim
+                # DeviceOps builds from the torch baseline (`_torch_ops`).
+                python -c "
+                import sys, lmcache, lmcache.c_ops
+                m = sys.modules['lmcache.c_ops']
+                assert m.__name__ == 'lmcache.c_ops', m.__name__
+                assert hasattr(m, 'TransferDirection')
+                "
+
+            - name: Upload CPU release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-cpu-artifacts
+                path: dist/

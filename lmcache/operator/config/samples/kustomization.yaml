@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- lmcache_v1alpha1_lmcacheengine.yaml
+- lmcache_v1alpha1_cacheblendengine.yaml
+- lmcache_v1alpha1_lmcachecoordinator.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

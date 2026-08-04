@@ -1,0 +1,786 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:2
+msgid "Adding Native Backends"
+msgstr "添加原生后端"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:9
+msgid ""
+"Native connectors are high-performance C++ storage backends that "
+"integrate with LMCache through pybind11. They work in **both** LMCache "
+"operating modes:"
+msgstr "原生连接器是高性能的 C++ 存储后端，通过 pybind11 与 LMCache 集成。它们在 **两种** LMCache 运行模式下均可工作："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:12
+msgid ""
+"**Non-MP mode** (single process): via ``ConnectorClientBase`` (asyncio "
+"integration)"
+msgstr "**非 MP 模式**\\ （单进程）：通过 ``ConnectorClientBase``\\ （asyncio 集成）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:13
+msgid ""
+"**MP mode** (multiprocess): via ``NativeConnectorL2Adapter`` (L2 adapter "
+"interface)"
+msgstr "**MP 模式**\\ （多进程）：通过 ``NativeConnectorL2Adapter``\\ （L2 适配器接口）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:15
+msgid "Write the connector once, get both modes for free."
+msgstr "连接器只需编写一次，即可同时支持两种模式。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:17
+msgid ""
+"The framework lives in ``csrc/storage_backends/`` with the Redis RESP "
+"connector as the reference implementation."
+msgstr "该框架位于 ``csrc/storage_backends/``\\ ，Redis RESP 连接器作为参考实现。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:21
+msgid "Architecture"
+msgstr "架构"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:41
+msgid "**Design principles:**"
+msgstr "**设计原则：**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:43
+msgid ""
+"**GIL release** at the pybind layer for true concurrency between native "
+"threads"
+msgstr "**在 pybind 层释放 GIL，实现原生线程间的真正并发**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:44
+msgid ""
+"**Batching with tiling**: work for a batched request is split evenly "
+"among threads"
+msgstr "**批处理与分片**\\ ：批量请求的工作量在各线程间均匀分配"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:45
+msgid "**eventfd-based completions**: the kernel wakes Python -- no polling"
+msgstr "**基于 eventfd 的完成**\\ ：内核唤醒 Python -- 无需轮询"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:46
+msgid ""
+"**Non-blocking submission**: submission queue / completion queue "
+"architecture"
+msgstr "**非阻塞提交**\\ ：提交队列 / 完成队列架构"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:50
+msgid "Step 1: C++ Connector"
+msgstr "步骤 1：C++ 连接器"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:52
+msgid ""
+"Create your connector directory (e.g., "
+"``csrc/storage_backends/mybackend/``) and inherit from "
+"``ConnectorBase<YourConnectionType>``. You need to override 4 required "
+"methods (and optionally ``do_single_delete`` to support eviction)."
+msgstr "创建您的连接器目录（例如，\\ ``csrc/storage_backends/mybackend/``\\ ），并从 ``ConnectorBase<YourConnectionType>`` 继承。您需要重写 4 个必需的方法（并可选地重写 ``do_single_delete`` 以支持逐出）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:56
+msgid "**connector.h:**"
+msgstr "**connector.h:**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:127
+msgid "**What ConnectorBase gives you for free:**"
+msgstr "**ConnectorBase 开箱即用为您提供的能力：**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:129
+msgid "Worker thread pool with per-thread connections"
+msgstr "工作线程池，每个线程持有独立连接"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:130
+msgid "Submission queue (lock-free enqueue) and completion queue"
+msgstr "提交队列（无锁入队）和完成队列"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:131
+msgid "Automatic tiling: batch operations are split across workers"
+msgstr "自动分片：批量操作拆分到各工作线程"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:132
+msgid "eventfd signaling on completion (kernel wakes Python)"
+msgstr "完成时的 eventfd 信号（内核唤醒 Python）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:133
+msgid "Graceful shutdown (stop flag, drain, join)"
+msgstr "优雅关闭（设置停止标志、排空队列、join 线程）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:136
+msgid ""
+"Always call ``start_workers()`` at the **end** of your derived "
+"constructor, after all member variables are initialized. Worker threads "
+"call ``create_connection()`` immediately, so the object must be fully "
+"constructed."
+msgstr "始终在派生构造函数的\\ **末尾**\\ 调用 ``start_workers()``\\ ，在所有成员变量初始化之后。工作线程会立即调用 ``create_connection()``\\ ，因此对象必须完全构造。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:140
+msgid ""
+"**Reference:** ``csrc/storage_backends/redis/connector.h`` and "
+"``connector.cpp``"
+msgstr "**参考:** ``csrc/storage_backends/redis/connector.h`` 和 ``connector.cpp``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:144
+msgid "Step 2: Pybind Module"
+msgstr "步骤 2：Pybind 模块"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:146
+msgid ""
+"Use the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro, which binds all 7 "
+"methods (``event_fd``, ``submit_batch_get/set/exists/delete``, "
+"``drain_completions``, ``close``) with proper GIL release and Python "
+"buffer protocol handling."
+msgstr "使用 ``LMCACHE_BIND_CONNECTOR_METHODS`` 宏，该宏绑定所有 7 个方法（\\ ``event_fd``\\ 、\\ ``submit_batch_get/set/exists/delete``\\ 、\\ ``drain_completions``\\ 、\\ ``close``\\ ），并正确处理 GIL 释放和 Python 缓冲区协议。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:168
+msgid "The pybind utilities automatically:"
+msgstr "pybind 工具自动："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:170
+msgid "Extract buffer pointers from Python ``memoryview`` objects under the GIL"
+msgstr "在 GIL 下从 Python ``memoryview`` 对象中提取缓冲区指针"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:171
+msgid "Release the GIL before calling into C++"
+msgstr "在调用 C++ 之前释放 GIL"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:172
+msgid ""
+"Convert C++ ``Completion`` structs to Python tuples ``(future_id, ok, "
+"error, result_bools)``"
+msgstr ""
+"将 C++ ``Completion`` 结构转换为 Python 元组 ``(future_id, ok, error, "
+"result_bools)``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:174
+msgid "**Reference:** ``csrc/storage_backends/redis/pybind.cpp``"
+msgstr "**参考:** ``csrc/storage_backends/redis/pybind.cpp``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:178
+msgid "Step 3: Build System"
+msgstr "步骤 3：构建系统"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:180
+msgid ""
+"Register your C++ sources in ``setup.py`` alongside the existing Redis "
+"extension:"
+msgstr "在 ``setup.py`` 中注册您的 C++ 源文件，与现有的 Redis 扩展一起："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:201
+msgid "Then rebuild:"
+msgstr "然后重建："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:209
+msgid "Step 4: Python Client (Non-MP Mode)"
+msgstr "步骤 4：Python 客户端（非 MP 模式）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:211
+msgid ""
+"Inherit from ``ConnectorClientBase`` which provides asyncio event loop "
+"integration, future management, and both sync and async methods."
+msgstr "从 ``ConnectorClientBase`` 继承，该类提供 asyncio 事件循环集成、Future 管理，以及同步和异步方法。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:226
+msgid ""
+"This gives you ``batch_get``, ``batch_set``, ``batch_exists`` (async), "
+"and their synchronous variants, all with automatic eventfd-driven "
+"completion handling."
+msgstr "这为您提供了 ``batch_get``\\ 、\\ ``batch_set``\\ 、\\ ``batch_exists``\\ （异步）及其同步变体，所有这些都具有自动的基于 eventfd 的完成处理。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:229
+msgid ""
+"**Reference:** "
+"``lmcache/v1/storage_backend/native_clients/resp_client.py``"
+msgstr "**参考:** ``lmcache/v1/storage_backend/native_clients/resp_client.py``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:233
+msgid "Step 5: L2 Adapter (MP Mode)"
+msgstr "步骤 5：L2 适配器（MP 模式）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:235
+msgid ""
+"To use your connector as an L2 adapter in MP mode, create a single Python"
+" module that defines the config class, factory function, and self-"
+"registers both. The ``NativeConnectorL2Adapter`` bridge handles all the "
+"complexity (eventfd demuxing, key serialization, locking)."
+msgstr "要将您的连接器用作 MP 模式下的 L2 适配器，请创建一个单独的 Python 模块，该模块定义配置类、工厂函数，并自我注册这两者。\\ ``NativeConnectorL2Adapter`` 桥接处理所有复杂性（eventfd 解复用、键序列化、锁定）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:240
+msgid "Create a new file in the L2 adapters package:"
+msgstr "在 L2 适配器包中创建一个新文件："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:322
+msgid ""
+"The L2 adapter package uses ``pkgutil.iter_modules`` to auto-discover all"
+" modules in ``lmcache/v1/distributed/l2_adapters/``. Simply creating the "
+"file above is sufficient -- no changes to ``__init__.py`` or any other "
+"existing file are needed."
+msgstr ""
+"L2 适配器包使用 ``pkgutil.iter_modules`` 自动发现 "
+"``lmcache/v1/distributed/l2_adapters/`` 中的所有模块。仅仅创建上述文件就足够了——不需要对 "
+"``__init__.py`` 或任何其他现有文件进行更改。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:326
+msgid "**Usage from the command line:**"
+msgstr "**命令行使用：**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:336
+msgid "How NativeConnectorL2Adapter Bridges the Gap"
+msgstr "NativeConnectorL2Adapter 如何弥合差异"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:338
+msgid ""
+"The C++ connector has 1 eventfd and mixed completions. MP mode's "
+"``L2AdapterInterface`` requires 3 separate eventfds and typed results. "
+"The bridge handles this transparently:"
+msgstr ""
+"C++ 连接器有 1 个 eventfd 和混合完成。MP 模式的 ``L2AdapterInterface`` 需要 3 个独立的 "
+"eventfd 和类型化结果。桥接器对此进行了透明处理："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:345
+msgid "L2 Adapter Method"
+msgstr "L2 适配器方法"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:346
+msgid "Native Call"
+msgstr "原生调用"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:347
+msgid "Extra Logic"
+msgstr "额外逻辑"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:348
+msgid "``submit_store_task(keys, objs)``"
+msgstr "``submit_store_task(keys, objs)``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:349
+msgid "``submit_batch_set``"
+msgstr "``submit_batch_set``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:350
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:356
+msgid "ObjectKey to string, MemoryObj to memoryview"
+msgstr "ObjectKey 转换为字符串，MemoryObj 转换为 memoryview"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:351
+msgid "``submit_lookup_and_lock_task(keys)``"
+msgstr "``submit_lookup_and_lock_task(keys)``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:352
+msgid "``submit_batch_exists``"
+msgstr "``submit_batch_exists``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:353
+msgid "client-side lock refcount"
+msgstr "客户端锁引用计数"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:354
+msgid "``submit_load_task(keys, objs)``"
+msgstr "``submit_load_task(keys, objs)``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:355
+msgid "``submit_batch_get``"
+msgstr "``submit_batch_get``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:357
+msgid "``submit_unlock(keys)``"
+msgstr "``submit_unlock(keys)``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:358
+msgid "*(none)*"
+msgstr "(无)"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:359
+msgid "client-side lock decrement"
+msgstr "客户端锁减少"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:360
+msgid "``pop_completed_store_tasks()``"
+msgstr "``pop_completed_store_tasks()``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:361
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:364
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:367
+msgid "via ``drain_completions``"
+msgstr "通过 ``drain_completions``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:362
+msgid "demux by op type"
+msgstr "按操作类型解复用"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:363
+msgid "``query_lookup_and_lock_result()``"
+msgstr "``query_lookup_and_lock_result()``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:365
+msgid "exists results to Bitmap, apply locks"
+msgstr "存在结果到位图，应用锁定"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:366
+msgid "``query_load_result()``"
+msgstr "``query_load_result()``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:368
+msgid "ok/fail to Bitmap"
+msgstr "成功/失败到位图"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:370
+msgid ""
+"A background demux thread polls the native eventfd, calls "
+"``drain_completions()``, looks up each ``future_id`` to determine its "
+"operation type, routes the result to the correct completion dict, and "
+"signals the corresponding Python eventfd."
+msgstr "一个后台解复用线程轮询原生 eventfd，调用 ``drain_completions()``\\ ，查找每个 ``future_id`` 以确定其操作类型，将结果路由到正确的完成字典，并发出相应的 Python eventfd 信号。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:376
+msgid "Third-Party Native Connector Plugins (``native_plugin``)"
+msgstr "第三方原生连接器插件（\\ ``native_plugin``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:380
+msgid ""
+"The steps above describe how to add a native connector **inside** the "
+"LMCache source tree. If you want to ship a connector as a **separate, "
+"pip-installable package** (e.g. a proprietary storage backend), use the "
+"``native_plugin`` L2 adapter type instead. It dynamically loads your "
+"connector at runtime -- no LMCache source modifications required."
+msgstr "上述步骤描述了如何在 LMCache 源代码树中\\ **内部**\\ 添加一个原生连接器。如果您想将连接器作为\\ **单独的、可通过 pip 安装的包**\\ （例如，专有存储后端）进行发布，请改用 ``native_plugin`` L2 适配器类型。它在运行时动态加载您的连接器——无需修改 LMCache 源代码。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:386
+msgid "How It Works"
+msgstr "它是如何工作的"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:388
+msgid ""
+"The ``native_plugin`` adapter type loads a third-party **connector "
+"object** (pybind-wrapped C++ or pure Python) and wraps it with the built-"
+"in ``NativeConnectorL2Adapter`` bridge. This means you only need to "
+"implement the 6 connector methods -- the Python-side demux/lock bridging "
+"logic is reused from LMCache."
+msgstr "``native_plugin`` 适配器类型加载一个第三方 **连接器对象**\\ （pybind 封装的 C++ 或纯 Python），并用内置的 ``NativeConnectorL2Adapter`` 桥接器将其包装。这意味着您只需实现 6 个连接器方法——Python 端的解复用/锁定桥接逻辑是从 LMCache 重用的。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:393
+msgid "``plugin`` vs ``native_plugin``"
+msgstr "``plugin`` 与 ``native_plugin``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:397
+msgid "Aspect"
+msgstr "方面"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:398
+msgid "``plugin``"
+msgstr "``plugin``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:399
+msgid "``native_plugin``"
+msgstr "``native_plugin``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:400
+msgid "What is loaded"
+msgstr "加载内容"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:401
+msgid "A full ``L2AdapterInterface`` subclass"
+msgstr "一个完整的 ``L2AdapterInterface`` 子类"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:402
+msgid "A **connector** object (lower level)"
+msgstr "一个 **连接器** 对象（较低级别）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:403
+msgid "Bridging logic"
+msgstr "桥接逻辑"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:404
+msgid "Provided by the plugin itself"
+msgstr "由插件本身提供"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:405
+msgid "Reused from ``NativeConnectorL2Adapter``"
+msgstr "从 ``NativeConnectorL2Adapter`` 重用"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:406
+msgid "Third-party effort"
+msgstr "第三方工作量"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:407
+msgid "Must implement all abstract methods + 3 eventfds"
+msgstr "必须实现所有抽象方法 + 3 个 eventfds"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:408
+msgid "Only 6 connector methods"
+msgstr "仅需 6 个连接器方法"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:411
+msgid "Required Connector Interface"
+msgstr "必需的连接器接口"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:413
+msgid ""
+"The dynamically loaded connector instance must expose the following "
+"methods (identical to the pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` "
+"contract):"
+msgstr "动态加载的连接器实例必须暴露以下方法（与 pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` 的契约一致）："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:443
+msgid ""
+"The factory validates the first 6 methods at creation time and raises "
+"``TypeError`` if any are missing. ``submit_batch_delete`` is **optional**"
+" -- if absent, the adapter's ``delete()`` method will be a no-op "
+"(eviction will not remove keys from the backend)."
+msgstr "工厂在创建时验证前 6 个方法，如果缺少任何方法则引发 ``TypeError``\\ 。\\ ``submit_batch_delete`` 是 **可选** 的——如果缺失，适配器的 ``delete()`` 方法将不执行任何操作（逐出不会从后端移除键）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:448
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:462
+msgid "``NativePluginL2AdapterConfig`` fields"
+msgstr "``NativePluginL2AdapterConfig`` 字段"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:466
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:467
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:468
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:469
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:470
+msgid "``module_path``"
+msgstr "``module_path``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:471
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:475
+msgid "``str``"
+msgstr "``str``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:472
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:476
+msgid "yes"
+msgstr "是"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:473
+msgid "Dotted Python import path of the module containing the connector class."
+msgstr "连接器类所在模块的点分 Python 导入路径。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:474
+msgid "``class_name``"
+msgstr "``class_name``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:477
+msgid "Name of the connector class inside ``module_path``."
+msgstr "``module_path`` 中连接器类的名称。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:478
+msgid "``adapter_params``"
+msgstr "``adapter_params``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:479
+msgid "``dict``"
+msgstr "``dict``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:480
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:484
+msgid "no"
+msgstr "不"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:481
+msgid "Forwarded as ``**kwargs`` to the connector class constructor."
+msgstr "作为 ``**kwargs`` 转发给连接器类构造函数。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:482
+msgid "``max_capacity_gb``"
+msgstr "``max_capacity_gb``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:483
+msgid "``float``"
+msgstr "``float``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:485
+msgid ""
+"Maximum L2 storage capacity in GB for client-side usage tracking. "
+"Required for L2 eviction. Default 0 (disabled)."
+msgstr "客户端使用跟踪的最大 L2 存储容量（以 GB 为单位）。这是 L2 逐出的必要条件。默认值为 0（禁用）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:488
+msgid "Loading Flow"
+msgstr "加载流程"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:510
+msgid "Step-by-Step: Building an External Native Connector Plugin"
+msgstr "逐步：构建外部原生连接器插件"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:512
+msgid ""
+"**Create a Python package** with a C++ pybind11 extension that inherits "
+"from ``ConnectorBase<T>`` (same base class as built-in connectors)."
+msgstr "**创建一个 Python 包**\\ ，其中包含一个继承自 ``ConnectorBase<T>`` 的 C++ pybind11 扩展（与内置连接器相同的基类）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:515
+msgid "Project layout:"
+msgstr "项目布局："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:531
+msgid ""
+"**Implement the C++ connector** inheriting from ``ConnectorBase<T>`` and "
+"override the 4 required methods (``create_connection``, "
+"``do_single_get``, ``do_single_set``, ``do_single_exists``) and "
+"optionally ``do_single_delete`` for eviction support."
+msgstr "**实现 C++ 连接器**\\ ，继承自 ``ConnectorBase<T>``\\ ，并重写 4 个必需的方法（\\ ``create_connection``\\ 、\\ ``do_single_get``\\ 、\\ ``do_single_set``\\ 、\\ ``do_single_exists``\\ ），可选地重写 ``do_single_delete`` 以支持逐出。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:535
+msgid ""
+"**Create pybind11 bindings** using the ``LMCACHE_BIND_CONNECTOR_METHODS``"
+" macro:"
+msgstr "**使用 ``LMCACHE_BIND_CONNECTOR_METHODS`` 宏创建 pybind11 绑定：**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:553
+msgid ""
+"**Write a Python factory class** that selects the backend and returns the"
+" native connector instance:"
+msgstr "**编写一个 Python 工厂类**\\ ，选择后端并返回原生连接器实例："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:568
+msgid "**Build and install** the package:"
+msgstr "**构建和安装** 包："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:575
+msgid "**Configure LMCache** to use it:"
+msgstr "**配置 LMCache** 以使用它："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:590
+msgid "Reference Implementation"
+msgstr "参考实现"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:592
+msgid ""
+"See ``examples/lmc_external_native_connector/`` for a complete, pip-"
+"installable example connector plugin that demonstrates:"
+msgstr ""
+"请参阅 ``examples/lmc_external_native_connector/`` 以获取完整的、可通过 pip "
+"安装的示例连接器插件，该插件演示了："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:595
+msgid ""
+"C++ pybind11-wrapped connectors inheriting from ``ConnectorBase<T>`` "
+"(same as built-in Redis/FS)."
+msgstr "从 ``ConnectorBase<T>`` 继承的 C++ pybind11 封装连接器（与内置的 Redis/FS 相同）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:597
+msgid ""
+"Two backends: filesystem (``ExampleFSConnector``) and in-memory "
+"(``ExampleMemoryConnector``), both in C++."
+msgstr "两个后端：文件系统（\\ ``ExampleFSConnector``\\ ）和内存（\\ ``ExampleMemoryConnector``\\ ），均为 C++ 实现。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:599
+msgid ""
+"A thin Python factory class (``ExampleNativeConnector``) that selects the"
+" backend via a ``\"backend\"`` parameter."
+msgstr "一个轻量级 Python 工厂类（\\ ``ExampleNativeConnector``\\ ），通过 ``\"backend\"`` 参数选择后端。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:601
+msgid ""
+"Worker thread pool with eventfd notification (inherited from "
+"``ConnectorBase``)."
+msgstr "带有 eventfd 通知的工作线程池（继承自 ``ConnectorBase``\\ ）。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:602
+msgid "Build via ``pip install -e .`` using pybind11 + setuptools."
+msgstr "通过 ``pip install -e .`` 使用 pybind11 + setuptools 构建。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:606
+msgid "Checklist"
+msgstr "清单"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:608
+msgid "Use this checklist when adding a new native connector:"
+msgstr "在添加新的原生连接器时，请使用此检查清单："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:610
+msgid ""
+"C++ connector inheriting ``ConnectorBase<T>`` with 4 required + 1 "
+"optional (``do_single_delete``) method overrides"
+msgstr "继承 ``ConnectorBase<T>`` 的 C++ 连接器，具有 4 个必需的方法重写和 1 个可选的方法重写（\\ ``do_single_delete``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:611
+msgid "Pybind module using ``LMCACHE_BIND_CONNECTOR_METHODS``"
+msgstr "使用 ``LMCACHE_BIND_CONNECTOR_METHODS`` 的 Pybind 模块"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:612
+msgid "``setup.py`` entry for the new ``CppExtension``"
+msgstr "``setup.py`` 中用于新的 ``CppExtension`` 的条目"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:613
+msgid "Python client inheriting ``ConnectorClientBase`` (non-MP mode)"
+msgstr "继承 ``ConnectorClientBase`` 的 Python 客户端（非 MP 模式）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:614
+msgid "L2 adapter module with config class + factory self-registration (MP mode)"
+msgstr "带有配置类和工厂自注册的 L2 适配器模块（多进程模式）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:615
+msgid ""
+"Unit tests (see "
+"``tests/v1/distributed/test_native_connector_l2_adapter.py``)"
+msgstr "单元测试（请参见 ``tests/v1/distributed/test_native_connector_l2_adapter.py``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:616
+msgid "Rebuild with ``pip install -e .`` and verify both modes work"
+msgstr "使用 ``pip install -e .`` 重新构建并验证两种模式均正常工作"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:618
+msgid "For **external** native connector plugins (``native_plugin``):"
+msgstr "对于 **外部** 原生连接器插件 (``native_plugin``)："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:620
+msgid "Separate pip-installable package with C++ pybind11 extension"
+msgstr "带有 C++ pybind11 扩展的独立 pip 可安装包"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:621
+msgid ""
+"Connector class exposing the 6 required methods (+ optional "
+"``submit_batch_delete`` for eviction)"
+msgstr "连接器类，暴露 6 个必需的方法（+ 可选的 ``submit_batch_delete`` 用于逐出）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:622
+msgid "Python factory class for backend selection"
+msgstr "后端选择的 Python 工厂类"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:623
+msgid "``pip install -e .`` and configure via ``--l2-adapter`` JSON"
+msgstr "``pip install -e .`` 并通过 ``--l2-adapter`` JSON 进行配置"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:624
+msgid "Unit tests (see ``examples/lmc_external_native_connector/tests/``)"
+msgstr "单元测试（参见 ``examples/lmc_external_native_connector/tests/``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:628
+msgid "Built-in Aerospike backend (optional)"
+msgstr "内置的 Aerospike 后端（可选）"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:630
+msgid ""
+"LMCache ships an optional in-tree Aerospike native connector (same "
+"``ConnectorBase`` harness as Redis). It is compiled only when "
+"``BUILD_AEROSPIKE=1`` or ``AEROSPIKE_INCLUDE_DIR`` is set during ``pip "
+"install -e .``."
+msgstr "LMCache 提供一个可选的内置 Aerospike 原生连接器（与 Redis 使用相同的 ``ConnectorBase`` 框架）。仅当在 ``pip install -e .`` 时设置 ``BUILD_AEROSPIKE=1`` 或 ``AEROSPIKE_INCLUDE_DIR`` 时，它才会被编译。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:635
+msgid "**Build:**"
+msgstr "**构建：**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:643
+msgid ""
+"The ``aerospike-client-c.env`` file simply points the build at the C "
+"client headers and shared libraries you unpacked into ``.deps/``. Adjust "
+"the paths to match where the client was installed. Example:"
+msgstr "``aerospike-client-c.env`` 文件仅仅指向您解压到 ``.deps/`` 中的 C 客户端头文件和共享库。请调整路径以匹配客户端的安装位置。示例："
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:656
+msgid ""
+"Setting ``AEROSPIKE_INCLUDE_DIR`` is enough to enable the extension, so "
+"``BUILD_AEROSPIKE=1`` is optional once the env file is sourced. Multiple "
+"include or library directories can be passed as ``;``-separated lists."
+msgstr "设置 ``AEROSPIKE_INCLUDE_DIR`` 足以启用扩展，因此一旦加载了环境文件，\\ ``BUILD_AEROSPIKE=1`` 是可选的。可以将多个包含或库目录作为 ``;`` 分隔的列表传递。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:660
+msgid "**MP mode:**"
+msgstr "**MP 模式:**"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:666
+msgid ""
+"Implementation: ``csrc/storage_backends/aerospike/``, "
+"``lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py``."
+msgstr "实现：\\ ``csrc/storage_backends/aerospike/``, ``lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:671
+msgid "Additional Resources"
+msgstr "附加资源"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:673
+msgid "Framework source: ``csrc/storage_backends/``"
+msgstr "框架源代码：\\ ``csrc/storage_backends/``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:674
+msgid "``ConnectorBase`` template: ``csrc/storage_backends/connector_base.h``"
+msgstr "``ConnectorBase`` 模板: ``csrc/storage_backends/connector_base.h``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:675
+msgid ""
+"``IStorageConnector`` interface: "
+"``csrc/storage_backends/connector_interface.h``"
+msgstr "``IStorageConnector`` 接口: ``csrc/storage_backends/connector_interface.h``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:676
+msgid "Pybind utilities: ``csrc/storage_backends/connector_pybind_utils.h``"
+msgstr "Pybind 工具: ``csrc/storage_backends/connector_pybind_utils.h``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:677
+msgid "Redis reference implementation: ``csrc/storage_backends/redis/``"
+msgstr "Redis 参考实现: ``csrc/storage_backends/redis/``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:678
+msgid "Aerospike implementation (optional): ``csrc/storage_backends/aerospike/``"
+msgstr "Aerospike 实现（可选）：\\ ``csrc/storage_backends/aerospike/``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:679
+msgid "Architecture README: ``csrc/storage_backends/README.md``"
+msgstr "架构自述文件: ``csrc/storage_backends/README.md``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:680
+msgid ""
+"External native connector example: "
+"``examples/lmc_external_native_connector/``"
+msgstr "外部原生连接器示例：\\ ``examples/lmc_external_native_connector/``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:682
+msgid ""
+"Native plugin adapter source: "
+"``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``"
+msgstr ""
+"原生插件适配器源: "
+"``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:684
+msgid ""
+"Design document: "
+"``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
+msgstr "设计文档：\\ ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
+
+#: ../../source/developer_guide/extending_lmcache/native_connectors.rst:686
+msgid ""
+"RESP backend user guide: :doc:`RESP (Native Redis/Valkey) "
+"<../../kv_cache/storage_backends/resp>`"
+msgstr ""
+"RESP 后端用户指南： :doc:`RESP (原生 Redis/Valkey) "
+"<../../kv_cache/storage_backends/resp>`"
+

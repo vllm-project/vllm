@@ -1,0 +1,258 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/server.rst:2
+msgid "lmcache server"
+msgstr "lmcache server"
+
+#: ../../source/cli/server.rst:4
+msgid ""
+"The ``lmcache server`` command launches the standalone LMCache Multi-"
+"Process (MP) server, which exposes a ZMQ control plane and an HTTP "
+"frontend (status, healthcheck, cache-clear, checksum APIs). It is the "
+"server that ``lmcache describe``, ``lmcache ping kvcache``, ``lmcache "
+"kvcache``, and ``lmcache bench server`` talk to."
+msgstr "``lmcache server`` 命令启动独立的 LMCache 多进程 (MP) 服务器，该服务器暴露 ZMQ 控制平面和 HTTP 前端 (状态、健康检查、清除缓存、校验和 API)。这是 ``lmcache describe``\\ 、\\ ``lmcache ping kvcache``\\ 、\\ ``lmcache kvcache`` 和 ``lmcache bench server`` 进行交互的服务器。"
+
+#: ../../source/cli/server.rst:12
+msgid ""
+"This command requires the full ``lmcache`` installation with CUDA "
+"extensions. It is **not** available in the lightweight ``lmcache-cli`` "
+"package."
+msgstr "此命令需要完整的 ``lmcache`` 安装，并带有 CUDA 扩展。它在轻量级的 ``lmcache-cli`` 包中 **不可用**\\ 。"
+
+#: ../../source/cli/server.rst:21
+msgid "Quick start"
+msgstr "快速开始"
+
+#: ../../source/cli/server.rst:31
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/server.rst:33
+msgid ""
+"The server composes its arguments from several configuration modules — "
+"the multiprocess server, the storage manager (L1 / L2 adapters / "
+"eviction), the HTTP frontend, and the Prometheus / telemetry "
+"observability layer. The full, authoritative list is large and evolves "
+"with the runtime, so consult:"
+msgstr ""
+"服务器从多个配置模块组合其参数——多进程服务器、存储管理器（L1 / L2 适配器 / 逐出）、HTTP 前端以及 Prometheus / "
+"监控可观察性层。完整的权威列表很大，并随着运行时而变化，因此请参考："
+
+#: ../../source/cli/server.rst:42
+msgid "Commonly used flags include:"
+msgstr "常用的标志包括："
+
+#: ../../source/cli/server.rst:48
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/server.rst:49
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/server.rst:50
+msgid "``--host HOST``"
+msgstr "``--host HOST``"
+
+#: ../../source/cli/server.rst:51
+msgid "Bind address for the server."
+msgstr "服务器的绑定地址。"
+
+#: ../../source/cli/server.rst:52
+msgid "``--port PORT``"
+msgstr "``--port PORT``"
+
+#: ../../source/cli/server.rst:53
+msgid "ZMQ control-plane port."
+msgstr "ZMQ 控制平面端口。"
+
+#: ../../source/cli/server.rst:54
+msgid "``--chunk-size N``"
+msgstr "``--chunk-size N``"
+
+#: ../../source/cli/server.rst:55
+msgid "KV cache chunk size in tokens."
+msgstr "KV Cache 块大小（以 token 为单位）。"
+
+#: ../../source/cli/server.rst:56
+msgid "``--l1-size-gb GB``"
+msgstr "``--l1-size-gb GB``"
+
+#: ../../source/cli/server.rst:57
+msgid "L1 (CPU/DRAM) cache capacity in GB."
+msgstr "L1 (CPU/DRAM) 缓存容量（以 GB 为单位）。"
+
+#: ../../source/cli/server.rst:58
+msgid "``--eviction-policy POLICY``"
+msgstr "``--eviction-policy POLICY``"
+
+#: ../../source/cli/server.rst:59
+msgid "L1 eviction policy (e.g. ``LRU``)."
+msgstr "L1 逐出策略（例如 ``LRU``\\ ）。"
+
+#: ../../source/cli/server.rst:60
+msgid "``--eviction-trigger-watermark RATIO``"
+msgstr "``--eviction-trigger-watermark RATIO``"
+
+#: ../../source/cli/server.rst:61
+msgid "L1 fill ratio at which eviction begins."
+msgstr "开始逐出的 L1 填充比率。"
+
+#: ../../source/cli/server.rst:62
+msgid "``--eviction-ratio RATIO``"
+msgstr "``--eviction-ratio RATIO``"
+
+#: ../../source/cli/server.rst:63
+msgid "Fraction of L1 cleared per eviction cycle."
+msgstr "每个逐出周期清除的 L1 分数。"
+
+#: ../../source/cli/server.rst:64
+msgid "``--max-workers N``"
+msgstr "``--max-workers N``"
+
+#: ../../source/cli/server.rst:65
+msgid "Number of server worker processes."
+msgstr "服务器工作进程的数量。"
+
+#: ../../source/cli/server.rst:66
+msgid "``--coordinator-url URL``"
+msgstr "``--coordinator-url URL``"
+
+#: ../../source/cli/server.rst:67
+msgid ""
+"Register with an MP coordinator at this base URL (e.g. "
+"``http://coordinator:9300``). Opt-in; enables fleet registration. See "
+":doc:`/mp/coordinator`."
+msgstr "在此基础 URL（例如 ``http://coordinator:9300``\\ ）注册 MP 协调器。可选；启用车队注册。请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/cli/server.rst:70
+msgid "``--coordinator-advertise-ip IP``"
+msgstr "``--coordinator-advertise-ip IP``"
+
+#: ../../source/cli/server.rst:71
+msgid ""
+"IP the coordinator should reach this server at (defaults to the outbound "
+"IP)."
+msgstr "协调器应通过此服务器访问的 IP（默认为出站 IP）。"
+
+#: ../../source/cli/server.rst:73
+msgid "``--coordinator-heartbeat-interval SECONDS``"
+msgstr "``--coordinator-heartbeat-interval SECONDS``"
+
+#: ../../source/cli/server.rst:74
+msgid ""
+"Seconds between heartbeats (``> 0``, default ``5``). Keep well below the "
+"coordinator's instance timeout."
+msgstr "心跳之间的秒数（\\ ``> 0``\\ ，默认值为 ``5``\\ ）。应远低于协调器的实例超时。"
+
+#: ../../source/cli/server.rst:76
+msgid "``--coordinator-l2-event-reporting``"
+msgstr "``--coordinator-l2-event-reporting``"
+
+#: ../../source/cli/server.rst:77
+msgid ""
+"Enable reporting L2 store/lookup events to the coordinator for fleet-wide"
+" usage tracking and quota-based eviction."
+msgstr "启用向协调器上报 L2 存储/查找事件，用于全集群使用量跟踪及基于配额的逐出。"
+
+#: ../../source/cli/server.rst:79
+msgid "``--coordinator-l2-event-flush-interval SECONDS``"
+msgstr "``--coordinator-l2-event-flush-interval SECONDS``"
+
+#: ../../source/cli/server.rst:80
+msgid "Seconds between L2 event batch flushes (``> 0``, default ``1``)."
+msgstr "L2 事件批量刷新之间的秒数（\\ ``> 0``\\ ，默认 ``1``\\ ）。"
+
+#: ../../source/cli/server.rst:81
+msgid "``--p2p-advertise-url HOST:PORT``"
+msgstr "``--p2p-advertise-url HOST:PORT``"
+
+#: ../../source/cli/server.rst:82
+msgid ""
+"Enable P2P KV cache sharing and advertise this server's transfer-channel "
+"endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it turns P2P on; it "
+"additionally requires ``--coordinator-url`` for peer discovery. See "
+":doc:`/mp/p2p`."
+msgstr "启用 P2P KV Cache 共享，并将此服务器的传输通道端点广告给对等方（例如 ``10.0.0.1:8500``）。设置它会开启 P2P；此外还需要 ``--coordinator-url`` 进行对等发现。请参见 :doc:`/mp/p2p`。"
+
+#: ../../source/cli/server.rst:86
+msgid "``--p2p-listen-url HOST:PORT``"
+msgstr "``--p2p-listen-url 主机:端口``"
+
+#: ../../source/cli/server.rst:87
+msgid ""
+"Address the transfer-channel server binds to. Defaults to ``--p2p-"
+"advertise-url``. Set it when the advertised address differs from the bind"
+" address (e.g. bind ``0.0.0.0`` while advertising a routable IP)."
+msgstr "传输通道服务器绑定的地址。默认为 ``--p2p-advertise-url``。当广告地址与绑定地址不同（例如，绑定 ``0.0.0.0`` 而广告一个可路由的 IP）时，请设置它。"
+
+#: ../../source/cli/server.rst:90
+msgid "``--p2p-lookup-timeout SECONDS``"
+msgstr "``--p2p-lookup-timeout SECONDS``"
+
+#: ../../source/cli/server.rst:91
+msgid "Deadline for a peer lookup before it counts as a miss (default ``30``)."
+msgstr "对等查找的截止时间，超过该时间将视为未命中（默认 ``30``）。"
+
+#: ../../source/cli/server.rst:92
+msgid "``--p2p-load-timeout SECONDS``"
+msgstr "``--p2p-load-timeout SECONDS``"
+
+#: ../../source/cli/server.rst:93
+msgid ""
+"Deadline for a peer KV read before it counts as a failure (default "
+"``30``)."
+msgstr "对等 KV 读取的截止时间，超过该时间将视为失败（默认 ``30``）。"
+
+#: ../../source/cli/server.rst:95
+msgid "``--p2p-transfer-engine ENGINE``"
+msgstr "``--p2p-transfer-engine ENGINE``"
+
+#: ../../source/cli/server.rst:96
+msgid "Transfer-channel implementation for P2P reads (default ``nixl``)."
+msgstr "P2P 读取的传输通道实现（默认 ``nixl``）。"
+
+#: ../../source/cli/server.rst:97
+#, python-brace-format
+msgid "``--trace-level {storage}``"
+msgstr "``--trace-level {storage}``"
+
+#: ../../source/cli/server.rst:98
+msgid "Enable storage-level trace recording (see :doc:`trace`)."
+msgstr "启用存储级别的追踪记录（请参见 :doc:`trace`）。"
+
+#: ../../source/cli/server.rst:99
+msgid "``--trace-output PATH``"
+msgstr "``--trace-output PATH``"
+
+#: ../../source/cli/server.rst:100
+msgid "Destination for recorded ``.lct`` trace files."
+msgstr "记录的 ``.lct`` 跟踪文件的目标。"
+
+#: ../../source/cli/server.rst:102
+msgid ""
+"L2 adapters, observability, and Prometheus exporters are configured "
+"through their own flag groups; see ``lmcache server --help`` for the "
+"complete set."
+msgstr "L2 适配器、可观察性和 Prometheus 导出器通过各自的标志组进行配置；有关完整的设置，请参见 ``lmcache server --help``\\ 。"
+

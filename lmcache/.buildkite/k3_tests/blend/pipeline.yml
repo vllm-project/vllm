@@ -1,0 +1,34 @@
+# CacheBlend <-> LMCache compatibility test.
+#
+# Builds the PR's LMCache from source (compiling c_ops for the pod's GPU arch),
+# pulls the external cacheblend-plugin from GitHub, installs it editable, and
+# runs the plugin's vllm_compat_check (--skip-correctness): one blend server +
+# vLLM stack, five V3 contract checks ending in a non-prefix blend that must
+# engage. Catches LMCache changes that break the external plugin *before* merge
+# — the recurring rebase/version-skew class (RPC key renames, handler-signature
+# drift, KV-layout changes, etc.).
+#
+# Needs one GPU. Set HF_TOKEN (gated model) and GH_TOKEN (private plugin repo)
+# in the Buildkite UI — see BK_WEB_SETUP.md.
+
+steps:
+  - label: ":jigsaw: CacheBlend plugin compat (Llama-8B)"
+    command: .buildkite/k3_tests/blend/run.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never  # local image, imported into K3s containerd
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "cb_compat_logs/**/*"

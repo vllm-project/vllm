@@ -1,0 +1,82 @@
+name: Build Main Artifacts
+
+# Reusable workflow that builds the main release artifacts:
+# - source distribution (tar ball)
+# - CUDA wheel (built via cibuildwheel, latest torch)
+# Uploaded as the `release-artifacts` GHA artifact.
+
+on:
+    workflow_call:
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-artifacts:
+        name: Build artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                # for setuptools-scm
+                fetch-depth: 0
+
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Pin release version from tag (setuptools-scm)
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling
+              run: |
+                python -m pip install --upgrade pip
+                pip install build cibuildwheel
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Build source distribution (no native extensions)
+              run: |
+                NO_NATIVE_EXT=1 python -m build --sdist
+
+            - name: Build CUDA wheels with cibuildwheel
+              # Configuration is set in pyproject.toml
+              # this will build lmcache with the latest version of torch
+              # building from source will be required if a serving engine uses
+              # an earlier non-ABI compatible version of torch
+              env:
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+              run: |
+                python -m cibuildwheel --output-dir dist
+
+            - name: Upload release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-artifacts
+                path: dist/

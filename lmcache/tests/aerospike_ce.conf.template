@@ -1,0 +1,53 @@
+# Aerospike CE template for CI/local integration tests.
+# __ACCESS_PORT__ is replaced by CI workflow / docker run
+service {
+    proto-fd-max 15000
+    cluster-name lmcache-test
+}
+
+logging {
+    console {
+        context any info
+    }
+}
+
+network {
+    service {
+        address any
+        port 3000
+        access-address 127.0.0.1
+        access-port __ACCESS_PORT__
+    }
+    heartbeat {
+        mode mesh
+        port 3002
+        interval 150
+        timeout 10
+    }
+    fabric {
+        port 3001
+    }
+    info {
+        port 3003
+    }
+}
+
+namespace lmcache {
+    replication-factor 1
+    nsup-period 120
+    default-ttl 0
+    max-record-size 1048576
+    storage-engine memory {
+        data-size 2G
+    }
+}
+
+namespace lmcache_no_nsup {
+    replication-factor 1
+    nsup-period 0
+    default-ttl 0
+    max-record-size 1048576
+    storage-engine memory {
+        data-size 512M
+    }
+}

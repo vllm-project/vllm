@@ -1,0 +1,18 @@
+chunk_size: 256
+local_cpu: False
+max_local_cpu_size: 10
+save_unfull_chunk: False
+
+remote_url: "s3://{BUCKET_NAME}.s3express-{AZ_ID}.{REGION}.amazonaws.com"
+remote_serde: "naive"
+
+blocking_timeout_secs: 100
+
+extra_config:
+  save_chunk_meta: False
+  s3_num_io_threads: 64
+  s3_prefer_http2: True
+  s3_region: "{REGION}"
+  s3_enable_s3express: True
+  aws_access_key_id: "{AWS_ACCESS_KEY_ID}"
+  aws_secret_access_key: "{AWS_SECRET_ACCESS_KEY}"

@@ -1,0 +1,229 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_management/index.rst:2
+msgid "LMCache Controller"
+msgstr "LMCache 控制器"
+
+#: ../../source/kv_cache_management/index.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_management/index.rst:10
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache_management/index.rst:11
+msgid ""
+"The overall architecture of the LMCache Controller is shown in the "
+"figure, mainly consisting of two parts: the Controller Manager and "
+"LMCache Worker."
+msgstr "LMCache 控制器的整体架构如图所示，主要由两个部分组成：控制器管理器和 LMCache 工作线程。"
+
+#: ../../source/kv_cache_management/index.rst:14
+msgid ""
+"The Controller Manager mainly consists of KV Controller, Reg Controller, "
+"and Cluster Executor."
+msgstr "控制器管理器主要由 KV 控制器、注册控制器和集群执行器组成。"
+
+#: ../../source/kv_cache_management/index.rst:16
+msgid ""
+"KV Controller: The KV Controller handles the chunk information reported "
+"by LMCache Workers, and lookup requests query chunk information from the "
+"KV Controller."
+msgstr ""
+"KV Controller：KV Controller 处理由 LMCache Workers 报告的块信息，并且查找请求从 KV "
+"Controller 查询块信息。"
+
+#: ../../source/kv_cache_management/index.rst:17
+msgid ""
+"Reg Controller: The Reg Controller is responsible for handling "
+"register/deregister/heartbeat requests from LMCache Workers."
+msgstr "Reg Controller: Reg Controller 负责处理来自 LMCache Workers 的注册/注销/心跳请求。"
+
+#: ../../source/kv_cache_management/index.rst:18
+msgid ""
+"Cluster Executor: When the Controller Manager receives user requests, "
+"such as Clear or Move, it sends the corresponding commands to LMCache "
+"Workers through the Cluster Executor."
+msgstr "集群执行器：当控制器管理器接收到用户请求，例如清除或移动时，它通过集群执行器将相应的命令发送给 LMCache 工作线程。"
+
+#: ../../source/kv_cache_management/index.rst:20
+msgid ""
+"The LMCache Worker is a thread within a rank process, which is "
+"responsible for the following tasks:"
+msgstr "LMCache Worker 是一个在排名进程中的线程，负责以下任务："
+
+#: ../../source/kv_cache_management/index.rst:22
+msgid "sends register, deregister, heartbeat to the Reg Controller."
+msgstr "向注册控制器发送注册、注销和心跳。"
+
+#: ../../source/kv_cache_management/index.rst:23
+msgid ""
+"send chunk information to the KV Controller, which include admit and "
+"evict message."
+msgstr "将块信息发送到 KV 控制器，包括接纳和逐出消息。"
+
+#: ../../source/kv_cache_management/index.rst:24
+msgid ""
+"listens on a port to receive commands from the Cluster Executor and "
+"performs corresponding processing."
+msgstr "在一个端口上监听以接收来自集群执行器的命令，并执行相应的处理。"
+
+#: ../../source/kv_cache_management/index.rst:26
+msgid "LMCache Controller Architecture Diagram"
+msgstr "LMCache 控制器架构图"
+
+#: ../../source/kv_cache_management/index.rst:30
+msgid "P2P Related"
+msgstr "P2P 相关"
+
+#: ../../source/kv_cache_management/index.rst:32
+msgid ""
+"If ``enable_p2p`` is enabled, the LMCache Controller must also be "
+"enabled. The LMCache Controller serves as the central node and stores "
+"information for each chunk. The ``P2PBackend`` queries chunk information "
+"from the LMCache Controller and performs data transmission through NIXL."
+msgstr ""
+"如果启用 ``enable_p2p``，则必须启用 LMCache 控制器。LMCache "
+"控制器作为中央节点，存储每个块的信息。``P2PBackend`` 从 LMCache 控制器查询块信息，并通过 NIXL 执行数据传输。"
+
+#: ../../source/kv_cache_management/index.rst:38
+msgid "Key Features"
+msgstr "关键特性"
+
+#: ../../source/kv_cache_management/index.rst:40
+msgid "Exposes a set of APIs for users and orchestrators to manage the KV cache."
+msgstr "暴露一组 API 供用户和调度器管理 KV Cache。"
+
+#: ../../source/kv_cache_management/index.rst:42
+msgid "Currently, the controller provides the following APIs:"
+msgstr "目前，控制器提供以下 API："
+
+#: ../../source/kv_cache_management/index.rst:44
+msgid ":ref:`Clear <clear>`: Clear the KV caches."
+msgstr ":ref:`清除 <clear>`: 清除 KV 缓存。"
+
+#: ../../source/kv_cache_management/index.rst:45
+msgid ":ref:`Compress <compress>`: Compress the KV cache."
+msgstr ":ref:`压缩 <compress>`: 压缩 KV Cache。"
+
+#: ../../source/kv_cache_management/index.rst:46
+msgid ":ref:`Health <health>`: Check the health status of cache workers."
+msgstr ":ref:`Health <health>`: 检查缓存工作线程的健康状态。"
+
+#: ../../source/kv_cache_management/index.rst:47
+msgid ":ref:`Lookup <lookup>`: Lookup the KV cache for a given list of tokens."
+msgstr ":ref:`查找 <lookup>`: 在 KV Cache 中查找给定的令牌列表。"
+
+#: ../../source/kv_cache_management/index.rst:48
+msgid ":ref:`Move <move>`: Move the KV cache to a different location."
+msgstr ":ref:`移动 <move>`: 将 KV Cache 移动到不同的位置。"
+
+#: ../../source/kv_cache_management/index.rst:49
+msgid ":ref:`Pin <pin>`: Persist the KV cache to prevent it from being evicted."
+msgstr ":ref:`Pin <pin>`: 持久化 KV Cache 以防止其被逐出。"
+
+#: ../../source/kv_cache_management/index.rst:50
+msgid ""
+":ref:`CheckFinish <check_finish>`: Check whether a (non-blocking) control"
+" event has finished or not."
+msgstr ":ref:`CheckFinish <check_finish>`: 检查一个（非阻塞）控制事件是否已经完成。"
+
+#: ../../source/kv_cache_management/index.rst:51
+msgid ":ref:`QueryWorkerInfo <query_worker_info>`: Query the worker info."
+msgstr ":ref:`QueryWorkerInfo <query_worker_info>`: 查询工作者信息。"
+
+#: ../../source/kv_cache_management/index.rst:53
+msgid "Interacts with the LMCache worker."
+msgstr "与 LMCache 工作线程交互。"
+
+#: ../../source/kv_cache_management/index.rst:55
+msgid "Currently, the LMCache worker supports the following functions:"
+msgstr "目前，LMCache 工作线程支持以下功能："
+
+#: ../../source/kv_cache_management/index.rst:57
+msgid "register with the controller"
+msgstr "向控制器注册"
+
+#: ../../source/kv_cache_management/index.rst:58
+msgid "deregister from the controller"
+msgstr "从控制器注销"
+
+#: ../../source/kv_cache_management/index.rst:59
+msgid "heartbeat"
+msgstr "心跳"
+
+#: ../../source/kv_cache_management/index.rst:60
+msgid "admit or evict chunk information(LocalCPUBackend or LocalDiskBackend)"
+msgstr "接受或逐出块信息（LocalCPUBackend 或 LocalDiskBackend）"
+
+#: ../../source/kv_cache_management/index.rst:64
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/kv_cache_management/index.rst:66
+msgid "**Start the Controller**"
+msgstr "**启动控制器**"
+
+#: ../../source/kv_cache_management/index.rst:72
+msgid "Expected output:"
+msgstr "预期输出："
+
+#: ../../source/kv_cache_management/index.rst:87
+msgid "**Controller Configuration**"
+msgstr "**控制器配置**"
+
+#: ../../source/kv_cache_management/index.rst:89
+msgid "--host: default is 0.0.0.0"
+msgstr "--host: 默认值为 0.0.0.0"
+
+#: ../../source/kv_cache_management/index.rst:90
+msgid ""
+"--port: default is 9000, the externally exposed port through which "
+"interfaces like lookup can be accessed via this port."
+msgstr "--port: 默认值为 9000，通过此端口可以访问诸如查找等接口。"
+
+#: ../../source/kv_cache_management/index.rst:91
+msgid ""
+"--monitor-port: default is 9001,  the port through which LMCache Worker "
+"communicates with Controller Manager (deprecated, indicates the pull port"
+" in --monitor-ports, reply port is None)."
+msgstr ""
+"--monitor-port: 默认值为 9001，LMCache Worker 与 Controller Manager "
+"通信的端口（已弃用，表示 --monitor-ports 中的拉取端口，回复端口为 None）。"
+
+#: ../../source/kv_cache_management/index.rst:92
+#, python-brace-format
+msgid ""
+"--monitor-ports: default is None, if configured, requires a JSON format "
+"string input such as ``{\"pull\": 8300, \"reply\": 8400}``."
+msgstr ""
+"--monitor-ports: 默认值为 None，如果配置，则需要输入 JSON 格式的字符串，例如 ``{\\\"pull\\\": "
+"8300, \\\"reply\\\": 8400}``。"
+
+#: ../../source/kv_cache_management/index.rst:94
+msgid "**YAML Configuration**"
+msgstr "**YAML 配置**"
+

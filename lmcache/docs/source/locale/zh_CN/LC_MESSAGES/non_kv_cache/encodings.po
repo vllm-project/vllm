@@ -1,0 +1,33 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/non_kv_cache/encodings.rst:2
+msgid "Encodings"
+msgstr "编码"
+
+#: ../../source/non_kv_cache/encodings.rst:6
+msgid ""
+"Multiprocess (MP) support for encoding (encoder / multimodal) caching is "
+"**coming soon**. The current in-process implementation is preserved in "
+"the Legacy section: :doc:`/non_kv_cache/encoder_cache` and "
+":doc:`/api_reference/multimodality`."
+msgstr "MP 模式（多进程）对编码（编码器／多模态）缓存的支持 **即将推出**\\ 。当前的进程内实现保留在旧版章节中：:doc:`/non_kv_cache/encoder_cache` 和 :doc:`/api_reference/multimodality`。"
+

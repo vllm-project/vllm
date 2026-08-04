@@ -1,0 +1,4 @@
+chunk_size: 256
+local_device: "cpu"
+remote_url: "lm://localhost:65000"
+remote_serde: "safetensor"

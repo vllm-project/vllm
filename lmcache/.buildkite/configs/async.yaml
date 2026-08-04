@@ -1,0 +1,32 @@
+workload:
+  type: long_doc_qa
+  max-inflight-requests: 20
+  sleep-time-after-warmup: 20
+  num-documents: 20
+  repeat-count: 1
+  hit-miss-ratio: 2:2
+
+docker:
+  env:
+    - "LMCACHE_CHUNK_SIZE=256"
+    - "LMCACHE_LOCAL_CPU=False"
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=70"
+    - "LMCACHE_MAX_LOCAL_DISK_SIZE=70"
+    - "LMCACHE_LOCAL_DISK=\"file:///local/end-to-end-tests/local/\""
+    - "LMCACHE_ENABLE_ASYNC_LOADING=True"
+    - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.01, \"use_odirect\": True}"
+    - "LMCACHE_SAVE_UNFULL_CHUNK=False"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
+
+vllm:
+  model: "meta-llama/Llama-3.1-8B-Instruct"
+  args:
+    - "--load-format"
+    - "dummy"
+    - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+checking-fields:
+  - query_round_time_per_prompt

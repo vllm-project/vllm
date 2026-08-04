@@ -1,0 +1,69 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_management/health.rst:4
+msgid "Check controller health"
+msgstr "检查控制器健康状态"
+
+#: ../../source/kv_cache_management/health.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_management/health.rst:11
+msgid "The ``health`` interface is defined as the following:"
+msgstr "``health`` 接口定义如下："
+
+#: ../../source/kv_cache_management/health.rst:17
+msgid ""
+"The function returns an ``event_id`` and a dictionary mapping "
+"``worker_id`` to ``error_code``. A value of ``0`` indicates a healthy "
+"worker, while a non-zero value signals an error."
+msgstr ""
+"该函数返回一个 ``event_id`` 和一个将 ``worker_id`` 映射到 ``error_code`` 的字典。值为 ``0`` "
+"表示工作正常，而非零值则表示出现错误。"
+
+#: ../../source/kv_cache_management/health.rst:22
+msgid "Example usage:"
+msgstr "示例用法："
+
+#: ../../source/kv_cache_management/health.rst:24
+msgid ""
+"First, start the lmcache controller at port 9000 and the monitor at port "
+"9001:"
+msgstr "首先，在 9000 端口启动 lmcache 控制器，在 9001 端口启动监视器："
+
+#: ../../source/kv_cache_management/health.rst:30
+msgid "Then send a health check request:"
+msgstr "然后发送健康检查请求："
+
+#: ../../source/kv_cache_management/health.rst:38
+msgid "The controller responds with a message similar to the following:"
+msgstr "控制器会返回类似于以下内容的消息："
+
+#: ../../source/kv_cache_management/health.rst:44
+msgid ""
+"Here ``error_codes`` lists each worker's ``error_code``. ``0`` represents"
+" a healthy worker, while non-zero values indicate an error."
+msgstr "这里 ``error_codes`` 列出了每个工作者的 ``error_code``。 ``0`` 表示工作者健康，而非零值则表示出现错误。"
+

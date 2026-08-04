@@ -1,0 +1,97 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_management/lookup.rst:4
+msgid "Lookup the KV cache"
+msgstr "查找 KV Cache"
+
+#: ../../source/kv_cache_management/lookup.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_management/lookup.rst:11
+msgid "The ``lookup`` interface is defined as the following:"
+msgstr "``lookup`` 接口定义如下："
+
+#: ../../source/kv_cache_management/lookup.rst:17
+msgid ""
+"The function takes a list of tokens as input and returns event_id and a "
+"dictionary containing the layout information for each token. The layout "
+"information is represented as a mapping between ``instance_id`` and a "
+"tuple of ``(location, matched_prefix_length)``."
+msgstr ""
+"该函数接受一个令牌列表作为输入，并返回 event_id 以及一个包含每个令牌布局信息的字典。布局信息表示为 ``instance_id`` 与 "
+"``(location, matched_prefix_length)`` 元组之间的映射。"
+
+#: ../../source/kv_cache_management/lookup.rst:21
+msgid "Example usage:"
+msgstr "示例用法："
+
+#: ../../source/kv_cache_management/lookup.rst:23
+msgid ""
+"First, we need a yaml file ``example.yaml`` to properly configure the "
+"lmcache instance:"
+msgstr "首先，我们需要一个 yaml 文件 ``example.yaml`` 来正确配置 lmcache 实例："
+
+#: ../../source/kv_cache_management/lookup.rst:41
+msgid "Second, we need to start the vllm/lmcache instance at port 8000:"
+msgstr "第二，我们需要在 8000 端口启动 vllm/lmcache 实例："
+
+#: ../../source/kv_cache_management/lookup.rst:47
+msgid ""
+"Third, we need to start the lmcache controller at port 9000 and the "
+"monitor at port 9001:"
+msgstr "第三，我们需要在 9000 端口启动 lmcache 控制器，在 9001 端口启动监视器："
+
+#: ../../source/kv_cache_management/lookup.rst:53
+msgid "Then we can send a request to vllm to see if it works properly:"
+msgstr "然后我们可以向 vllm 发送请求，以查看它是否正常工作："
+
+#: ../../source/kv_cache_management/lookup.rst:65
+msgid "Now we send a request to tokenize the prompt:"
+msgstr "现在我们发送请求以对提示进行标记化："
+
+#: ../../source/kv_cache_management/lookup.rst:76
+msgid "We should be able to see token ids in response:"
+msgstr "我们应该能够在响应中看到令牌 ID："
+
+#: ../../source/kv_cache_management/lookup.rst:82
+msgid "Finally, we can send a ``lookup`` request to the lmcache controller:"
+msgstr "最后，我们可以向 lmcache 控制器发送一个 ``lookup`` 请求："
+
+#: ../../source/kv_cache_management/lookup.rst:92
+msgid "We should be able to see the response like this:"
+msgstr "我们应该能够看到这样的响应："
+
+#: ../../source/kv_cache_management/lookup.rst:98
+msgid ""
+"The field ``lmcache_default_instance`` shows the instance ID, followed by"
+" a tuple of ``(location, matched_prefix_length)`` indicating the cache "
+"location within that instance and matched prefix length. ``event_id`` is "
+"an identifier of the controller operation and can typically be ignored."
+msgstr ""
+"字段 ``lmcache_default_instance`` 显示实例 ID，后面是一个元组 ``(location, "
+"matched_prefix_length)``，指示该实例内的缓存位置和匹配前缀长度。 ``event_id`` "
+"是控制器操作的标识符，通常可以忽略。"
+

@@ -1,0 +1,117 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:2
+msgid "HF Bucket"
+msgstr "HF Bucket"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:4
+msgid ""
+"An L2 adapter that stores KV cache objects in a `Hugging Face Bucket "
+"<https://huggingface.co/docs/hub/storage-backends>`_ using the "
+"``huggingface_hub`` bucket APIs.  Blocking Hub calls run on a bounded "
+"thread pool driven by an asyncio loop on a daemon thread, so the L2 "
+"controller thread is never blocked on network I/O."
+msgstr "一个 L2 适配器，通过 ``huggingface_hub`` 桶 API 将 KV Cache 对象存储在 `Hugging Face Bucket <https://huggingface.co/docs/hub/storage-backends>`_ 中。阻塞式 Hub 调用在一个由守护线程上的 asyncio 循环驱动的有界线程池中执行，因此 L2 控制器线程不会阻塞在网络 I/O 上。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:10
+msgid ""
+"Object names are derived from the MP ``ObjectKey`` as "
+"``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]`` and then "
+"encoded with the standard HFBucket object-name encoding plus the optional"
+" bucket prefix. Because Hugging Face batch writes are not transactional, "
+"a store task that partially fails reconciles backend metadata so that any"
+" objects that actually landed are still counted for usage accounting and "
+"later deletion."
+msgstr "对象名称源自 MP ``ObjectKey``，格式为 ``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]``，然后使用标准的 HFBucket 对象名称编码加上可选的桶前缀进行编码。由于 Hugging Face 的批量写入不是事务性的，因此部分失败的存储任务会协调后端元数据，以便实际落地的对象仍然计入使用量核算和后续删除。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:17
+msgid ""
+"This is a persistent remote backend best suited to warm and cold KV cache"
+" tiers; prefer a lower-latency local adapter for the hottest cache tier."
+msgstr "这是一个持久化远程后端，最适合温层和冷层 KV Cache 缓存；对于最热的缓存层，建议优先使用延迟更低的本地适配器。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:20
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:22
+msgid ""
+"``bucket_handle``: Bucket location in the form "
+"``hf://buckets/<namespace>/<bucket>[/<prefix>]``."
+msgstr "``bucket_handle``：桶的位置，格式为 ``hf://buckets/<namespace>/<bucket>[/<prefix>]``。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:25
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:27
+msgid ""
+"``token_env`` (string, default ``\"HF_TOKEN\"``): Environment variable "
+"used to resolve the Hugging Face access token."
+msgstr "``token_env`` (字符串，默认 ``\"HF_TOKEN\"``)：用于解析 Hugging Face 访问令牌的环境变量。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:29
+msgid ""
+"``token`` (string): Direct token fallback used when ``token_env`` is "
+"unset."
+msgstr "``token`` (字符串)：``token_env`` 未设置时直接使用的令牌备用值。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:30
+msgid ""
+"``create_bucket_if_missing`` (bool, default ``false``): Create the bucket"
+" lazily on the first store instead of requiring it to exist."
+msgstr "``create_bucket_if_missing`` (bool，默认 ``false``)：在首次存储时惰性创建桶，而非要求桶预先存在。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:32
+msgid ""
+"``download_tmp_dir`` (string): Root directory for temporary load "
+"downloads."
+msgstr "``download_tmp_dir`` (字符串)：加载时临时下载文件的根目录。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:33
+msgid ""
+"``metadata_cache_ttl_secs`` (float, default ``30.0``): TTL for the path-"
+"size metadata cache that backs lookups and usage accounting."
+msgstr "``metadata_cache_ttl_secs`` (float，默认 ``30.0``)：用于支持查找和用量统计的路径大小元数据缓存的 TTL。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:35
+msgid ""
+"``num_workers`` (int, default ``4``): Number of worker threads for "
+"blocking Hugging Face Hub API calls."
+msgstr "``num_workers`` (int，默认 ``4``)：用于执行阻塞式 Hugging Face Hub API 调用的工作线程数。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:37
+msgid ""
+"``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by "
+"``get_usage()``.  A value of ``0`` disables aggregate eviction."
+msgstr "``max_capacity_gb`` (float，默认 ``0.0``)：``get_usage()`` 所使用的总容量上限。值为 ``0`` 时禁用整体逐出。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:39
+msgid ""
+"``eviction`` (dict): Optional eviction policy, see "
+"``L2AdapterConfigBase``."
+msgstr "``eviction`` (dict)：可选的逐出策略，参见 ``L2AdapterConfigBase``。"
+
+#: ../../source/mp/l2_storage/hfbucket.rst:41
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+

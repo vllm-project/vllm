@@ -1,0 +1,4 @@
+chunk_size: 256
+local_cpu: True
+remote_url: "lm://localhost:65432"
+remote_serde: "cachegen"

@@ -1,0 +1,17 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 5
+
+# P2P configurations
+enable_p2p: True
+p2p_host: "localhost"
+p2p_init_ports: 8202
+p2p_lookup_ports: 8203
+transfer_channel: "nixl"
+
+# cache controller configurations
+enable_controller: True
+lmcache_instance_id: "lmcache_instance_2"
+controller_pull_url: "localhost:8300"
+controller_reply_url: "localhost:8400"
+lmcache_worker_ports: 8501

@@ -1,0 +1,234 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/frontend.rst:4
+msgid "LMCache Frontend"
+msgstr "LMCache 前端"
+
+#: ../../source/production/observability/frontend.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/frontend_dashboard`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/frontend_dashboard`。"
+
+#: ../../source/production/observability/frontend.rst:11
+msgid ""
+"LMCache Frontend is a monitoring and proxy service for LMCache clusters, "
+"providing a web interface for cluster management and HTTP request "
+"proxying to cluster nodes."
+msgstr ""
+"LMCache Frontend 是一个用于 LMCache 集群的监控和代理服务，提供集群管理的 Web 界面以及对集群节点的 HTTP "
+"请求代理。"
+
+#: ../../source/production/observability/frontend.rst:15
+msgid "LMCache Frontend Dashboard"
+msgstr "LMCache 前端仪表板"
+
+#: ../../source/production/observability/frontend.rst:21
+msgid "Features"
+msgstr "功能"
+
+#: ../../source/production/observability/frontend.rst:23
+msgid "**Cluster Monitoring**: Web-based dashboard for visualizing cluster status"
+msgstr "**集群监控**\\ ：基于网页的仪表板，用于可视化集群状态"
+
+#: ../../source/production/observability/frontend.rst:24
+msgid ""
+"**Request Proxying**: HTTP proxy service to forward requests to any "
+"cluster node"
+msgstr "**请求代理**\\ ：HTTP 代理服务，用于将请求转发到任何集群节点"
+
+#: ../../source/production/observability/frontend.rst:25
+msgid ""
+"**Flexible Configuration**: Support for both IP:port and Unix domain "
+"sockets"
+msgstr "**灵活配置**\\ ：支持 IP:端口 和 Unix 域套接字"
+
+#: ../../source/production/observability/frontend.rst:26
+msgid "**Plugin System**: Integration with LMCache plugin framework"
+msgstr "**插件系统**\\ ：与 LMCache 插件框架的集成"
+
+#: ../../source/production/observability/frontend.rst:30
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/production/observability/frontend.rst:32
+msgid "Install from PyPI:"
+msgstr "从 PyPI 安装："
+
+#: ../../source/production/observability/frontend.rst:38
+msgid "Or install from source:"
+msgstr "或从源代码安装："
+
+#: ../../source/production/observability/frontend.rst:48
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/production/observability/frontend.rst:51
+msgid "Starting the Service"
+msgstr "启动服务"
+
+#: ../../source/production/observability/frontend.rst:59
+msgid "Command Line Options"
+msgstr "命令行选项"
+
+#: ../../source/production/observability/frontend.rst:65
+msgid "Option"
+msgstr "选项"
+
+#: ../../source/production/observability/frontend.rst:66
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/frontend.rst:67
+msgid "``--port``"
+msgstr "``--port``"
+
+#: ../../source/production/observability/frontend.rst:68
+msgid "Service port (default: 8000)"
+msgstr "服务端口（默认：8000）"
+
+#: ../../source/production/observability/frontend.rst:69
+msgid "``--host``"
+msgstr "``--host``"
+
+#: ../../source/production/observability/frontend.rst:70
+msgid "Bind host address (default: 0.0.0.0)"
+msgstr "绑定主机地址（默认：0.0.0.0）"
+
+#: ../../source/production/observability/frontend.rst:71
+msgid "``--config``"
+msgstr "``--config``"
+
+#: ../../source/production/observability/frontend.rst:72
+msgid "Path to configuration file"
+msgstr "配置文件路径"
+
+#: ../../source/production/observability/frontend.rst:73
+msgid "``--nodes``"
+msgstr "``--nodes``"
+
+#: ../../source/production/observability/frontend.rst:74
+msgid "Direct node configuration (JSON string)"
+msgstr "直接节点配置（JSON 字符串）"
+
+#: ../../source/production/observability/frontend.rst:77
+msgid ""
+"After starting the service, access the dashboard at "
+"``http://localhost:8080/``."
+msgstr "启动服务后，可以通过访问 ``http://localhost:8080/`` 来查看仪表板。"
+
+#: ../../source/production/observability/frontend.rst:81
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/production/observability/frontend.rst:84
+msgid "Node Configuration"
+msgstr "节点配置"
+
+#: ../../source/production/observability/frontend.rst:86
+msgid "Create a ``config.json`` file with node definitions:"
+msgstr "创建一个 ``config.json`` 文件，包含节点定义："
+
+#: ../../source/production/observability/frontend.rst:103
+msgid ""
+"The ``port`` field can be configured as either an integer port number or "
+"a string path for Unix domain sockets."
+msgstr "``port`` 字段可以配置为整数端口号或 Unix 域套接字的字符串路径。"
+
+#: ../../source/production/observability/frontend.rst:108
+msgid "LMCache Plugin Integration"
+msgstr "LMCache 插件集成"
+
+#: ../../source/production/observability/frontend.rst:110
+msgid ""
+"To start the frontend via the LMCache plugin framework, add the following"
+" to your ``lmcache.yaml``:"
+msgstr "要通过 LMCache 插件框架启动前端，请将以下内容添加到您的 ``lmcache.yaml`` 中："
+
+#: ../../source/production/observability/frontend.rst:124
+msgid "Proxying Requests"
+msgstr "代理请求"
+
+#: ../../source/production/observability/frontend.rst:126
+msgid "Proxy requests using the format:"
+msgstr "使用以下格式代理请求："
+
+#: ../../source/production/observability/frontend.rst:132
+msgid "Examples:"
+msgstr "示例："
+
+#: ../../source/production/observability/frontend.rst:145
+msgid "Contributing"
+msgstr "贡献"
+
+#: ../../source/production/observability/frontend.rst:147
+msgid ""
+"LMCache Frontend is an open-source project and we welcome contributions "
+"from the community! Whether you want to fix bugs, add new features, "
+"improve documentation, or share ideas, your contributions are "
+"appreciated."
+msgstr "LMCache 前端是一个开源项目，我们欢迎社区的贡献！无论您想修复错误、添加新功能、改善文档还是分享想法，我们都非常感谢您的贡献。"
+
+#: ../../source/production/observability/frontend.rst:151
+msgid "Ways to contribute:"
+msgstr "贡献方式："
+
+#: ../../source/production/observability/frontend.rst:153
+msgid ""
+"**Report Issues**: Found a bug or have a feature request? Open an issue "
+"on GitHub."
+msgstr "**报告问题**\\ ：发现了一个错误或有功能请求？在 GitHub 上提交一个问题。"
+
+#: ../../source/production/observability/frontend.rst:155
+msgid ""
+"**Submit Pull Requests**: Fork the repository, make your changes, and "
+"submit a PR."
+msgstr "**提交拉取请求**\\ ：分叉仓库，进行更改，并提交 PR。"
+
+#: ../../source/production/observability/frontend.rst:157
+msgid "**Improve Documentation**: Help us make the docs clearer and more helpful."
+msgstr "**改善文档**\\ ：帮助我们使文档更清晰、更有帮助。"
+
+#: ../../source/production/observability/frontend.rst:158
+msgid ""
+"**Share Feedback**: Let us know how you're using LMCache Frontend and "
+"what could be improved."
+msgstr "**分享反馈**\\ ：让我们知道您如何使用 LMCache 前端以及可以改进的地方。"
+
+#: ../../source/production/observability/frontend.rst:161
+msgid "Join us in making LMCache Frontend better for everyone!"
+msgstr "加入我们，让 LMCache Frontend 变得更好！"
+
+#: ../../source/production/observability/frontend.rst:165
+msgid "More Information"
+msgstr "更多信息"
+
+#: ../../source/production/observability/frontend.rst:167
+msgid ""
+"For more details, visit the `LMCache Frontend GitHub repository "
+"<https://github.com/LMCache/lmcache_frontend>`_."
+msgstr ""
+"有关更多详细信息，请访问 `LMCache Frontend GitHub 仓库 "
+"<https://github.com/LMCache/lmcache_frontend>`_。"
+

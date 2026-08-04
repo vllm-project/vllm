@@ -1,0 +1,40 @@
+S3
+==
+
+An L2 adapter that stores KV cache objects as S3 objects using the AWS
+Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any
+S3-compatible endpoint (MinIO, Ceph RGW, etc.).
+
+**Required fields:**
+
+- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
+  (used for non-AWS endpoints).
+- ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
+
+**Optional fields:**
+
+- ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
+- ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing
+  for S3 Express One Zone buckets.
+- ``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a
+  plain-HTTP endpoint (e.g. a local MinIO).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static
+  credentials; omit both to use the AWS default credential provider chain
+  (environment, EC2 instance profile, etc.).
+- ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
+  ``get_usage()``.  A value of ``0`` disables aggregate eviction
+  (``usage_fraction == -1.0``).
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # AWS S3 with default credentials
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+
+    # Static credentials, HTTP/2 disabled
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+
+    # Local MinIO over plain HTTP
+    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'

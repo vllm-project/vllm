@@ -1,0 +1,140 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/observability/logs.rst:2
+msgid "Logging"
+msgstr "日志记录"
+
+#: ../../source/mp/observability/logs.rst:4
+msgid ""
+"Logging subscribers emit debug-level messages for store, retrieve, "
+"lookup, L1, and StorageManager events via Python's standard ``logging`` "
+"module."
+msgstr ""
+"日志订阅者通过 Python 的标准 ``logging`` 模块为存储、检索、查找、L1 和 StorageManager "
+"事件发出调试级别的消息。"
+
+#: ../../source/mp/observability/logs.rst:7
+msgid ""
+"When OpenTelemetry is installed, ``init_logger`` automatically attaches "
+"an OTel ``LoggingHandler`` so that log records are forwarded to any "
+"configured OTel ``LoggerProvider``. The handler respects the "
+"``LMCACHE_LOG_LEVEL`` environment variable."
+msgstr ""
+"当安装 OpenTelemetry 时，``init_logger`` 会自动附加一个 OTel "
+"``LoggingHandler``，以便将日志记录转发到任何配置的 OTel ``LoggerProvider``。该处理程序遵循 "
+"``LMCACHE_LOG_LEVEL`` 环境变量。"
+
+#: ../../source/mp/observability/logs.rst:16
+msgid "Key log messages:"
+msgstr "关键日志消息："
+
+#: ../../source/mp/observability/logs.rst:22
+msgid "Level"
+msgstr "级别"
+
+#: ../../source/mp/observability/logs.rst:23
+msgid "Message"
+msgstr "消息"
+
+#: ../../source/mp/observability/logs.rst:24
+#: ../../source/mp/observability/logs.rst:26
+#: ../../source/mp/observability/logs.rst:28
+msgid "INFO"
+msgstr "INFO"
+
+#: ../../source/mp/observability/logs.rst:25
+msgid "``Stored N tokens in X seconds``"
+msgstr "``Stored N tokens in X seconds``"
+
+#: ../../source/mp/observability/logs.rst:27
+msgid "``Retrieved N tokens in X seconds``"
+msgstr "``Retrieved N tokens in X seconds``"
+
+#: ../../source/mp/observability/logs.rst:29
+msgid "``Prefetch request completed (L1+L2): N/M prefix hits``"
+msgstr "``Prefetch request completed (L1+L2): N/M prefix hits``"
+
+#: ../../source/mp/observability/logs.rst:30
+#: ../../source/mp/observability/logs.rst:32
+msgid "DEBUG"
+msgstr "DEBUG"
+
+#: ../../source/mp/observability/logs.rst:31
+msgid "``MP store start: session=... device=...``"
+msgstr "``MP store start: session=... device=...``"
+
+#: ../../source/mp/observability/logs.rst:33
+msgid "``MP retrieve end: session=... retrieved_count=...``"
+msgstr "``MP retrieve end: session=... retrieved_count=...``"
+
+#: ../../source/mp/observability/logs.rst:36
+msgid "Extra Logging (periodic transfer stats)"
+msgstr "额外日志记录（定期传输统计信息）"
+
+#: ../../source/mp/observability/logs.rst:38
+msgid ""
+"Opt-in periodic INFO-level stats, aimed at watching a running server from"
+" its logs without a metrics stack:"
+msgstr "选择性地记录周期性 INFO 级别的统计信息，旨在通过日志监控正在运行的服务器，而无需使用指标堆栈："
+
+#: ../../source/mp/observability/logs.rst:45
+msgid ""
+"Every interval, the server logs — per GPU — the L0<->L1 store/retrieve "
+"activity of the last window and the cumulative totals since start "
+"(operation count, tokens, size in GB, and average copy throughput in "
+"GB/s):"
+msgstr "每个时间间隔，服务器日志 — 每个 GPU — 记录最后窗口的 L0<->L1 存取活动和自启动以来的累计总数（操作计数、令牌、大小（GB）和平均复制吞吐量（GB/s）："
+
+#: ../../source/mp/observability/logs.rst:54
+msgid "The eviction loop also reports L1 memory usage at the same interval:"
+msgstr "逐出循环还会在相同的时间间隔报告 L1 内存使用情况："
+
+#: ../../source/mp/observability/logs.rst:60
+msgid "Notes:"
+msgstr "注意："
+
+#: ../../source/mp/observability/logs.rst:62
+msgid ""
+"Transfer-stat lines are only emitted for windows with activity; the L1 "
+"memory usage line is emitted every interval regardless of load."
+msgstr "仅在有活动的窗口中发出传输状态行；L1 内存使用情况行在每个时间间隔内发出，无论负载如何。"
+
+#: ../../source/mp/observability/logs.rst:64
+msgid ""
+"``avg_copy`` measures throughput of the GPU-stream copy time only (not "
+"wall clock), and shows ``n/a`` when no timed operation completed in the "
+"window."
+msgstr "``avg_copy`` 仅测量 GPU 流复制时间的吞吐量（不是实际时间），当窗口内没有完成计时操作时显示 ``n/a``。"
+
+#: ../../source/mp/observability/logs.rst:67
+msgid ""
+"``--extra-logging-interval`` values below ``1.0`` are limited by the 1 Hz"
+" internal heartbeat."
+msgstr "``--extra-logging-interval`` 小于 ``1.0`` 的值受限于 1 Hz 的内部心跳。"
+
+#: ../../source/mp/observability/logs.rst:69
+msgid ""
+"``--enable-extra-logging`` works even with ``--disable-logging``, but "
+"conflicts with ``--disable-observability`` (the server raises a "
+"``ValueError`` at startup)."
+msgstr "``--enable-extra-logging`` 即使在 ``--disable-logging`` 的情况下也能工作，但与 ``--disable-observability`` 冲突（服务器在启动时会引发 ``ValueError``）。"
+

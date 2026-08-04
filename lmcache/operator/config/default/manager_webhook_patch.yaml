@@ -1,0 +1,20 @@
+# This patch wires the webhook serving certificate into the controller-manager Deployment:
+# it tells the manager where to read the cert (the --webhook-cert-path arg consumed by
+# cmd/main.go), and mounts the cert-manager-managed secret (webhook-server-cert) read-only
+# at that path. The default cert file names (tls.crt / tls.key) match cmd/main.go's
+# --webhook-cert-name / --webhook-cert-key defaults.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: webhook-certs
+    mountPath: /tmp/k8s-webhook-server/serving-certs
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: webhook-certs
+    secret:
+      secretName: webhook-server-cert

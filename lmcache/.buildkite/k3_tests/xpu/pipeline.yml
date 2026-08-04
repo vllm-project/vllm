@@ -1,0 +1,25 @@
+# XPU smoke test.
+# Runs on a dedicated `intel-xpu` queue using the public XPU CI image.
+
+steps:
+  - label: ":intel-xpu-unit-tests"
+    command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/xpu/run.sh"
+    timeout_in_minutes: 180
+    agents: { queue: "intel-xpu" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            # Use the prebuilt public XPU CI image.
+            containers:
+              - name: container-0
+                image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+                imagePullPolicy: IfNotPresent
+                resources:
+                  requests:
+                    deviceclass.resource.kubernetes.io/gpu.intel.com: "1"
+                  limits:
+                    deviceclass.resource.kubernetes.io/gpu.intel.com: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }

@@ -1,0 +1,44 @@
+# Unit tests — runs pytest with coverage against LMCache source.
+# No vLLM required; uses setup-lmcache-only-env.sh for a lighter install.
+
+steps:
+  - label: ":test_tube: Unit Tests"
+    command: .buildkite/k3_tests/unit/run.sh
+    timeout_in_minutes: 60
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
+                resources:
+                  requests:
+                    cpu: "32"
+                    memory: "96Gi"
+                  limits:
+                    nvidia.com/gpu: "1"
+                    cpu: "64"
+                    memory: "200Gi"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  # K8s defaults /dev/shm to 64 MiB, which causes SIGBUS in
+                  # tests/v1/shm_allocator (allocates 5 GiB via SharedMemory).
+                  # Mount a 16 GiB tmpfs to give shm tests headroom.
+                  - { name: dshm, mountPath: /dev/shm }
+                  # GDS-capable scratch dir on the host's local NVMe. Direct
+                  # hostPath (no subPath) — K8s' subPath bind-mount breaks
+                  # cuFile's fs-type detection. run.sh creates a per-build
+                  # subdir here and exposes it via LMCACHE_TEST_TMPDIR.
+                  - { name: scratch, mountPath: /scratch }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }
+              - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "durations/test.html"
+      - "coverage-test.xml"
+      - "coverage-test/**/*"

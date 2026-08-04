@@ -1,0 +1,111 @@
+name: Build ROCm Artifacts
+
+# Reusable workflow that builds the ROCm/HIP wheel for AMD Instinct GPUs
+# (gfx942: MI300X/MI325X, gfx950: MI350X/MI355X).
+#
+# The wheel is built against the public ROCm PyTorch (torch==2.11.0+rocm7.2)
+# so its C++ ABI matches the torch shipped in the upstream
+# vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2.3, cp312). auditwheel
+# excludes torch and the ROCm runtime libraries, so the wheel binds to the
+# host torch/ROCm at runtime -- exactly like the cu129 wheel does for CUDA.
+#
+# Uploaded as the `release-rocm-artifacts` GHA artifact. The ROCm wheel
+# carries a +rocm7.2 local version and is published to a dedicated
+# v{tag}-rocm GitHub Release (not PyPI), mirroring the cu129 flow.
+
+on:
+    workflow_call:
+
+env:
+    LC_ALL: en_US.UTF-8
+    # Version pins that define the wheel's ABI target, consolidated here as the
+    # single place to update. The wheel links torch and the ROCm runtime as
+    # *external* (auditwheel-excluded) libraries, so compatibility is tied to
+    # the torch MINOR version (2.11), not to any specific vLLM/SGLang image —
+    # it loads in any ROCm image shipping torch 2.11 (cp3x). Bump these
+    # together when the upstream ROCm images move to a new torch/ROCm minor;
+    # this mirrors how the cu129/cu130 wheels are pinned to a CUDA+torch pair.
+    ROCM_IMAGE: rocm/dev-ubuntu-22.04:7.2.3-complete
+    TORCH_ROCM_SPEC: torch==2.11.0+rocm7.2
+    TORCH_ROCM_INDEX: https://download.pytorch.org/whl/rocm7.2
+    PYTORCH_ROCM_ARCH: gfx942;gfx950
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-rocm-artifacts:
+        name: Build ROCm wheel (gfx942, gfx950)
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-rocm, v*-cu129) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Login to DockerHub
+              # Skip when creds are absent (fork PRs never get secrets). The
+              # public dev-ubuntu / vllm-openai-rocm pulls work unauthenticated
+              # but DockerHub anonymous rate limits can bite CI.
+              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+              env:
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Get base version for rocm wheel
+              run: |
+                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                  BASE="${GITHUB_REF_NAME#v}"
+                else
+                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                fi
+                echo "ROCM_VERSION=${BASE}" >> "$GITHUB_ENV"
+
+            # Build inside the ROCm dev image. No GPU is needed to compile HIP
+            # kernels; PYTORCH_ROCM_ARCH bakes gfx942+gfx950 code objects into
+            # the fat binary. torch's cpp_extension injects --offload-arch for
+            # the hipified .hip sources.
+            - name: Build ROCm wheel
+              run: |
+                docker run --rm \
+                  -e PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
+                  -e SETUPTOOLS_SCM_PRETEND_VERSION="${ROCM_VERSION}" \
+                  -e TORCH_ROCM_SPEC="${TORCH_ROCM_SPEC}" \
+                  -e TORCH_ROCM_INDEX="${TORCH_ROCM_INDEX}" \
+                  -v "${PWD}:/work/LMCache" \
+                  --entrypoint bash "${ROCM_IMAGE}" \
+                  /work/LMCache/.github/scripts/build_rocm_wheel.sh
+
+            - name: Upload ROCm release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-rocm-artifacts
+                path: dist/
+
+# On-device validation (loading the compiled c_ops and running the real
+# KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
+# GitHub-hosted runners do not provide and LMCache does not maintain a
+# self-hosted runner for. It is therefore run manually on AMD hardware:
+# install the built wheel into the upstream vllm/vllm-openai-rocm image and run
+# tests/v1/test_mem_kernels.py. Recorded gfx942 + gfx950 results are in the PR.

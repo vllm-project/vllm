@@ -1,0 +1,126 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/controller/index.rst:2
+msgid "Controller WebUI"
+msgstr "控制器 WebUI"
+
+#: ../../source/controller/index.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/coordinator`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/controller/index.rst:10
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/controller/index.rst:12
+msgid ""
+"The LMCache Controller provides a web-based dashboard for monitoring your"
+" LMCache instances. This web interface allows you to monitor system "
+"status, instances, workers, and performance metrics."
+msgstr "LMCache 控制器提供了一个基于网页的仪表板，用于监控您的 LMCache 实例。该网页界面允许您监控系统状态、实例、工作进程和性能指标。"
+
+#: ../../source/controller/index.rst:15
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/controller/index.rst:17
+msgid ""
+"To enable the Controller WebUI, start your LMCache instance with the "
+"following command:"
+msgstr "要启用 Controller WebUI，请使用以下命令启动您的 LMCache 实例："
+
+#: ../../source/controller/index.rst:28
+msgid "After starting the controller, access the WebUI at:"
+msgstr "启动控制器后，访问 WebUI："
+
+#: ../../source/controller/index.rst:35
+msgid "Configuration Options"
+msgstr "配置选项"
+
+#: ../../source/controller/index.rst:37
+msgid "``--host``: Bind address for the API server (default: 0.0.0.0)"
+msgstr "``--host``: API 服务器的绑定地址（默认: 0.0.0.0）"
+
+#: ../../source/controller/index.rst:38
+msgid "``--port``: Port for the API server (default: 9000)"
+msgstr "``--port``: API 服务器的端口（默认: 9000）"
+
+#: ../../source/controller/index.rst:39
+msgid "``--monitor-ports``: ZMQ ports for controller communication"
+msgstr "``--monitor-ports``: 控制器通信的 ZMQ 端口"
+
+#: ../../source/controller/index.rst:40
+msgid "``--lmcache-worker-timeout``: Worker timeout in seconds"
+msgstr "``--lmcache-worker-timeout``: 工作线程超时时间（秒）"
+
+#: ../../source/controller/index.rst:41
+msgid "``--health-check-interval``: Health check interval in seconds"
+msgstr "``--health-check-interval``: 健康检查间隔（秒）"
+
+#: ../../source/controller/index.rst:44
+msgid "Dashboard Features"
+msgstr "仪表板功能"
+
+#: ../../source/controller/index.rst:46
+msgid "The Controller Dashboard provides:"
+msgstr "控制器仪表板提供："
+
+#: ../../source/controller/index.rst:48
+msgid "System overview and health monitoring"
+msgstr "系统概览和健康监控"
+
+#: ../../source/controller/index.rst:49
+msgid "Instance and worker management"
+msgstr "实例和工作者管理"
+
+#: ../../source/controller/index.rst:50
+msgid "Performance metrics"
+msgstr "性能指标"
+
+#: ../../source/controller/index.rst:51
+msgid "Thread information"
+msgstr "线程信息"
+
+#: ../../source/controller/index.rst:52
+msgid "Environment variables inspection"
+msgstr "环境变量检查"
+
+#: ../../source/controller/index.rst:55
+msgid "Related Documentation"
+msgstr "相关文档"
+
+#: ../../source/controller/index.rst:57
+msgid ":doc:`../api_reference/configurations` - Complete configuration reference"
+msgstr ":doc:`../api_reference/configurations` - 完整的配置参考"
+
+#: ../../source/controller/index.rst:58
+msgid ":doc:`../kv_cache_management/index` - KV cache management guide"
+msgstr ":doc:`../kv_cache_management/index` - KV Cache 管理指南"
+
+#: ../../source/controller/index.rst:59
+msgid ":doc:`freeze_mode` - Freeze Mode safety mechanism guide"
+msgstr ":doc:`freeze_mode` - 冻结模式安全机制指南"
+

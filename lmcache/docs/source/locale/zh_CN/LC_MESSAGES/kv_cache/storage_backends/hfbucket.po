@@ -1,0 +1,297 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:2
+msgid "Hugging Face Buckets Backend"
+msgstr "Hugging Face Buckets 后端"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:4
+msgid ""
+"The Hugging Face Buckets backend stores LMCache chunks in a Hugging Face "
+"Bucket using LMCache's built-in remote storage plugin framework. This is "
+"a persistent remote backend that fits warm and cold KV cache persistence "
+"better than the hottest local tiers."
+msgstr ""
+"Hugging Face Buckets 后端使用 LMCache 内置的远程存储插件框架，将 LMCache 块存储在 Hugging Face"
+" Bucket 中。这是一个持久的远程后端，适合于温暖和冷却的 KV Cache 持久化，而不是最热的本地层。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:10
+msgid "When to use it"
+msgstr "何时使用它"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:12
+msgid "Use the HFBucket backend when you want:"
+msgstr "当您想要时，请使用 HFBucket 后端："
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:14
+msgid "A Hub-native persistent store for KV cache data."
+msgstr "一个 Hub 原生的持久存储，用于 KV Cache 数据。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:15
+msgid ""
+"A remote backend that can be configured through "
+"``remote_storage_plugins``."
+msgstr "一个可以通过 ``remote_storage_plugins`` 配置的远程后端。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:16
+msgid "Multiple named bucket instances in one LMCache deployment."
+msgstr "在一个 LMCache 部署中有多个命名的桶实例。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:18
+msgid ""
+"Avoid using it as the primary hot path for the lowest-latency cache "
+"lookups. Local CPU, local disk, and other lower-latency backends are a "
+"better fit for the hottest cache tier."
+msgstr "避免将其用作最低延迟缓存查找的主要热路径。本地 CPU、本地磁盘和其他低延迟后端更适合最热门的缓存层。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:24
+msgid "Requirements and limitations"
+msgstr "要求和限制"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:26
+msgid ""
+"LMCache uses ``huggingface_hub`` bucket APIs for uploads, downloads, "
+"listing, and deletes."
+msgstr "LMCache 使用 ``huggingface_hub`` 存储桶 API 进行上传、下载、列出和删除操作。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:28
+msgid "The first built-in release is intentionally conservative:"
+msgstr "首次内置版本故意采取保守态度："
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:30
+msgid "Only full chunks are supported."
+msgstr "仅支持完整块。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:31
+msgid "Partial chunk uploads are rejected."
+msgstr "部分块上传被拒绝。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:32
+msgid ""
+"Downloads are rejected when the stored object size does not match the "
+"expected full LMCache chunk size."
+msgstr "当存储的对象大小与预期的完整 LMCache 块大小不匹配时，下载将被拒绝。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:34
+msgid "Chunk metadata is not stored in the bucket objects."
+msgstr "块元数据未存储在桶对象中。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:38
+msgid "Minimal configuration"
+msgstr "最小配置"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:57
+msgid "Multiple instances"
+msgstr "多个实例"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:59
+msgid ""
+"Use instance-qualified plugin names to configure more than one bucket-"
+"backed remote store in the same LMCache config."
+msgstr "使用实例限定的插件名称来配置同一 LMCache 配置中的多个基于桶的远程存储。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:73
+msgid "Configuration reference"
+msgstr "配置参考"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:75
+msgid ""
+"All configuration keys live under "
+"``extra_config.remote_storage_plugin.<plugin_name>.*`` where "
+"``plugin_name`` is either ``hfbucket`` or an instance-qualified name such"
+" as ``hfbucket.prod``."
+msgstr "所有配置键都位于 ``extra_config.remote_storage_plugin.<plugin_name>.*`` 下，其中 ``plugin_name`` 可以是 ``hfbucket`` 或者实例限定名称，例如 ``hfbucket.prod``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:79
+msgid ""
+"``bucket_handle`` (required): Hugging Face Bucket handle in "
+"``hf://buckets/<namespace>/<bucket>[/<prefix>]`` format."
+msgstr "``bucket_handle``\\ （必需）：Hugging Face Bucket 句柄，格式为 ``hf://buckets/<namespace>/<bucket>[/<prefix>]``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:81
+msgid ""
+"``token_env`` (optional, default ``HF_TOKEN``): Environment variable used"
+" to resolve the Hugging Face access token."
+msgstr "``token_env``\\ （可选，默认 ``HF_TOKEN``\\ ）：用于解析 Hugging Face 访问令牌的环境变量。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:83
+msgid ""
+"``token`` (optional): Direct token override. ``token_env`` takes "
+"precedence when both are set."
+msgstr "``token``\\ （可选）：直接的令牌覆盖。当两者都设置时，\\ ``token_env`` 优先。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:85
+msgid ""
+"``create_bucket_if_missing`` (optional, default ``false``): Lazily create"
+" the bucket on the first write path."
+msgstr "``create_bucket_if_missing`` (可选，默认 ``false``)：在第一次写入路径时延迟创建存储桶。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:87
+msgid ""
+"``download_tmp_dir`` (optional): Root directory for connector-local "
+"download scratch space. On Linux, pointing this at a tmpfs mount such as "
+"``/dev/shm/lmcache-hfbucket`` avoids the disk write on the download path."
+msgstr "``download_tmp_dir`` (可选): 连接器本地下载临时空间的根目录。在 Linux 上，将其指向 tmpfs 挂载，例如 ``/dev/shm/lmcache-hfbucket``\\ ，可以避免下载路径上的磁盘写入。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:90
+msgid ""
+"``metadata_cache_ttl_secs`` (optional, default ``30``): TTL for cached "
+"exact existence and size metadata."
+msgstr "``metadata_cache_ttl_secs``\\ （可选，默认值为 ``30``\\ ）：缓存确切存在性和大小元数据的生存时间（TTL）。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:95
+msgid "MP Mode Configuration"
+msgstr "MP 模式配置"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:97
+msgid ""
+"In multi-process (MP) mode, Hugging Face Buckets are configured as an L2 "
+"adapter through a JSON spec passed to the LMCache server. This is "
+"separate from the non-MP ``remote_storage_plugins`` configuration above. "
+"Each ``--l2-adapter`` argument takes a JSON object whose ``\"type\": "
+"\"hfbucket\"`` field selects the HFBucket adapter."
+msgstr "在多进程（MP）模式下，Hugging Face Buckets 通过传递给 LMCache 服务器的 JSON 规范配置为 L2 适配器。这与上面的非 MP ``remote_storage_plugins`` 配置是分开的。每个 ``--l2-adapter`` 参数接受一个 JSON 对象，其 ``\\\"type\\\": \\\"hfbucket\\\"`` 字段选择 HFBucket 适配器。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:122
+msgid "HFBucket L2 Adapter Fields"
+msgstr "HFBucket L2 适配器字段"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:124
+msgid "**type** (required): must be ``\"hfbucket\"``."
+msgstr "**类型**\\ （必需）：必须是 ``\"hfbucket\"``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:125
+msgid ""
+"**bucket_handle** (required): Hugging Face Bucket handle in "
+"``hf://buckets/<namespace>/<bucket>[/<prefix>]`` format."
+msgstr "**bucket_handle**\\ （必需）：Hugging Face Bucket 句柄，格式为 ``hf://buckets/<namespace>/<bucket>[/<prefix>]``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:127
+msgid ""
+"**token_env**: environment variable used to resolve the Hugging Face "
+"access token (default ``\"HF_TOKEN\"``)."
+msgstr "``token_env``\\ ：用于解析 Hugging Face 访问令牌的环境变量（默认 ``\"HF_TOKEN\"``\\ ）。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:129
+msgid ""
+"**token**: optional direct token fallback. ``token_env`` takes precedence"
+" when the environment variable is set. Prefer ``token_env`` for "
+"production deployments so secrets do not live in adapter JSON."
+msgstr "``token``\\ （可选，直接的令牌回退。当环境变量设置时，\\ ``token_env`` 优先。对于生产部署，建议使用 ``token_env`` 以避免在适配器 JSON 中存储秘密。）"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:132
+msgid ""
+"**create_bucket_if_missing**: lazily create the bucket on the first store"
+" operation (default ``false``). This only helps when the bucket is "
+"missing and the token has permission to create it; it does not fix "
+"invalid credentials, invalid handles, or network failures."
+msgstr "**create_bucket_if_missing**: 在第一次存储操作时懒惰地创建存储桶（默认值为 ``false``\\ ）。这仅在存储桶缺失且令牌有权限创建时有效；它无法修复无效的凭据、无效的句柄或网络故障。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:136
+msgid ""
+"**download_tmp_dir**: root directory for temporary load downloads "
+"(default ``/tmp/lmcache-hfbucket-mp``). The MP adapter downloads bucket "
+"files into per-task temporary files and then copies their bytes into the "
+"destination ``MemoryObj`` buffers supplied by the MP controller."
+msgstr "**download_tmp_dir**: 临时加载下载的根目录（默认 ``/tmp/lmcache-hfbucket-mp``\\ ）。MP 适配器将桶文件下载到每个任务的临时文件中，然后将其字节复制到 MP 控制器提供的目标 ``MemoryObj`` 缓冲区中。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:140
+msgid ""
+"**metadata_cache_ttl_secs**: TTL for cached exact path-size metadata "
+"(default ``30``). Set this lower when another process may modify the same"
+" bucket prefix outside LMCache and fresher metadata is more important "
+"than reducing Hugging Face metadata calls."
+msgstr "**metadata_cache_ttl_secs**: 缓存的确切路径大小元数据的 TTL（默认 ``30``\\ ）。当其他进程可能在 LMCache 之外修改同一存储桶前缀时，将此值设置得更低，以便更新的元数据比减少 Hugging Face 元数据调用更为重要。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:144
+msgid ""
+"**num_workers**: number of worker threads used for blocking Hugging Face "
+"Hub bucket API calls (default ``4``). The HFBucket Python APIs are "
+"synchronous, so MP mode runs upload, lookup, load, and delete work on a "
+"bounded thread pool behind the adapter's eventfd-based completion "
+"interface."
+msgstr "**num_workers**: 用于阻塞 Hugging Face Hub 存储桶 API 调用的工作线程数量（默认 ``4``\\ ）。HFBucket Python API 是同步的，因此 MP 模式在适配器的基于 eventfd 的完成接口后面运行上传、查找、加载和删除工作，使用有限的线程池。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:148
+msgid ""
+"**max_capacity_gb**: capacity used by ``get_usage()`` for watermark-based"
+" L2 eviction. Set to ``0`` (default) to disable aggregate capacity "
+"tracking; ``get_usage()`` then reports the adapter as not providing an "
+"eviction signal."
+msgstr "**max_capacity_gb**: ``get_usage()`` 用于基于水印的 L2 逐出的容量。设置为 ``0``\\ （默认）以禁用聚合容量跟踪；此时 ``get_usage()`` 报告适配器未提供逐出信号。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:151
+msgid ""
+"**eviction**: optional sub-dict enabling the L2 eviction controller for "
+"this adapter. When present, keys that are currently being loaded are "
+"protected by the lookup-and-lock path and skipped by ``delete()`` until "
+"they are unlocked."
+msgstr "**逐出**: 可选的子字典，用于为此适配器启用 L2 逐出控制器。当存在时，当前正在加载的键会通过查找和锁定路径受到保护，并在解锁之前被 ``delete()`` 跳过。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:156
+msgid "Differences vs Non-MP HFBucket"
+msgstr "与非多租户 HFBucket 的区别"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:158
+msgid ""
+"Hugging Face bucket operations are synchronous but the adapter makes "
+"submission non-blocking by running the blocking calls on worker threads."
+msgstr "Hugging Face 桶操作是同步的，但适配器通过在工作线程上运行阻塞调用使提交变为非阻塞。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:160
+msgid ""
+"MP loads do not allocate and return new memory. The MP controller "
+"provides destination ``MemoryObj`` buffers, and the adapter copies "
+"downloaded bytes into those buffers."
+msgstr "MP 加载不会分配和返回新的内存。MP 控制器提供目标 ``MemoryObj`` 缓冲区，适配器将下载的字节复制到这些缓冲区中。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:163
+msgid ""
+"Keys are identified by ``ObjectKey`` (``model_name`` + ``kv_rank`` + "
+"``chunk_hash`` + optional ``cache_salt``) rather than ``CacheEngineKey``."
+" The serialized MP object name is "
+"``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]`` and is then "
+"encoded for the bucket path. This naming is not compatible with the non-"
+"MP HFBucket connector's ``CacheEngineKey`` object names, so a bucket "
+"prefix populated by non-MP LMCache cannot be read directly by MP LMCache "
+"and vice versa."
+msgstr "键通过 ``ObjectKey`` (``model_name`` + ``kv_rank`` + ``chunk_hash`` + 可选的 ``cache_salt``) 来识别，而不是 ``CacheEngineKey``\\ 。序列化的 MP 对象名称为 ``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]``\\ ，然后对其进行编码以形成桶路径。此命名与非 MP HFBucket 连接器的 ``CacheEngineKey`` 对象名称不兼容，因此由非 MP LMCache 填充的桶前缀不能被 MP LMCache 直接读取，反之亦然。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:171
+msgid ""
+"Full object writes are batch based. Hugging Face batch writes are not "
+"transactional, so a failed store task may still leave some objects in the"
+" bucket. The MP adapter reconciles backend metadata after such failures "
+"so any objects that actually landed are counted for usage and later "
+"deletion (submitted store task is still reported as failed)."
+msgstr "完整对象写入是基于批处理的。Hugging Face 的批量写入不是事务性的，因此失败的存储任务可能仍会在桶中留下某些对象。MP 适配器在此类失败后会协调后端元数据，因此实际写入的对象会被计入使用量并在后续删除（提交的存储任务仍会被报告为失败）。"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:179
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/kv_cache/storage_backends/hfbucket.rst:181
+msgid ""
+"The backend stores objects under the configured bucket prefix using a "
+"reversible encoding of LMCache keys, so ``list()`` returns LMCache key "
+"strings instead of raw bucket object paths."
+msgstr "后端在配置的桶前缀下存储对象，使用 LMCache 键的可逆编码，因此 ``list()`` 返回 LMCache 键字符串，而不是原始桶对象路径。"
+

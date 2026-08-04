@@ -1,0 +1,11 @@
+local_cpu: false
+chunk_size: 256
+
+# CPU mode: NIXL shares LocalCPUBackend's pinned pool (sized by
+# max_local_cpu_size, default 5 GiB); nixl_buffer_size is GPU-mode only.
+nixl_buffer_device: cpu
+extra_config:
+  enable_nixl_storage: true
+  nixl_backend: POSIX
+  nixl_pool_size: 2
+  nixl_path: /tmp/nixl/cache

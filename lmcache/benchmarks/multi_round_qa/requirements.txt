@@ -1,0 +1,3 @@
+tqdm
+pandas
+openai

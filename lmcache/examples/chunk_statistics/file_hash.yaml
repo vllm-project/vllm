@@ -1,0 +1,15 @@
+# Enable internal API server for interacting with the chunk statistics API
+internal_api_server_enabled: True
+# Base port for the API server
+# actual_port = internal_api_server_port_start + index
+# Scheduler → 6999 + 0 = 6999
+# Worker 0 → 6999 + 1 = 7000
+internal_api_server_port_start: 6999
+# Enable chunk statistics with file hash strategy
+enable_chunk_statistics: true
+chunk_statistics_strategy: "file_hash"
+chunk_statistics_auto_start_statistics: true
+extra_config:
+  chunk_statistics_file_output_dir: "/tmp/lmcache_chunk_statistics"
+  chunk_statistics_file_rotation_size: 104857600  # 100MB
+  chunk_statistics_file_max_count: 100

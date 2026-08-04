@@ -1,0 +1,124 @@
+# The LMCache XPU Dockerfile layers LMCache on top of a prebuilt vLLM XPU
+# runtime image so we can test LMCache + vLLM OpenAI server without rebuilding
+# vLLM, UCX/NIXL, or oneCCL (all already provided by the base image).
+
+# vLLM: 0.21.0+xpu, UCX: 1.21.0, NIXL: 0.7.0, oneCCL: 2021.15
+ARG BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
+ARG BASE_IMAGE_TAG=ad7125a431e176d4161099480a66f0169609a690-xpu
+
+# Optional proxy args (pass via --build-arg)
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+#################### BASE RUNTIME IMAGE ####################
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV UV_HTTP_TIMEOUT=500
+ENV http_proxy=${http_proxy}
+ENV https_proxy=${https_proxy}
+ENV no_proxy=${no_proxy}
+
+WORKDIR /workspace
+
+#################### LMCache (Build, XPU) ####################
+
+FROM base AS image-build
+
+ARG LMCACHE_COMMIT_ID=1
+# Set UPDATE_NIXL=1 to rebuild UCX/NIXL from source in this Dockerfile.
+ARG UPDATE_NIXL=0
+ARG UCX_VERSION=v1.21.0-rc2
+ARG NIXL_VERSION=0.10.1
+
+ENV VLLM_TARGET_DEVICE=xpu
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+# Rebuilt UCX (when enabled) is installed here.
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+
+# Optional UCX/NIXL rebuild path (disabled by default).
+# 1) build UCX + NIXL wheel, 2) install RDMA runtime libs, 3) install local NIXL wheel.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "${UPDATE_NIXL}" = "1" ]; then \
+      apt-get update -y && apt-get install -y --no-install-recommends \
+        build-essential autoconf automake libtool pkg-config \
+        libibverbs-dev librdmacm-dev && \
+      rm -rf /var/lib/apt/lists/* && \
+      git clone https://github.com/openucx/ucx /tmp/ucx_source && \
+      cd /tmp/ucx_source && git checkout "${UCX_VERSION}" && \
+      bash autogen.sh && \
+      ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
+      make CFLAGS="-Wno-error=incompatible-pointer-types" -j8 && make install && \
+      git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
+      cd /tmp/nixl_source && git checkout "${NIXL_VERSION}" && \
+      uv pip install --upgrade meson pybind11 patchelf && \
+      uv pip install -r requirements.txt && \
+      PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig \
+      LD_LIBRARY_PATH=/tmp/ucx_install/lib \
+      python -m pip wheel --no-deps . -w /tmp/nixl_wheels/ && \
+      find /tmp/ucx_install -type f \( -name '*.a' -o -name '*.la' \) -delete && \
+      rm -rf /tmp/ucx_install/include /tmp/ucx_install/share /tmp/ucx_install/etc /tmp/ucx_install/lib/cmake /tmp/ucx_install/bin && \
+      cd /workspace && \
+      rm -rf /tmp/ucx_source /tmp/nixl_source && \
+      apt-get update -y && apt-get install -y --no-install-recommends \
+        rdma-core libibverbs1 librdmacm1 libibumad3 libibmad5 \
+        libmlx5-1 libmlx4-1 ibverbs-providers librdmacm1t64 && \
+      rm -rf /var/lib/apt/lists/* && \
+      uv pip install --no-deps /tmp/nixl_wheels/nixl*.whl && \
+      uv pip install nixl==${NIXL_VERSION} && \
+      rm -rf /tmp/nixl_wheels; \
+    else \
+      echo "Skipping UCX/NIXL rebuild (UPDATE_NIXL=${UPDATE_NIXL})"; \
+    fi
+
+COPY ./requirements/build.txt /workspace/build.txt
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r /workspace/build.txt
+
+COPY . /workspace/LMCache
+WORKDIR /workspace/LMCache
+
+RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
+    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    BUILD_WITH_SYCL=1 python setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose && \
+    BUILD_WITH_SYCL=1 python setup.py build_ext --inplace
+
+WORKDIR /workspace
+ENTRYPOINT ["vllm", "serve"]
+
+
+# Build:
+# docker build -f docker/Dockerfile.xpu -t lmcache-xpu:latest \
+#   --progress=plain \
+#   --build-arg UPDATE_NIXL=1 \
+#   --build-arg BASE_IMAGE=public.ecr.aws/q9t5s3a7/vllm-ci-test-repo \
+#   --build-arg BASE_IMAGE_TAG=ad7125a431e176d4161099480a66f0169609a690-xpu \
+#   --build-arg http_proxy=<proxy> \
+#   --build-arg https_proxy=<proxy> \
+#   --build-arg no_proxy=localhost,127.0.0.1 \
+#   .
+
+# Run:
+# docker run --device /dev/dri  \
+#  --ipc=host \
+#  --shm-size=16g \
+#   -p 8001:8000 \
+#   -e ZE_AFFINITY_MASK=1 \
+#   -e HF_ENDPOINT=https://hf-mirror.com \
+#   -e HF_TOKEN=<hf-token > \
+#   -e http_proxy=<proxy> \
+#   -e https_proxy=<proxy> \
+#   lmcache-xpu:latest \
+#   Qwen/Qwen3-0.6B \
+#   --kv-transfer-config \
+#   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

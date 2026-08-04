@@ -1,0 +1,2791 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "title": "System Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Rate of L1 allocation failures (OOM), L1 read failures, and L2 prefetch failures. Non-zero values indicate unhealthy cache operations.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": true,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_allocation_failure_chunks_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "L1 alloc failure [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_read_failure_chunks_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "L1 read failure [{{service_instance_id}}]",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l2_prefetch_failure_chunks_total[$__rate_interval])) or vector(0)",
+          "legendFormat": "L2 prefetch failure [{{service_instance_id}}]",
+          "refId": "C"
+        }
+      ],
+      "title": "Failure Rates",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L1 eviction loop iterations and triggered runs per second.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_eviction_loop_ticks_total[$__rate_interval])",
+          "legendFormat": "eviction loop ticks/s",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_eviction_loop_triggered_total[$__rate_interval])",
+          "legendFormat": "eviction loop triggered/s",
+          "refId": "B"
+        }
+      ],
+      "title": "L1 Eviction Loop",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L1 cache memory consumption in bytes and usage ratio (0\u20131).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/L1 memory bytes/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/L1 usage ratio/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_l1_memory_usage_bytes",
+          "legendFormat": "L1 memory bytes [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_l1_usage_ratio",
+          "legendFormat": "L1 usage ratio [{{service_instance_id}}]",
+          "refId": "B"
+        }
+      ],
+      "title": "L1 Memory Usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L1 cache key-level operations: reads, writes, and evictions per second.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_read_chunks_total[$__rate_interval])",
+          "legendFormat": "L1 reads/s [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_write_chunks_total[$__rate_interval])",
+          "legendFormat": "L1 writes/s [{{service_instance_id}}]",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_evicted_chunks_total[$__rate_interval])",
+          "legendFormat": "L1 evictions/s [{{service_instance_id}}]",
+          "refId": "C"
+        }
+      ],
+      "title": "L1 Cache Operations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L2 store pipeline: tasks submitted vs completed, and keys succeeded vs failed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed keys/s"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": true,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_submitted_requests_total[$__rate_interval])",
+          "legendFormat": "tasks submitted/s",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_completed_requests_total[$__rate_interval])",
+          "legendFormat": "tasks completed/s ({{l2_name}})",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_submitted_objects_chunks_total[$__rate_interval])",
+          "legendFormat": "keys submitted/s",
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_completed_objects_chunks_total[$__rate_interval])",
+          "legendFormat": "succeeded keys/s",
+          "refId": "D"
+        }
+      ],
+      "title": "L2 Store Pipeline",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L2 prefetch pipeline: lookups submitted, keys looked up vs hit, load tasks, keys loaded vs failed.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed keys/s"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": true,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_lookup_requests_total[$__rate_interval])",
+          "legendFormat": "lookups/s",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_lookup_objects_chunks_total[$__rate_interval])",
+          "legendFormat": "lookup keys/s",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_hit_chunks_total[$__rate_interval])",
+          "legendFormat": "hit keys/s",
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_requests_total[$__rate_interval])",
+          "legendFormat": "load tasks/s",
+          "refId": "D"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total[$__rate_interval])",
+          "legendFormat": "load keys submitted/s",
+          "refId": "E"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_completed_chunks_total[$__rate_interval])",
+          "legendFormat": "loaded keys/s",
+          "refId": "F"
+        },
+        {
+          "editorMode": "code",
+          "expr": "sum(rate(lmcache_mp_l2_prefetch_failure_chunks_total[$__rate_interval]))",
+          "legendFormat": "failed keys/s",
+          "refId": "G"
+        }
+      ],
+      "title": "L2 Prefetch Pipeline",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Current in-flight L2 store tasks, L2 load tasks, active prefetch jobs, and reserved memory for in-flight loads.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/inflight load memory/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_num_inflight_l2_stores",
+          "legendFormat": "inflight L2 stores ({{l2_name}}) [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_num_inflight_l2_loads",
+          "legendFormat": "inflight L2 loads ({{l2_name}}) [{{service_instance_id}}]",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_active_prefetch_jobs",
+          "legendFormat": "active prefetch jobs [{{service_instance_id}}]",
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_inflight_load_memory_usage_bytes",
+          "legendFormat": "inflight load memory [{{service_instance_id}}]",
+          "refId": "D"
+        }
+      ],
+      "title": "Inflight Operations",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "EventBus queue depth, drain lag, dropped events, and subscriber exceptions.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/drain lag/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_event_bus_queue_depth",
+          "legendFormat": "event bus queue depth",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_event_bus_drain_lag_seconds",
+          "legendFormat": "drain lag",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_event_bus_dropped_events_total[$__rate_interval])",
+          "legendFormat": "dropped events/s",
+          "refId": "C"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_event_bus_subscriber_exceptions_total[$__rate_interval])",
+          "legendFormat": "subscriber exceptions/s ({{subscriber_name}})",
+          "refId": "D"
+        }
+      ],
+      "title": "Event Bus",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "id": 200,
+      "title": "Performance",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Average L0 (GPU) to L1 (CPU) transfer throughput per request, measured on the GPU cupy stream.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "GB/s",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "GBs"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l0_l1_store_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_store_throughput_GB_per_second_count[$__rate_interval])",
+          "legendFormat": "L0\u2192L1 store ({{device}})",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l0_l1_load_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_load_throughput_GB_per_second_count[$__rate_interval])",
+          "legendFormat": "L1\u2192L0 load ({{device}})",
+          "refId": "B"
+        }
+      ],
+      "title": "L0 \u2194 L1 Throughput (GB/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Average L1 (CPU) to L2 (remote/disk) transfer throughput per task. Includes adapter queue wait + network/disk I/O.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "GB/s",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "GBs"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_store_throughput_GB_per_second_count[$__rate_interval])",
+          "legendFormat": "L1\u2192L2 store ({{l2_name}})",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_load_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_load_throughput_GB_per_second_count[$__rate_interval])",
+          "legendFormat": "L2\u2192L1 load ({{l2_name}})",
+          "refId": "B"
+        }
+      ],
+      "title": "L1 \u2194 L2 Throughput (GB/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Chunks loaded into the engine, and lookup token counts (requested vs hit).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_requested_tokens_total[$__rate_interval])",
+          "legendFormat": "lookup requested tokens/s [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_hit_tokens_total[$__rate_interval])",
+          "legendFormat": "lookup hit tokens/s [{{service_instance_id}}]",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_num_chunks_loaded_total[$__rate_interval])",
+          "legendFormat": "chunks loaded/s [{{service_instance_id}}]",
+          "refId": "C"
+        }
+      ],
+      "title": "Lookup & Engine Activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Token-level cache hit rate: fraction of requested tokens found in L1+L2 during lookup (contiguous prefix hits only).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_requested_tokens_total[$__rate_interval])",
+          "legendFormat": "L1+L2 token hit rate [{{service_instance_id}}]",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache Hit Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L1 key-level I/O operations per second (reads and writes).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_read_chunks_total[$__rate_interval])",
+          "legendFormat": "L1 read IOPS [{{service_instance_id}}]",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_write_chunks_total[$__rate_interval])",
+          "legendFormat": "L1 write IOPS [{{service_instance_id}}]",
+          "refId": "B"
+        }
+      ],
+      "title": "L1 IOPS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "L2 adapter-level I/O operations per second (store and load task completions).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "iops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_store_completed_requests_total[$__rate_interval])",
+          "legendFormat": "L2 store IOPS ({{l2_name}})",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l2_load_completed_requests_total[$__rate_interval])",
+          "legendFormat": "L2 load IOPS ({{l2_name}})",
+          "refId": "B"
+        }
+      ],
+      "title": "L2 IOPS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Current bytes held in each L2 adapter, sampled live from adapter.get_usage(). One line per adapter, tagged by ``l2_name``. Parallel to the L1 ``lmcache_mp_l1_memory_usage_bytes`` gauge.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_l2_usage_bytes",
+          "legendFormat": "{{l2_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "L2 Usage (current)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 300,
+      "title": "Production Insights",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Average GPU KV cache block lifetime, idle time before eviction, and time gap between consecutive accesses.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l0_block_lifetime_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l0_block_lifetime_seconds_count[$__rate_interval])",
+          "legendFormat": "avg block lifetime",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l0_block_idle_before_evict_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l0_block_idle_before_evict_seconds_count[$__rate_interval])",
+          "legendFormat": "avg idle before evict",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l0_block_reuse_gap_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l0_block_reuse_gap_seconds_count[$__rate_interval])",
+          "legendFormat": "avg reuse gap",
+          "refId": "C"
+        }
+      ],
+      "title": "L0 (GPU) Block Lifecycle",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Average L1 chunk lifetime, idle time before eviction, and time gap between consecutive touches.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_chunk_lifetime_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l1_chunk_lifetime_seconds_count[$__rate_interval])",
+          "legendFormat": "avg chunk lifetime",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_chunk_idle_before_evict_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l1_chunk_idle_before_evict_seconds_count[$__rate_interval])",
+          "legendFormat": "avg idle before evict",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_chunk_reuse_gap_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l1_chunk_reuse_gap_seconds_count[$__rate_interval])",
+          "legendFormat": "avg reuse gap",
+          "refId": "C"
+        }
+      ],
+      "title": "L1 Chunk Lifecycle",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Time from L1 chunk eviction to next reuse of the same slot. Capped at max_evict_reuse_wait. Helps size the L1 cache: if this is consistently low, more L1 capacity would improve hit rates.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_l1_chunk_evict_reuse_gap_seconds_sum[$__rate_interval]) / rate(lmcache_mp_l1_chunk_evict_reuse_gap_seconds_count[$__rate_interval])",
+          "legendFormat": "avg evict-to-reuse gap",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, rate(lmcache_mp_l1_chunk_evict_reuse_gap_seconds_bucket[$__rate_interval]))",
+          "legendFormat": "p50 evict-to-reuse gap",
+          "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, rate(lmcache_mp_l1_chunk_evict_reuse_gap_seconds_bucket[$__rate_interval]))",
+          "legendFormat": "p95 evict-to-reuse gap",
+          "refId": "C"
+        }
+      ],
+      "title": "L1 Evict-to-Reuse Gap",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Time and access-count gaps between consecutive reads of the same chunk at the StorageManager level. Tagged by cache_salt. Helps evaluate cache retention effectiveness.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/chunks/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "chunks"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_real_reuse_gap_seconds_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_seconds_count[$__rate_interval])",
+          "legendFormat": "avg reuse gap seconds ({{cache_salt}})",
+          "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_real_reuse_gap_objects_chunks_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_objects_chunks_count[$__rate_interval])",
+          "legendFormat": "avg reuse gap chunks ({{cache_salt}})",
+          "refId": "B"
+        }
+      ],
+      "title": "SM Real Reuse Gap",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 400,
+      "title": "CacheBlend (expand if using blend_server)",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "CacheBlend lookup, retrieve, and store operation rates including success, failure, and hit metrics.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "/failure/"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "red",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 84
+          },
+          "id": 30,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": true,
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_requests_total[$__rate_interval])",
+              "legendFormat": "lookup requests/s",
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_fingerprint_hits_total[$__rate_interval])",
+              "legendFormat": "fingerprint hits/s",
+              "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_storage_hits_total[$__rate_interval])",
+              "legendFormat": "storage hits/s",
+              "refId": "C"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_stale_chunks_total[$__rate_interval])",
+              "legendFormat": "stale chunks/s",
+              "refId": "D"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_pre_computed_requests_total[$__rate_interval])",
+              "legendFormat": "store_pre_computed requests/s",
+              "refId": "E"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_final_requests_total[$__rate_interval])",
+              "legendFormat": "store_final requests/s",
+              "refId": "F"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_retrieve_requests_total[$__rate_interval])",
+              "legendFormat": "retrieve requests/s",
+              "refId": "G"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_retrieve_failures_total[$__rate_interval])",
+              "legendFormat": "retrieve failure/s",
+              "refId": "H"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_pre_computed_failures_total[$__rate_interval])",
+              "legendFormat": "store_pre_computed failure/s",
+              "refId": "I"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_final_failures_total[$__rate_interval])",
+              "legendFormat": "store_final failure/s",
+              "refId": "J"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_no_gpu_context_errors_total[$__rate_interval])",
+              "legendFormat": "no GPU context errors/s",
+              "refId": "K"
+            }
+          ],
+          "title": "CacheBlend Operations",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Overall blend token hit rate (left, %) and chunk throughput (right, ops/s). Prometheus.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "F"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 84
+          },
+          "id": 31,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_lookup_hit_tokens_total[$__rate_interval]) / rate(lmcache_blend_lookup_requested_tokens_total[$__rate_interval])",
+              "legendFormat": "blend token hit rate",
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_retrieve_chunks_total[$__rate_interval])",
+              "legendFormat": "retrieve chunks/s",
+              "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_pre_computed_chunks_total[$__rate_interval])",
+              "legendFormat": "store_pre_computed chunks/s",
+              "refId": "C"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_store_final_chunks_total[$__rate_interval])",
+              "legendFormat": "store_final chunks/s",
+              "refId": "D"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_fingerprints_registered_total[$__rate_interval])",
+              "legendFormat": "fingerprints registered chunks/s",
+              "refId": "E"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(lmcache_blend_chunks_evicted_total[$__rate_interval])",
+              "legendFormat": "evicted chunks/s",
+              "refId": "F"
+            }
+          ],
+          "title": "CacheBlend Hit Rate & Chunks",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Prefix vs non-prefix token hit rate (each / requested tokens; they sum to the overall hit rate). Prometheus.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 92
+          },
+          "id": 34,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "refId": "A",
+              "expr": "rate(lmcache_blend_lookup_prefix_hit_tokens_total[$__rate_interval]) / rate(lmcache_blend_lookup_requested_tokens_total[$__rate_interval])",
+              "legendFormat": "prefix hit rate"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "refId": "B",
+              "expr": "rate(lmcache_blend_lookup_non_prefix_hit_tokens_total[$__rate_interval]) / rate(lmcache_blend_lookup_requested_tokens_total[$__rate_interval])",
+              "legendFormat": "non-prefix hit rate"
+            }
+          ],
+          "title": "CacheBlend prefix vs non-prefix hit rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "uid": "tempo"
+          },
+          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.sparse_prefetch}, cb.retrieve {cb.scatter}, cb.store_pre_computed, cb.store_final. Click a row for the full Tempo waterfall.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 100
+          },
+          "id": 51,
+          "options": {
+            "dedupStrategy": "none",
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "Start time"
+              }
+            ],
+            "spanFilters": {
+              "criticalPathOnly": false,
+              "matchesOnly": false
+            }
+          },
+          "targets": [
+            {
+              "limit": 20,
+              "query": "{ name = \"cb.request\" }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ],
+          "title": "CacheBlend Request Traces",
+          "type": "traces"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "id": 500,
+      "title": "Request Traces",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "uid": "tempo"
+      },
+      "description": "Waterfall view of per-request spans. Each trace shows the root 'request' span with child spans: mp.lookup_prefetch, mp.retrieve, mp.store. Click a row to open the full waterfall in Tempo.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "id": 50,
+      "options": {
+        "dedupStrategy": "none",
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Start time"
+          }
+        ],
+        "spanFilters": {
+          "criticalPathOnly": false,
+          "matchesOnly": false
+        }
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ name = \"request\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Traces",
+      "type": "traces"
+    }
+  ],
+  "preload": false,
+  "refresh": "5s",
+  "schemaVersion": 42,
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "LMCache",
+  "uid": "lmcache-standard",
+  "version": 8,
+  "weekStart": ""
+}

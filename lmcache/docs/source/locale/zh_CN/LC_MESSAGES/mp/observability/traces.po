@@ -1,0 +1,279 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/observability/traces.rst:2
+msgid "Tracing"
+msgstr "追踪"
+
+#: ../../source/mp/observability/traces.rst:6
+msgid ""
+"``--enable-tracing`` **requires** ``--otlp-endpoint`` to be set. The "
+"server will refuse to start if tracing is enabled without an OTLP "
+"endpoint, since there is no local fallback for trace export."
+msgstr "``--enable-tracing`` **要求** 设置 ``--otlp-endpoint``\\ 。如果启用追踪但没有 OTLP 端点，服务器将拒绝启动，因为没有本地回退用于追踪导出。"
+
+#: ../../source/mp/observability/traces.rst:10
+msgid ""
+"When tracing is enabled (``--enable-tracing --otlp-endpoint <URL>``), the"
+" tracing subscriber creates OTel spans from START/END event pairs:"
+msgstr "当启用追踪时（\\ ``--enable-tracing --otlp-endpoint <URL>``\\ ），追踪订阅者从 START/END 事件对创建 OTel spans："
+
+#: ../../source/mp/observability/traces.rst:13
+msgid "``mp.store`` — from ``MP_STORE_START`` to ``MP_STORE_END``"
+msgstr "``mp.store`` — 从 ``MP_STORE_START`` 到 ``MP_STORE_END``"
+
+#: ../../source/mp/observability/traces.rst:14
+msgid "``mp.retrieve`` — from ``MP_RETRIEVE_START`` to ``MP_RETRIEVE_END``"
+msgstr "``mp.retrieve`` — 从 ``MP_RETRIEVE_START`` 到 ``MP_RETRIEVE_END``"
+
+#: ../../source/mp/observability/traces.rst:15
+msgid ""
+"``mp.lookup_prefetch`` — from ``MP_LOOKUP_PREFETCH_START`` to "
+"``MP_LOOKUP_PREFETCH_END``"
+msgstr "``mp.lookup_prefetch`` — 从 ``MP_LOOKUP_PREFETCH_START`` 到 ``MP_LOOKUP_PREFETCH_END``"
+
+#: ../../source/mp/observability/traces.rst:17
+msgid ""
+"Each span carries event metadata as span attributes (e.g. ``device``, "
+"``stored_count``, ``found_count``)."
+msgstr "每个 span 携带事件元数据作为 span 属性（例如 ``device``\\ 、\\ ``stored_count``\\ 、\\ ``found_count``\\ ）。"
+
+#: ../../source/mp/observability/traces.rst:20
+msgid ""
+"View traces in any OTel-compatible backend such as **Jaeger** or "
+"**Grafana Tempo**."
+msgstr "在任何与 OTel 兼容的后端中查看追踪，例如 **Jaeger** 或 **Grafana Tempo**\\ 。"
+
+#: ../../source/mp/observability/traces.rst:36
+msgid "Per-Request Hit-Rate Attributes"
+msgstr "每个请求的命中率属性"
+
+#: ../../source/mp/observability/traces.rst:38
+msgid ""
+"Each session is wrapped in a per-request root span — ``request`` for the "
+"standard MP path and ``cb.request`` for the CacheBlend path — that nests "
+"all child spans (``mp.store``, ``mp.retrieve``, ``mp.lookup_prefetch``) "
+"beneath it.  When the lookup phase ends, the root span is annotated with "
+"three OTel attributes that summarise the request-level cache hit rate:"
+msgstr "每个会话都被封装在一个每请求根 span 中——标准 MP 路径对应 ``request``\\ ，CacheBlend 路径对应 ``cb.request``——该根 span 将所有子 span（\\ ``mp.store``\\ 、\\ ``mp.retrieve``\\ 、\\ ``mp.lookup_prefetch``\\ ）嵌套在其下。当查找阶段结束时，根 span 会被标注三个 OTel 属性，用以汇总请求级别的缓存命中率："
+
+#: ../../source/mp/observability/traces.rst:48
+msgid "Attribute"
+msgstr "属性"
+
+#: ../../source/mp/observability/traces.rst:49
+msgid "OTel type"
+msgstr "OTel 类型"
+
+#: ../../source/mp/observability/traces.rst:50
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/observability/traces.rst:51
+msgid "``hit_tokens``"
+msgstr "``hit_tokens``"
+
+#: ../../source/mp/observability/traces.rst:52
+#: ../../source/mp/observability/traces.rst:55
+msgid "``int``"
+msgstr "``int``"
+
+#: ../../source/mp/observability/traces.rst:53
+msgid "Tokens served from L1+L2 (numerator)."
+msgstr "从 L1+L2 命中并返回的 token 数（分子）。"
+
+#: ../../source/mp/observability/traces.rst:54
+msgid "``requested_tokens``"
+msgstr "``requested_tokens``"
+
+#: ../../source/mp/observability/traces.rst:56
+msgid "Chunk-aligned tokens submitted for lookup (denominator)."
+msgstr "提交查找的块对齐 token 数（分母）。"
+
+#: ../../source/mp/observability/traces.rst:57
+msgid "``hit_rate``"
+msgstr "``hit_rate``"
+
+#: ../../source/mp/observability/traces.rst:58
+msgid "``float``"
+msgstr "``float``"
+
+#: ../../source/mp/observability/traces.rst:59
+msgid ""
+"``hit_tokens / requested_tokens``; ``0.0`` when the denominator is zero."
+"  Stored as a precomputed float because trace UIs (Tempo, Jaeger) cannot "
+"derive it from two integer attributes at query time."
+msgstr "``hit_tokens / requested_tokens``\\ ；当分母为零时取 ``0.0``\\ 。以预计算浮点数形式存储，原因是追踪 UI（Tempo、Jaeger）无法在查询时从两个整数属性动态推导该值。"
+
+#: ../../source/mp/observability/traces.rst:63
+msgid ""
+"The attributes are written when ``MP_LOOKUP_PREFETCH_END`` (standard MP "
+"path) or ``CB_LOOKUP_END`` (CacheBlend path) is processed — while the "
+"root span is still open.  **Store-only requests** that never call "
+"``lookup_prefetch_start()`` emit no end event for the lookup phase, so "
+"their root span will not carry these attributes."
+msgstr "在处理 ``MP_LOOKUP_PREFETCH_END``\\ （标准 MP 路径）或 ``CB_LOOKUP_END``\\ （CacheBlend 路径）时写入这些属性——此时根 span 仍处于打开状态。\\ **纯存储请求**\\ 不会调用 ``lookup_prefetch_start()``\\ ，因此不会为查找阶段发出结束事件，其根 span 也不会携带这些属性。"
+
+#: ../../source/mp/observability/traces.rst:69
+msgid "Example TraceQL queries (Grafana Tempo):"
+msgstr "示例 TraceQL 查询（Grafana Tempo）："
+
+#: ../../source/mp/observability/traces.rst:82
+msgid ""
+"For the full event-to-span mapping and the registry pattern that links "
+"child spans back to the root see ``docs/design/observability/request-"
+"event-span.md`` in the source tree."
+msgstr "有关完整的事件到 span 映射以及将子 span 关联回根 span 的注册模式，请参阅源码树中的 ``docs/design/observability/request-event-span.md``\\ 。"
+
+#: ../../source/mp/observability/traces.rst:89
+msgid "Trace Recording"
+msgstr "追踪记录"
+
+#: ../../source/mp/observability/traces.rst:93
+msgid ""
+"Trace recording is **distinct from** ``--enable-tracing`` (OTel spans). "
+"Trace recording captures every ``StorageManager`` public-API call to a "
+"binary file so the same workload can be **replayed** later for testing, "
+"regression hunting, and benchmarking — without needing vLLM and "
+"(eventually) without a GPU. ``--enable-tracing`` exports live OTel spans "
+"to an OTLP endpoint for online observability. The two features are "
+"independent and can be used together."
+msgstr "追踪录制与 ``--enable-tracing``\\ （OTel span）是 **两个独立的功能**\\ 。追踪录制将每次 ``StorageManager`` 公共 API 调用记录到二进制文件，以便后续在无需 vLLM（最终也无需 GPU）的情况下 **重放** 相同的工作负载，用于测试、回归排查和基准测试。\\ ``--enable-tracing`` 则将实时 OTel span 导出到 OTLP 端点以实现在线可观测性。两者相互独立，可同时使用。"
+
+#: ../../source/mp/observability/traces.rst:101
+#, python-brace-format
+msgid ""
+"When ``--trace-level storage`` is set, LMCache records every call to "
+"``StorageManager.{reserve_write, finish_write, submit_prefetch_task, "
+"read_prefetched_results, finish_read_prefetched}`` to a binary file for "
+"later replay."
+msgstr "当设置 ``--trace-level storage`` 时，LMCache 会将每次对 ``StorageManager.{reserve_write, finish_write, submit_prefetch_task, read_prefetched_results, finish_read_prefetched}`` 的调用记录到一个二进制文件中，以便后续重放。"
+
+#: ../../source/mp/observability/traces.rst:106
+msgid ""
+"Recording is **off by default** and adds near-zero overhead when off (a "
+"single boolean check per ``StorageManager`` call). When on, recording "
+"happens on the EventBus drain thread, off the request path."
+msgstr "录制默认\\ **关闭**\\ ，关闭状态下开销几乎为零（每次 ``StorageManager`` 调用仅做一次布尔判断）。开启时，录制在 EventBus 排空线程上执行，不占用请求路径。"
+
+#: ../../source/mp/observability/traces.rst:111
+msgid "Capturing a trace"
+msgstr "捕获追踪"
+
+#: ../../source/mp/observability/traces.rst:113
+msgid "With an explicit output path:"
+msgstr "带有显式输出路径："
+
+#: ../../source/mp/observability/traces.rst:121
+msgid "With an implicit timestamped output path under ``$TMPDIR``:"
+msgstr "在 ``$TMPDIR`` 下使用隐式时间戳输出路径："
+
+#: ../../source/mp/observability/traces.rst:132
+msgid ""
+"The trace file is closed cleanly on shutdown (SIGTERM is handled by the "
+"EventBus stop path)."
+msgstr "关闭时（SIGTERM 由 EventBus 停止路径处理），追踪文件会被正常关闭。"
+
+#: ../../source/mp/observability/traces.rst:136
+msgid "Replay"
+msgstr "重放"
+
+#: ../../source/mp/observability/traces.rst:138
+msgid ""
+"Replaying a recorded trace, plus the full set of CLI flags for driving, "
+"monitoring, and exporting replay results, is covered in its own page: "
+":doc:`/mp/tracing_and_debugging`."
+msgstr "录制追踪的重放方式，以及驱动、监控和导出重放结果的完整 CLI 参数集，详见专属页面： :doc:`/mp/tracing_and_debugging`。"
+
+#: ../../source/mp/observability/traces.rst:143
+msgid "What is captured (and what is not)"
+msgstr "捕获了什么（以及未捕获的内容）"
+
+#: ../../source/mp/observability/traces.rst:145
+msgid "**Captured:**"
+msgstr "**捕获：**"
+
+#: ../../source/mp/observability/traces.rst:147
+msgid "The fully-qualified name of every decorated ``StorageManager`` call."
+msgstr "每个被装饰的 ``StorageManager`` 方法调用的完全限定名（qualname）。"
+
+#: ../../source/mp/observability/traces.rst:148
+msgid ""
+"Each call's input arguments (e.g. ``keys``, ``layout_desc``, ``mode``, "
+"``extra_count``, ``external_request_id``)."
+msgstr "每个调用的输入参数（例如 ``keys``, ``layout_desc``, ``mode``, ``extra_count``, ``external_request_id``\\ ）。"
+
+#: ../../source/mp/observability/traces.rst:150
+msgid "Wall-clock and monotonic timestamps of each call."
+msgstr "每个调用的墙钟时间和单调时间戳。"
+
+#: ../../source/mp/observability/traces.rst:151
+msgid ""
+"A header carrying a trace schema version, start times, and a SHA-256 "
+"digest of the active ``StorageManagerConfig`` so replay can detect "
+"mismatched configurations."
+msgstr "包含追踪 schema 版本、开始时间以及当前 ``StorageManagerConfig`` 的 SHA-256 摘要的文件头，供重放时检测配置不匹配。"
+
+#: ../../source/mp/observability/traces.rst:155
+msgid "**Not captured:**"
+msgstr "**未捕获：**"
+
+#: ../../source/mp/observability/traces.rst:157
+msgid ""
+"KV tensor bytes. Replay exercises bookkeeping and controller logic; "
+"payloads at replay time are zeros."
+msgstr "KV 张量的字节内容。重放仅演练状态记账与控制器逻辑；重放时的负载数据以零值填充。"
+
+#: ../../source/mp/observability/traces.rst:159
+msgid ""
+"Calls inside the ``MPCacheServer``, the message queue, or any GPU-copy "
+"code. These layers are **out of scope** for the storage trace level."
+msgstr "``MPCacheServer``\\ 、消息队列或任何 GPU 拷贝代码内部的调用。这些层 **不在存储追踪级别的采集范围内**\\ 。"
+
+#: ../../source/mp/observability/traces.rst:164
+msgid "File format"
+msgstr "文件格式"
+
+#: ../../source/mp/observability/traces.rst:166
+msgid "A length-prefixed `msgpack <https://msgpack.org/>`_ stream:"
+msgstr "一个长度前缀的 `msgpack <https://msgpack.org/>`_ 流："
+
+#: ../../source/mp/observability/traces.rst:175
+msgid ""
+"The ``Header`` carries a magic prefix (``LMCT``), a format version, the "
+"trace level (``storage`` today), a trace schema version, start "
+"timestamps, and the StorageManagerConfig digest. Each ``Record`` carries "
+"a relative timestamp, a wall-clock timestamp, the fully-qualified call "
+"site (``qualname``), and an argument dict."
+msgstr "``Header`` 包含魔数前缀（\\ ``LMCT``\\ ）、格式版本、追踪级别（当前为 ``storage``\\ ）、追踪 schema 版本、开始时间戳以及 StorageManagerConfig 摘要。每个 ``Record`` 包含相对时间戳、墙钟时间戳、完全限定调用位置（\\ ``qualname``\\ ）和参数字典。"
+
+#: ../../source/mp/observability/traces.rst:181
+msgid ""
+"The format is deliberately extensible: future trace **levels** (``mq``, "
+"``gpu``) will share this layout and use the ``level`` header field to "
+"discriminate. Additional captured ops add new ``qualname`` strings "
+"without bumping the format version."
+msgstr "该格式有意设计为可扩展：未来的追踪 **级别**\\ （\\ ``mq``\\ 、\\ ``gpu``\\ ）将共享此布局，并通过 ``level`` 头字段加以区分。新增捕获的操作只需添加新的 ``qualname`` 字符串，无需升级格式版本。"
+
+#: ../../source/mp/observability/traces.rst:186
+msgid "For the full design rationale see"
+msgstr "有关完整的设计原理，请参见"
+

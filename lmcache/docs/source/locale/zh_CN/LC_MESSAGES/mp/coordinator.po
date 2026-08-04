@@ -1,0 +1,1491 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/coordinator.rst:2
+msgid "Multi-Server Coordination"
+msgstr "多服务器协调"
+
+#: ../../source/mp/coordinator.rst:4
+msgid ""
+"When you run more than one LMCache multiprocess (MP) server, the **MP "
+"Coordinator** is a standalone service they register with, giving you a "
+"single, fleet-wide view of every running server. Each MP server caches "
+"independently; the coordinator ties them together into one coordinated "
+"fleet."
+msgstr ""
+"当您运行多个 LMCache 多进程（MP）服务器时，\\ **MP 协调器**\\ "
+"是一个独立服务，各服务器向其注册，从而为您提供覆盖所有运行中服务器的单一全局视图。每个 MP "
+"服务器独立缓存；协调器将它们整合为一个统一管理的集群。"
+
+#: ../../source/mp/coordinator.rst:14
+msgid "Running the coordinator"
+msgstr "运行协调器"
+
+#: ../../source/mp/coordinator.rst:16
+msgid "The coordinator is a FastAPI service. Start it with:"
+msgstr "协调器是一个 FastAPI 服务。使用以下命令启动它："
+
+#: ../../source/mp/coordinator.rst:22
+msgid "Expected log output:"
+msgstr "预期的日志输出："
+
+#: ../../source/mp/coordinator.rst:28
+msgid ""
+"The CLI accepts ``--host``, ``--port``, ``--instance-timeout``, "
+"``--health-check-interval``, ``--eviction-check-interval``, ``--eviction-"
+"ratio``, ``--trigger-watermark``, ``--chunk-size``, ``--hash-algorithm``,"
+" ``--blend-probe-stride``, and ``--timeout-keep-alive``; any flag "
+"overrides the matching environment variable below. See "
+":doc:`/cli/coordinator` for details. Equivalently, the coordinator can "
+"still be launched as a module with ``python3 -m "
+"lmcache.v1.mp_coordinator``."
+msgstr ""
+"CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-"
+"interval``、``--eviction-check-interval``、``--eviction-ratio"
+"``、``--trigger-watermark``、``--chunk-size``、``--hash-algorithm"
+"``、``--blend-probe-stride`` 和 ``--timeout-keep-"
+"alive``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过"
+" ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
+
+#: ../../source/mp/coordinator.rst:38
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/coordinator.rst:40
+msgid ""
+"The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` "
+"environment variables:"
+msgstr "协调器通过 ``LMCACHE_MP_COORDINATOR_*`` 环境变量进行配置："
+
+#: ../../source/mp/coordinator.rst:47
+msgid "Environment variable"
+msgstr "环境变量"
+
+#: ../../source/mp/coordinator.rst:48
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/coordinator.rst:49 ../../source/mp/coordinator.rst:132
+#: ../../source/mp/coordinator.rst:199 ../../source/mp/coordinator.rst:444
+#: ../../source/mp/coordinator.rst:488 ../../source/mp/coordinator.rst:628
+#: ../../source/mp/coordinator.rst:711 ../../source/mp/coordinator.rst:789
+#: ../../source/mp/coordinator.rst:852
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/coordinator.rst:50
+msgid "``LMCACHE_MP_COORDINATOR_HOST``"
+msgstr "``LMCACHE_MP_COORDINATOR_HOST``"
+
+#: ../../source/mp/coordinator.rst:51
+msgid "``0.0.0.0``"
+msgstr "``0.0.0.0``"
+
+#: ../../source/mp/coordinator.rst:52
+msgid "Host the HTTP server binds to."
+msgstr "HTTP服务器绑定的主机。"
+
+#: ../../source/mp/coordinator.rst:53
+msgid "``LMCACHE_MP_COORDINATOR_PORT``"
+msgstr "``LMCACHE_MP_COORDINATOR_PORT``"
+
+#: ../../source/mp/coordinator.rst:54
+msgid "``9300``"
+msgstr "``9300``"
+
+#: ../../source/mp/coordinator.rst:55
+msgid "Port the HTTP server binds to."
+msgstr "HTTP服务器绑定的端口。"
+
+#: ../../source/mp/coordinator.rst:56
+msgid "``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``"
+msgstr "``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``"
+
+#: ../../source/mp/coordinator.rst:57
+msgid "``30``"
+msgstr "``30``"
+
+#: ../../source/mp/coordinator.rst:58
+msgid ""
+"Seconds without a heartbeat after which a server is dropped from the "
+"fleet."
+msgstr "超过此秒数未收到心跳后，服务器将从集群中移除。"
+
+#: ../../source/mp/coordinator.rst:60
+msgid "``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``"
+msgstr "``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:61 ../../source/mp/coordinator.rst:88
+msgid "``10``"
+msgstr "``10``"
+
+#: ../../source/mp/coordinator.rst:62
+msgid "Seconds between health-check sweeps. ``0`` disables eviction."
+msgstr "健康检查扫描之间的秒数。\\ ``0`` 禁用逐出。"
+
+#: ../../source/mp/coordinator.rst:63
+msgid "``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``"
+msgstr "``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:64
+msgid "``5``"
+msgstr "``5``"
+
+#: ../../source/mp/coordinator.rst:65
+msgid "Seconds between L2 eviction sweeps. ``0`` disables the loop."
+msgstr "L2 逐出清扫之间的秒数。\\ ``0`` 禁用循环。"
+
+#: ../../source/mp/coordinator.rst:66
+msgid "``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``"
+msgstr "``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``"
+
+#: ../../source/mp/coordinator.rst:67
+msgid "``0.2``"
+msgstr "``0.2``"
+
+#: ../../source/mp/coordinator.rst:68
+msgid "Fraction of tracked keys (by count) to evict per cycle (0.0 to 1.0)."
+msgstr "每个周期逐出的跟踪键的比例（按计数，范围为 0.0 到 1.0）。"
+
+#: ../../source/mp/coordinator.rst:69
+msgid "``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``"
+msgstr "``LMCACHE_MP_COORDINATOR_TRIGGER_WATERMARK``"
+
+#: ../../source/mp/coordinator.rst:70
+msgid "``1.0``"
+msgstr "``1.0``"
+
+#: ../../source/mp/coordinator.rst:71
+msgid ""
+"Eviction fires when usage reaches this fraction of the quota (0.0 "
+"exclusive to 1.0)."
+msgstr "当使用量达到配额的该比例时触发逐出（取值范围为 (0.0, 1.0]，不含 0.0）。"
+
+#: ../../source/mp/coordinator.rst:73
+msgid "``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``"
+msgstr "``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``"
+
+#: ../../source/mp/coordinator.rst:74
+msgid "``256``"
+msgstr "``256``"
+
+#: ../../source/mp/coordinator.rst:75
+msgid ""
+"Tokens per KV chunk: the CacheBlend match unit and the unit used to "
+"resolve pin ``token_ids`` to keys. Must equal the MP servers' ``--chunk-"
+"size``."
+msgstr ""
+"每个 KV 块的令牌数：CacheBlend 匹配单元和用于将固定的 ``token_ids`` 解析为键的单元。必须等于 MP 服务器的 "
+"``--chunk-size``。"
+
+#: ../../source/mp/coordinator.rst:78
+msgid "``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``"
+msgstr "``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``"
+
+#: ../../source/mp/coordinator.rst:79
+msgid "``blake3``"
+msgstr "``blake3``"
+
+#: ../../source/mp/coordinator.rst:80
+msgid ""
+"Token hash algorithm for pin key resolution. Must equal the MP servers' "
+"``--hash-algorithm``. ``blake3`` is self-contained; other algorithms "
+"require vLLM importable in the coordinator process."
+msgstr ""
+"用于 pin 密钥解析的令牌哈希算法。必须与 MP 服务器的 ``--hash-algorithm`` 相等。``blake3`` "
+"是自包含的；其他算法需要在协调器进程中可导入的 vLLM。"
+
+#: ../../source/mp/coordinator.rst:83
+msgid "``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``"
+msgstr "``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``"
+
+#: ../../source/mp/coordinator.rst:84 ../../source/mp/coordinator.rst:102
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/mp/coordinator.rst:85
+msgid ""
+"Positions between CacheBlend match probes. ``1`` probes every offset for "
+"full recall."
+msgstr "在 CacheBlend 匹配探针之间的位置。``1`` 在每个偏移量进行探测以实现完全回忆。"
+
+#: ../../source/mp/coordinator.rst:87
+msgid "``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``"
+msgstr "``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``"
+
+#: ../../source/mp/coordinator.rst:89
+msgid ""
+"Seconds the HTTP server keeps idle connections open before closing them. "
+"Must be greater than the MP servers' heartbeat interval (default ``5``), "
+"otherwise heartbeat requests may hit a closing connection and fail with "
+"``Server disconnected without sending a response``."
+msgstr ""
+"HTTP 服务器在关闭空闲连接之前保持打开的秒数。必须大于 MP 服务器的心跳间隔（默认 "
+"``5``），否则心跳请求可能会遇到关闭的连接并失败，出现 ``服务器在未发送响应的情况下断开连接``。"
+
+#: ../../source/mp/coordinator.rst:94
+msgid "``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``"
+msgstr "``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``"
+
+#: ../../source/mp/coordinator.rst:95
+msgid "``True``"
+msgstr "``True``"
+
+#: ../../source/mp/coordinator.rst:96
+msgid ""
+"When ``True``, the coordinator runs a one-shot L2 resync on startup that "
+"paginates an MP server's ``GET /cache/objects`` and backfills usage + "
+"eviction trackers from existing L2 contents. Disable to start from empty "
+"trackers (handy for tests, or deployments that start the coordinator "
+"before any MP server)."
+msgstr ""
+"当设置为 ``True`` 时，协调器在启动时会执行一次 L2 重新同步，分页 MP 服务器的 ``GET /cache/objects`` "
+"并从现有的 L2 内容中填充使用情况和逐出跟踪器。禁用此选项可以从空跟踪器开始（适用于测试或在任何 MP 服务器之前启动协调器的部署）。"
+
+#: ../../source/mp/coordinator.rst:101
+msgid "``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``"
+msgstr "``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:103
+msgid ""
+"Seconds between registry checks while waiting for the first MP server to "
+"register so startup resync can begin."
+msgstr "在等待第一个 MP 服务器注册以便启动重新同步可以开始时，注册检查之间的秒数。"
+
+#: ../../source/mp/coordinator.rst:105
+msgid "``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``"
+msgstr "``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``"
+
+#: ../../source/mp/coordinator.rst:106
+msgid "``60``"
+msgstr "``60``"
+
+#: ../../source/mp/coordinator.rst:107
+msgid ""
+"Maximum seconds startup resync waits for an MP server before giving up. "
+"The coordinator keeps running with empty trackers until normal usage "
+"events fill them in."
+msgstr "最大秒数启动重新同步等待 MP 服务器在放弃之前。协调器保持运行，使用空的跟踪器，直到正常使用事件填充它们。"
+
+#: ../../source/mp/coordinator.rst:110
+msgid "``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``"
+msgstr "``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``"
+
+#: ../../source/mp/coordinator.rst:111
+msgid "``1000``"
+msgstr "``1000``"
+
+#: ../../source/mp/coordinator.rst:112
+msgid ""
+"``page_size`` forwarded to the MP server's ``GET /cache/objects`` during "
+"resync. Larger values reduce RTT count; the server clamps to its own "
+"ceiling."
+msgstr ""
+"``page_size`` 在重新同步期间转发到 MP 服务器的 ``GET /cache/objects``。较大的值会减少 RTT "
+"计数；服务器会限制在其自身的上限。"
+
+#: ../../source/mp/coordinator.rst:117
+msgid "Connecting MP servers"
+msgstr "连接 MP 服务器"
+
+#: ../../source/mp/coordinator.rst:119
+msgid ""
+"An MP server (``lmcache server``) joins the coordinator when you point it"
+" at one with ``--coordinator-url``. It registers on startup, heartbeats "
+"while running, and deregisters on shutdown -- all on the server's own "
+"event loop. This is opt-in: with no URL set, the server runs exactly as "
+"before. Each flag falls back to a matching ``LMCACHE_COORDINATOR_*`` "
+"environment variable (handy for the Kubernetes downward API); an explicit"
+" flag wins over the env var."
+msgstr ""
+"当您通过 ``--coordinator-url`` 为 MP 服务器（\\ ``lmcache server``\\ "
+"）指定协调器地址时，该服务器便会加入协调器。它在启动时注册、运行时持续发送心跳、关闭时注销——所有操作均在服务器自身的事件循环中完成。此功能为可选项：若未设置"
+" URL，服务器的行为与之前完全相同。每个标志均可回退到对应的 ``LMCACHE_COORDINATOR_*`` 环境变量（在使用 "
+"Kubernetes Downward API 时非常便捷）；显式标志优先于环境变量。"
+
+#: ../../source/mp/coordinator.rst:130
+msgid "Flag (on the MP server)"
+msgstr "标志（在 MP 服务器上）"
+
+#: ../../source/mp/coordinator.rst:131
+msgid "Env fallback"
+msgstr "环境回退"
+
+#: ../../source/mp/coordinator.rst:133
+msgid "``--coordinator-url``"
+msgstr "``--coordinator-url``"
+
+#: ../../source/mp/coordinator.rst:134
+msgid "``LMCACHE_COORDINATOR_URL``"
+msgstr "``LMCACHE_COORDINATOR_URL``"
+
+#: ../../source/mp/coordinator.rst:135
+msgid ""
+"Coordinator base URL, e.g. ``http://coordinator:9300``. Enables "
+"registration when set."
+msgstr "协调器基础 URL，例如 ``http://coordinator:9300``\\ 。设置后启用注册。"
+
+#: ../../source/mp/coordinator.rst:137
+msgid "``--coordinator-advertise-ip``"
+msgstr "``--coordinator-advertise-ip``"
+
+#: ../../source/mp/coordinator.rst:138
+msgid "``LMCACHE_COORDINATOR_ADVERTISE_IP``"
+msgstr "``LMCACHE_COORDINATOR_ADVERTISE_IP``"
+
+#: ../../source/mp/coordinator.rst:139
+msgid ""
+"IP the coordinator should reach this server at (defaults to the server's "
+"outbound IP)."
+msgstr "协调器应通过此服务器访问的 IP（默认为服务器的外部 IP）。"
+
+#: ../../source/mp/coordinator.rst:141
+msgid "``--coordinator-heartbeat-interval``"
+msgstr "``--coordinator-heartbeat-interval``"
+
+#: ../../source/mp/coordinator.rst:142
+msgid "``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``"
+msgstr "``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:143
+msgid ""
+"Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well"
+" below the coordinator's ``INSTANCE_TIMEOUT``."
+msgstr "心跳之间的秒数（必须为 ``> 0``\\ ，默认值为 ``5``\\ ）。保持远低于协调器的 ``INSTANCE_TIMEOUT``\\ 。"
+
+#: ../../source/mp/coordinator.rst:145
+msgid "``--coordinator-l2-event-reporting``"
+msgstr "``--coordinator-l2-event-reporting``"
+
+#: ../../source/mp/coordinator.rst:146
+msgid "``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``"
+msgstr "``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``"
+
+#: ../../source/mp/coordinator.rst:147
+msgid ""
+"Enable reporting L2 store/lookup events to the coordinator for fleet-wide"
+" usage tracking and quota-based eviction."
+msgstr "启用向协调器上报 L2 存储/查找事件，用于全集群使用量跟踪及基于配额的逐出。"
+
+#: ../../source/mp/coordinator.rst:149
+msgid "``--coordinator-l2-event-flush-interval``"
+msgstr "``--coordinator-l2-event-flush-interval``"
+
+#: ../../source/mp/coordinator.rst:150
+msgid "``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``"
+msgstr "``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:151
+msgid "Seconds between L2 event batch flushes (must be ``> 0``, default ``1``)."
+msgstr "L2 事件批量刷新之间的秒数（必须为 ``> 0``\\ ，默认值为 ``1``\\ ）。"
+
+#: ../../source/mp/coordinator.rst:153
+msgid ""
+"The server registers under its stable identity (``--instance-id`` / OTel "
+"``service.instance.id``); if the flag is not passed, the server mints a "
+"random UUID v4 at startup and registers under that."
+msgstr ""
+"服务器在其稳定身份下注册（\\ ``--instance-id`` / OTel ``service.instance.id``\\ "
+"）；如果未传递该标志，服务器将在启动时生成一个随机的 UUID v4 并在该 UUID 下注册。"
+
+#: ../../source/mp/coordinator.rst:157
+msgid ""
+"Registration is best-effort: if the coordinator is unreachable, the MP "
+"server logs a warning, keeps retrying, and continues serving. A malformed"
+" heartbeat-interval value is rejected at startup."
+msgstr "注册是尽力而为的：如果协调器无法访问，MP 服务器会记录警告，持续重试，并继续提供服务。启动时会拒绝格式错误的心跳间隔值。"
+
+#: ../../source/mp/coordinator.rst:162
+msgid "HTTP endpoints"
+msgstr "HTTP 端点"
+
+#: ../../source/mp/coordinator.rst:164
+msgid ""
+"The coordinator's HTTP surface (base URL ``http://localhost:9300``) "
+"groups into:"
+msgstr "协调器的 HTTP 接口（基础 URL ``http://localhost:9300``）分为："
+
+#: ../../source/mp/coordinator.rst:166
+msgid ""
+"**Fleet membership and health** -- registration and liveness "
+"(``/instances``, ``/healthz``)."
+msgstr "**车队成员资格和健康** -- 注册和存活 (``/instances``, ``/healthz``)。"
+
+#: ../../source/mp/coordinator.rst:168
+msgid ""
+"**Quota, usage, and eviction** -- the ``/quota`` group: per-tenant byte "
+"budgets, usage accounting, and the usage-event ingest that drives fleet-"
+"wide eviction."
+msgstr "**配额、使用情况和逐出** -- ``/quota`` 组：每个租户的字节预算、使用情况核算，以及驱动全队逐出的使用事件摄取。"
+
+#: ../../source/mp/coordinator.rst:171
+msgid ""
+"**Cache control** -- the ``/cache`` group: cache operations dispatched to"
+" a named server (warm prefetch, pin/unpin, and delete, with more to "
+"come)."
+msgstr "**缓存控制** -- ``/cache`` 组：分派给命名服务器的缓存操作（热预取、固定/解固定和删除，更多功能即将推出）。"
+
+#: ../../source/mp/coordinator.rst:174
+#, python-brace-format
+msgid ""
+"Each endpoint is documented below. Success is ``200`` unless noted, and "
+"``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The "
+"wire types live in ``lmcache/v1/mp_coordinator/schemas.py``."
+msgstr ""
+"每个端点的文档如下。成功状态为 ``200``，除非另有说明，``{cache_salt}`` 使用 ``_default`` "
+"哨兵表示空盐。数据类型位于 ``lmcache/v1/mp_coordinator/schemas.py``。"
+
+#: ../../source/mp/coordinator.rst:179
+msgid "Fleet membership and health"
+msgstr "车队成员资格和健康状态"
+
+#: ../../source/mp/coordinator.rst:181
+msgid ""
+"MP servers register, heartbeat, and deregister automatically (see "
+"`Connecting MP servers`_); ``GET /instances`` and ``GET /healthz`` are "
+"read-only operator views."
+msgstr ""
+"MP 服务器自动注册、心跳和注销（参见 `Connecting MP servers`_）；``GET /instances`` 和 ``GET "
+"/healthz`` 是只读的操作员视图。"
+
+#: ../../source/mp/coordinator.rst:186
+msgid "``POST /instances``"
+msgstr "``POST /instances``"
+
+#: ../../source/mp/coordinator.rst:188
+msgid ""
+"Register (or re-register) an MP server. Called automatically by each "
+"server on startup."
+msgstr "注册（或重新注册）一个 MP 服务器。每个服务器在启动时会自动调用。"
+
+#: ../../source/mp/coordinator.rst:191 ../../source/mp/coordinator.rst:480
+#: ../../source/mp/coordinator.rst:620 ../../source/mp/coordinator.rst:703
+#: ../../source/mp/coordinator.rst:844
+msgid "**Request body:**"
+msgstr "**请求体：**"
+
+#: ../../source/mp/coordinator.rst:197 ../../source/mp/coordinator.rst:442
+#: ../../source/mp/coordinator.rst:486 ../../source/mp/coordinator.rst:626
+#: ../../source/mp/coordinator.rst:709 ../../source/mp/coordinator.rst:787
+#: ../../source/mp/coordinator.rst:850
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/mp/coordinator.rst:198 ../../source/mp/coordinator.rst:443
+#: ../../source/mp/coordinator.rst:487 ../../source/mp/coordinator.rst:627
+#: ../../source/mp/coordinator.rst:710 ../../source/mp/coordinator.rst:788
+#: ../../source/mp/coordinator.rst:851
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/mp/coordinator.rst:200
+msgid "``ip``"
+msgstr "``ip``"
+
+#: ../../source/mp/coordinator.rst:201 ../../source/mp/coordinator.rst:208
+#: ../../source/mp/coordinator.rst:215 ../../source/mp/coordinator.rst:452
+#: ../../source/mp/coordinator.rst:494 ../../source/mp/coordinator.rst:630
+#: ../../source/mp/coordinator.rst:637 ../../source/mp/coordinator.rst:713
+#: ../../source/mp/coordinator.rst:716 ../../source/mp/coordinator.rst:728
+#: ../../source/mp/coordinator.rst:791 ../../source/mp/coordinator.rst:794
+#: ../../source/mp/coordinator.rst:854 ../../source/mp/coordinator.rst:864
+msgid "string"
+msgstr "字符串"
+
+#: ../../source/mp/coordinator.rst:202
+msgid ""
+"IP/host of the server's HTTP API; the coordinator dials this address, so "
+"it must be non-empty."
+msgstr "服务器 HTTP API 的 IP/主机地址；协调器拨打此地址，因此必须非空。"
+
+#: ../../source/mp/coordinator.rst:204
+msgid "``http_port``"
+msgstr "``http_port``"
+
+#: ../../source/mp/coordinator.rst:205 ../../source/mp/coordinator.rst:219
+#: ../../source/mp/coordinator.rst:633 ../../source/mp/coordinator.rst:719
+#: ../../source/mp/coordinator.rst:857
+msgid "int"
+msgstr "整数"
+
+#: ../../source/mp/coordinator.rst:206
+msgid "Port of the server's HTTP API."
+msgstr "服务器 HTTP API 的端口。"
+
+#: ../../source/mp/coordinator.rst:207 ../../source/mp/coordinator.rst:629
+#: ../../source/mp/coordinator.rst:712 ../../source/mp/coordinator.rst:790
+msgid "``instance_id``"
+msgstr "``instance_id``"
+
+#: ../../source/mp/coordinator.rst:209
+msgid ""
+"Optional. Server identifier; if omitted (or blank) the coordinator "
+"generates one and returns it."
+msgstr "可选。服务器标识符；如果省略（或留空），协调器将生成一个并返回。"
+
+#: ../../source/mp/coordinator.rst:211
+msgid "``metadata``"
+msgstr "``metadata``"
+
+#: ../../source/mp/coordinator.rst:212
+msgid "object"
+msgstr "对象"
+
+#: ../../source/mp/coordinator.rst:213
+msgid "Optional. Free-form ``string -> string`` registration hints."
+msgstr "可选。自由格式的 ``string -> string`` 注册提示。"
+
+#: ../../source/mp/coordinator.rst:214
+msgid "``p2p_advertised_url``"
+msgstr "``p2p_advertised_url``"
+
+#: ../../source/mp/coordinator.rst:216
+msgid ""
+"Optional. URL the server advertises for peer-to-peer transfers; empty "
+"when it is not in P2P."
+msgstr "可选。服务器为点对点传输宣传的 URL；在不处于 P2P 时为空。"
+
+#: ../../source/mp/coordinator.rst:218
+msgid "``mq_port``"
+msgstr "``mq_port``"
+
+#: ../../source/mp/coordinator.rst:220
+msgid ""
+"Optional (default ``0``). ZMQ message-queue port P2P peers send "
+"lookup/unlock RPCs to; ``0`` when P2P is disabled."
+msgstr "可选（默认 ``0``）。ZMQ 消息队列端口，P2P 对等体发送查找/解锁 RPC 的端口；当 P2P 被禁用时为 ``0``。"
+
+#: ../../source/mp/coordinator.rst:223 ../../source/mp/coordinator.rst:254
+#: ../../source/mp/coordinator.rst:299 ../../source/mp/coordinator.rst:337
+#: ../../source/mp/coordinator.rst:455 ../../source/mp/coordinator.rst:498
+#: ../../source/mp/coordinator.rst:531 ../../source/mp/coordinator.rst:561
+#: ../../source/mp/coordinator.rst:589 ../../source/mp/coordinator.rst:647
+#: ../../source/mp/coordinator.rst:732 ../../source/mp/coordinator.rst:867
+#: ../../source/mp/coordinator.rst:948
+msgid "**Response** (``200 OK``):"
+msgstr "**响应** (``200 OK``):"
+
+#: ../../source/mp/coordinator.rst:229
+msgid ""
+"``instance_id`` is the registered id (the generated one when the request "
+"omitted it); ``re_registered`` is ``true`` when this replaced an existing"
+" registration."
+msgstr ""
+"``instance_id`` 是注册的 ID（当请求省略时生成的 ID）；``re_registered`` 在替换现有注册时为 "
+"``true``。"
+
+#: ../../source/mp/coordinator.rst:232 ../../source/mp/coordinator.rst:260
+#: ../../source/mp/coordinator.rst:283 ../../source/mp/coordinator.rst:322
+#: ../../source/mp/coordinator.rst:343 ../../source/mp/coordinator.rst:504
+#: ../../source/mp/coordinator.rst:540 ../../source/mp/coordinator.rst:571
+#: ../../source/mp/coordinator.rst:603 ../../source/mp/coordinator.rst:655
+#: ../../source/mp/coordinator.rst:748 ../../source/mp/coordinator.rst:811
+#: ../../source/mp/coordinator.rst:876 ../../source/mp/coordinator.rst:962
+msgid "**HTTP status codes:**"
+msgstr "**HTTP 状态码:**"
+
+#: ../../source/mp/coordinator.rst:234
+msgid "``200``: registered."
+msgstr "``200``: 已注册。"
+
+#: ../../source/mp/coordinator.rst:235
+msgid ""
+"``422``: request body fails field-level validation (e.g. blank ``ip`` or "
+"out-of-range ``http_port``)."
+msgstr "``422``: 请求体未通过字段级验证（例如，空白的 ``ip`` 或超出范围的 ``http_port``）。"
+
+#: ../../source/mp/coordinator.rst:238 ../../source/mp/coordinator.rst:266
+#: ../../source/mp/coordinator.rst:287 ../../source/mp/coordinator.rst:326
+#: ../../source/mp/coordinator.rst:347 ../../source/mp/coordinator.rst:461
+#: ../../source/mp/coordinator.rst:510 ../../source/mp/coordinator.rst:544
+#: ../../source/mp/coordinator.rst:575 ../../source/mp/coordinator.rst:607
+#: ../../source/mp/coordinator.rst:660 ../../source/mp/coordinator.rst:760
+#: ../../source/mp/coordinator.rst:818 ../../source/mp/coordinator.rst:883
+#: ../../source/mp/coordinator.rst:913 ../../source/mp/coordinator.rst:968
+msgid "**Example:**"
+msgstr "**示例：**"
+
+#: ../../source/mp/coordinator.rst:248
+#, python-brace-format
+msgid "``PUT /instances/{instance_id}/heartbeat``"
+msgstr "``PUT /instances/{instance_id}/heartbeat``"
+
+#: ../../source/mp/coordinator.rst:250
+msgid "Record a liveness heartbeat. Called automatically while the server runs."
+msgstr "记录存活心跳。在服务器运行时自动调用。"
+
+#: ../../source/mp/coordinator.rst:252
+msgid ""
+"**Path parameters:** ``instance_id`` — the instance recording the "
+"heartbeat."
+msgstr "**路径参数:** ``instance_id`` — 记录心跳的实例。"
+
+#: ../../source/mp/coordinator.rst:262
+msgid "``200``: heartbeat recorded."
+msgstr "``200``: 心跳已记录。"
+
+#: ../../source/mp/coordinator.rst:263
+msgid ""
+"``404``: unknown instance — the caller should re-register via ``POST "
+"/instances``."
+msgstr "``404``: 未知实例 — 调用者应通过 ``POST /instances`` 重新注册。"
+
+#: ../../source/mp/coordinator.rst:274
+#, python-brace-format
+msgid "``DELETE /instances/{instance_id}``"
+msgstr "``DELETE /instances/{instance_id}``"
+
+#: ../../source/mp/coordinator.rst:276
+msgid "Deregister an MP server. Called automatically on shutdown."
+msgstr "注销一个 MP 服务器。在关闭时自动调用。"
+
+#: ../../source/mp/coordinator.rst:278
+msgid "**Path parameters:** ``instance_id`` — the server to deregister."
+msgstr "**路径参数:** ``instance_id`` — 要注销的服务器。"
+
+#: ../../source/mp/coordinator.rst:280
+msgid ""
+"**Response:** ``204 No Content`` with an empty body, returned whether or "
+"not the instance was registered (idempotent)."
+msgstr "**响应:** ``204 No Content``，返回一个空主体，无论实例是否已注册（幂等）。"
+
+#: ../../source/mp/coordinator.rst:285
+msgid "``204``: deregistered (also returned for an unknown instance)."
+msgstr "``204``: 已注销（对于未知实例也会返回此状态）。"
+
+#: ../../source/mp/coordinator.rst:295
+msgid "``GET /instances``"
+msgstr "``GET /instances``"
+
+#: ../../source/mp/coordinator.rst:297
+msgid "List every registered MP server."
+msgstr "列出每个注册的 MP 服务器。"
+
+#: ../../source/mp/coordinator.rst:317
+msgid ""
+"Each entry reports the server's ``instance_id``, the ``ip`` / "
+"``http_port`` the coordinator reaches it at, the wall-clock "
+"``registration_time`` (epoch seconds), any ``metadata`` supplied at "
+"registration, and the ``p2p_advertised_url`` / ``mq_port`` used for peer-"
+"to-peer transfers (empty / ``0`` when P2P is disabled)."
+msgstr ""
+"每个条目报告服务器的 ``instance_id``、协调器访问的 ``ip`` / ``http_port``、墙钟 "
+"``registration_time``（纪元秒）、注册时提供的任何 ``metadata``，以及用于点对点传输的 "
+"``p2p_advertised_url`` / ``mq_port``（当 P2P 被禁用时为空 / ``0``）。"
+
+#: ../../source/mp/coordinator.rst:324
+#, python-brace-format
+msgid "``200``: fleet listed (an empty fleet returns ``{\"instances\": []}``)."
+msgstr "``200``: 已列出舰队（空舰队返回 ``{\\\"instances\\\": []}``）。"
+
+#: ../../source/mp/coordinator.rst:333
+msgid "``GET /healthz``"
+msgstr "``GET /healthz``"
+
+#: ../../source/mp/coordinator.rst:335
+msgid "Coordinator liveness probe (for Kubernetes)."
+msgstr "协调器存活探测（用于 Kubernetes）。"
+
+#: ../../source/mp/coordinator.rst:345
+msgid "``200``: the coordinator is up."
+msgstr "``200``: 协调器正常运行。"
+
+#: ../../source/mp/coordinator.rst:355
+msgid "Quota, usage, and eviction"
+msgstr "配额、使用情况和逐出"
+
+#: ../../source/mp/coordinator.rst:357
+msgid ""
+"The ``/quota`` group owns per-``cache_salt`` byte budgets, the live usage"
+" accounting behind them, and the usage-event stream that drives fleet-"
+"wide eviction. (The MP server exposes a node-local ``/quota`` with the "
+"same shape; this is its fleet-wide counterpart.) Use ``_default`` as the "
+"path parameter to target the empty-string salt."
+msgstr ""
+"``/quota`` 组拥有每个 ``cache_salt`` 字节预算、其背后的实时使用情况核算，以及驱动全队逐出的使用事件流。 （MP "
+"服务器暴露了一个节点本地的 ``/quota``，形状相同；这是其全队对应的版本。）使用 ``_default`` 作为路径参数以针对空字符串盐。"
+
+#: ../../source/mp/coordinator.rst:365
+msgid ""
+"Do **not** use the MP server's node-local ``/quota`` API together with "
+"the coordinator's. The two are independent, unsynchronized quota "
+"registries enforcing eviction on the **same shared L2**: the server-side "
+"enforcer (active when the server runs a per-salt eviction policy) uses "
+"strict allowlist semantics — any salt missing from *its own* table is "
+"fully evicted — and it never sees quotas registered on the coordinator, "
+"and vice versa. Mixing the two produces competing eviction decisions: the"
+" server can wipe data the coordinator considers within quota (or still "
+"exempt before the default limit is armed). Pick one owner per deployment "
+"— in coordinator-managed deployments, register quotas **only** through "
+"the coordinator's ``/quota`` API and leave the servers' node-local quota "
+"tables untouched."
+msgstr ""
+"请勿将 MP 服务器的节点本地 ``/quota`` API 与协调器的 API 一起使用。这两者是独立的、不同步的配额注册表，在 **同一共享 "
+"L2** 上强制执行逐出：服务器端的强制执行者（在服务器运行每个盐的逐出策略时处于活动状态）使用严格的白名单语义——任何缺失于 *其自身* "
+"表中的盐都会被完全逐出——并且它永远无法看到在协调器上注册的配额，反之亦然。混合这两者会产生相互竞争的逐出决策：服务器可以删除协调器认为在配额内的数据（或在默认限制生效之前仍然豁免的数据）。每个部署选择一个所有者——在协调器管理的部署中，仅通过协调器的"
+" ``/quota`` API 注册配额，并保持服务器的节点本地配额表不变。"
+
+#: ../../source/mp/coordinator.rst:378
+msgid ""
+"Salts without an explicit quota are governed by the registry's **default "
+"limit** (``PUT /quota/config``). On boot the default is unset, and "
+"unquota'd salts are **exempt** from eviction — quotas live in memory, so "
+"a freshly (re)started coordinator has an empty quota table until the "
+"external quota controller re-syncs it, and the exempt default keeps that "
+"window from mass-evicting unknown tenants. After re-registering every "
+"per-salt quota, the controller sets the default to ``0`` — the signal "
+"that arms strict allowlist enforcement (all bytes under unquota'd salts "
+"become evictable on the next cycle):"
+msgstr ""
+"没有显式配额的盐由注册表的 **默认限制** (``PUT /quota/config``) 管控。启动时默认值未设置，未配额的盐 **免于** "
+"逐出 — "
+"配额存储在内存中，因此一个新启动的（重新）协调器在外部配额控制器重新同步之前有一个空的配额表，而免配额的默认值防止在这一窗口内大规模逐出未知租户。在重新注册每个盐的配额后，控制器将默认值设置为"
+" ``0`` — 这是启动严格允许列表强制执行的信号（所有未配额盐下的字节将在下一个周期变为可逐出）："
+
+#: ../../source/mp/coordinator.rst:400
+msgid ""
+"When MP servers enable ``--coordinator-l2-event-reporting``, they stream "
+"L2 ``store``, ``lookup``, and ``delete`` events to the coordinator, which"
+" aggregates per-``cache_salt`` usage, enforces quotas, and selects LRU "
+"keys to evict. Each batch carries the server's ``instance_id`` and a "
+"monotonically increasing sequence number (``seq``) scoped to that "
+"instance, enabling future gap detection."
+msgstr ""
+"当 MP 服务器启用 ``--coordinator-l2-event-reporting`` 时，它们将 L2 "
+"``store``、``lookup`` 和 ``delete`` 事件流式传输到协调器，协调器汇总每个 ``cache_salt`` "
+"的使用情况，强制执行配额，并选择 LRU 键进行逐出。每个批次携带服务器的 ``instance_id`` 和一个单调递增的序列号 "
+"(``seq``)，该序列号作用于该实例，从而实现未来的间隙检测。"
+
+#: ../../source/mp/coordinator.rst:406
+msgid ""
+"**Active eviction loop.** Every "
+"``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the "
+"coordinator inspects per-salt usage against the registered quotas and, "
+"for any salt over the trigger watermark, picks LRU victims and dispatches"
+" a single ``DELETE /cache/objects`` to a uniformly random registered MP "
+"server. Because all MP servers share the same backing L2 (e.g. one S3 "
+"bucket), one dispatch evicts the keys for the whole fleet. The MP "
+"server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the "
+"delete completes; those listeners ship ``delete`` events back through "
+"``POST /quota/events``, which is what updates the coordinator's LRU + "
+"per-salt totals. Dispatch failures or no-instances-registered fall "
+"through to the next cycle — at-least-once semantics, safe because the S3 "
+"delete is idempotent."
+msgstr ""
+"**主动逐出循环。** 每 ``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` "
+"秒，协调器检查每个盐的使用情况与注册的配额，并对任何超过触发水位线的盐选择 LRU 牺牲品，并向一个均匀随机的注册 MP 服务器发送单个 "
+"``DELETE /cache/objects``。由于所有 MP 服务器共享相同的后端 L2（例如，一个 S3 "
+"存储桶），一次调度会逐出整个集群的键。MP 服务器的 L2 适配器在删除完成后触发 ``on_l2_keys_deleted`` "
+"监听器；这些监听器通过 ``POST /quota/events`` 发送 ``delete`` 事件，这就是更新协调器的 LRU + "
+"每盐总数的方式。调度失败或没有注册实例将进入下一个周期——至少一次语义，安全，因为 S3 删除是幂等的。"
+
+#: ../../source/mp/coordinator.rst:420
+msgid ""
+"**Startup resync.** On boot, the coordinator waits up to "
+"``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP "
+"server to register, then paginates its ``GET /cache/objects`` and seeds "
+"the in-memory usage + eviction trackers with whatever is already resident"
+" in L2 — so a fresh coordinator does not start from zero usage. Set "
+"``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this "
+"phase. Best-effort: resync failures are logged and the manager gives up; "
+"the ongoing usage-event stream from MP servers eventually corrects any "
+"initial blind spots."
+msgstr ""
+"**启动重新同步。** 在启动时，协调器最多等待 ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` "
+"秒以注册第一个 MP 服务器，然后对其 ``GET /cache/objects`` 进行分页，并用 L2 "
+"中已经存在的内容填充内存中的使用情况和逐出跟踪器——因此一个新的协调器不会从零使用开始。设置 "
+"``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` "
+"以跳过此阶段。尽力而为：重新同步失败会被记录，管理器会放弃；来自 MP 服务器的持续使用事件流最终会纠正任何初始盲点。"
+
+#: ../../source/mp/coordinator.rst:432
+msgid "``PUT /quota/config`` / ``GET /quota/config``"
+msgstr "``PUT /quota/config`` / ``GET /quota/config``"
+
+#: ../../source/mp/coordinator.rst:434
+msgid ""
+"Set / read the default limit applied to salts with no explicit quota "
+"entry."
+msgstr "设置/读取未明确配额条目的盐的默认限制。"
+
+#: ../../source/mp/coordinator.rst:436
+msgid "**Request body** (``PUT``):"
+msgstr "**请求体** (``PUT``):"
+
+#: ../../source/mp/coordinator.rst:445
+msgid "``default_limit_gb``"
+msgstr "``default_limit_gb``"
+
+#: ../../source/mp/coordinator.rst:446
+msgid "float or null"
+msgstr "浮动或空值"
+
+#: ../../source/mp/coordinator.rst:447
+msgid ""
+"``null`` (the boot default) exempts unquota'd salts from eviction; ``0`` "
+"arms strict allowlist enforcement (all unquota'd bytes become evictable "
+"next cycle); a positive value grants every unquota'd salt that byte "
+"budget."
+msgstr ""
+"``null``（启动默认值）使未配额的盐免于逐出；``0`` "
+"启用严格的白名单执行（所有未配额的字节在下一个周期变为可逐出）；正值为每个未配额的盐提供该字节预算。"
+
+#: ../../source/mp/coordinator.rst:451 ../../source/mp/coordinator.rst:493
+#: ../../source/mp/coordinator.rst:636
+msgid "``tier``"
+msgstr "``tier``"
+
+#: ../../source/mp/coordinator.rst:453
+msgid "Optional (default ``l2``). Only ``l2`` is supported today."
+msgstr "可选（默认 ``l2``）。目前仅支持 ``l2``。"
+
+#: ../../source/mp/coordinator.rst:473
+#, python-brace-format
+msgid "``PUT /quota/{cache_salt}``"
+msgstr "``PUT /quota/{cache_salt}``"
+
+#: ../../source/mp/coordinator.rst:475
+msgid "Create or update a tenant's byte budget."
+msgstr "创建或更新租户的字节预算。"
+
+#: ../../source/mp/coordinator.rst:477 ../../source/mp/coordinator.rst:525
+#: ../../source/mp/coordinator.rst:556
+msgid ""
+"**Path parameters:** ``cache_salt`` — tenant identifier (``_default`` for"
+" the empty salt)."
+msgstr "**路径参数:** ``cache_salt`` — 租户标识符 (``_default`` 表示空盐)。"
+
+#: ../../source/mp/coordinator.rst:489
+msgid "``limit_gb``"
+msgstr "``limit_gb``"
+
+#: ../../source/mp/coordinator.rst:490
+msgid "float"
+msgstr "浮点数"
+
+#: ../../source/mp/coordinator.rst:491
+msgid ""
+"Byte budget in GiB; must be ``>= 0`` (``0`` clears the tenant's data on "
+"the next eviction cycle)."
+msgstr "以 GiB 为单位的字节预算；必须为 ``>= 0``（``0`` 会在下一个逐出周期清除租户的数据）。"
+
+#: ../../source/mp/coordinator.rst:495
+msgid ""
+"Optional (default ``l2``). Cache tier the quota applies to; only ``l2`` "
+"is supported today."
+msgstr "可选（默认 ``l2``）。配额适用的缓存层级；目前仅支持 ``l2``。"
+
+#: ../../source/mp/coordinator.rst:506
+msgid "``200``: quota applied."
+msgstr "``200``: 已应用配额。"
+
+#: ../../source/mp/coordinator.rst:507
+msgid "``400``: invalid limit (negative or non-finite)."
+msgstr "``400``: 无效的限制（负值或非有限值）。"
+
+#: ../../source/mp/coordinator.rst:508 ../../source/mp/coordinator.rst:658
+#: ../../source/mp/coordinator.rst:753 ../../source/mp/coordinator.rst:881
+msgid "``422``: request body fails field-level validation."
+msgstr "``422``: 请求体未通过字段级验证。"
+
+#: ../../source/mp/coordinator.rst:520
+#, python-brace-format
+msgid "``DELETE /quota/{cache_salt}``"
+msgstr "``DELETE /quota/{cache_salt}``"
+
+#: ../../source/mp/coordinator.rst:522
+msgid ""
+"Remove a salt's quota entry. Any bytes still cached under it become over-"
+"budget on the next eviction cycle (effective limit drops to ``0``)."
+msgstr "删除盐的配额条目。任何仍然缓存的字节将在下一个逐出周期变为超出预算（有效限制降至 ``0``）。"
+
+#: ../../source/mp/coordinator.rst:528
+msgid ""
+"**Query parameters:** ``tier`` — optional (default ``l2``); cache tier "
+"the quota applies to."
+msgstr "**查询参数:** ``tier`` — 可选（默认 ``l2``）；配额适用的缓存层级。"
+
+#: ../../source/mp/coordinator.rst:537
+msgid ""
+"When no quota was registered for the salt, ``status`` is "
+"``\"not_found\"`` (still ``200 OK``)."
+msgstr "当未为盐注册配额时，``status`` 为 ``\"not_found\"``（仍然是 ``200 OK``）。"
+
+#: ../../source/mp/coordinator.rst:542
+msgid "``200``: removed, or ``not_found`` if no quota existed."
+msgstr "``200``: 已移除，或 ``not_found`` 如果不存在配额。"
+
+#: ../../source/mp/coordinator.rst:552
+#, python-brace-format
+msgid "``GET /quota/{cache_salt}``"
+msgstr "``GET /quota/{cache_salt}``"
+
+#: ../../source/mp/coordinator.rst:554
+msgid "Read the quota and live usage for a single salt."
+msgstr "读取单个盐的配额和实时使用情况。"
+
+#: ../../source/mp/coordinator.rst:559 ../../source/mp/coordinator.rst:587
+msgid "**Query parameters:** ``tier`` — optional (default ``l2``)."
+msgstr "**查询参数:** ``tier`` — 可选（默认 ``l2``）。"
+
+#: ../../source/mp/coordinator.rst:567
+msgid ""
+"``quota_limit_gb`` is the configured limit in GiB (``0.0`` when no quota "
+"is set), ``quota_exists`` whether an explicit quota is registered, and "
+"``usage_gb`` the current aggregate usage. This endpoint never returns "
+"``404`` for an unknown salt."
+msgstr ""
+"``quota_limit_gb`` 是以 GiB 为单位的配置限制（当未设置配额时为 ``0.0``），``quota_exists`` "
+"表示是否注册了显式配额，``usage_gb`` 是当前的总使用量。此端点对于未知的 salt 永远不会返回 ``404``。"
+
+#: ../../source/mp/coordinator.rst:573
+msgid "``200``: quota and usage reported."
+msgstr "``200``: 报告配额和使用情况。"
+
+#: ../../source/mp/coordinator.rst:583
+msgid "``GET /quota``"
+msgstr "``GET /quota``"
+
+#: ../../source/mp/coordinator.rst:585
+msgid "List total usage and a per-salt breakdown."
+msgstr "列出总使用量和每个 salt 的详细信息。"
+
+#: ../../source/mp/coordinator.rst:600
+#, python-brace-format
+msgid ""
+"``total_gb`` is aggregate usage across all salts in GiB; each "
+"``by_cache_salt`` entry has the same fields as the ``GET "
+"/quota/{cache_salt}`` response."
+msgstr ""
+"``total_gb`` 是所有 salt 的总使用量（以 GiB 为单位）；每个 ``by_cache_salt`` 条目具有与 ``GET "
+"/quota/{cache_salt}`` 响应相同的字段。"
+
+#: ../../source/mp/coordinator.rst:605
+msgid "``200``: usage reported."
+msgstr "``200``: 报告的使用情况。"
+
+#: ../../source/mp/coordinator.rst:615
+msgid "``POST /quota/events``"
+msgstr "``POST /quota/events``"
+
+#: ../../source/mp/coordinator.rst:617
+msgid ""
+"Ingest a batch of usage events. Sent automatically by reporting MP "
+"servers; not usually called by hand."
+msgstr "摄取一批使用事件。由报告 MP 服务器自动发送；通常不手动调用。"
+
+#: ../../source/mp/coordinator.rst:631
+msgid "The MP server that produced this batch."
+msgstr "生成此批次的 MP 服务器。"
+
+#: ../../source/mp/coordinator.rst:632
+msgid "``seq``"
+msgstr "``seq``"
+
+#: ../../source/mp/coordinator.rst:634
+msgid ""
+"Monotonic per-instance sequence number (``>= 1``); supports future gap "
+"detection of lost batches."
+msgstr "每个实例的单调序列号（``>= 1``）；支持未来丢失批次的间隙检测。"
+
+#: ../../source/mp/coordinator.rst:638
+msgid "Optional (default ``l2``). Cache tier the events apply to."
+msgstr "可选（默认 ``l2``）。事件适用的缓存层。"
+
+#: ../../source/mp/coordinator.rst:639
+msgid "``events``"
+msgstr "``events``"
+
+#: ../../source/mp/coordinator.rst:640
+msgid "list[object]"
+msgstr "列表[对象]"
+
+#: ../../source/mp/coordinator.rst:641
+#, python-brace-format
+msgid ""
+"The events to record. Each is ``{\"type\", \"key\", \"bytes\"}``: "
+"``type`` is ``\"store\"``, ``\"lookup\"``, or ``\"delete\"``; ``key`` is "
+"the encoded object key; ``bytes`` (``>= 0``) is the stored size — counted"
+" for ``store`` and ignored for ``lookup`` / ``delete`` (a ``delete`` "
+"subtracts the size recorded at the original ``store``)."
+msgstr ""
+"要记录的事件。每个事件为 ``{\\\"type\\\", \\\"key\\\", \\\"bytes\\\"}``： ``type`` 为 "
+"``\\\"store\\\"``、``\\\"lookup\\\"`` 或 ``\\\"delete\\\"``； ``key`` "
+"是编码后的对象键； ``bytes`` (``>= 0``) 是存储的大小 — 对于 ``store`` 计入，对于 ``lookup`` / "
+"``delete`` 忽略（``delete`` 会减去在原始 ``store`` 记录的大小）。"
+
+#: ../../source/mp/coordinator.rst:653
+msgid "``recorded`` is the number of events processed."
+msgstr "``recorded`` 是处理的事件数量。"
+
+#: ../../source/mp/coordinator.rst:657
+msgid "``200``: events processed."
+msgstr "``200``: 处理的事件数量。"
+
+#: ../../source/mp/coordinator.rst:678
+msgid "Cache control"
+msgstr "缓存控制"
+
+#: ../../source/mp/coordinator.rst:680
+msgid ""
+"The ``/cache`` group dispatches cache operations to a named MP server. It"
+" covers **warm prefetch**, **pin/unpin**, and **delete**; further cache-"
+"control operations will be documented as endpoints here as they land."
+msgstr "``/cache`` 组将缓存操作分派到命名的 MP 服务器。它涵盖 **热预取**、**固定/解固定** 和 **删除**；进一步的缓存控制操作将在此处作为端点记录。"
+
+#: ../../source/mp/coordinator.rst:684
+msgid ""
+"**Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 "
+"with the KV for a known prompt **before** the requests arrive, so the "
+"first request hits L1 instead of paying the L2 fetch inline -- useful "
+"when you know a workload is about to be routed to a node (a traffic "
+"shift, a hot shared system prompt)."
+msgstr ""
+"**热预取（从 L2 预加载 L1）。** 在请求到达之前，用已知提示的 KV 预热一个 MP 服务器的 L1，以便第一个请求命中 "
+"L1，而不是支付 L2 内联获取的费用——当您知道工作负载即将路由到节点（流量转移、热共享系统提示）时，这非常有用。"
+
+#: ../../source/mp/coordinator.rst:689
+msgid ""
+"You describe the content by **token ids** -- the unit the cache speaks --"
+" never by internal cache keys, which you cannot construct (a key is a "
+"content hash plus a per-rank layout bitmap). The coordinator forwards the"
+" request to the named server, which hashes the tokens, expands them "
+"across the node's ranks, loads the chunks from L2 into L1, and "
+"**retains** them so a later lookup hits. The submit returns a "
+"``request_id``; poll the status endpoint until ``completed``. The warm "
+"acquires no lock -- the poll simply reports progress and clears the "
+"server-side job once the load finishes."
+msgstr ""
+"您通过 **token ids** "
+"描述内容——缓存使用的单位——而不是通过内部缓存键，您无法构造这些键（键是内容哈希加上每个排名的布局位图）。协调器将请求转发到指定的服务器，该服务器对令牌进行哈希，将它们扩展到节点的各个排名，从"
+" L2 加载块到 L1，并 **保留** 它们，以便后续查找命中。提交返回一个 ``request_id``；轮询状态端点直到 "
+"``completed``。预热不需要获取锁——轮询仅报告进度，并在加载完成后清除服务器端作业。"
+
+#: ../../source/mp/coordinator.rst:699
+msgid "``POST /cache/prefetches``"
+msgstr "``POST /cache/prefetches``"
+
+#: ../../source/mp/coordinator.rst:701
+msgid "Submit a warm prefetch of a token sequence on one named server."
+msgstr "在一个指定的服务器上提交一个令牌序列的预热预取。"
+
+#: ../../source/mp/coordinator.rst:714
+msgid "Target MP server; must be registered."
+msgstr "目标 MP 服务器；必须已注册。"
+
+#: ../../source/mp/coordinator.rst:715 ../../source/mp/coordinator.rst:853
+msgid "``model_name``"
+msgstr "``model_name``"
+
+#: ../../source/mp/coordinator.rst:717
+msgid "Model whose layout sizes the target's L1 buffers."
+msgstr "目标的 L1 缓冲区布局大小的模型。"
+
+#: ../../source/mp/coordinator.rst:718 ../../source/mp/coordinator.rst:856
+msgid "``world_size``"
+msgstr "``world_size``"
+
+#: ../../source/mp/coordinator.rst:720
+msgid ""
+"World size (``>= 1``) selecting the KV layout and the per-rank fan-out "
+"(``1`` for a single-GPU, TP=1 deployment)."
+msgstr "世界大小（``>= 1``），选择 KV 布局和每个 rank 的扇出（对于单 GPU，TP=1 部署为 ``1``）。"
+
+#: ../../source/mp/coordinator.rst:722 ../../source/mp/coordinator.rst:859
+msgid "``token_ids``"
+msgstr "``token_ids``"
+
+#: ../../source/mp/coordinator.rst:723 ../../source/mp/coordinator.rst:860
+msgid "list[int]"
+msgstr "列表[int]"
+
+#: ../../source/mp/coordinator.rst:724
+msgid ""
+"Prompt tokens whose complete ``chunk_size`` chunks are warmed; must match"
+" what was stored (same tokenizer / special tokens). A sub-chunk sequence "
+"is a ``noop``."
+msgstr "完全 ``chunk_size`` 块的提示令牌已预热；必须与存储的内容匹配（相同的分词器/特殊令牌）。子块序列是 ``noop``。"
+
+#: ../../source/mp/coordinator.rst:727 ../../source/mp/coordinator.rst:863
+msgid "``cache_salt``"
+msgstr "``cache_salt``"
+
+#: ../../source/mp/coordinator.rst:729
+msgid ""
+"Optional (default ``\"\"``). Per-tenant isolation salt applied to the "
+"produced keys."
+msgstr "可选（默认 ``\"\"``）。应用于生成键的每个租户隔离盐。"
+
+#: ../../source/mp/coordinator.rst:738
+msgid ""
+"When the sequence is shorter than one chunk, nothing is submitted and "
+"``request_id`` is empty:"
+msgstr "当序列短于一个块时，什么都不会被提交，``request_id`` 为空："
+
+#: ../../source/mp/coordinator.rst:745
+msgid ""
+"``request_id`` is the id to poll; ``chunks`` is the number of whole "
+"chunks submitted to warm."
+msgstr "``request_id`` 是用于轮询的 ID；``chunks`` 是提交的完整块的数量。"
+
+#: ../../source/mp/coordinator.rst:750
+msgid "``200``: submitted (or a ``noop`` as above)."
+msgstr "``200``：已提交（或如上所述的 ``noop``）。"
+
+#: ../../source/mp/coordinator.rst:751
+msgid "``404``: unknown ``instance_id`` (not registered)."
+msgstr "``404``: 未知 ``instance_id``（未注册）。"
+
+#: ../../source/mp/coordinator.rst:752
+msgid "``502``: the target server was unreachable or rejected the submit."
+msgstr "``502``: 目标服务器无法访问或拒绝了提交。"
+
+#: ../../source/mp/coordinator.rst:757
+msgid ""
+"**Single-node scope:** one ``instance_id`` warms only that node's shards."
+" For a model sharded across multiple nodes, submit one request per node's"
+" instance."
+msgstr "**单节点范围：** 一个 ``instance_id`` 仅对该节点的分片进行预热。对于跨多个节点的模型，每个节点的实例需提交一个请求。"
+
+#: ../../source/mp/coordinator.rst:776
+#, python-brace-format
+msgid "``GET /cache/prefetches/{instance_id}/{request_id}``"
+msgstr "``GET /cache/prefetches/{instance_id}/{request_id}``"
+
+#: ../../source/mp/coordinator.rst:778
+msgid ""
+"Poll a submitted warm prefetch; the response relays the owning server's "
+"status verbatim with its code."
+msgstr "轮询已提交的预热预取；响应将拥有服务器的状态及其代码逐字传递。"
+
+#: ../../source/mp/coordinator.rst:781
+msgid "**Path parameters:**"
+msgstr "**路径参数：**"
+
+#: ../../source/mp/coordinator.rst:792
+msgid "The server the prefetch was submitted to."
+msgstr "提交预取的服务器。"
+
+#: ../../source/mp/coordinator.rst:793
+msgid "``request_id``"
+msgstr "``request_id``"
+
+#: ../../source/mp/coordinator.rst:795
+msgid "The id returned by ``POST /cache/prefetches``."
+msgstr "由 ``POST /cache/prefetches`` 返回的 id。"
+
+#: ../../source/mp/coordinator.rst:797
+msgid "**Response** (``200 OK``) while the load runs:"
+msgstr "**响应** (``200 OK``) 在加载运行时："
+
+#: ../../source/mp/coordinator.rst:803
+msgid "…and once complete:"
+msgstr "…并且一旦完成："
+
+#: ../../source/mp/coordinator.rst:809
+msgid "``found_keys`` of ``total_keys`` requested chunks were resident."
+msgstr "``found_keys`` 的 ``total_keys`` 请求块是常驻的。"
+
+#: ../../source/mp/coordinator.rst:813
+msgid "``200``: status reported (``pending`` or ``completed``)."
+msgstr "``200``: 状态报告（``pending`` 或 ``completed``）。"
+
+#: ../../source/mp/coordinator.rst:814
+msgid ""
+"``404``: unknown ``instance_id``, or unknown ``request_id`` relayed from "
+"the server."
+msgstr "``404``: 未知的 ``instance_id``，或来自服务器的未知 ``request_id``。"
+
+#: ../../source/mp/coordinator.rst:816
+msgid "``502``: the target server was unreachable."
+msgstr "``502``: 目标服务器无法访问。"
+
+#: ../../source/mp/coordinator.rst:825
+msgid ""
+"**Pin/unpin (protecting cache from eviction).** Pin a token sequence's "
+"cache so it is not evicted from L2 until unpinned. The coordinator "
+"resolves the token sequence to its object keys **locally** (no MP-server "
+"round-trip) and records them in its L2 eviction plan (``POST``) or "
+"releases them (``DELETE``), excluding pinned keys from quota-based "
+"eviction. L2 pins are fleet-wide (per ``cache_salt``), so no target "
+"instance is named."
+msgstr ""
+"**固定/解固定（保护缓存不被逐出）。** 固定一个令牌序列的缓存，以便在解固定之前不会从 L2 中被逐出。协调器将令牌序列解析为其对象键 "
+"**本地**（无需 MP 服务器往返），并将其记录在 L2 "
+"逐出计划中（``POST``）或释放它们（``DELETE``），将固定的键排除在基于配额的逐出之外。L2 固定是全舰队范围的（按 "
+"``cache_salt``），因此没有指定目标实例。"
+
+#: ../../source/mp/coordinator.rst:832
+msgid ""
+"Local resolution requires the coordinator's ``chunk_size`` and "
+"``hash_algorithm`` (see `Configuration`_) to match the MP servers' "
+"``--chunk-size`` / ``--hash-algorithm``; otherwise the resolved keys will"
+" not match what was stored and the pin protects nothing. It also requires"
+" the MP servers to be launched with ``--no-separate-object-groups`` (the "
+"coordinator resolves keys in a single object group)."
+msgstr ""
+"本地解析要求协调器的 ``chunk_size`` 和 ``hash_algorithm``（请参见 `Configuration`_）与 MP "
+"服务器的 ``--chunk-size`` / ``--hash-algorithm`` "
+"匹配；否则解析的键将与存储的键不匹配，且固定不会保护任何内容。它还要求 MP 服务器以 ``--no-separate-object-"
+"groups`` 启动（协调器在单个对象组中解析键）。"
+
+#: ../../source/mp/coordinator.rst:840
+msgid "``POST /cache/pins``"
+msgstr "``POST /cache/pins``"
+
+#: ../../source/mp/coordinator.rst:842
+msgid "Pin a token sequence's keys in the L2 eviction plan."
+msgstr "在 L2 逐出计划中固定一个令牌序列的键。"
+
+#: ../../source/mp/coordinator.rst:855
+msgid "Model whose rank fan-out to use when resolving keys."
+msgstr "用于解析键时使用的模型的扇出等级。"
+
+#: ../../source/mp/coordinator.rst:858
+msgid "World size (``>= 1``) selecting the per-rank fan-out."
+msgstr "世界大小（``>= 1``），选择每个排名的扇出。"
+
+#: ../../source/mp/coordinator.rst:861
+msgid ""
+"Prompt tokens whose complete chunks are pinned; must match what was "
+"stored. A sub-chunk sequence pins nothing (``affected`` 0)."
+msgstr "完整块被固定的提示令牌；必须与存储的内容匹配。子块序列不固定任何内容（``affected`` 0）。"
+
+#: ../../source/mp/coordinator.rst:865
+msgid "Optional (default ``\"\"``). Per-tenant isolation salt."
+msgstr "可选（默认 ``\"\"``）。每个租户的隔离盐。"
+
+#: ../../source/mp/coordinator.rst:873
+msgid ""
+"``requested`` is the number of whole chunks resolved; ``affected`` is the"
+" number of L2 keys pinned (chunks times the per-rank fan-out)."
+msgstr "``requested`` 是解析的完整块数；``affected`` 是固定的 L2 键的数量（块数乘以每个排名的分支因子）。"
+
+#: ../../source/mp/coordinator.rst:878
+msgid "``200``: pinned."
+msgstr "``200``: 已固定。"
+
+#: ../../source/mp/coordinator.rst:879
+msgid ""
+"``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` "
+"violates its invariants."
+msgstr "``400``: ``token_ids`` 超过每个请求的上限，或者 ``cache_salt`` 违反了其不变性。"
+
+#: ../../source/mp/coordinator.rst:899
+msgid ""
+"**Requires L2 event reporting.** The coordinator can only exclude keys "
+"from eviction for a salt it is tracking, which requires the MP servers "
+"started with ``--coordinator-l2-event-reporting`` (see `Connecting MP "
+"servers`_)."
+msgstr ""
+"**需要 L2 事件报告。** 协调器只能排除其正在跟踪的盐的键的逐出，这需要 MP 服务器以 ``--coordinator-l2-event-"
+"reporting`` 启动（请参见 `连接 MP 服务器`_）。"
+
+#: ../../source/mp/coordinator.rst:904
+msgid "``DELETE /cache/pins``"
+msgstr "``DELETE /cache/pins``"
+
+#: ../../source/mp/coordinator.rst:906
+msgid ""
+"Unpin a token sequence's keys from the L2 eviction plan. Same request "
+"body as ``POST /cache/pins``. The response mirrors the pin (``affected`` "
+"is the number of keys unpinned), with ``status`` ``\"unpinned\"``. Pins "
+"are reference-counted: a chunk pinned *N* times needs *N* unpins before "
+"it can be evicted."
+msgstr ""
+"从 L2 逐出计划中取消一个令牌序列的键。请求体与 ``POST /cache/pins`` 相同。响应与 pin 相似（``affected``"
+" 是取消固定的键的数量），``status`` 为 ``\"unpinned\"``。Pins 是按引用计数的：一个块被固定 *N* 次需要 "
+"*N* 次取消固定才能被逐出。"
+
+#: ../../source/mp/coordinator.rst:911
+msgid "**HTTP status codes:** same as ``POST /cache/pins``."
+msgstr "**HTTP 状态码:** 与 ``POST /cache/pins`` 相同。"
+
+#: ../../source/mp/coordinator.rst:927
+msgid ""
+"**Delete (removing cache by token sequence).** Delete a token sequence's "
+"cache on one named server, addressed by token ids. The coordinator "
+"resolves the tokens to object keys locally (like pin) and issues a single"
+" key-addressed ``DELETE /cache/objects`` to the named server, which "
+"removes them from the requested tier(s). The ``tier`` field selects the "
+"tier(s): ``l1`` deletes only the named server's L1, ``l2`` only L2, "
+"``all`` both. When the tier includes L2, the coordinator first drops any "
+"key it is protecting with an L2 pin from the delete set unless ``force`` "
+"is set — so a pinned key is retained in every tier the delete would have "
+"touched; ``force`` deletes them and drops those pins."
+msgstr "**删除（通过令牌序列移除缓存）。** 在一个指定的服务器上删除令牌序列的缓存，通过令牌 ID 定址。协调器将令牌解析为本地对象键（如 pin），并向指定服务器发出单个键地址的 ``DELETE /cache/objects`` 请求，从请求的层级中移除它们。``tier`` 字段选择层级：``l1`` 仅删除指定服务器的 L1，``l2`` 仅删除 L2，``all`` 则删除两者。当层级包括 L2 时，协调器首先从删除集合中删除任何受 L2 pin 保护的键，除非设置了 ``force`` — 因此，任何被 pin 的键在删除操作中会保留在每个被触及的层级中；``force`` 会删除它们并移除这些 pins。"
+
+#: ../../source/mp/coordinator.rst:938
+msgid "``POST /cache/delete``"
+msgstr "``POST /cache/delete``"
+
+#: ../../source/mp/coordinator.rst:940
+msgid "Delete a token sequence on one named server."
+msgstr "在一个指定的服务器上删除一个令牌序列。"
+
+#: ../../source/mp/coordinator.rst:942
+msgid ""
+"**Request body:** (``model_name``, ``world_size``, ``token_ids``, "
+"``cache_salt``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force`` "
+"(bool, default ``false``). When ``force`` is ``true``, locked keys are "
+"deleted anyway (L1 read/write locks on the node and the coordinator's L2 "
+"pin set)."
+msgstr "**请求体：** (``model_name``, ``world_size``, ``token_ids``, ``cache_salt``) 以及 ``tier`` (``l1`` / ``l2`` / ``all``) 和 ``force`` (布尔值，默认 ``false``)。当 ``force`` 为 ``true`` 时，锁定的键仍然会被删除（节点上的 L1 读/写锁和协调器的 L2 固定集）。"
+
+#: ../../source/mp/coordinator.rst:954
+msgid ""
+"``requested`` is the number of whole chunks resolved. ``affected`` and "
+"``skipped`` are **totals across the tiers acted on**: ``affected`` counts"
+" L1 keys removed by the node plus L2 keys removed by the coordinator, and"
+" ``skipped`` counts L1 keys the node refused plus L2 keys held back for "
+"an L2 pin (non-force only). A chunk resident in both tiers (``tier=all``)"
+" contributes to both counts, so ``affected`` may be up to ``2 x requested"
+" x world_size``. A sub-chunk sequence returns ``status`` ``\"noop\"``."
+msgstr "``requested`` 是已解析的完整块的数量。 ``affected`` 和 ``skipped`` 是 **作用于的各层的总计**： ``affected`` 计算节点移除的 L1 键加上协调器移除的 L2 键，而 ``skipped`` 计算节点拒绝的 L1 键加上因 L2 钉住而保留的 L2 键（仅限非强制）。同时存在于两个层中的块（``tier=all``）会对两个计数都有贡献，因此 ``affected`` 可能高达 ``2 x requested x world_size``。一个子块序列返回 ``status`` ``\"noop\"``。"
+
+#: ../../source/mp/coordinator.rst:964
+msgid "``200``: deleted (or a ``noop``)."
+msgstr "``200``: 已删除（或为 ``noop``）。"
+
+#: ../../source/mp/coordinator.rst:965
+msgid "``404``: no server is registered under ``instance_id``."
+msgstr "``404``：没有服务器在 ``instance_id`` 下注册。"
+
+#: ../../source/mp/coordinator.rst:966
+msgid "``502``: the target server was unreachable or rejected the delete."
+msgstr "``502``: 目标服务器无法访问或拒绝了删除请求。"
+
+#~ msgid ""
+#~ "**Event ingestion** -- MP servers POST"
+#~ " batched events; this is handled "
+#~ "automatically by the event listener and"
+#~ " is not typically called manually."
+#~ msgstr "**事件摄取** -- MP 服务器通过 POST 批量事件；这由事件监听器自动处理，通常不需要手动调用。"
+
+#~ msgid "Inspecting the fleet"
+#~ msgstr "检查集群"
+
+#~ msgid "Two read-only endpoints let you observe the coordinator:"
+#~ msgstr "以下两个只读端点可用于查看协调器状态："
+
+#~ msgid ""
+#~ "Each event batch carries the server's"
+#~ " ``instance_id`` and a monotonically "
+#~ "increasing sequence number (``seq``) scoped"
+#~ " to that instance. These fields "
+#~ "enable future gap detection to identify"
+#~ " lost batches."
+#~ msgstr ""
+#~ "每个事件批次携带服务器的 ``instance_id`` 和一个按实例范围单调递增的序列号 "
+#~ "(``seq``)。这些字段为未来实现缺口检测（识别丢失批次）提供了支持。"
+
+#~ msgid ""
+#~ "**Quota management** -- set per-``cache_salt``"
+#~ " byte budgets. Salts without a quota"
+#~ " default to a 0-byte limit (allowlist"
+#~ " semantics)."
+#~ msgstr "**配额管理** -- 为每个 ``cache_salt`` 设置字节预算。未设置配额的 salt 默认限额为 0 字节（白名单语义）。"
+
+#~ msgid "Use ``_default`` as the path parameter to target the empty-string salt."
+#~ msgstr "使用 ``_default`` 作为路径参数，以指向空字符串 salt。"
+
+#~ msgid ""
+#~ "**Event ingestion** -- MP servers POST"
+#~ " batched events; this is handled "
+#~ "automatically by the event listener and"
+#~ " is not typically called manually. "
+#~ "Supported event types are ``store``, "
+#~ "``lookup``, and ``delete``. A ``delete`` "
+#~ "event subtracts the key's previously-"
+#~ "recorded bytes from the per-salt "
+#~ "totals (the wire ``bytes`` field is "
+#~ "ignored for ``delete``; the coordinator "
+#~ "already knows the size from the "
+#~ "original ``store``)."
+#~ msgstr ""
+#~ "**事件摄取** -- MP 服务器以 POST "
+#~ "方式发送批量事件；这由事件监听器自动处理，通常不需要手动调用。支持的事件类型有 ``store``、``lookup`` "
+#~ "和 ``delete``。``delete`` 事件从每个盐的总数中减去该键之前记录的字节数（对于 "
+#~ "``delete``，网络 ``bytes`` 字段被忽略；协调器已经知道原始 ``store``"
+#~ " 的大小）。"
+
+#~ msgid "**Status queries** -- inspect usage and quota info."
+#~ msgstr "**状态查询** -- 检查使用情况和配额信息。"
+
+#~ msgid "Method"
+#~ msgstr "方法"
+
+#~ msgid "Path"
+#~ msgstr "路径"
+
+#~ msgid "Create or update a quota (body: ``{\"limit_gb\": N}``)."
+#~ msgstr "创建或更新配额（请求体：\\ ``{\\\"limit_gb\\\": N}``\\ ）。"
+
+#~ msgid "Remove a salt's quota entry."
+#~ msgstr "删除指定 salt 的配额条目。"
+
+#~ msgid "Ingest a batch of L2 ``store`` / ``lookup`` / ``delete`` events."
+#~ msgstr "摄取一批 L2 ``store`` / ``lookup`` / ``delete`` 事件。"
+
+#~ msgid "``/l2/status/{cache_salt}``"
+#~ msgstr "``/l2/status/{cache_salt}``"
+
+#~ msgid "``/l2/status``"
+#~ msgstr "``/l2/status``"
+
+#~ msgid "Poll a submitted warm prefetch (``pending`` / ``completed``)."
+#~ msgstr "轮询已提交的热预取（``待处理`` / ``已完成``）。"
+
+#~ msgid "Warm prefetch (pre-loading L1 from L2)"
+#~ msgstr "预加载 L1 从 L2 的温预取"
+
+#~ msgid ""
+#~ "The submit returns a ``request_id``; "
+#~ "poll the status endpoint until "
+#~ "``completed``. The warm acquires no lock"
+#~ " -- the poll simply reports progress"
+#~ " and clears the server-side job "
+#~ "once the load finishes."
+#~ msgstr ""
+#~ "提交返回一个 ``request_id``；轮询状态端点直到 "
+#~ "``completed``。预热不获取锁——轮询仅报告进度，并在加载完成后清除服务器端的任务。"
+
+#~ msgid "A few rules of thumb:"
+#~ msgstr "一些经验法则："
+
+#~ msgid ""
+#~ "``token_ids`` must match what was stored"
+#~ " (same tokenizer / special tokens) "
+#~ "and contain at least one full "
+#~ "``chunk_size`` of tokens -- only "
+#~ "complete chunks are warmed (a shorter"
+#~ " sequence returns ``status: \"noop\"``)."
+#~ msgstr ""
+#~ "``token_ids`` 必须与存储的内容匹配（相同的分词器/特殊标记），并且至少包含一个完整的 "
+#~ "``chunk_size`` 的标记——只有完整的块会被预热（较短的序列返回 ``status: "
+#~ "\\\"noop\\\"``）。"
+
+#~ msgid ""
+#~ "Tokens per chunk for the global "
+#~ "CacheBlend directory. Must equal the "
+#~ "LMCache chunk size the blend servers "
+#~ "use."
+#~ msgstr "全局 CacheBlend 目录每块的令牌数。必须等于混合服务器使用的 LMCache 块大小。"
+

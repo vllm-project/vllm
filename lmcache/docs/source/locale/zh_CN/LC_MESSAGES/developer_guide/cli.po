@@ -1,0 +1,517 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-29 10:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/cli.rst:2
+msgid "Extending the CLI"
+msgstr "扩展 CLI"
+
+#: ../../source/developer_guide/cli.rst:4
+msgid ""
+"LMCache's CLI is built on a plugin-style architecture that supports "
+"**N-level nested subcommands** with zero-registration auto-discovery. "
+"This guide explains how to add commands at each level."
+msgstr "LMCache 的 CLI 基于插件式架构构建，支持 **N 级嵌套子命令**，并具有零注册自动发现功能。本指南解释了如何在每个级别添加命令。"
+
+#: ../../source/developer_guide/cli.rst:9
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/developer_guide/cli.rst:11
+msgid ""
+"The CLI framework is composed of two core classes in "
+"``lmcache/cli/commands/base.py``:"
+msgstr "CLI 框架由两个核心类组成，位于 ``lmcache/cli/commands/base.py``："
+
+#: ../../source/developer_guide/cli.rst:14
+msgid ""
+"**BaseCommand** — Abstract base class for leaf commands (commands that "
+"perform actual work)."
+msgstr "**BaseCommand** — 叶命令的抽象基类（执行实际工作的命令）。"
+
+#: ../../source/developer_guide/cli.rst:16
+msgid ""
+"**CompositeCommand** — A ``BaseCommand`` subclass for commands that only "
+"group sub-subcommands. It auto-discovers child commands by scanning the "
+"package where it is defined."
+msgstr "**CompositeCommand** — 一个 ``BaseCommand`` 子类，用于仅将子子命令分组的命令。它通过扫描定义它的包自动发现子命令。"
+
+#: ../../source/developer_guide/cli.rst:20
+msgid ""
+"The discovery mechanism uses ``pkgutil.iter_modules`` to scan direct "
+"submodules of a package, then collects all concrete ``BaseCommand`` "
+"subclasses found in those modules. This means:"
+msgstr "发现机制使用 ``pkgutil.iter_modules`` 扫描包的直接子模块，然后收集在这些模块中找到的所有具体的 ``BaseCommand`` 子类。这意味着："
+
+#: ../../source/developer_guide/cli.rst:24
+msgid ""
+"Each command is a separate ``.py`` file (or a sub-package with an "
+"``__init__.py``)."
+msgstr "每个命令都是一个单独的 ``.py`` 文件（或带有 ``__init__.py`` 的子包）。"
+
+#: ../../source/developer_guide/cli.rst:26
+msgid ""
+"No manual registration is needed — just create the file and it is picked "
+"up automatically."
+msgstr "无需手动注册 — 只需创建文件，它会自动被识别。"
+
+#: ../../source/developer_guide/cli.rst:28
+msgid ""
+"Utility/helper modules should be prefixed with ``_`` (e.g. "
+"``_helpers.py``) so they are excluded from the scan."
+msgstr "工具/辅助模块应以 ``_`` 开头（例如 ``_helpers.py``），以便在扫描时将其排除。"
+
+#: ../../source/developer_guide/cli.rst:32
+msgid "Auto-Discovery Mechanism"
+msgstr "自动发现机制"
+
+#: ../../source/developer_guide/cli.rst:34
+msgid ""
+"The CLI uses a unified ``discover_subclasses()`` utility (defined in "
+"``lmcache/v1/utils/subclass_discovery.py``) to locate command classes at "
+"every level.  Understanding the two discovery entry points is key to "
+"extending the CLI."
+msgstr "CLI 使用统一的 ``discover_subclasses()`` 工具（定义在 ``lmcache/v1/utils/subclass_discovery.py`` 中）来定位每个级别的命令类。理解这两个发现入口是扩展 CLI 的关键。"
+
+#: ../../source/developer_guide/cli.rst:40
+msgid "Top-Level Command Discovery"
+msgstr "顶级命令发现"
+
+#: ../../source/developer_guide/cli.rst:42
+msgid ""
+"When the CLI starts, ``lmcache/cli/commands/__init__.py`` calls "
+"``discover_subclasses()`` on its own package (``lmcache.cli.commands``). "
+"This scans all **direct submodules** — both ``.py`` files and sub-"
+"packages (via their ``__init__.py``) — and collects every concrete "
+"``BaseCommand`` subclass found."
+msgstr "当 CLI 启动时，``lmcache/cli/commands/__init__.py`` 在其自身的包（``lmcache.cli.commands``）上调用 ``discover_subclasses()``。这会扫描所有 **直接子模块** — 包括 ``.py`` 文件和子包（通过它们的 ``__init__.py``） — 并收集找到的每个具体的 ``BaseCommand`` 子类。"
+
+#: ../../source/developer_guide/cli.rst:62
+msgid ""
+"The resulting ``ALL_COMMANDS`` list is then registered with the root "
+"``argparse`` parser in ``main.py``.  This means any new ``.py`` file (or "
+"sub-package) placed under ``lmcache/cli/commands/`` is automatically "
+"available as a top-level command — no manual imports or registration "
+"needed."
+msgstr "生成的 ``ALL_COMMANDS`` 列表随后在 ``main.py`` 中注册到根 ``argparse`` 解析器。这意味着放置在 ``lmcache/cli/commands/`` 下的任何新 ``.py`` 文件（或子包）会自动作为顶级命令可用 — 无需手动导入或注册。"
+
+#: ../../source/developer_guide/cli.rst:68
+msgid "**Filtering rules for top-level discovery:**"
+msgstr "**顶级发现的过滤规则：**"
+
+#: ../../source/developer_guide/cli.rst:70
+msgid ""
+"The module named ``base`` is explicitly excluded (it defines the abstract"
+" base classes, not a command)."
+msgstr "名为 ``base`` 的模块被明确排除（它定义了抽象基类，而不是一个命令）。"
+
+#: ../../source/developer_guide/cli.rst:72
+msgid ""
+"Modules whose name starts with ``_`` are excluded by the underlying "
+"``pkgutil.iter_modules`` convention (they are treated as private)."
+msgstr "以 ``_`` 开头的模块根据底层的 ``pkgutil.iter_modules`` 约定被排除（它们被视为私有）。"
+
+#: ../../source/developer_guide/cli.rst:74
+msgid "Only **concrete** subclasses are collected — abstract classes are skipped."
+msgstr "仅收集 **具体** 子类 — 抽象类会被跳过。"
+
+#: ../../source/developer_guide/cli.rst:76
+msgid ""
+"Only classes **defined in** the scanned module are collected (re-exports "
+"are ignored via ``require_defined_in_module=True``)."
+msgstr "仅收集在扫描模块中**定义的**类（通过 ``require_defined_in_module=True`` 忽略重新导出）。"
+
+#: ../../source/developer_guide/cli.rst:80
+msgid "Sub-Command Discovery (CompositeCommand)"
+msgstr "子命令发现（CompositeCommand）"
+
+#: ../../source/developer_guide/cli.rst:82
+msgid ""
+"When a ``CompositeCommand`` registers itself with the parser, its "
+"``register()`` method calls ``discover_subclasses()`` on the package "
+"where the ``CompositeCommand`` subclass is defined (i.e. its own "
+"``__init__.py``'s package)."
+msgstr "当 ``CompositeCommand`` 向解析器注册时，它的 ``register()`` 方法会在定义 ``CompositeCommand`` 子类的包上调用 ``discover_subclasses()``（即它自己的 ``__init__.py`` 所在的包）。"
+
+#: ../../source/developer_guide/cli.rst:103
+msgid "**Filtering rules for sub-command discovery:**"
+msgstr "**子命令发现的过滤规则：**"
+
+#: ../../source/developer_guide/cli.rst:105
+msgid ""
+"Modules starting with ``_`` are excluded (use this prefix for helper "
+"files like ``_utils.py``)."
+msgstr "以 ``_`` 开头的模块会被排除（使用这个前缀来命名像 ``_utils.py`` 这样的辅助文件）。"
+
+#: ../../source/developer_guide/cli.rst:107
+msgid ""
+"The ``CompositeCommand`` class itself is skipped to avoid infinite "
+"recursion."
+msgstr "``CompositeCommand`` 类本身被跳过以避免无限递归。"
+
+#: ../../source/developer_guide/cli.rst:109
+msgid ""
+"Only concrete ``BaseCommand`` subclasses **defined in** the scanned "
+"module are collected."
+msgstr "仅收集在扫描模块中**定义的**具体 ``BaseCommand`` 子类。"
+
+#: ../../source/developer_guide/cli.rst:111
+msgid ""
+"The scan is **non-recursive** (depth 1 only) — each ``CompositeCommand`` "
+"only sees its own package's direct children."
+msgstr "扫描是 **非递归** 的（仅深度 1）——每个 ``CompositeCommand`` 仅能看到其所在包的直接子项。"
+
+#: ../../source/developer_guide/cli.rst:114
+msgid ""
+"**How nesting works:** If a child is itself a ``CompositeCommand`` "
+"(defined in a sub-package's ``__init__.py``), its own ``register()`` "
+"method will in turn scan *its* package for further children.  This "
+"creates the recursive nesting without any special configuration."
+msgstr "**嵌套如何工作：** 如果一个子命令本身是一个 ``CompositeCommand``（在子包的 ``__init__.py`` 中定义），它自己的 ``register()`` 方法将反过来扫描 *它* 的包以查找更多子命令。这在没有任何特殊配置的情况下创建了递归嵌套。"
+
+#: ../../source/developer_guide/cli.rst:138
+msgid "Directory Layout"
+msgstr "目录结构"
+
+#: ../../source/developer_guide/cli.rst:161
+msgid "Key Rules"
+msgstr "关键规则"
+
+#: ../../source/developer_guide/cli.rst:163
+msgid ""
+"A ``CompositeCommand`` subclass **must** be defined in the "
+"``__init__.py`` of its package."
+msgstr "一个 ``CompositeCommand`` 子类 **必须** 在其包的 ``__init__.py`` 中定义。"
+
+#: ../../source/developer_guide/cli.rst:165
+msgid ""
+"Modules starting with ``_`` are **excluded** from auto-discovery (use "
+"this for helpers, utilities, internal logic)."
+msgstr "以 ``_`` 开头的模块会被 **排除** 在自动发现之外（用于帮助器、工具、内部逻辑）。"
+
+#: ../../source/developer_guide/cli.rst:167
+msgid ""
+"Each leaf command file should contain exactly one concrete "
+"``BaseCommand`` subclass."
+msgstr "每个叶命令文件应包含一个具体的 ``BaseCommand`` 子类。"
+
+#: ../../source/developer_guide/cli.rst:169
+msgid ""
+"The scan is **non-recursive** — each ``CompositeCommand`` only scans its "
+"own package's direct submodules."
+msgstr "扫描是 **非递归** 的——每个 ``CompositeCommand`` 仅扫描其自身包的直接子模块。"
+
+#: ../../source/developer_guide/cli.rst:173
+msgid "Level 1: Adding a Top-Level Command"
+msgstr "级别 1：添加顶级命令"
+
+#: ../../source/developer_guide/cli.rst:175
+msgid "A top-level command appears directly under ``lmcache <command>``."
+msgstr "一个顶级命令直接出现在 ``lmcache <command>`` 之下。"
+
+#: ../../source/developer_guide/cli.rst:177
+msgid "**Step 1**: Create a new file under ``lmcache/cli/commands/``:"
+msgstr "**步骤 1**：在 ``lmcache/cli/commands/`` 下创建一个新文件："
+
+#: ../../source/developer_guide/cli.rst:206
+msgid "**Step 2**: Done! The command is automatically discovered. Test it:"
+msgstr "**步骤 2**：完成！命令会自动被发现。测试一下："
+
+#: ../../source/developer_guide/cli.rst:214
+msgid ""
+"This works because the top-level ``lmcache/cli/commands/__init__.py`` "
+"calls ``discover_subclasses`` on its own package at import time. It uses "
+"``pkgutil.iter_modules`` to find all direct submodules (files and sub-"
+"packages), imports each one, and collects every concrete ``BaseCommand`` "
+"subclass. The resulting list is stored in ``ALL_COMMANDS`` and registered"
+" with the argument parser in ``main.py``. So adding a new ``.py`` file "
+"with a ``BaseCommand`` subclass is all that is needed — no edits to any "
+"other file."
+msgstr "这之所以有效，是因为顶层的 ``lmcache/cli/commands/__init__.py`` 在导入时调用了 ``discover_subclasses``。它使用 ``pkgutil.iter_modules`` 查找所有直接子模块（文件和子包），导入每一个，并收集每个具体的 ``BaseCommand`` 子类。结果列表存储在 ``ALL_COMMANDS`` 中，并在 ``main.py`` 中与参数解析器注册。因此，只需添加一个带有 ``BaseCommand`` 子类的新 ``.py`` 文件即可——不需要编辑其他任何文件。"
+
+#: ../../source/developer_guide/cli.rst:224
+msgid "Level 2: Adding a Subcommand Group"
+msgstr "级别 2：添加子命令组"
+
+#: ../../source/developer_guide/cli.rst:226
+msgid "A subcommand group appears as ``lmcache <group> <subcommand>``."
+msgstr "子命令组的形式为 ``lmcache <group> <subcommand>``。"
+
+#: ../../source/developer_guide/cli.rst:228
+msgid "**Step 1**: Create a package directory:"
+msgstr "**步骤 1**：创建一个包目录："
+
+#: ../../source/developer_guide/cli.rst:234
+msgid "**Step 2**: Define the ``CompositeCommand`` in ``__init__.py``:"
+msgstr "**第 2 步**：在 ``__init__.py`` 中定义 ``CompositeCommand``："
+
+#: ../../source/developer_guide/cli.rst:256
+msgid "**Step 3**: Add leaf subcommands as separate files:"
+msgstr "**第 3 步**：将叶子子命令作为单独的文件添加："
+
+#: ../../source/developer_guide/cli.rst:285
+msgid "**Step 4**: (Optional) Add helper modules with ``_`` prefix:"
+msgstr "**步骤 4**： （可选）添加以 ``_`` 前缀的辅助模块："
+
+#: ../../source/developer_guide/cli.rst:295
+#: ../../source/developer_guide/cli.rst:415
+msgid "**Result**:"
+msgstr "**结果**:"
+
+#: ../../source/developer_guide/cli.rst:302
+msgid "Level 2: Adding a Subcommand to an Existing Group"
+msgstr "级别 2：向现有组添加子命令"
+
+#: ../../source/developer_guide/cli.rst:304
+msgid ""
+"If a ``CompositeCommand`` group already exists (e.g. ``bench``, "
+"``quota``, ``trace``), you can extend it by simply adding **one new "
+"file** — no other changes are required."
+msgstr "如果已经存在一个 ``CompositeCommand`` 组（例如 ``bench``、``quota``、``trace``），您可以通过简单地添加 **一个新文件** 来扩展它 — 不需要其他更改。"
+
+#: ../../source/developer_guide/cli.rst:308
+msgid ""
+"For example, to add a new ``lmcache bench l2`` subcommand under the "
+"existing ``bench`` group:"
+msgstr "例如，要在现有的 ``bench`` 组下添加一个新的 ``lmcache bench l2`` 子命令："
+
+#: ../../source/developer_guide/cli.rst:311
+msgid ""
+"**Step 1**: Create a single file (or sub-package) in the existing group's"
+" package directory:"
+msgstr "**步骤 1**：在现有组的包目录中创建一个单文件（或子包）："
+
+#: ../../source/developer_guide/cli.rst:345
+msgid ""
+"**Step 2**: Done! The parent ``CompositeCommand`` (``BenchCommand``) "
+"auto-discovers the new subcommand at startup. No registration code, no "
+"imports to add, no ``__init__.py`` edits in the parent."
+msgstr "**步骤 2**：完成！父级 ``CompositeCommand`` (``BenchCommand``) 在启动时会自动发现新的子命令。无需注册代码，无需添加导入，无需在父级中编辑 ``__init__.py``。"
+
+#: ../../source/developer_guide/cli.rst:351
+msgid ""
+"This works because ``CompositeCommand.register()`` scans all direct "
+"submodules of its package each time the CLI starts. A new file (or sub-"
+"package) is automatically picked up as long as:"
+msgstr "这工作是因为 ``CompositeCommand.register()`` 每次 CLI 启动时都会扫描其包的所有直接子模块。只要满足以下条件，新文件（或子包）会被自动识别："
+
+#: ../../source/developer_guide/cli.rst:355
+msgid "It does **not** start with ``_``."
+msgstr "它**不**以``_``开头。"
+
+#: ../../source/developer_guide/cli.rst:356
+msgid "It contains a concrete ``BaseCommand`` subclass."
+msgstr "它包含一个具体的 ``BaseCommand`` 子类。"
+
+#: ../../source/developer_guide/cli.rst:359
+msgid "Level N: Arbitrary Nesting"
+msgstr "级别 N：任意嵌套"
+
+#: ../../source/developer_guide/cli.rst:361
+msgid ""
+"The framework supports **unlimited nesting depth**. Each level follows "
+"the same pattern: a ``CompositeCommand`` in a package's ``__init__.py`` "
+"auto-discovers its children."
+msgstr "该框架支持 **无限嵌套深度**。每个级别遵循相同的模式：包的 ``__init__.py`` 中的 ``CompositeCommand`` 自动发现其子命令。"
+
+#: ../../source/developer_guide/cli.rst:365
+msgid "**Example**: Adding a 3rd level under ``lmcache mygroup``:"
+msgstr "**示例**：在 ``lmcache mygroup`` 下添加第 3 级："
+
+#: ../../source/developer_guide/cli.rst:421
+msgid "You can continue nesting indefinitely by repeating this pattern."
+msgstr "您可以通过重复此模式无限制地继续嵌套。"
+
+#: ../../source/developer_guide/cli.rst:424
+msgid "Real-World Example"
+msgstr "现实世界示例"
+
+#: ../../source/developer_guide/cli.rst:426
+msgid ""
+"The existing ``lmcache tool cache-simulator simulate`` command "
+"demonstrates 3-level nesting:"
+msgstr "现有的 ``lmcache tool cache-simulator simulate`` 命令演示了 3 级嵌套："
+
+#: ../../source/developer_guide/cli.rst:438
+msgid "Using the Metrics System"
+msgstr "使用指标系统"
+
+#: ../../source/developer_guide/cli.rst:440
+msgid "The metrics system uses a **handler + formatter** architecture:"
+msgstr "指标系统使用 **处理器 + 格式化器** 架构："
+
+#: ../../source/developer_guide/cli.rst:442
+msgid "**Metrics** — the collector. Holds sections and entries."
+msgstr "**指标** — 收集器。包含部分和条目。"
+
+#: ../../source/developer_guide/cli.rst:443
+msgid "**Handler** — the destination (stdout, file, etc.)."
+msgstr "**处理器** — 目标（标准输出、文件等）。"
+
+#: ../../source/developer_guide/cli.rst:444
+msgid "**Formatter** — the rendering (ASCII table, JSON, etc.)."
+msgstr "**格式化器** — 渲染（ASCII 表格、JSON 等）。"
+
+#: ../../source/developer_guide/cli.rst:446
+msgid ""
+"``BaseCommand.create_metrics()`` sets up default handlers automatically, "
+"so command authors just build metrics and call ``emit()``:"
+msgstr ""
+"``BaseCommand.create_metrics()`` 会自动配置默认处理器，命令开发者只需构建指标数据并调用 ``emit()`` "
+"即可："
+
+#: ../../source/developer_guide/cli.rst:468
+msgid ""
+"The ``--format`` and ``--output`` flags are added automatically by "
+"``BaseCommand.register()`` — subcommands do not need to add them "
+"manually."
+msgstr ""
+"``--format`` 和 ``--output`` 标志由 ``BaseCommand.register()`` 自动添加 — "
+"子命令无需手动添加。"
+
+#: ../../source/developer_guide/cli.rst:472
+msgid "Summary"
+msgstr "摘要"
+
+#: ../../source/developer_guide/cli.rst:478
+msgid "Level"
+msgstr "级别"
+
+#: ../../source/developer_guide/cli.rst:479
+msgid "Pattern"
+msgstr "模式"
+
+#: ../../source/developer_guide/cli.rst:480
+msgid "How to add"
+msgstr "如何添加"
+
+#: ../../source/developer_guide/cli.rst:481
+msgid "1 (top)"
+msgstr "1 (顶部)"
+
+#: ../../source/developer_guide/cli.rst:482
+msgid "Single ``.py`` file"
+msgstr "单个 ``.py`` 文件"
+
+#: ../../source/developer_guide/cli.rst:483
+msgid "Create ``lmcache/cli/commands/<name>.py`` with a ``BaseCommand`` subclass."
+msgstr "创建 ``lmcache/cli/commands/<name>.py``，并使用 ``BaseCommand`` 子类。"
+
+#: ../../source/developer_guide/cli.rst:485
+msgid "2+"
+msgstr "2+"
+
+#: ../../source/developer_guide/cli.rst:486
+msgid "Package directory"
+msgstr "包目录"
+
+#: ../../source/developer_guide/cli.rst:487
+msgid ""
+"Create ``lmcache/cli/commands/<group>/__init__.py`` with a "
+"``CompositeCommand`` subclass, then add leaf commands as sibling ``.py`` "
+"files."
+msgstr "创建 ``lmcache/cli/commands/<group>/__init__.py``，并使用 ``CompositeCommand`` 子类，然后将叶命令作为同级 ``.py`` 文件添加。"
+
+#: ../../source/developer_guide/cli.rst:490
+msgid "N (any)"
+msgstr "N (任何)"
+
+#: ../../source/developer_guide/cli.rst:491
+msgid "Nested package"
+msgstr "嵌套包"
+
+#: ../../source/developer_guide/cli.rst:492
+msgid ""
+"Same as level 2, but inside an existing composite command's package. Each"
+" ``CompositeCommand`` scans only its own direct submodules."
+msgstr "与级别 2 相同，但在现有复合命令的包内。每个 ``CompositeCommand`` 仅扫描其直接子模块。"
+
+#: ../../source/developer_guide/cli.rst:498
+msgid ""
+"Prefix helper/utility modules with ``_`` to exclude them from auto-"
+"discovery."
+msgstr "将帮助/工具模块前缀加上 ``_`` 以将其排除在自动发现之外。"
+
+#: ../../source/developer_guide/cli.rst:500
+msgid ""
+"Each ``CompositeCommand`` must be defined in its package's "
+"``__init__.py``."
+msgstr "每个 ``CompositeCommand`` 必须在其包的 ``__init__.py`` 中定义。"
+
+#: ../../source/developer_guide/cli.rst:502
+msgid ""
+"The ``name()`` method determines the CLI token (e.g. ``\"foo\"`` becomes "
+"``lmcache ... foo``)."
+msgstr "``name()`` 方法确定 CLI 令牌（例如 ``\"foo\"`` 变为 ``lmcache ... foo``）。"
+
+#~ msgid "File Layout"
+#~ msgstr "文件布局"
+
+#~ msgid "**Step 1.** Create ``lmcache/cli/commands/describe.py``:"
+#~ msgstr "**第 1 步。** 创建 ``lmcache/cli/commands/describe.py``："
+
+#~ msgid "**Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:"
+#~ msgstr "**步骤 2.** 在 ``lmcache/cli/commands/__init__.py`` 中注册它："
+
+#~ msgid "This guide explains how to add new subcommands to the ``lmcache`` CLI."
+#~ msgstr "本指南介绍如何为 ``lmcache`` CLI 添加新子命令。"
+
+#~ msgid "The CLI uses explicit command registration:"
+#~ msgstr "CLI 使用显式命令注册："
+
+#~ msgid "Each command is a class inheriting from ``BaseCommand``."
+#~ msgstr "每个命令都是一个继承自 ``BaseCommand`` 的类。"
+
+#~ msgid ""
+#~ "Commands are instantiated and listed in"
+#~ " a central ``ALL_COMMANDS`` registry."
+#~ msgstr "所有命令均在中央 ``ALL_COMMANDS`` 注册表中实例化并列出。"
+
+#~ msgid ""
+#~ "At startup, the entry point iterates "
+#~ "``ALL_COMMANDS`` and calls "
+#~ "``cmd.register(subparsers)`` to wire up "
+#~ "argparse."
+#~ msgstr ""
+#~ "启动时，入口点遍历 ``ALL_COMMANDS`` 并调用 "
+#~ "``cmd.register(subparsers)``，将各子命令注册到 argparse。"
+
+#~ msgid ""
+#~ "``BaseCommand`` is an abstract class "
+#~ "with a small set of required "
+#~ "methods (name, help, argument registration,"
+#~ " and execute). Forgetting any of them"
+#~ " raises ``TypeError`` at instantiation "
+#~ "time."
+#~ msgstr ""
+#~ "``BaseCommand`` 是一个抽象类，包含少量必需方法（名称、帮助、参数注册及执行）。若遗漏其中任一方法，实例化时将引发"
+#~ " ``TypeError``。"
+
+#~ msgid "**Step 1.** Create a new command class that subclasses ``BaseCommand``:"
+#~ msgstr "**步骤 1.** 创建一个继承自 ``BaseCommand`` 的新命令类："
+
+#~ msgid "**Step 2.** Add an instance of it to the ``ALL_COMMANDS`` registry:"
+#~ msgstr "**步骤 2.** 将其实例添加到 ``ALL_COMMANDS`` 注册表中："
+
+#~ msgid ""
+#~ "That's it --- ``lmcache describe --url"
+#~ " http://localhost:8000`` is now available."
+#~ msgstr "至此，``lmcache describe --url http://localhost:8000`` 即可正常使用。"
+

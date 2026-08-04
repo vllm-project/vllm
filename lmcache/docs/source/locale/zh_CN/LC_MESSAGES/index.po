@@ -1,0 +1,437 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-26 17:26-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: Jiayue Chen <joyce@tensormesh.ai>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/index.rst:10
+msgid "Welcome to LMCache!"
+msgstr "欢迎使用 LMCache！"
+
+#: ../../source/index.rst:12
+msgid "LMCache"
+msgstr "LMCache"
+
+#: ../../source/index.rst:20
+msgid "**A KV Cache Management Layer for Scalable LLM Inference.**"
+msgstr "**面向 LLM 推理的 KV Cache 管理层**"
+
+#: ../../source/index.rst:23
+msgid ""
+"We are currently in the process of upgrading our documentation to provide "
+"better guidance and examples. Some sections may be under construction. Thank "
+"you for your patience!"
+msgstr ""
+"我们目前正在升级文档，以提供更好的指导和示例。某些章节可能仍在建设中，感谢您"
+"的耐心等待！"
+
+#: ../../source/index.rst:36
+msgid ""
+"LMCache is a **KV cache management layer** for LLM inference. It turns KV "
+"cache from a temporary state into reusable *AI-native knowledge* that can be "
+"*stored* persistently, *reused* across multiple serving engines, *monitored* "
+"with an observability stack, and *transformed* for better generation "
+"quality. As a result, LMCache **reduces TTFT** (time-to-first-token) and "
+"**improves throughput**, especially for long-context agentic, multi-turn "
+"conversation, and knowledge-augmented workloads (e.g., RAG)."
+msgstr ""
+"LMCache 是面向 LLM 推理的 **KV Cache 管理层**。它将 KV Cache 从临时状态转变为"
+"可复用的 AI 原生知识：可以持久存储、在多个服务引擎之间复用、通过可观测性栈进"
+"行监控，并可转换以获得更好的生成质量。因此，LMCache 能\\ **降低 TTFT**\\ "
+"（首 token 时间）并\\ **提升吞吐量**，尤其适用于长上下文智能体、多轮对话以及"
+"知识增强（如 RAG）等工作负载。"
+
+#: ../../source/index.rst:38
+msgid ""
+"LMCache is **vendor-neutral**. It can be used as a KV cache layer for a "
+"range of mainstream open-source serving engines, inference frameworks, "
+"hardware vendors, storage systems, and infrastructure providers. The vendor "
+"neutrality allows users to freely switch between serving engines and storage "
+"vendors, while reusing the stored KV caches."
+msgstr ""
+"LMCache 具有\\ **厂商中立性**\\。它可以作为 KV Cache 层，接入多种主流开源服务"
+"引擎、推理框架、硬件平台、存储系统和基础设施提供商。因此，用户可以在不同的服"
+"务引擎和存储厂商之间灵活切换，同时继续复用已存储的 KV Cache。"
+
+#: ../../source/index.rst:40 ../../source/index.rst:46
+msgid "LMCache Deployment Modes"
+msgstr "LMCache 部署模式"
+
+#: ../../source/index.rst:52 ../../source/index.rst:79
+#: ../../source/index.rst:101 ../../source/index.rst:114
+#: ../../source/index.rst:126 ../../source/index.rst:133
+#: ../../source/index.rst:140 ../../source/index.rst:147
+#: ../../source/index.rst:154 ../../source/index.rst:161
+#: ../../source/index.rst:168 ../../source/index.rst:175
+#: ../../source/index.rst:182 ../../source/index.rst:189
+#: ../../source/index.rst:196 ../../source/index.rst:203
+msgid ":raw-html:`<br />`"
+msgstr ":raw-html:`<br />`"
+
+#: ../../source/index.rst:55
+msgid "Key features"
+msgstr "主要特性"
+
+#: ../../source/index.rst:57
+msgid ""
+"**Engine-independent deployment**: LMCache, as a standalone daemon process, "
+"manages KV cache independently from the inference engine process, so that KV "
+"cache will not be lost even if the inference engine crashes (i.e., no fate-"
+"sharing with engines)."
+msgstr ""
+"**引擎独立部署**：LMCache 作为独立的守护进程运行，能够在推理引擎进程之外独立"
+"管理 KV cache。因此，即使推理引擎发生崩溃，KV cache 也不会随之丢失，避免了与"
+"推理引擎“同生共死”的问题。"
+
+#: ../../source/index.rst:59
+msgid ""
+"**Persistent, tiered KV cache offloading and reuse**: Move KV caches out of "
+"GPU memory into a tiered storage hierarchy spanning CPU memory, local "
+"storage, and remote backends, enabling reuse across requests, sessions, and "
+"engine instances to reduce repeated prefill computation and improve TTFT."
+msgstr ""
+"**持久化的分层 KV Cache 卸载与复用**：将 KV Cache 从显存卸载到跨越 CPU 内存、"
+"本地存储和远程后端的分层存储体系中，实现跨请求、跨会话和跨引擎实例的复用，从"
+"而减少重复的 Prefill 计算并降低 TTFT。"
+
+#: ../../source/index.rst:61
+msgid ""
+"**Production-level KV cache observability**: LMCache provides a rich set of "
+"KV cache observability metrics, including typical Kubernetes metrics (health "
+"monitoring, performance diagnostics), KV-cache-specific metrics (request-"
+"level and token-level prefix cache hits, lifecycle, request-level KV cache "
+"performance), management metrics (user-specific usage), and more."
+msgstr ""
+"**生产级 KV Cache 可观测性**：LMCache 提供丰富的 KV Cache 可观测性指标，包括"
+"典型的 Kubernetes 指标（健康监控、性能诊断）、KV Cache 专属指标（请求级和 "
+"token 级的前缀缓存命中、生命周期、请求级 KV Cache 性能）、管理指标（特定用户"
+"的使用情况）等。"
+
+#: ../../source/index.rst:63
+msgid ""
+"**Pluggable storage and transport backends**: Easily integrate remote "
+"storage and KV transfer backends through a unified interface, enabling KV "
+"cache offloading and sharing across storage providers. Through this "
+"interface, LMCache supports storage backends including CPU RAM, local disk "
+"(SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, "
+"NIXL, and GDS."
+msgstr ""
+"**可插拔的存储与传输后端**：通过统一接口轻松集成远程存储和 KV 传输后端，实现"
+"跨存储提供商的 KV Cache 卸载与共享。通过该接口，LMCache 支持的存储后端包括 "
+"CPU RAM、本地磁盘（SSD）、Redis/Valkey、Mooncake、InfiniStore、兼容 S3 的对象"
+"存储、NIXL 和 GDS。"
+
+#: ../../source/index.rst:65
+msgid ""
+"**Non-prefix KV reuse**: Extend KV reuse beyond prefix caching by reusing "
+"cached KV blocks at any position in the prompt. This leverages CacheBlend to "
+"selectively recompute tokens for quality recovery."
+msgstr ""
+"**非前缀 KV 复用**：通过复用 prompt 中任意位置的已缓存 KV 块，将 KV 复用扩展"
+"到前缀缓存之外。它借助 CacheBlend 选择性地重新计算部分 token，从而恢复生成质"
+"量。"
+
+#: ../../source/index.rst:67
+msgid ""
+"**PD disaggregation and KV transfer**: Support KV cache transfer from "
+"prefill workers to decode workers over NVLink, RDMA, or TCP through "
+"transport layers such as NIXL."
+msgstr ""
+"**PD 分离与 KV 传输**：支持通过 NIXL 等传输层，经由 NVLink、RDMA 或 TCP 将 "
+"KV Cache 从 Prefill 工作节点传输到解码工作节点。"
+
+#: ../../source/index.rst:69
+msgid ""
+"**Pluggable KV transformation**: A simple interface for researchers to write "
+"compression, token dropping, and custom serialization through a flexible "
+"SERDE interface."
+msgstr ""
+"**可插拔的 KV 转换**：提供简洁的接口，让研究人员能够借助灵活的 SERDE 接口实现"
+"压缩、token 丢弃和自定义序列化。"
+
+#: ../../source/index.rst:71
+msgid ""
+"LMCache is becoming an integral layer in the LLM inference *ecosystem*, with "
+"*community*-driven integration with serving engines, inference frameworks, "
+"hardware vendors, storage systems, and infrastructure providers:"
+msgstr ""
+"LMCache 正在成为 LLM 推理生态系统中不可或缺的一层，并通过社区驱动的方式与服务"
+"引擎、推理框架、硬件厂商、存储系统和基础设施提供商集成："
+
+#: ../../source/index.rst:73
+msgid "LMCache ecosystem"
+msgstr "LMCache 生态系统"
+
+#: ../../source/index.rst:82
+msgid "Updates"
+msgstr "最新动态"
+
+#: ../../source/index.rst:84
+msgid ""
+"[2026/06] 🔥 LMCache multi-platform development support with no GPU required "
+"(`blog <https://blog.lmcache.ai/en/2026/06/23/vllm-lmcache-a-starter-guide-"
+"no-gpu-required/>`__, `blog <https://blog.lmcache.ai/en/2026/06/15/"
+"understanding-lmcache-mp-mode-transfer-paths-a-beginners-guide/>`__)."
+msgstr ""
+"[2026/06] 🔥 LMCache 多平台开发支持，无需 GPU（`博客 <https://"
+"blog.lmcache.ai/en/2026/06/23/vllm-lmcache-a-starter-guide-no-gpu-required/"
+">`__、`博客 <https://blog.lmcache.ai/en/2026/06/15/understanding-lmcache-mp-"
+"mode-transfer-paths-a-beginners-guide/>`__）。"
+
+#: ../../source/index.rst:85
+msgid ""
+"[2026/05] 🔥 Agentic workload benchmark on AMD MI300X (`blog <https://"
+"blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-"
+"workloads-on-amd-mi300x/>`__)."
+msgstr ""
+"[2026/05] 🔥 AMD MI300X 上的智能体工作负载基准测试（`博客 <https://"
+"blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-"
+"workloads-on-amd-mi300x/>`__）。"
+
+#: ../../source/index.rst:86
+msgid ""
+"[2026/04] 🔥 LMCache's new multiprocess (MP) architecture release (`blog "
+"<https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-"
+"inference-performance-by-10x/>`__)."
+msgstr ""
+"[2026/04] 🔥 LMCache 全新多进程（MP）架构发布（`博客 <https://"
+"blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-"
+"performance-by-10x/>`__）。"
+
+#: ../../source/index.rst:87
+msgid ""
+"[2026/03] LMCache at GTC 2026 (`post <https://www.linkedin.com/posts/lmcache-"
+"lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu>`__)."
+msgstr ""
+"[2026/03] LMCache 亮相 GTC 2026（`帖子 <https://www.linkedin.com/posts/"
+"lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-"
+"pMAu>`__）。"
+
+#: ../../source/index.rst:88
+msgid ""
+"[2026/01] LMCache multi-node P2P CPU memory sharing, from experimental "
+"feature to production (`blog <https://blog.lmcache.ai/en/2026/01/21/p2p-1/"
+">`__)."
+msgstr ""
+"[2026/01] LMCache 多节点 P2P CPU 内存共享，从实验性功能走向生产（`博客 "
+"<https://blog.lmcache.ai/en/2026/01/21/p2p-1/>`__）。"
+
+#: ../../source/index.rst:0
+msgid "More"
+msgstr "更多"
+
+#: ../../source/index.rst:92
+msgid ""
+"[2025/11] LMCache x CoreWeave accelerate efficient LLM inference for Cohere "
+"(`blog <https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-"
+"how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/>`__)."
+msgstr ""
+"[2025/11] LMCache 携手 CoreWeave 为 Cohere 加速高效 LLM 推理（`博客 <https://"
+"blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-"
+"coreweave-power-efficient-llm-inference-for-cohere/>`__）。"
+
+#: ../../source/index.rst:93
+msgid ""
+"[2025/10] LMCache joins the PyTorch Foundation and Tensormesh unveiled "
+"(`blog <https://blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-"
+"lmcache-joins-the-pytorch-foundation/>`__, `PyTorch <https://pytorch.org/"
+"blog/lmcache-joins-pytorch-ecosystem/>`__)."
+msgstr ""
+"[2025/10] LMCache 加入 PyTorch 基金会，Tensormesh 正式亮相（`博客 <https://"
+"blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-lmcache-joins-the-"
+"pytorch-foundation/>`__，`PyTorch <https://pytorch.org/blog/lmcache-joins-"
+"pytorch-ecosystem/>`__）。"
+
+#: ../../source/index.rst:94
+msgid ""
+"[2025/09] NVIDIA Dynamo integrates LMCache, accelerating LLM inference "
+"(`blog <https://blog.lmcache.ai/en/2025/09/18/nvidia-dynamo-integrates-"
+"lmcache-accelerating-llm-inference/>`__)."
+msgstr ""
+"[2025/09] NVIDIA Dynamo 集成 LMCache，加速 LLM 推理（`博客 <https://"
+"blog.lmcache.ai/en/2025/09/18/nvidia-dynamo-integrates-lmcache-accelerating-"
+"llm-inference/>`__）。"
+
+#: ../../source/index.rst:95
+msgid ""
+"[2025/08] 🎉 LMCache hits 5,000+ GitHub stars (`blog <https://"
+"blog.lmcache.ai/en/2025/08/28/%f0%9f%8e%89-lmcache-hits-5000-github-stars-"
+"thank-you-community/>`__)."
+msgstr ""
+"[2025/08] 🎉 LMCache GitHub star 数突破 5,000+（`博客 <https://"
+"blog.lmcache.ai/en/2025/08/28/%f0%9f%8e%89-lmcache-hits-5000-github-stars-"
+"thank-you-community/>`__）。"
+
+#: ../../source/index.rst:96
+msgid ""
+"[2025/08] LMCache supports gpt-oss (20B/120B) on day 1 (`blog <https://"
+"blog.lmcache.ai/en/2025/08/05/lmcache-supports-gpt-oss-20b-120b-on-day-1/"
+">`__)."
+msgstr ""
+"[2025/08] LMCache 在首日即支持 gpt-oss（20B/120B）（`博客 <https://"
+"blog.lmcache.ai/en/2025/08/05/lmcache-supports-gpt-oss-20b-120b-on-day-1/"
+">`__）。"
+
+#: ../../source/index.rst:97
+msgid ""
+"[2025/07] Get faster LLM inference and cheaper responses with LMCache and "
+"Redis (`Redis blog <https://redis.io/blog/get-faster-llm-inference-and-"
+"cheaper-responses-with-lmcache-and-redis/>`__)."
+msgstr ""
+"[2025/07] 借助 LMCache 和 Redis 实现更快的 LLM 推理和更低的响应成本（`Redis "
+"博客 <https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-"
+"with-lmcache-and-redis/>`__）。"
+
+#: ../../source/index.rst:98
+msgid ""
+"[2025/07] LMCache extends its turbo-boost to multimodal models in vLLM V1 "
+"(`blog <https://blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-"
+"boost-to-multimodal-models-in-vllm-v1/>`__)."
+msgstr ""
+"[2025/07] LMCache 将其加速能力扩展到 vLLM V1 中的多模态模型（`博客 <https://"
+"blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-boost-to-multimodal-"
+"models-in-vllm-v1/>`__）。"
+
+#: ../../source/index.rst:99
+msgid ""
+"[2025/06] LLM Production Stack goes cross-hardware: AMD, Arm and Ascend "
+"(`blog <https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-"
+"cross-hardware-ascend-arm-and-amd-support-incoming/>`__)."
+msgstr ""
+"[2025/06] LLM Production Stack 实现跨硬件：AMD、Arm 和 Ascend（`博客 "
+"<https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-cross-"
+"hardware-ascend-arm-and-amd-support-incoming/>`__）。"
+
+#: ../../source/index.rst:104
+msgid "For more information, check out the following:"
+msgstr "有关更多信息，请查看以下内容："
+
+#: ../../source/index.rst:106
+msgid "`LMCache blogs <https://lmcache.github.io>`_"
+msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
+
+#: ../../source/index.rst:107
+msgid ""
+"`Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/"
+"shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+msgstr ""
+"`加入我们的 Slack 社区 <https://join.slack.com/t/lmcacheworkspace/"
+"shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+
+#: ../../source/index.rst:108
+msgid "Our papers:"
+msgstr "我们的论文："
+
+#: ../../source/index.rst:110
+msgid ""
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language Model "
+"Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+msgstr ""
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
+"<https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+
+#: ../../source/index.rst:111
+msgid ""
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion "
+"<https://arxiv.org/abs/2405.16444>`_"
+msgstr ""
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
+"<https://arxiv.org/abs/2405.16444>`_"
+
+#: ../../source/index.rst:112
+msgid ""
+"`Do Large Language Models Need a Content Delivery Network? <https://"
+"arxiv.org/abs/2409.13761>`_"
+msgstr ""
+"`Do Large Language Models Need a Content Delivery Network? <https://"
+"arxiv.org/abs/2409.13761>`_"
+
+#: ../../source/index.rst:118
+msgid "Documentation"
+msgstr "文档"
+
+#~ msgid "**Supercharge Your LLM with the Fastest KV Cache Layer.**"
+#~ msgstr "**极速 KV Cache 层，让大模型告别重复计算，全面提升推理效率。**"
+
+#~ msgid ""
+#~ "LMCache lets LLMs prefill each text only once. By storing the KV caches "
+#~ "of all reusable texts, LMCache can reuse the KV caches of any reused text "
+#~ "(not necessarily prefix) in any serving engine instance. It thus reduces "
+#~ "prefill delay, i.e., time to first token (TTFT), as well as saves the "
+#~ "precious GPU cycles and memory."
+#~ msgstr ""
+#~ "LMCache 让 LLM 对每段文本只需预填充一次。通过存储所有可复用文本的 KV 缓"
+#~ "存，LMCache 能在任意推理引擎实例中复用任意可复用文本（不必是前缀）的 KV 缓"
+#~ "存。由此既降低了预填充延迟（即首 token 时间，TTFT），又节省了宝贵的 GPU 算"
+#~ "力与显存。"
+
+#~ msgid ""
+#~ "By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and "
+#~ "GPU cycle reduction in many LLM use cases, including multi-round QA and "
+#~ "RAG."
+#~ msgstr ""
+#~ "将 LMCache 与 vLLM 结合后，在多轮问答、RAG 等众多 LLM 应用场景中，LMCache "
+#~ "可实现 3-10 倍的延迟节省并降低 GPU 算力消耗。"
+
+#~ msgid "Welcome to LMCache"
+#~ msgstr "欢迎使用 LMCache"
+
+#~ msgid "Getting Started"
+#~ msgstr "入门指南"
+
+#~ msgid "Recipes"
+#~ msgstr "使用指南"
+
+#~ msgid "KV Cache offloading and sharing"
+#~ msgstr "KV Cache 卸载和共享"
+
+#~ msgid "Non-KV caching"
+#~ msgstr "非 KV 缓存"
+
+#~ msgid "Multiprocess Mode"
+#~ msgstr "多进程模式"
+
+#~ msgid "Disaggregated prefill"
+#~ msgstr "分离式 Prefill"
+
+#~ msgid "KV Cache management"
+#~ msgstr "KV Cache 管理"
+
+#~ msgid "KV Cache Optimizations"
+#~ msgstr "KV Cache 优化"
+
+#~ msgid "Use LMCache in production"
+#~ msgstr "在生产中使用 LMCache"
+
+#~ msgid "CLI"
+#~ msgstr "命令行界面"
+
+#~ msgid "Internal API Server"
+#~ msgstr "内部 API 服务器"
+
+#~ msgid "Controller WebUI"
+#~ msgstr "控制器 WebUI"
+
+#~ msgid "Developer Guide"
+#~ msgstr "开发者指南"
+
+#~ msgid "API Reference"
+#~ msgstr "API 参考"
+
+#~ msgid "Community"
+#~ msgstr "社区"

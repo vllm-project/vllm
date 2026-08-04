@@ -1,0 +1,143 @@
+# Comprehensive integration tests — one step per config, run in parallel.
+# Each step gets its own K8s pod with the exact GPU count it needs.
+# 2-GPU group is listed first so these heavier jobs get scheduled before 1-GPU jobs.
+
+x-perf-retry: &perf-retry
+  automatic:
+    - exit_status: -1
+      limit: 2
+    - exit_status: 1
+      limit: 2
+
+steps:
+  - group: ":test_tube: Comprehensive (2-GPU)"
+    steps:
+      - label: ":test_tube: pd"
+        command: .buildkite/k3_tests/comprehensive/run.sh pd.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-2gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "2" } }
+                    volumeMounts: &vol-mounts
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: datasets, mountPath: /root/correctness }
+                volumes: &vols
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: datasets, hostPath: { path: /data/datasets, type: DirectoryOrCreate } }
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: p2p"
+        command: .buildkite/k3_tests/comprehensive/run.sh p2p.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: p2p_with_v3"
+        command: .buildkite/k3_tests/comprehensive/run.sh p2p_with_v3.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+  - group: ":test_tube: Comprehensive (1-GPU)"
+    steps:
+      - label: ":test_tube: local_cpu"
+        command: .buildkite/k3_tests/comprehensive/run.sh local_cpu.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-1gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts: *vol-mounts
+                volumes: *vols
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: local_disk"
+        command: .buildkite/k3_tests/comprehensive/run.sh local_disk.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: async"
+        command: .buildkite/k3_tests/comprehensive/run.sh async.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: local_cpu_with_v3"
+        command: .buildkite/k3_tests/comprehensive/run.sh local_cpu_with_v3.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: local_disk_with_v3"
+        command: .buildkite/k3_tests/comprehensive/run.sh local_disk_with_v3.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: multi_device"
+        command: .buildkite/k3_tests/comprehensive/run.sh multi_device.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+      - label: ":test_tube: layerwise"
+        command: .buildkite/k3_tests/comprehensive/run.sh layerwise.yaml
+        timeout_in_minutes: 30
+        retry: *perf-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "benchmarks/long_doc_qa/*.json"]
+
+  # Nightly baseline upload: only runs when NEED_UPLOAD=true (scheduled build).
+  # Collects date-stamped baseline artifacts from all config steps,
+  # prunes files older than 5 days, and pushes a single commit to benchmarks-main.
+  - wait: ~
+    if: build.env("NEED_UPLOAD") == "true"
+
+  - label: ":arrow_up: Upload rolling baselines"
+    if: build.env("NEED_UPLOAD") == "true"
+    command: .buildkite/k3_tests/comprehensive/scripts/upload-baselines.sh
+    timeout_in_minutes: 5
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources: { limits: { cpu: "1", memory: "2Gi" } }
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN

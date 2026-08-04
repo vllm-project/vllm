@@ -1,0 +1,26 @@
+# The serving certificate for the mutating admission webhook. cert-manager writes the
+# resulting key pair into the secret named by secretName, which the controller-manager
+# Deployment mounts at /tmp/k8s-webhook-server/serving-certs (see manager_webhook_patch.yaml).
+# The MutatingWebhookConfiguration's cert-manager.io/inject-ca-from annotation points at
+# this Certificate so the caBundle is injected and rotated automatically (design §10).
+#
+# The dnsNames carry a placeholder Service name/namespace; the config/default overlay
+# rewrites the SERVICE_NAME / SERVICE_NAMESPACE segments via kustomize replacements so the
+# rendered SAN matches the actual (namePrefix-ed, namespaced) Service.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: serving-cert
+  namespace: system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  dnsNames:
+  # SERVICE_NAME and SERVICE_NAMESPACE will be substituted by kustomize replacements.
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: selfsigned-issuer
+  secretName: webhook-server-cert

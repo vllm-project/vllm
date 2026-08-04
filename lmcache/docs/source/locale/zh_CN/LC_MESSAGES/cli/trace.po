@@ -1,0 +1,170 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/trace.rst:2
+msgid "lmcache trace"
+msgstr "lmcache trace"
+
+#: ../../source/cli/trace.rst:4
+msgid ""
+"The ``lmcache trace`` command inspects and replays LMCache storage-level "
+"trace files (``.lct``). It has two sub-commands:"
+msgstr "``lmcache trace`` 命令用于检查和重放 LMCache 存储级别的跟踪文件 (``.lct``)。它有两个子命令："
+
+#: ../../source/cli/trace.rst:13
+msgid ""
+"``lmcache trace`` needs the full ``lmcache`` package (StorageManager, "
+"trace codecs, ``TraceReader``). It is not available in the lightweight "
+"``lmcache-cli`` install and exits with status ``2`` if those modules are "
+"missing."
+msgstr "``lmcache trace`` 需要完整的 ``lmcache`` 包（StorageManager、trace 编解码器、\\ ``TraceReader``\\ ）。在轻量级的 ``lmcache-cli`` 安装中不可用，如果缺少这些模块，则会以状态 ``2`` 退出。"
+
+#: ../../source/cli/trace.rst:18
+msgid ""
+"Trace *capture* is not a ``trace`` sub-command — recording is bound to a "
+"live server via ``lmcache server --trace-level storage [--trace-output "
+"...]`` (see :doc:`server`)."
+msgstr "Trace 捕获不是 ``trace`` 子命令 — 录制绑定到通过 ``lmcache server --trace-level storage [--trace-output ...]`` 的实时服务器（参见 :doc:`server`）。"
+
+#: ../../source/cli/trace.rst:24
+msgid "info"
+msgstr "信息"
+
+#: ../../source/cli/trace.rst:26
+msgid ""
+"Print a one-screen summary of a trace file: header metadata plus per-"
+"qualname record counts."
+msgstr "打印跟踪文件的一屏摘要：头部元数据加上每个 qualname 的记录计数。"
+
+#: ../../source/cli/trace.rst:46
+msgid ""
+"The only argument is the positional ``FILE`` (path to a ``.lct`` trace "
+"file)."
+msgstr "唯一的参数是位置参数 ``FILE``\\ （指向 ``.lct`` 跟踪文件的路径）。"
+
+#: ../../source/cli/trace.rst:50
+msgid "replay"
+msgstr "重放"
+
+#: ../../source/cli/trace.rst:52
+msgid ""
+"Reissue every recorded call against a fresh ``StorageManager``, honoring "
+"the recorded inter-call timings."
+msgstr "对新创建的 ``StorageManager`` 重新发出每个记录的调用，遵循记录的调用间隔时间。"
+
+#: ../../source/cli/trace.rst:60
+msgid ""
+"``replay`` accepts the standard storage-manager configuration flags "
+"(``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``); see ``lmcache "
+"server --help`` for the full list. The replay-side config may differ from"
+" the config recorded in the trace, which can legitimately cause retrieve "
+"misses."
+msgstr "``replay`` 接受标准的存储管理器配置标志（\\ ``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``\\ ）；有关完整列表，请参见 ``lmcache server --help``\\ 。重放侧的配置可能与记录在追踪中的配置不同，这可能会导致合法的查找未命中。"
+
+#: ../../source/cli/trace.rst:68
+msgid ""
+"A replay environment mismatch may cause retrieve misses. Replay uses the "
+"replay-side StorageManager config (which may differ from the recorded "
+"config), runs on a host whose performance may differ from the recording "
+"host, and StorageManager reads/writes are async. Treat retrieve-miss "
+"counts as a signal about the replay environment, not a defect in the "
+"trace."
+msgstr "重放环境不匹配可能导致查找未命中。重放使用重放端的 StorageManager 配置（可能与记录的配置不同），在性能可能与记录主机不同的主机上运行，并且 StorageManager 的读/写是异步的。将查找未命中计数视为重放环境的信号，而不是记录中的缺陷。"
+
+#: ../../source/cli/trace.rst:75
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/trace.rst:81
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/trace.rst:82
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/trace.rst:83
+msgid "``FILE``"
+msgstr "``FILE``"
+
+#: ../../source/cli/trace.rst:84
+msgid "Path to a ``.lct`` trace file (positional, required)."
+msgstr "```.lct``` 跟踪文件的路径（位置参数，必填）。"
+
+#: ../../source/cli/trace.rst:85
+msgid "``--verbose``"
+msgstr "``--verbose``"
+
+#: ../../source/cli/trace.rst:86
+msgid "Print one line per replayed record."
+msgstr "每个重放记录打印一行。"
+
+#: ../../source/cli/trace.rst:87
+msgid "``--jsonl-out PATH``"
+msgstr "``--jsonl-out PATH``"
+
+#: ../../source/cli/trace.rst:88
+msgid ""
+"Write one JSON object per replayed record to ``PATH`` (qualname, "
+"latency_ms, failed)."
+msgstr "将每个重放记录写入一个 JSON 对象到 ``PATH``\\ （qualname，延迟_ms，失败）。"
+
+#: ../../source/cli/trace.rst:90
+msgid "``--output-dir DIR``"
+msgstr "``--output-dir DIR``"
+
+#: ../../source/cli/trace.rst:91
+msgid ""
+"Directory for aggregated CSV / JSON summary output (default: current "
+"directory)."
+msgstr "聚合的 CSV / JSON 摘要输出目录（默认：当前目录）。"
+
+#: ../../source/cli/trace.rst:93
+msgid "``--no-csv``"
+msgstr "``--no-csv``"
+
+#: ../../source/cli/trace.rst:94
+msgid "Skip the aggregated CSV summary export."
+msgstr "跳过聚合的 CSV 摘要导出。"
+
+#: ../../source/cli/trace.rst:95
+msgid "``--json``"
+msgstr "``--json``"
+
+#: ../../source/cli/trace.rst:96
+msgid "Also export an aggregated JSON summary."
+msgstr "还可以导出一个汇总的 JSON。"
+
+#: ../../source/cli/trace.rst:97
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/trace.rst:98
+msgid "Suppress the terminal metrics table (files are still written)."
+msgstr "抑制终端指标表（文件仍然会被写入）。"
+
+#: ../../source/cli/trace.rst:100
+msgid ""
+"The terminal summary reports overall replay stats (records replayed / "
+"skipped / failed, duration, config-digest match) and per-op latency "
+"percentiles. ``replay`` exits with status ``1`` if any record failed."
+msgstr "终端摘要报告整体重放统计信息（重放/跳过/失败的记录、持续时间、配置摘要匹配）和每个操作的延迟百分位数。如果任何记录失败，\\ ``replay`` 将以状态 ``1`` 退出。"
+

@@ -1,0 +1,2069 @@
+FFMPEG(1)						FFMPEG(1)
+
+NAME
+       ffmpeg - ffmpeg video converter
+
+SYNOPSIS
+       ffmpeg [global_options] {[input_file_options] -i input_url} ... 
+       {[output_file_options] output_url} ...
+
+DESCRIPTION
+       ffmpeg is a very fast video and audio converter that can also 
+       grab from a live audio/video source. It can also convert between 
+       arbitrary sample rates and resize video on the fly with a high 
+       quality polyphase filter.
+
+       ffmpeg reads from an arbitrary number of input "files" (which 
+       can be regular files, pipes, network streams, grabbing devices, 
+       etc.), specified by the "-i" option, and writes to an arbitrary 
+       number of output "files", which are specified by a plain output
+       url. Anything found on the command line which cannot be inter-
+       preted as an option is considered to be an output url.
+
+       Each input or output url can, in principle, contain any number of 
+       streams of different types (video/audio/subtitle/attachment/data). 
+       The allowed number and/or types of streams may be limited by the 
+       container format. Selecting which streams from which inputs will 
+       go into which output is either done automatically or with the 
+       "-map" option (see the Stream selection chapter).
+
+       To refer to input files in options, you must use their indices 
+       (0-based). E.g.  the first input file is 0, the second is 1, etc. 
+       Similarly, streams within a file are referred to by their indices. 
+       E.g. "2:3" refers to the fourth stream in the third input file. 
+       Also see the Stream specifiers chapter.
+
+       As a general rule, options are applied to the next specified file. 
+       Therefore, order is important, and you can have the same option on 
+       the command line multiple times. Each occurrence is then applied 
+       to the next input or output file.  Exceptions from this rule are 
+       the global options (e.g. verbosity level), which should be specified 
+       first.
+
+       Do not mix input and output files -- first specify all input files, 
+       then all output files. Also do not mix options which belong to 
+       different files. All options apply ONLY to the next input or output 
+       file and are reset between files.
+
+       •   To set the video bitrate of the output file to 64 kbit/s:
+
+		   ffmpeg -i input.avi -b:v 64k -bufsize 64k output.avi
+
+       •   To force the frame rate of the output file to 24 fps:
+
+		   ffmpeg -i input.avi -r 24 output.avi
+
+       •   To force the frame rate of the input file (valid for raw formats only) to 1 fps and the frame
+	   rate of the output file to 24 fps:
+
+		   ffmpeg -r 1 -i input.m2v -r 24 output.avi
+
+       The format option may be needed for raw input files.
+
+DETAILED DESCRIPTION
+       The transcoding process in ffmpeg for each output can be described by the following diagram:
+
+		_______ 	     ______________
+	       |       |	    |		   |
+	       | input |  demuxer   | encoded data |   decoder
+	       | file  | ---------> | packets	   | -----+
+	       |_______|	    |______________|	  |
+							  v
+						      _________
+						     |	       |
+						     | decoded |
+						     | frames  |
+						     |_________|
+		________	     ______________	  |
+	       |	|	    |		   |	  |
+	       | output | <-------- | encoded data | <----+
+	       | file	|   muxer   | packets	   |   encoder
+	       |________|	    |______________|
+
+       ffmpeg calls the libavformat library (containing demuxers) to read input files and get packets
+       containing encoded data from them. When there are multiple input files, ffmpeg tries to keep them
+       synchronized by tracking lowest timestamp on any active input stream.
+
+       Encoded packets are then passed to the decoder (unless streamcopy is selected for the stream, see
+       further for a description). The decoder produces uncompressed frames (raw video/PCM audio/...)
+       which can be processed further by filtering (see next section). After filtering, the frames are
+       passed to the encoder, which encodes them and outputs encoded packets. Finally those are passed to
+       the muxer, which writes the encoded packets to the output file.
+
+   Filtering
+       Before encoding, ffmpeg can process raw audio and video frames using filters from the libavfilter
+       library. Several chained filters form a filter graph. ffmpeg distinguishes between two types of
+       filtergraphs: simple and complex.
+
+       Simple filtergraphs
+
+       Simple filtergraphs are those that have exactly one input and output, both of the same type. In
+       the above diagram they can be represented by simply inserting an additional step between decoding
+       and encoding:
+
+		_________			 ______________
+	       |	 |			|	       |
+	       | decoded |			| encoded data |
+	       | frames  |\		      _ | packets      |
+	       |_________| \		      /||______________|
+			    \	__________   /
+		 simple     _\||	  | /  encoder
+		 filtergraph   | filtered |/
+			       | frames   |
+			       |__________|
+
+       Simple filtergraphs are configured with the per-stream -filter option (with -vf and -af aliases
+       for video and audio respectively).  A simple filtergraph for video can look for example like this:
+
+		_______        _____________	    _______	   ________
+	       |       |      | 	    |	   |	   |	  |	   |
+	       | input | ---> | deinterlace | ---> | scale | ---> | output |
+	       |_______|      |_____________|	   |_______|	  |________|
+
+       Note that some filters change frame properties but not frame contents. E.g. the "fps" filter in
+       the example above changes number of frames, but does not touch the frame contents. Another example
+       is the "setpts" filter, which only sets timestamps and otherwise passes the frames unchanged.
+
+       Complex filtergraphs
+
+       Complex filtergraphs are those which cannot be described as simply a linear processing chain
+       applied to one stream. This is the case, for example, when the graph has more than one input
+       and/or output, or when output stream type is different from input. They can be represented with
+       the following diagram:
+
+		_________
+	       |	 |
+	       | input 0 |\		       __________
+	       |_________| \		      | 	 |
+			    \	_________    /| output 0 |
+			     \ |	 |  / |__________|
+		_________     \| complex | /
+	       |	 |     |	 |/
+	       | input 1 |---->| filter  |\
+	       |_________|     |	 | \   __________
+			      /| graph	 |  \ | 	 |
+			     / |	 |   \| output 1 |
+		_________   /  |_________|    |__________|
+	       |	 | /
+	       | input 2 |/
+	       |_________|
+
+       Complex filtergraphs are configured with the -filter_complex option.  Note that this option is
+       global, since a complex filtergraph, by its nature, cannot be unambiguously associated with a
+       single stream or file.
+
+       The -lavfi option is equivalent to -filter_complex.
+
+       A trivial example of a complex filtergraph is the "overlay" filter, which has two video inputs and
+       one video output, containing one video overlaid on top of the other. Its audio counterpart is the
+       "amix" filter.
+
+   Stream copy
+       Stream copy is a mode selected by supplying the "copy" parameter to the -codec option. It makes
+       ffmpeg omit the decoding and encoding step for the specified stream, so it does only demuxing and
+       muxing. It is useful for changing the container format or modifying container-level metadata. The
+       diagram above will, in this case, simplify to this:
+
+		_______ 	     ______________	       ________
+	       |       |	    |		   |	      |        |
+	       | input |  demuxer   | encoded data |  muxer   | output |
+	       | file  | ---------> | packets	   | -------> | file   |
+	       |_______|	    |______________|	      |________|
+
+       Since there is no decoding or encoding, it is very fast and there is no quality loss. However, it
+       might not work in some cases because of many factors. Applying filters is obviously also
+       impossible, since filters work on uncompressed data.
+
+STREAM SELECTION
+       ffmpeg provides the "-map" option for manual control of stream selection in each output file.
+       Users can skip "-map" and let ffmpeg perform automatic stream selection as described below. The
+       "-vn / -an / -sn / -dn" options can be used to skip inclusion of video, audio, subtitle and data
+       streams respectively, whether manually mapped or automatically selected, except for those streams
+       which are outputs of complex filtergraphs.
+
+   Description
+       The sub-sections that follow describe the various rules that are involved in stream selection.
+       The examples that follow next show how these rules are applied in practice.
+
+       While every effort is made to accurately reflect the behavior of the program, FFmpeg is under
+       continuous development and the code may have changed since the time of this writing.
+
+       Automatic stream selection
+
+       In the absence of any map options for a particular output file, ffmpeg inspects the output format
+       to check which type of streams can be included in it, viz. video, audio and/or subtitles. For each
+       acceptable stream type, ffmpeg will pick one stream, when available, from among all the inputs.
+
+       It will select that stream based upon the following criteria:
+
+       •   for video, it is the stream with the highest resolution,
+
+       •   for audio, it is the stream with the most channels,
+
+       •   for subtitles, it is the first subtitle stream found but there's a caveat.  The output
+	   format's default subtitle encoder can be either text-based or image-based, and only a subtitle
+	   stream of the same type will be chosen.
+
+       In the case where several streams of the same type rate equally, the stream with the lowest index
+       is chosen.
+
+       Data or attachment streams are not automatically selected and can only be included using "-map".
+
+       Manual stream selection
+
+       When "-map" is used, only user-mapped streams are included in that output file, with one possible
+       exception for filtergraph outputs described below.
+
+       Complex filtergraphs
+
+       If there are any complex filtergraph output streams with unlabeled pads, they will be added to the
+       first output file. This will lead to a fatal error if the stream type is not supported by the
+       output format. In the absence of the map option, the inclusion of these streams leads to the
+       automatic stream selection of their types being skipped. If map options are present, these
+       filtergraph streams are included in addition to the mapped streams.
+
+       Complex filtergraph output streams with labeled pads must be mapped once and exactly once.
+
+       Stream handling
+
+       Stream handling is independent of stream selection, with an exception for subtitles described
+       below. Stream handling is set via the "-codec" option addressed to streams within a specific
+       output file. In particular, codec options are applied by ffmpeg after the stream selection process
+       and thus do not influence the latter. If no "-codec" option is specified for a stream type, ffmpeg
+       will select the default encoder registered by the output file muxer.
+
+       An exception exists for subtitles. If a subtitle encoder is specified for an output file, the
+       first subtitle stream found of any type, text or image, will be included. ffmpeg does not validate
+       if the specified encoder can convert the selected stream or if the converted stream is acceptable
+       within the output format. This applies generally as well: when the user sets an encoder manually,
+       the stream selection process cannot check if the encoded stream can be muxed into the output file.
+       If it cannot, ffmpeg will abort and all output files will fail to be processed.
+
+   Examples
+       The following examples illustrate the behavior, quirks and limitations of ffmpeg's stream
+       selection methods.
+
+       They assume the following three input files.
+
+	       input file 'A.avi'
+		     stream 0: video 640x360
+		     stream 1: audio 2 channels
+
+	       input file 'B.mp4'
+		     stream 0: video 1920x1080
+		     stream 1: audio 2 channels
+		     stream 2: subtitles (text)
+		     stream 3: audio 5.1 channels
+		     stream 4: subtitles (text)
+
+	       input file 'C.mkv'
+		     stream 0: video 1280x720
+		     stream 1: audio 2 channels
+		     stream 2: subtitles (image)
+
+       Example: automatic stream selection
+
+	       ffmpeg -i A.avi -i B.mp4 out1.mkv out2.wav -map 1:a -c:a copy out3.mov
+
+       There are three output files specified, and for the first two, no "-map" options are set, so
+       ffmpeg will select streams for these two files automatically.
+
+       out1.mkv is a Matroska container file and accepts video, audio and subtitle streams, so ffmpeg
+       will try to select one of each type.For video, it will select "stream 0" from B.mp4, which has the
+       highest resolution among all the input video streams.For audio, it will select "stream 3" from
+       B.mp4, since it has the greatest number of channels.For subtitles, it will select "stream 2" from
+       B.mp4, which is the first subtitle stream from among A.avi and B.mp4.
+
+       out2.wav accepts only audio streams, so only "stream 3" from B.mp4 is selected.
+
+       For out3.mov, since a "-map" option is set, no automatic stream selection will occur. The "-map
+       1:a" option will select all audio streams from the second input B.mp4. No other streams will be
+       included in this output file.
+
+       For the first two outputs, all included streams will be transcoded. The encoders chosen will be
+       the default ones registered by each output format, which may not match the codec of the selected
+       input streams.
+
+       For the third output, codec option for audio streams has been set to "copy", so no decoding-
+       filtering-encoding operations will occur, or can occur.	Packets of selected streams shall be
+       conveyed from the input file and muxed within the output file.
+
+       Example: automatic subtitles selection
+
+	       ffmpeg -i C.mkv out1.mkv -c:s dvdsub -an out2.mkv
+
+       Although out1.mkv is a Matroska container file which accepts subtitle streams, only a video and
+       audio stream shall be selected. The subtitle stream of C.mkv is image-based and the default
+       subtitle encoder of the Matroska muxer is text-based, so a transcode operation for the subtitles
+       is expected to fail and hence the stream isn't selected. However, in out2.mkv, a subtitle encoder
+       is specified in the command and so, the subtitle stream is selected, in addition to the video
+       stream. The presence of "-an" disables audio stream selection for out2.mkv.
+
+       Example: unlabeled filtergraph outputs
+
+	       ffmpeg -i A.avi -i C.mkv -i B.mp4 -filter_complex "overlay" out1.mp4 out2.srt
+
+       A filtergraph is setup here using the "-filter_complex" option and consists of a single video
+       filter. The "overlay" filter requires exactly two video inputs, but none are specified, so the
+       first two available video streams are used, those of A.avi and C.mkv. The output pad of the filter
+       has no label and so is sent to the first output file out1.mp4. Due to this, automatic selection of
+       the video stream is skipped, which would have selected the stream in B.mp4. The audio stream with
+       most channels viz. "stream 3" in B.mp4, is chosen automatically. No subtitle stream is chosen
+       however, since the MP4 format has no default subtitle encoder registered, and the user hasn't
+       specified a subtitle encoder.
+
+       The 2nd output file, out2.srt, only accepts text-based subtitle streams. So, even though the first
+       subtitle stream available belongs to C.mkv, it is image-based and hence skipped.  The selected
+       stream, "stream 2" in B.mp4, is the first text-based subtitle stream.
+
+       Example: labeled filtergraph outputs
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0[outv];overlay;aresample" \
+		      -map '[outv]' -an        out1.mp4 \
+					       out2.mkv \
+		      -map '[outv]' -map 1:a:0 out3.mkv
+
+       The above command will fail, as the output pad labelled "[outv]" has been mapped twice.	None of
+       the output files shall be processed.
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0[outv];overlay;aresample" \
+		      -an	 out1.mp4 \
+				 out2.mkv \
+		      -map 1:a:0 out3.mkv
+
+       This command above will also fail as the hue filter output has a label, "[outv]", and hasn't been
+       mapped anywhere.
+
+       The command should be modified as follows,
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0,split=2[outv1][outv2];overlay;aresample" \
+		       -map '[outv1]' -an	 out1.mp4 \
+						 out2.mkv \
+		       -map '[outv2]' -map 1:a:0 out3.mkv
+
+       The video stream from B.mp4 is sent to the hue filter, whose output is cloned once using the split
+       filter, and both outputs labelled. Then a copy each is mapped to the first and third output files.
+
+       The overlay filter, requiring two video inputs, uses the first two unused video streams. Those are
+       the streams from A.avi and C.mkv. The overlay output isn't labelled, so it is sent to the first
+       output file out1.mp4, regardless of the presence of the "-map" option.
+
+       The aresample filter is sent the first unused audio stream, that of A.avi. Since this filter
+       output is also unlabelled, it too is mapped to the first output file. The presence of "-an" only
+       suppresses automatic or manual stream selection of audio streams, not outputs sent from
+       filtergraphs. Both these mapped streams shall be ordered before the mapped stream in out1.mp4.
+
+       The video, audio and subtitle streams mapped to "out2.mkv" are entirely determined by automatic
+       stream selection.
+
+       out3.mkv consists of the cloned video output from the hue filter and the first audio stream from
+       B.mp4.
+
+OPTIONS
+       All the numerical options, if not specified otherwise, accept a string representing a number as
+       input, which may be followed by one of the SI unit prefixes, for example: 'K', 'M', or 'G'.
+
+       If 'i' is appended to the SI unit prefix, the complete prefix will be interpreted as a unit prefix
+       for binary multiples, which are based on powers of 1024 instead of powers of 1000. Appending 'B'
+       to the SI unit prefix multiplies the value by 8. This allows using, for example: 'KB', 'MiB', 'G'
+       and 'B' as number suffixes.
+
+       Options which do not take arguments are boolean options, and set the corresponding value to true.
+       They can be set to false by prefixing the option name with "no". For example using "-nofoo" will
+       set the boolean option with name "foo" to false.
+
+   Stream specifiers
+       Some options are applied per-stream, e.g. bitrate or codec. Stream specifiers are used to
+       precisely specify which stream(s) a given option belongs to.
+
+       A stream specifier is a string generally appended to the option name and separated from it by a
+       colon. E.g. "-codec:a:1 ac3" contains the "a:1" stream specifier, which matches the second audio
+       stream. Therefore, it would select the ac3 codec for the second audio stream.
+
+       A stream specifier can match several streams, so that the option is applied to all of them. E.g.
+       the stream specifier in "-b:a 128k" matches all audio streams.
+
+       An empty stream specifier matches all streams. For example, "-codec copy" or "-codec: copy" would
+       copy all the streams without reencoding.
+
+       Possible forms of stream specifiers are:
+
+       stream_index
+	   Matches the stream with this index. E.g. "-threads:1 4" would set the thread count for the
+	   second stream to 4. If stream_index is used as an additional stream specifier (see below),
+	   then it selects stream number stream_index from the matching streams. Stream numbering is
+	   based on the order of the streams as detected by libavformat except when a program ID is also
+	   specified. In this case it is based on the ordering of the streams in the program.
+
+       stream_type[:additional_stream_specifier]
+	   stream_type is one of following: 'v' or 'V' for video, 'a' for audio, 's' for subtitle, 'd'
+	   for data, and 't' for attachments. 'v' matches all video streams, 'V' only matches video
+	   streams which are not attached pictures, video thumbnails or cover arts. If
+	   additional_stream_specifier is used, then it matches streams which both have this type and
+	   match the additional_stream_specifier. Otherwise, it matches all streams of the specified
+	   type.
+
+       p:program_id[:additional_stream_specifier]
+	   Matches streams which are in the program with the id program_id. If
+	   additional_stream_specifier is used, then it matches streams which both are part of the
+	   program and match the additional_stream_specifier.
+
+       #stream_id or i:stream_id
+	   Match the stream by stream id (e.g. PID in MPEG-TS container).
+
+       m:key[:value]
+	   Matches streams with the metadata tag key having the specified value. If value is not given,
+	   matches streams that contain the given tag with any value.
+
+       u   Matches streams with usable configuration, the codec must be defined and the essential
+	   information such as video dimension or audio sample rate must be present.
+
+	   Note that in ffmpeg, matching by metadata will only work properly for input files.
+
+   Generic options
+       These options are shared amongst the ff* tools.
+
+       -L  Show license.
+
+       -h, -?, -help, --help [arg]
+	   Show help. An optional parameter may be specified to print help about a specific item. If no
+	   argument is specified, only basic (non advanced) tool options are shown.
+
+	   Possible values of arg are:
+
+	   long
+	       Print advanced tool options in addition to the basic tool options.
+
+	   full
+	       Print complete list of options, including shared and private options for encoders,
+	       decoders, demuxers, muxers, filters, etc.
+
+	   decoder=decoder_name
+	       Print detailed information about the decoder named decoder_name. Use the -decoders option
+	       to get a list of all decoders.
+
+	   encoder=encoder_name
+	       Print detailed information about the encoder named encoder_name. Use the -encoders option
+	       to get a list of all encoders.
+
+	   demuxer=demuxer_name
+	       Print detailed information about the demuxer named demuxer_name. Use the -formats option
+	       to get a list of all demuxers and muxers.
+
+	   muxer=muxer_name
+	       Print detailed information about the muxer named muxer_name. Use the -formats option to
+	       get a list of all muxers and demuxers.
+
+	   filter=filter_name
+	       Print detailed information about the filter name filter_name. Use the -filters option to
+	       get a list of all filters.
+
+	   bsf=bitstream_filter_name
+	       Print detailed information about the bitstream filter name bitstream_filter_name.  Use the
+	       -bsfs option to get a list of all bitstream filters.
+
+       -version
+	   Show version.
+
+       -formats
+	   Show available formats (including devices).
+
+       -demuxers
+	   Show available demuxers.
+
+       -muxers
+	   Show available muxers.
+
+       -devices
+	   Show available devices.
+
+       -codecs
+	   Show all codecs known to libavcodec.
+
+	   Note that the term 'codec' is used throughout this documentation as a shortcut for what is
+	   more correctly called a media bitstream format.
+
+       -decoders
+	   Show available decoders.
+
+       -encoders
+	   Show all available encoders.
+
+       -bsfs
+	   Show available bitstream filters.
+
+       -protocols
+	   Show available protocols.
+
+       -filters
+	   Show available libavfilter filters.
+
+       -pix_fmts
+	   Show available pixel formats.
+
+       -sample_fmts
+	   Show available sample formats.
+
+       -layouts
+	   Show channel names and standard channel layouts.
+
+       -colors
+	   Show recognized color names.
+
+       -sources device[,opt1=val1[,opt2=val2]...]
+	   Show autodetected sources of the input device.  Some devices may provide system-dependent
+	   source names that cannot be autodetected.  The returned list cannot be assumed to be always
+	   complete.
+
+		   ffmpeg -sources pulse,server=192.168.0.4
+
+       -sinks device[,opt1=val1[,opt2=val2]...]
+	   Show autodetected sinks of the output device.  Some devices may provide system-dependent sink
+	   names that cannot be autodetected.  The returned list cannot be assumed to be always complete.
+
+		   ffmpeg -sinks pulse,server=192.168.0.4
+
+       -loglevel [flags+]loglevel | -v [flags+]loglevel
+	   Set logging level and flags used by the library.
+
+	   The optional flags prefix can consist of the following values:
+
+	   repeat
+	       Indicates that repeated log output should not be compressed to the first line and the
+	       "Last message repeated n times" line will be omitted.
+
+	   level
+	       Indicates that log output should add a "[level]" prefix to each message line. This can be
+	       used as an alternative to log coloring, e.g. when dumping the log to file.
+
+	   Flags can also be used alone by adding a '+'/'-' prefix to set/reset a single flag without
+	   affecting other flags or changing loglevel. When setting both flags and loglevel, a '+'
+	   separator is expected between the last flags value and before loglevel.
+
+	   loglevel is a string or a number containing one of the following values:
+
+	   quiet, -8
+	       Show nothing at all; be silent.
+
+	   panic, 0
+	       Only show fatal errors which could lead the process to crash, such as an assertion
+	       failure. This is not currently used for anything.
+
+	   fatal, 8
+	       Only show fatal errors. These are errors after which the process absolutely cannot
+	       continue.
+
+	   error, 16
+	       Show all errors, including ones which can be recovered from.
+
+	   warning, 24
+	       Show all warnings and errors. Any message related to possibly incorrect or unexpected
+	       events will be shown.
+
+	   info, 32
+	       Show informative messages during processing. This is in addition to warnings and errors.
+	       This is the default value.
+
+	   verbose, 40
+	       Same as "info", except more verbose.
+
+	   debug, 48
+	       Show everything, including debugging information.
+
+	   trace, 56
+
+	   For example to enable repeated log output, add the "level" prefix, and set loglevel to
+	   "verbose":
+
+		   ffmpeg -loglevel repeat+level+verbose -i input output
+
+	   Another example that enables repeated log output without affecting current state of "level"
+	   prefix flag or loglevel:
+
+		   ffmpeg [...] -loglevel +repeat
+
+	   By default the program logs to stderr. If coloring is supported by the terminal, colors are
+	   used to mark errors and warnings. Log coloring can be disabled setting the environment
+	   variable AV_LOG_FORCE_NOCOLOR or NO_COLOR, or can be forced setting the environment variable
+	   AV_LOG_FORCE_COLOR.	The use of the environment variable NO_COLOR is deprecated and will be
+	   dropped in a future FFmpeg version.
+
+       -report
+	   Dump full command line and console output to a file named "program-YYYYMMDD-HHMMSS.log" in the
+	   current directory.  This file can be useful for bug reports.  It also implies "-loglevel
+	   debug".
+
+	   Setting the environment variable FFREPORT to any value has the same effect. If the value is a
+	   ':'-separated key=value sequence, these options will affect the report; option values must be
+	   escaped if they contain special characters or the options delimiter ':' (see the ``Quoting and
+	   escaping'' section in the ffmpeg-utils manual).
+
+	   The following options are recognized:
+
+	   file
+	       set the file name to use for the report; %p is expanded to the name of the program, %t is
+	       expanded to a timestamp, "%%" is expanded to a plain "%"
+
+	   level
+	       set the log verbosity level using a numerical value (see "-loglevel").
+
+	   For example, to output a report to a file named ffreport.log using a log level of 32 (alias
+	   for log level "info"):
+
+		   FFREPORT=file=ffreport.log:level=32 ffmpeg -i input output
+
+	   Errors in parsing the environment variable are not fatal, and will not appear in the report.
+
+       -hide_banner
+	   Suppress printing banner.
+
+	   All FFmpeg tools will normally show a copyright notice, build options and library versions.
+	   This option can be used to suppress printing this information.
+
+       -cpuflags flags (global)
+	   Allows setting and clearing cpu flags. This option is intended for testing. Do not use it
+	   unless you know what you're doing.
+
+		   ffmpeg -cpuflags -sse+mmx ...
+		   ffmpeg -cpuflags mmx ...
+		   ffmpeg -cpuflags 0 ...
+
+	   Possible flags for this option are:
+
+	   x86
+	       mmx
+	       mmxext
+	       sse
+	       sse2
+	       sse2slow
+	       sse3
+	       sse3slow
+	       ssse3
+	       atom
+	       sse4.1
+	       sse4.2
+	       avx
+	       avx2
+	       xop
+	       fma3
+	       fma4
+	       3dnow
+	       3dnowext
+	       bmi1
+	       bmi2
+	       cmov
+	   ARM
+	       armv5te
+	       armv6
+	       armv6t2
+	       vfp
+	       vfpv3
+	       neon
+	       setend
+	   AArch64
+	       armv8
+	       vfp
+	       neon
+	   PowerPC
+	       altivec
+	   Specific Processors
+	       pentium2
+	       pentium3
+	       pentium4
+	       k6
+	       k62
+	       athlon
+	       athlonxp
+	       k8
+
+   AVOptions
+       These options are provided directly by the libavformat, libavdevice and libavcodec libraries. To
+       see the list of available AVOptions, use the -help option. They are separated into two categories:
+
+       generic
+	   These options can be set for any container, codec or device. Generic options are listed under
+	   AVFormatContext options for containers/devices and under AVCodecContext options for codecs.
+
+       private
+	   These options are specific to the given container, device or codec. Private options are listed
+	   under their corresponding containers/devices/codecs.
+
+       For example to write an ID3v2.3 header instead of a default ID3v2.4 to an MP3 file, use the
+       id3v2_version private option of the MP3 muxer:
+
+	       ffmpeg -i input.flac -id3v2_version 3 out.mp3
+
+       All codec AVOptions are per-stream, and thus a stream specifier should be attached to them:
+
+	       ffmpeg -i multichannel.mxf -map 0:v:0 -map 0:a:0 -map 0:a:0 -c:a:0 ac3 -b:a:0 640k -ac:a:1 2 -c:a:1 aac -b:2 128k out.mp4
+
+       In the above example, a multichannel audio stream is mapped twice for output.  The first instance
+       is encoded with codec ac3 and bitrate 640k.  The second instance is downmixed to 2 channels and
+       encoded with codec aac. A bitrate of 128k is specified for it using absolute index of the output
+       stream.
+
+       Note: the -nooption syntax cannot be used for boolean AVOptions, use -option 0/-option 1.
+
+       Note: the old undocumented way of specifying per-stream AVOptions by prepending v/a/s to the
+       options name is now obsolete and will be removed soon.
+
+   Main options
+       -f fmt (input/output)
+	   Force input or output file format. The format is normally auto detected for input files and
+	   guessed from the file extension for output files, so this option is not needed in most cases.
+
+       -i url (input)
+	   input file url
+
+       -y (global)
+	   Overwrite output files without asking.
+
+       -n (global)
+	   Do not overwrite output files, and exit immediately if a specified output file already exists.
+
+       -stream_loop number (input)
+	   Set number of times input stream shall be looped. Loop 0 means no loop, loop -1 means infinite
+	   loop.
+
+       -c[:stream_specifier] codec (input/output,per-stream)
+       -codec[:stream_specifier] codec (input/output,per-stream)
+	   Select an encoder (when used before an output file) or a decoder (when used before an input
+	   file) for one or more streams. codec is the name of a decoder/encoder or a special value
+	   "copy" (output only) to indicate that the stream is not to be re-encoded.
+
+	   For example
+
+		   ffmpeg -i INPUT -map 0 -c:v libx264 -c:a copy OUTPUT
+
+	   encodes all video streams with libx264 and copies all audio streams.
+
+	   For each stream, the last matching "c" option is applied, so
+
+		   ffmpeg -i INPUT -map 0 -c copy -c:v:1 libx264 -c:a:137 libvorbis OUTPUT
+
+	   will copy all the streams except the second video, which will be encoded with libx264, and the
+	   138th audio, which will be encoded with libvorbis.
+
+       -t duration (input/output)
+	   When used as an input option (before "-i"), limit the duration of data read from the input
+	   file.
+
+	   When used as an output option (before an output url), stop writing the output after its
+	   duration reaches duration.
+
+	   duration must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+	   -to and -t are mutually exclusive and -t has priority.
+
+       -to position (input/output)
+	   Stop writing the output or reading the input at position.  position must be a time duration
+	   specification, see the Time duration section in the ffmpeg-utils(1) manual.
+
+	   -to and -t are mutually exclusive and -t has priority.
+
+       -fs limit_size (output)
+	   Set the file size limit, expressed in bytes. No further chunk of bytes is written after the
+	   limit is exceeded. The size of the output file is slightly more than the requested file size.
+
+       -ss position (input/output)
+	   When used as an input option (before "-i"), seeks in this input file to position. Note that in
+	   most formats it is not possible to seek exactly, so ffmpeg will seek to the closest seek point
+	   before position.  When transcoding and -accurate_seek is enabled (the default), this extra
+	   segment between the seek point and position will be decoded and discarded. When doing stream
+	   copy or when -noaccurate_seek is used, it will be preserved.
+
+	   When used as an output option (before an output url), decodes but discards input until the
+	   timestamps reach position.
+
+	   position must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+       -sseof position (input)
+	   Like the "-ss" option but relative to the "end of file". That is negative values are earlier
+	   in the file, 0 is at EOF.
+
+       -itsoffset offset (input)
+	   Set the input time offset.
+
+	   offset must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+	   The offset is added to the timestamps of the input files. Specifying a positive offset means
+	   that the corresponding streams are delayed by the time duration specified in offset.
+
+       -itsscale scale (input,per-stream)
+	   Rescale input timestamps. scale should be a floating point number.
+
+       -timestamp date (output)
+	   Set the recording timestamp in the container.
+
+	   date must be a date specification, see the Date section in the ffmpeg-utils(1) manual.
+
+       -metadata[:metadata_specifier] key=value (output,per-metadata)
+	   Set a metadata key/value pair.
+
+	   An optional metadata_specifier may be given to set metadata on streams, chapters or programs.
+	   See "-map_metadata" documentation for details.
+
+	   This option overrides metadata set with "-map_metadata". It is also possible to delete
+	   metadata by using an empty value.
+
+	   For example, for setting the title in the output file:
+
+		   ffmpeg -i in.avi -metadata title="my title" out.flv
+
+	   To set the language of the first audio stream:
+
+		   ffmpeg -i INPUT -metadata:s:a:0 language=eng OUTPUT
+
+       -disposition[:stream_specifier] value (output,per-stream)
+	   Sets the disposition for a stream.
+
+	   This option overrides the disposition copied from the input stream. It is also possible to
+	   delete the disposition by setting it to 0.
+
+	   The following dispositions are recognized:
+
+	   default
+	   dub
+	   original
+	   comment
+	   lyrics
+	   karaoke
+	   forced
+	   hearing_impaired
+	   visual_impaired
+	   clean_effects
+	   attached_pic
+	   captions
+	   descriptions
+	   dependent
+	   metadata
+
+	   For example, to make the second audio stream the default stream:
+
+		   ffmpeg -i in.mkv -c copy -disposition:a:1 default out.mkv
+
+	   To make the second subtitle stream the default stream and remove the default disposition from
+	   the first subtitle stream:
+
+		   ffmpeg -i in.mkv -c copy -disposition:s:0 0 -disposition:s:1 default out.mkv
+
+	   To add an embedded cover/thumbnail:
+
+		   ffmpeg -i in.mp4 -i IMAGE -map 0 -map 1 -c copy -c:v:1 png -disposition:v:1 attached_pic out.mp4
+
+	   Not all muxers support embedded thumbnails, and those who do, only support a few formats, like
+	   JPEG or PNG.
+
+       -program [title=title:][program_num=program_num:]st=stream[:st=stream...] (output)
+	   Creates a program with the specified title, program_num and adds the specified stream(s) to
+	   it.
+
+       -target type (output)
+	   Specify target file type ("vcd", "svcd", "dvd", "dv", "dv50"). type may be prefixed with
+	   "pal-", "ntsc-" or "film-" to use the corresponding standard. All the format options (bitrate,
+	   codecs, buffer sizes) are then set automatically. You can just type:
+
+		   ffmpeg -i myfile.avi -target vcd /tmp/vcd.mpg
+
+	   Nevertheless you can specify additional options as long as you know they do not conflict with
+	   the standard, as in:
+
+		   ffmpeg -i myfile.avi -target vcd -bf 2 /tmp/vcd.mpg
+
+       -dn (input/output)
+	   As an input option, blocks all data streams of a file from being filtered or being
+	   automatically selected or mapped for any output. See "-discard" option to disable streams
+	   individually.
+
+	   As an output option, disables data recording i.e. automatic selection or mapping of any data
+	   stream. For full manual control see the "-map" option.
+
+       -dframes number (output)
+	   Set the number of data frames to output. This is an obsolete alias for "-frames:d", which you
+	   should use instead.
+
+       -frames[:stream_specifier] framecount (output,per-stream)
+	   Stop writing to the stream after framecount frames.
+
+       -q[:stream_specifier] q (output,per-stream)
+       -qscale[:stream_specifier] q (output,per-stream)
+	   Use fixed quality scale (VBR). The meaning of q/qscale is codec-dependent.  If qscale is used
+	   without a stream_specifier then it applies only to the video stream, this is to maintain
+	   compatibility with previous behavior and as specifying the same codec specific value to 2
+	   different codecs that is audio and video generally is not what is intended when no
+	   stream_specifier is used.
+
+       -filter[:stream_specifier] filtergraph (output,per-stream)
+	   Create the filtergraph specified by filtergraph and use it to filter the stream.
+
+	   filtergraph is a description of the filtergraph to apply to the stream, and must have a single
+	   input and a single output of the same type of the stream. In the filtergraph, the input is
+	   associated to the label "in", and the output to the label "out". See the ffmpeg-filters manual
+	   for more information about the filtergraph syntax.
+
+	   See the -filter_complex option if you want to create filtergraphs with multiple inputs and/or
+	   outputs.
+
+       -filter_script[:stream_specifier] filename (output,per-stream)
+	   This option is similar to -filter, the only difference is that its argument is the name of the
+	   file from which a filtergraph description is to be read.
+
+       -filter_threads nb_threads (global)
+	   Defines how many threads are used to process a filter pipeline. Each pipeline will produce a
+	   thread pool with this many threads available for parallel processing.  The default is the
+	   number of available CPUs.
+
+       -pre[:stream_specifier] preset_name (output,per-stream)
+	   Specify the preset for matching stream(s).
+
+       -stats (global)
+	   Print encoding progress/statistics. It is on by default, to explicitly disable it you need to
+	   specify "-nostats".
+
+       -progress url (global)
+	   Send program-friendly progress information to url.
+
+	   Progress information is written approximately every second and at the end of the encoding
+	   process. It is made of "key=value" lines. key consists of only alphanumeric characters. The
+	   last key of a sequence of progress information is always "progress".
+
+       -stdin
+	   Enable interaction on standard input. On by default unless standard input is used as an input.
+	   To explicitly disable interaction you need to specify "-nostdin".
+
+	   Disabling interaction on standard input is useful, for example, if ffmpeg is in the background
+	   process group. Roughly the same result can be achieved with "ffmpeg ... < /dev/null" but it
+	   requires a shell.
+
+       -debug_ts (global)
+	   Print timestamp information. It is off by default. This option is mostly useful for testing
+	   and debugging purposes, and the output format may change from one version to another, so it
+	   should not be employed by portable scripts.
+
+	   See also the option "-fdebug ts".
+
+       -attach filename (output)
+	   Add an attachment to the output file. This is supported by a few formats like Matroska for
+	   e.g. fonts used in rendering subtitles. Attachments are implemented as a specific type of
+	   stream, so this option will add a new stream to the file. It is then possible to use per-
+	   stream options on this stream in the usual way. Attachment streams created with this option
+	   will be created after all the other streams (i.e. those created with "-map" or automatic
+	   mappings).
+
+	   Note that for Matroska you also have to set the mimetype metadata tag:
+
+		   ffmpeg -i INPUT -attach DejaVuSans.ttf -metadata:s:2 mimetype=application/x-truetype-font out.mkv
+
+	   (assuming that the attachment stream will be third in the output file).
+
+       -dump_attachment[:stream_specifier] filename (input,per-stream)
+	   Extract the matching attachment stream into a file named filename. If filename is empty, then
+	   the value of the "filename" metadata tag will be used.
+
+	   E.g. to extract the first attachment to a file named 'out.ttf':
+
+		   ffmpeg -dump_attachment:t:0 out.ttf -i INPUT
+
+	   To extract all attachments to files determined by the "filename" tag:
+
+		   ffmpeg -dump_attachment:t "" -i INPUT
+
+	   Technical note -- attachments are implemented as codec extradata, so this option can actually
+	   be used to extract extradata from any stream, not just attachments.
+
+       -noautorotate
+	   Disable automatically rotating video based on file metadata.
+
+   Video Options
+       -vframes number (output)
+	   Set the number of video frames to output. This is an obsolete alias for "-frames:v", which you
+	   should use instead.
+
+       -r[:stream_specifier] fps (input/output,per-stream)
+	   Set frame rate (Hz value, fraction or abbreviation).
+
+	   As an input option, ignore any timestamps stored in the file and instead generate timestamps
+	   assuming constant frame rate fps.  This is not the same as the -framerate option used for some
+	   input formats like image2 or v4l2 (it used to be the same in older versions of FFmpeg).  If in
+	   doubt use -framerate instead of the input option -r.
+
+	   As an output option, duplicate or drop input frames to achieve constant output frame rate fps.
+
+       -s[:stream_specifier] size (input/output,per-stream)
+	   Set frame size.
+
+	   As an input option, this is a shortcut for the video_size private option, recognized by some
+	   demuxers for which the frame size is either not stored in the file or is configurable -- e.g.
+	   raw video or video grabbers.
+
+	   As an output option, this inserts the "scale" video filter to the end of the corresponding
+	   filtergraph. Please use the "scale" filter directly to insert it at the beginning or some
+	   other place.
+
+	   The format is wxh (default - same as source).
+
+       -aspect[:stream_specifier] aspect (output,per-stream)
+	   Set the video display aspect ratio specified by aspect.
+
+	   aspect can be a floating point number string, or a string of the form num:den, where num and
+	   den are the numerator and denominator of the aspect ratio. For example "4:3", "16:9",
+	   "1.3333", and "1.7777" are valid argument values.
+
+	   If used together with -vcodec copy, it will affect the aspect ratio stored at container level,
+	   but not the aspect ratio stored in encoded frames, if it exists.
+
+       -vn (input/output)
+	   As an input option, blocks all video streams of a file from being filtered or being
+	   automatically selected or mapped for any output. See "-discard" option to disable streams
+	   individually.
+
+	   As an output option, disables video recording i.e. automatic selection or mapping of any video
+	   stream. For full manual control see the "-map" option.
+
+       -vcodec codec (output)
+	   Set the video codec. This is an alias for "-codec:v".
+
+       -pass[:stream_specifier] n (output,per-stream)
+	   Select the pass number (1 or 2). It is used to do two-pass video encoding. The statistics of
+	   the video are recorded in the first pass into a log file (see also the option -passlogfile),
+	   and in the second pass that log file is used to generate the video at the exact requested
+	   bitrate.  On pass 1, you may just deactivate audio and set output to null, examples for
+	   Windows and Unix:
+
+		   ffmpeg -i foo.mov -c:v libxvid -pass 1 -an -f rawvideo -y NUL
+		   ffmpeg -i foo.mov -c:v libxvid -pass 1 -an -f rawvideo -y /dev/null
+
+       -passlogfile[:stream_specifier] prefix (output,per-stream)
+	   Set two-pass log file name prefix to prefix, the default file name prefix is ``ffmpeg2pass''.
+	   The complete file name will be PREFIX-N.log, where N is a number specific to the output stream
+
+       -vf filtergraph (output)
+	   Create the filtergraph specified by filtergraph and use it to filter the stream.
+
+	   This is an alias for "-filter:v", see the -filter option.
+
+===============================================================================
+===============================================================================
+
+FFMPEG(1)						FFMPEG(1)
+
+NAME
+       ffmpeg - ffmpeg video converter
+
+SYNOPSIS
+       ffmpeg [global_options] {[input_file_options] -i input_url} ... 
+       {[output_file_options] output_url} ...
+
+DESCRIPTION
+       ffmpeg is a very fast video and audio converter that can also 
+       grab from a live audio/video source. It can also convert between 
+       arbitrary sample rates and resize video on the fly with a high 
+       quality polyphase filter.
+
+       ffmpeg reads from an arbitrary number of input "files" (which 
+       can be regular files, pipes, network streams, grabbing devices, 
+       etc.), specified by the "-i" option, and writes to an arbitrary 
+       number of output "files", which are specified by a plain output
+       url. Anything found on the command line which cannot be inter-
+       preted as an option is considered to be an output url.
+
+       Each input or output url can, in principle, contain any number of 
+       streams of different types (video/audio/subtitle/attachment/data). 
+       The allowed number and/or types of streams may be limited by the 
+       container format. Selecting which streams from which inputs will 
+       go into which output is either done automatically or with the 
+       "-map" option (see the Stream selection chapter).
+
+       To refer to input files in options, you must use their indices 
+       (0-based). E.g.  the first input file is 0, the second is 1, etc. 
+       Similarly, streams within a file are referred to by their indices. 
+       E.g. "2:3" refers to the fourth stream in the third input file. 
+       Also see the Stream specifiers chapter.
+
+       As a general rule, options are applied to the next specified file. 
+       Therefore, order is important, and you can have the same option on 
+       the command line multiple times. Each occurrence is then applied 
+       to the next input or output file.  Exceptions from this rule are 
+       the global options (e.g. verbosity level), which should be specified 
+       first.
+
+       Do not mix input and output files -- first specify all input files, 
+       then all output files. Also do not mix options which belong to 
+       different files. All options apply ONLY to the next input or output 
+       file and are reset between files.
+
+       •   To set the video bitrate of the output file to 64 kbit/s:
+
+		   ffmpeg -i input.avi -b:v 64k -bufsize 64k output.avi
+
+       •   To force the frame rate of the output file to 24 fps:
+
+		   ffmpeg -i input.avi -r 24 output.avi
+
+       •   To force the frame rate of the input file (valid for raw formats only) to 1 fps and the frame
+	   rate of the output file to 24 fps:
+
+		   ffmpeg -r 1 -i input.m2v -r 24 output.avi
+
+       The format option may be needed for raw input files.
+
+DETAILED DESCRIPTION
+       The transcoding process in ffmpeg for each output can be described by the following diagram:
+
+		_______ 	     ______________
+	       |       |	    |		   |
+	       | input |  demuxer   | encoded data |   decoder
+	       | file  | ---------> | packets	   | -----+
+	       |_______|	    |______________|	  |
+							  v
+						      _________
+						     |	       |
+						     | decoded |
+						     | frames  |
+						     |_________|
+		________	     ______________	  |
+	       |	|	    |		   |	  |
+	       | output | <-------- | encoded data | <----+
+	       | file	|   muxer   | packets	   |   encoder
+	       |________|	    |______________|
+
+       ffmpeg calls the libavformat library (containing demuxers) to read input files and get packets
+       containing encoded data from them. When there are multiple input files, ffmpeg tries to keep them
+       synchronized by tracking lowest timestamp on any active input stream.
+
+       Encoded packets are then passed to the decoder (unless streamcopy is selected for the stream, see
+       further for a description). The decoder produces uncompressed frames (raw video/PCM audio/...)
+       which can be processed further by filtering (see next section). After filtering, the frames are
+       passed to the encoder, which encodes them and outputs encoded packets. Finally those are passed to
+       the muxer, which writes the encoded packets to the output file.
+
+   Filtering
+       Before encoding, ffmpeg can process raw audio and video frames using filters from the libavfilter
+       library. Several chained filters form a filter graph. ffmpeg distinguishes between two types of
+       filtergraphs: simple and complex.
+
+       Simple filtergraphs
+
+       Simple filtergraphs are those that have exactly one input and output, both of the same type. In
+       the above diagram they can be represented by simply inserting an additional step between decoding
+       and encoding:
+
+		_________			 ______________
+	       |	 |			|	       |
+	       | decoded |			| encoded data |
+	       | frames  |\		      _ | packets      |
+	       |_________| \		      /||______________|
+			    \	__________   /
+		 simple     _\||	  | /  encoder
+		 filtergraph   | filtered |/
+			       | frames   |
+			       |__________|
+
+       Simple filtergraphs are configured with the per-stream -filter option (with -vf and -af aliases
+       for video and audio respectively).  A simple filtergraph for video can look for example like this:
+
+		_______        _____________	    _______	   ________
+	       |       |      | 	    |	   |	   |	  |	   |
+	       | input | ---> | deinterlace | ---> | scale | ---> | output |
+	       |_______|      |_____________|	   |_______|	  |________|
+
+       Note that some filters change frame properties but not frame contents. E.g. the "fps" filter in
+       the example above changes number of frames, but does not touch the frame contents. Another example
+       is the "setpts" filter, which only sets timestamps and otherwise passes the frames unchanged.
+
+       Complex filtergraphs
+
+       Complex filtergraphs are those which cannot be described as simply a linear processing chain
+       applied to one stream. This is the case, for example, when the graph has more than one input
+       and/or output, or when output stream type is different from input. They can be represented with
+       the following diagram:
+
+		_________
+	       |	 |
+	       | input 0 |\		       __________
+	       |_________| \		      | 	 |
+			    \	_________    /| output 0 |
+			     \ |	 |  / |__________|
+		_________     \| complex | /
+	       |	 |     |	 |/
+	       | input 1 |---->| filter  |\
+	       |_________|     |	 | \   __________
+			      /| graph	 |  \ | 	 |
+			     / |	 |   \| output 1 |
+		_________   /  |_________|    |__________|
+	       |	 | /
+	       | input 2 |/
+	       |_________|
+
+       Complex filtergraphs are configured with the -filter_complex option.  Note that this option is
+       global, since a complex filtergraph, by its nature, cannot be unambiguously associated with a
+       single stream or file.
+
+       The -lavfi option is equivalent to -filter_complex.
+
+       A trivial example of a complex filtergraph is the "overlay" filter, which has two video inputs and
+       one video output, containing one video overlaid on top of the other. Its audio counterpart is the
+       "amix" filter.
+
+   Stream copy
+       Stream copy is a mode selected by supplying the "copy" parameter to the -codec option. It makes
+       ffmpeg omit the decoding and encoding step for the specified stream, so it does only demuxing and
+       muxing. It is useful for changing the container format or modifying container-level metadata. The
+       diagram above will, in this case, simplify to this:
+
+		_______ 	     ______________	       ________
+	       |       |	    |		   |	      |        |
+	       | input |  demuxer   | encoded data |  muxer   | output |
+	       | file  | ---------> | packets	   | -------> | file   |
+	       |_______|	    |______________|	      |________|
+
+       Since there is no decoding or encoding, it is very fast and there is no quality loss. However, it
+       might not work in some cases because of many factors. Applying filters is obviously also
+       impossible, since filters work on uncompressed data.
+
+STREAM SELECTION
+       ffmpeg provides the "-map" option for manual control of stream selection in each output file.
+       Users can skip "-map" and let ffmpeg perform automatic stream selection as described below. The
+       "-vn / -an / -sn / -dn" options can be used to skip inclusion of video, audio, subtitle and data
+       streams respectively, whether manually mapped or automatically selected, except for those streams
+       which are outputs of complex filtergraphs.
+
+   Description
+       The sub-sections that follow describe the various rules that are involved in stream selection.
+       The examples that follow next show how these rules are applied in practice.
+
+       While every effort is made to accurately reflect the behavior of the program, FFmpeg is under
+       continuous development and the code may have changed since the time of this writing.
+
+       Automatic stream selection
+
+       In the absence of any map options for a particular output file, ffmpeg inspects the output format
+       to check which type of streams can be included in it, viz. video, audio and/or subtitles. For each
+       acceptable stream type, ffmpeg will pick one stream, when available, from among all the inputs.
+
+       It will select that stream based upon the following criteria:
+
+       •   for video, it is the stream with the highest resolution,
+
+       •   for audio, it is the stream with the most channels,
+
+       •   for subtitles, it is the first subtitle stream found but there's a caveat.  The output
+	   format's default subtitle encoder can be either text-based or image-based, and only a subtitle
+	   stream of the same type will be chosen.
+
+       In the case where several streams of the same type rate equally, the stream with the lowest index
+       is chosen.
+
+       Data or attachment streams are not automatically selected and can only be included using "-map".
+
+       Manual stream selection
+
+       When "-map" is used, only user-mapped streams are included in that output file, with one possible
+       exception for filtergraph outputs described below.
+
+       Complex filtergraphs
+
+       If there are any complex filtergraph output streams with unlabeled pads, they will be added to the
+       first output file. This will lead to a fatal error if the stream type is not supported by the
+       output format. In the absence of the map option, the inclusion of these streams leads to the
+       automatic stream selection of their types being skipped. If map options are present, these
+       filtergraph streams are included in addition to the mapped streams.
+
+       Complex filtergraph output streams with labeled pads must be mapped once and exactly once.
+
+       Stream handling
+
+       Stream handling is independent of stream selection, with an exception for subtitles described
+       below. Stream handling is set via the "-codec" option addressed to streams within a specific
+       output file. In particular, codec options are applied by ffmpeg after the stream selection process
+       and thus do not influence the latter. If no "-codec" option is specified for a stream type, ffmpeg
+       will select the default encoder registered by the output file muxer.
+
+       An exception exists for subtitles. If a subtitle encoder is specified for an output file, the
+       first subtitle stream found of any type, text or image, will be included. ffmpeg does not validate
+       if the specified encoder can convert the selected stream or if the converted stream is acceptable
+       within the output format. This applies generally as well: when the user sets an encoder manually,
+       the stream selection process cannot check if the encoded stream can be muxed into the output file.
+       If it cannot, ffmpeg will abort and all output files will fail to be processed.
+
+   Examples
+       The following examples illustrate the behavior, quirks and limitations of ffmpeg's stream
+       selection methods.
+
+       They assume the following three input files.
+
+	       input file 'A.avi'
+		     stream 0: video 640x360
+		     stream 1: audio 2 channels
+
+	       input file 'B.mp4'
+		     stream 0: video 1920x1080
+		     stream 1: audio 2 channels
+		     stream 2: subtitles (text)
+		     stream 3: audio 5.1 channels
+		     stream 4: subtitles (text)
+
+	       input file 'C.mkv'
+		     stream 0: video 1280x720
+		     stream 1: audio 2 channels
+		     stream 2: subtitles (image)
+
+       Example: automatic stream selection
+
+	       ffmpeg -i A.avi -i B.mp4 out1.mkv out2.wav -map 1:a -c:a copy out3.mov
+
+       There are three output files specified, and for the first two, no "-map" options are set, so
+       ffmpeg will select streams for these two files automatically.
+
+       out1.mkv is a Matroska container file and accepts video, audio and subtitle streams, so ffmpeg
+       will try to select one of each type.For video, it will select "stream 0" from B.mp4, which has the
+       highest resolution among all the input video streams.For audio, it will select "stream 3" from
+       B.mp4, since it has the greatest number of channels.For subtitles, it will select "stream 2" from
+       B.mp4, which is the first subtitle stream from among A.avi and B.mp4.
+
+       out2.wav accepts only audio streams, so only "stream 3" from B.mp4 is selected.
+
+       For out3.mov, since a "-map" option is set, no automatic stream selection will occur. The "-map
+       1:a" option will select all audio streams from the second input B.mp4. No other streams will be
+       included in this output file.
+
+       For the first two outputs, all included streams will be transcoded. The encoders chosen will be
+       the default ones registered by each output format, which may not match the codec of the selected
+       input streams.
+
+       For the third output, codec option for audio streams has been set to "copy", so no decoding-
+       filtering-encoding operations will occur, or can occur.	Packets of selected streams shall be
+       conveyed from the input file and muxed within the output file.
+
+       Example: automatic subtitles selection
+
+	       ffmpeg -i C.mkv out1.mkv -c:s dvdsub -an out2.mkv
+
+       Although out1.mkv is a Matroska container file which accepts subtitle streams, only a video and
+       audio stream shall be selected. The subtitle stream of C.mkv is image-based and the default
+       subtitle encoder of the Matroska muxer is text-based, so a transcode operation for the subtitles
+       is expected to fail and hence the stream isn't selected. However, in out2.mkv, a subtitle encoder
+       is specified in the command and so, the subtitle stream is selected, in addition to the video
+       stream. The presence of "-an" disables audio stream selection for out2.mkv.
+
+       Example: unlabeled filtergraph outputs
+
+	       ffmpeg -i A.avi -i C.mkv -i B.mp4 -filter_complex "overlay" out1.mp4 out2.srt
+
+       A filtergraph is setup here using the "-filter_complex" option and consists of a single video
+       filter. The "overlay" filter requires exactly two video inputs, but none are specified, so the
+       first two available video streams are used, those of A.avi and C.mkv. The output pad of the filter
+       has no label and so is sent to the first output file out1.mp4. Due to this, automatic selection of
+       the video stream is skipped, which would have selected the stream in B.mp4. The audio stream with
+       most channels viz. "stream 3" in B.mp4, is chosen automatically. No subtitle stream is chosen
+       however, since the MP4 format has no default subtitle encoder registered, and the user hasn't
+       specified a subtitle encoder.
+
+       The 2nd output file, out2.srt, only accepts text-based subtitle streams. So, even though the first
+       subtitle stream available belongs to C.mkv, it is image-based and hence skipped.  The selected
+       stream, "stream 2" in B.mp4, is the first text-based subtitle stream.
+
+       Example: labeled filtergraph outputs
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0[outv];overlay;aresample" \
+		      -map '[outv]' -an        out1.mp4 \
+					       out2.mkv \
+		      -map '[outv]' -map 1:a:0 out3.mkv
+
+       The above command will fail, as the output pad labelled "[outv]" has been mapped twice.	None of
+       the output files shall be processed.
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0[outv];overlay;aresample" \
+		      -an	 out1.mp4 \
+				 out2.mkv \
+		      -map 1:a:0 out3.mkv
+
+       This command above will also fail as the hue filter output has a label, "[outv]", and hasn't been
+       mapped anywhere.
+
+       The command should be modified as follows,
+
+	       ffmpeg -i A.avi -i B.mp4 -i C.mkv -filter_complex "[1:v]hue=s=0,split=2[outv1][outv2];overlay;aresample" \
+		       -map '[outv1]' -an	 out1.mp4 \
+						 out2.mkv \
+		       -map '[outv2]' -map 1:a:0 out3.mkv
+
+       The video stream from B.mp4 is sent to the hue filter, whose output is cloned once using the split
+       filter, and both outputs labelled. Then a copy each is mapped to the first and third output files.
+
+       The overlay filter, requiring two video inputs, uses the first two unused video streams. Those are
+       the streams from A.avi and C.mkv. The overlay output isn't labelled, so it is sent to the first
+       output file out1.mp4, regardless of the presence of the "-map" option.
+
+       The aresample filter is sent the first unused audio stream, that of A.avi. Since this filter
+       output is also unlabelled, it too is mapped to the first output file. The presence of "-an" only
+       suppresses automatic or manual stream selection of audio streams, not outputs sent from
+       filtergraphs. Both these mapped streams shall be ordered before the mapped stream in out1.mp4.
+
+       The video, audio and subtitle streams mapped to "out2.mkv" are entirely determined by automatic
+       stream selection.
+
+       out3.mkv consists of the cloned video output from the hue filter and the first audio stream from
+       B.mp4.
+
+OPTIONS
+       All the numerical options, if not specified otherwise, accept a string representing a number as
+       input, which may be followed by one of the SI unit prefixes, for example: 'K', 'M', or 'G'.
+
+       If 'i' is appended to the SI unit prefix, the complete prefix will be interpreted as a unit prefix
+       for binary multiples, which are based on powers of 1024 instead of powers of 1000. Appending 'B'
+       to the SI unit prefix multiplies the value by 8. This allows using, for example: 'KB', 'MiB', 'G'
+       and 'B' as number suffixes.
+
+       Options which do not take arguments are boolean options, and set the corresponding value to true.
+       They can be set to false by prefixing the option name with "no". For example using "-nofoo" will
+       set the boolean option with name "foo" to false.
+
+   Stream specifiers
+       Some options are applied per-stream, e.g. bitrate or codec. Stream specifiers are used to
+       precisely specify which stream(s) a given option belongs to.
+
+       A stream specifier is a string generally appended to the option name and separated from it by a
+       colon. E.g. "-codec:a:1 ac3" contains the "a:1" stream specifier, which matches the second audio
+       stream. Therefore, it would select the ac3 codec for the second audio stream.
+
+       A stream specifier can match several streams, so that the option is applied to all of them. E.g.
+       the stream specifier in "-b:a 128k" matches all audio streams.
+
+       An empty stream specifier matches all streams. For example, "-codec copy" or "-codec: copy" would
+       copy all the streams without reencoding.
+
+       Possible forms of stream specifiers are:
+
+       stream_index
+	   Matches the stream with this index. E.g. "-threads:1 4" would set the thread count for the
+	   second stream to 4. If stream_index is used as an additional stream specifier (see below),
+	   then it selects stream number stream_index from the matching streams. Stream numbering is
+	   based on the order of the streams as detected by libavformat except when a program ID is also
+	   specified. In this case it is based on the ordering of the streams in the program.
+
+       stream_type[:additional_stream_specifier]
+	   stream_type is one of following: 'v' or 'V' for video, 'a' for audio, 's' for subtitle, 'd'
+	   for data, and 't' for attachments. 'v' matches all video streams, 'V' only matches video
+	   streams which are not attached pictures, video thumbnails or cover arts. If
+	   additional_stream_specifier is used, then it matches streams which both have this type and
+	   match the additional_stream_specifier. Otherwise, it matches all streams of the specified
+	   type.
+
+       p:program_id[:additional_stream_specifier]
+	   Matches streams which are in the program with the id program_id. If
+	   additional_stream_specifier is used, then it matches streams which both are part of the
+	   program and match the additional_stream_specifier.
+
+       #stream_id or i:stream_id
+	   Match the stream by stream id (e.g. PID in MPEG-TS container).
+
+       m:key[:value]
+	   Matches streams with the metadata tag key having the specified value. If value is not given,
+	   matches streams that contain the given tag with any value.
+
+       u   Matches streams with usable configuration, the codec must be defined and the essential
+	   information such as video dimension or audio sample rate must be present.
+
+	   Note that in ffmpeg, matching by metadata will only work properly for input files.
+
+   Generic options
+       These options are shared amongst the ff* tools.
+
+       -L  Show license.
+
+       -h, -?, -help, --help [arg]
+	   Show help. An optional parameter may be specified to print help about a specific item. If no
+	   argument is specified, only basic (non advanced) tool options are shown.
+
+	   Possible values of arg are:
+
+	   long
+	       Print advanced tool options in addition to the basic tool options.
+
+	   full
+	       Print complete list of options, including shared and private options for encoders,
+	       decoders, demuxers, muxers, filters, etc.
+
+	   decoder=decoder_name
+	       Print detailed information about the decoder named decoder_name. Use the -decoders option
+	       to get a list of all decoders.
+
+	   encoder=encoder_name
+	       Print detailed information about the encoder named encoder_name. Use the -encoders option
+	       to get a list of all encoders.
+
+	   demuxer=demuxer_name
+	       Print detailed information about the demuxer named demuxer_name. Use the -formats option
+	       to get a list of all demuxers and muxers.
+
+	   muxer=muxer_name
+	       Print detailed information about the muxer named muxer_name. Use the -formats option to
+	       get a list of all muxers and demuxers.
+
+	   filter=filter_name
+	       Print detailed information about the filter name filter_name. Use the -filters option to
+	       get a list of all filters.
+
+	   bsf=bitstream_filter_name
+	       Print detailed information about the bitstream filter name bitstream_filter_name.  Use the
+	       -bsfs option to get a list of all bitstream filters.
+
+       -version
+	   Show version.
+
+       -formats
+	   Show available formats (including devices).
+
+       -demuxers
+	   Show available demuxers.
+
+       -muxers
+	   Show available muxers.
+
+       -devices
+	   Show available devices.
+
+       -codecs
+	   Show all codecs known to libavcodec.
+
+	   Note that the term 'codec' is used throughout this documentation as a shortcut for what is
+	   more correctly called a media bitstream format.
+
+       -decoders
+	   Show available decoders.
+
+       -encoders
+	   Show all available encoders.
+
+       -bsfs
+	   Show available bitstream filters.
+
+       -protocols
+	   Show available protocols.
+
+       -filters
+	   Show available libavfilter filters.
+
+       -pix_fmts
+	   Show available pixel formats.
+
+       -sample_fmts
+	   Show available sample formats.
+
+       -layouts
+	   Show channel names and standard channel layouts.
+
+       -colors
+	   Show recognized color names.
+
+       -sources device[,opt1=val1[,opt2=val2]...]
+	   Show autodetected sources of the input device.  Some devices may provide system-dependent
+	   source names that cannot be autodetected.  The returned list cannot be assumed to be always
+	   complete.
+
+		   ffmpeg -sources pulse,server=192.168.0.4
+
+       -sinks device[,opt1=val1[,opt2=val2]...]
+	   Show autodetected sinks of the output device.  Some devices may provide system-dependent sink
+	   names that cannot be autodetected.  The returned list cannot be assumed to be always complete.
+
+		   ffmpeg -sinks pulse,server=192.168.0.4
+
+       -loglevel [flags+]loglevel | -v [flags+]loglevel
+	   Set logging level and flags used by the library.
+
+	   The optional flags prefix can consist of the following values:
+
+	   repeat
+	       Indicates that repeated log output should not be compressed to the first line and the
+	       "Last message repeated n times" line will be omitted.
+
+	   level
+	       Indicates that log output should add a "[level]" prefix to each message line. This can be
+	       used as an alternative to log coloring, e.g. when dumping the log to file.
+
+	   Flags can also be used alone by adding a '+'/'-' prefix to set/reset a single flag without
+	   affecting other flags or changing loglevel. When setting both flags and loglevel, a '+'
+	   separator is expected between the last flags value and before loglevel.
+
+	   loglevel is a string or a number containing one of the following values:
+
+	   quiet, -8
+	       Show nothing at all; be silent.
+
+	   panic, 0
+	       Only show fatal errors which could lead the process to crash, such as an assertion
+	       failure. This is not currently used for anything.
+
+	   fatal, 8
+	       Only show fatal errors. These are errors after which the process absolutely cannot
+	       continue.
+
+	   error, 16
+	       Show all errors, including ones which can be recovered from.
+
+	   warning, 24
+	       Show all warnings and errors. Any message related to possibly incorrect or unexpected
+	       events will be shown.
+
+	   info, 32
+	       Show informative messages during processing. This is in addition to warnings and errors.
+	       This is the default value.
+
+	   verbose, 40
+	       Same as "info", except more verbose.
+
+	   debug, 48
+	       Show everything, including debugging information.
+
+	   trace, 56
+
+	   For example to enable repeated log output, add the "level" prefix, and set loglevel to
+	   "verbose":
+
+		   ffmpeg -loglevel repeat+level+verbose -i input output
+
+	   Another example that enables repeated log output without affecting current state of "level"
+	   prefix flag or loglevel:
+
+		   ffmpeg [...] -loglevel +repeat
+
+	   By default the program logs to stderr. If coloring is supported by the terminal, colors are
+	   used to mark errors and warnings. Log coloring can be disabled setting the environment
+	   variable AV_LOG_FORCE_NOCOLOR or NO_COLOR, or can be forced setting the environment variable
+	   AV_LOG_FORCE_COLOR.	The use of the environment variable NO_COLOR is deprecated and will be
+	   dropped in a future FFmpeg version.
+
+       -report
+	   Dump full command line and console output to a file named "program-YYYYMMDD-HHMMSS.log" in the
+	   current directory.  This file can be useful for bug reports.  It also implies "-loglevel
+	   debug".
+
+	   Setting the environment variable FFREPORT to any value has the same effect. If the value is a
+	   ':'-separated key=value sequence, these options will affect the report; option values must be
+	   escaped if they contain special characters or the options delimiter ':' (see the ``Quoting and
+	   escaping'' section in the ffmpeg-utils manual).
+
+	   The following options are recognized:
+
+	   file
+	       set the file name to use for the report; %p is expanded to the name of the program, %t is
+	       expanded to a timestamp, "%%" is expanded to a plain "%"
+
+	   level
+	       set the log verbosity level using a numerical value (see "-loglevel").
+
+	   For example, to output a report to a file named ffreport.log using a log level of 32 (alias
+	   for log level "info"):
+
+		   FFREPORT=file=ffreport.log:level=32 ffmpeg -i input output
+
+	   Errors in parsing the environment variable are not fatal, and will not appear in the report.
+
+       -hide_banner
+	   Suppress printing banner.
+
+	   All FFmpeg tools will normally show a copyright notice, build options and library versions.
+	   This option can be used to suppress printing this information.
+
+       -cpuflags flags (global)
+	   Allows setting and clearing cpu flags. This option is intended for testing. Do not use it
+	   unless you know what you're doing.
+
+		   ffmpeg -cpuflags -sse+mmx ...
+		   ffmpeg -cpuflags mmx ...
+		   ffmpeg -cpuflags 0 ...
+
+	   Possible flags for this option are:
+
+	   x86
+	       mmx
+	       mmxext
+	       sse
+	       sse2
+	       sse2slow
+	       sse3
+	       sse3slow
+	       ssse3
+	       atom
+	       sse4.1
+	       sse4.2
+	       avx
+	       avx2
+	       xop
+	       fma3
+	       fma4
+	       3dnow
+	       3dnowext
+	       bmi1
+	       bmi2
+	       cmov
+	   ARM
+	       armv5te
+	       armv6
+	       armv6t2
+	       vfp
+	       vfpv3
+	       neon
+	       setend
+	   AArch64
+	       armv8
+	       vfp
+	       neon
+	   PowerPC
+	       altivec
+	   Specific Processors
+	       pentium2
+	       pentium3
+	       pentium4
+	       k6
+	       k62
+	       athlon
+	       athlonxp
+	       k8
+
+   AVOptions
+       These options are provided directly by the libavformat, libavdevice and libavcodec libraries. To
+       see the list of available AVOptions, use the -help option. They are separated into two categories:
+
+       generic
+	   These options can be set for any container, codec or device. Generic options are listed under
+	   AVFormatContext options for containers/devices and under AVCodecContext options for codecs.
+
+       private
+	   These options are specific to the given container, device or codec. Private options are listed
+	   under their corresponding containers/devices/codecs.
+
+       For example to write an ID3v2.3 header instead of a default ID3v2.4 to an MP3 file, use the
+       id3v2_version private option of the MP3 muxer:
+
+	       ffmpeg -i input.flac -id3v2_version 3 out.mp3
+
+       All codec AVOptions are per-stream, and thus a stream specifier should be attached to them:
+
+	       ffmpeg -i multichannel.mxf -map 0:v:0 -map 0:a:0 -map 0:a:0 -c:a:0 ac3 -b:a:0 640k -ac:a:1 2 -c:a:1 aac -b:2 128k out.mp4
+
+       In the above example, a multichannel audio stream is mapped twice for output.  The first instance
+       is encoded with codec ac3 and bitrate 640k.  The second instance is downmixed to 2 channels and
+       encoded with codec aac. A bitrate of 128k is specified for it using absolute index of the output
+       stream.
+
+       Note: the -nooption syntax cannot be used for boolean AVOptions, use -option 0/-option 1.
+
+       Note: the old undocumented way of specifying per-stream AVOptions by prepending v/a/s to the
+       options name is now obsolete and will be removed soon.
+
+   Main options
+       -f fmt (input/output)
+	   Force input or output file format. The format is normally auto detected for input files and
+	   guessed from the file extension for output files, so this option is not needed in most cases.
+
+       -i url (input)
+	   input file url
+
+       -y (global)
+	   Overwrite output files without asking.
+
+       -n (global)
+	   Do not overwrite output files, and exit immediately if a specified output file already exists.
+
+       -stream_loop number (input)
+	   Set number of times input stream shall be looped. Loop 0 means no loop, loop -1 means infinite
+	   loop.
+
+       -c[:stream_specifier] codec (input/output,per-stream)
+       -codec[:stream_specifier] codec (input/output,per-stream)
+	   Select an encoder (when used before an output file) or a decoder (when used before an input
+	   file) for one or more streams. codec is the name of a decoder/encoder or a special value
+	   "copy" (output only) to indicate that the stream is not to be re-encoded.
+
+	   For example
+
+		   ffmpeg -i INPUT -map 0 -c:v libx264 -c:a copy OUTPUT
+
+	   encodes all video streams with libx264 and copies all audio streams.
+
+	   For each stream, the last matching "c" option is applied, so
+
+		   ffmpeg -i INPUT -map 0 -c copy -c:v:1 libx264 -c:a:137 libvorbis OUTPUT
+
+	   will copy all the streams except the second video, which will be encoded with libx264, and the
+	   138th audio, which will be encoded with libvorbis.
+
+       -t duration (input/output)
+	   When used as an input option (before "-i"), limit the duration of data read from the input
+	   file.
+
+	   When used as an output option (before an output url), stop writing the output after its
+	   duration reaches duration.
+
+	   duration must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+	   -to and -t are mutually exclusive and -t has priority.
+
+       -to position (input/output)
+	   Stop writing the output or reading the input at position.  position must be a time duration
+	   specification, see the Time duration section in the ffmpeg-utils(1) manual.
+
+	   -to and -t are mutually exclusive and -t has priority.
+
+       -fs limit_size (output)
+	   Set the file size limit, expressed in bytes. No further chunk of bytes is written after the
+	   limit is exceeded. The size of the output file is slightly more than the requested file size.
+
+       -ss position (input/output)
+	   When used as an input option (before "-i"), seeks in this input file to position. Note that in
+	   most formats it is not possible to seek exactly, so ffmpeg will seek to the closest seek point
+	   before position.  When transcoding and -accurate_seek is enabled (the default), this extra
+	   segment between the seek point and position will be decoded and discarded. When doing stream
+	   copy or when -noaccurate_seek is used, it will be preserved.
+
+	   When used as an output option (before an output url), decodes but discards input until the
+	   timestamps reach position.
+
+	   position must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+       -sseof position (input)
+	   Like the "-ss" option but relative to the "end of file". That is negative values are earlier
+	   in the file, 0 is at EOF.
+
+       -itsoffset offset (input)
+	   Set the input time offset.
+
+	   offset must be a time duration specification, see the Time duration section in the
+	   ffmpeg-utils(1) manual.
+
+	   The offset is added to the timestamps of the input files. Specifying a positive offset means
+	   that the corresponding streams are delayed by the time duration specified in offset.
+
+       -itsscale scale (input,per-stream)
+	   Rescale input timestamps. scale should be a floating point number.
+
+       -timestamp date (output)
+	   Set the recording timestamp in the container.
+
+	   date must be a date specification, see the Date section in the ffmpeg-utils(1) manual.
+
+       -metadata[:metadata_specifier] key=value (output,per-metadata)
+	   Set a metadata key/value pair.
+
+	   An optional metadata_specifier may be given to set metadata on streams, chapters or programs.
+	   See "-map_metadata" documentation for details.
+
+	   This option overrides metadata set with "-map_metadata". It is also possible to delete
+	   metadata by using an empty value.
+
+	   For example, for setting the title in the output file:
+
+		   ffmpeg -i in.avi -metadata title="my title" out.flv
+
+	   To set the language of the first audio stream:
+
+		   ffmpeg -i INPUT -metadata:s:a:0 language=eng OUTPUT
+
+       -disposition[:stream_specifier] value (output,per-stream)
+	   Sets the disposition for a stream.
+
+	   This option overrides the disposition copied from the input stream. It is also possible to
+	   delete the disposition by setting it to 0.
+
+	   The following dispositions are recognized:
+
+	   default
+	   dub
+	   original
+	   comment
+	   lyrics
+	   karaoke
+	   forced
+	   hearing_impaired
+	   visual_impaired
+	   clean_effects
+	   attached_pic
+	   captions
+	   descriptions
+	   dependent
+	   metadata
+
+	   For example, to make the second audio stream the default stream:
+
+		   ffmpeg -i in.mkv -c copy -disposition:a:1 default out.mkv
+
+	   To make the second subtitle stream the default stream and remove the default disposition from
+	   the first subtitle stream:
+
+		   ffmpeg -i in.mkv -c copy -disposition:s:0 0 -disposition:s:1 default out.mkv
+
+	   To add an embedded cover/thumbnail:
+
+		   ffmpeg -i in.mp4 -i IMAGE -map 0 -map 1 -c copy -c:v:1 png -disposition:v:1 attached_pic out.mp4
+
+	   Not all muxers support embedded thumbnails, and those who do, only support a few formats, like
+	   JPEG or PNG.
+
+       -program [title=title:][program_num=program_num:]st=stream[:st=stream...] (output)
+	   Creates a program with the specified title, program_num and adds the specified stream(s) to
+	   it.
+
+       -target type (output)
+	   Specify target file type ("vcd", "svcd", "dvd", "dv", "dv50"). type may be prefixed with
+	   "pal-", "ntsc-" or "film-" to use the corresponding standard. All the format options (bitrate,
+	   codecs, buffer sizes) are then set automatically. You can just type:
+
+		   ffmpeg -i myfile.avi -target vcd /tmp/vcd.mpg
+
+	   Nevertheless you can specify additional options as long as you know they do not conflict with
+	   the standard, as in:
+
+		   ffmpeg -i myfile.avi -target vcd -bf 2 /tmp/vcd.mpg
+
+       -dn (input/output)
+	   As an input option, blocks all data streams of a file from being filtered or being
+	   automatically selected or mapped for any output. See "-discard" option to disable streams
+	   individually.
+
+	   As an output option, disables data recording i.e. automatic selection or mapping of any data
+	   stream. For full manual control see the "-map" option.
+
+       -dframes number (output)
+	   Set the number of data frames to output. This is an obsolete alias for "-frames:d", which you
+	   should use instead.
+
+       -frames[:stream_specifier] framecount (output,per-stream)
+	   Stop writing to the stream after framecount frames.
+
+       -q[:stream_specifier] q (output,per-stream)
+       -qscale[:stream_specifier] q (output,per-stream)
+	   Use fixed quality scale (VBR). The meaning of q/qscale is codec-dependent.  If qscale is used
+	   without a stream_specifier then it applies only to the video stream, this is to maintain
+	   compatibility with previous behavior and as specifying the same codec specific value to 2
+	   different codecs that is audio and video generally is not what is intended when no
+	   stream_specifier is used.
+
+       -filter[:stream_specifier] filtergraph (output,per-stream)
+	   Create the filtergraph specified by filtergraph and use it to filter the stream.
+
+	   filtergraph is a description of the filtergraph to apply to the stream, and must have a single
+	   input and a single output of the same type of the stream. In the filtergraph, the input is
+	   associated to the label "in", and the output to the label "out". See the ffmpeg-filters manual
+	   for more information about the filtergraph syntax.
+
+	   See the -filter_complex option if you want to create filtergraphs with multiple inputs and/or
+	   outputs.
+
+       -filter_script[:stream_specifier] filename (output,per-stream)
+	   This option is similar to -filter, the only difference is that its argument is the name of the
+	   file from which a filtergraph description is to be read.
+
+       -filter_threads nb_threads (global)
+	   Defines how many threads are used to process a filter pipeline. Each pipeline will produce a
+	   thread pool with this many threads available for parallel processing.  The default is the
+	   number of available CPUs.
+
+       -pre[:stream_specifier] preset_name (output,per-stream)
+	   Specify the preset for matching stream(s).
+
+       -stats (global)
+	   Print encoding progress/statistics. It is on by default, to explicitly disable it you need to
+	   specify "-nostats".
+
+       -progress url (global)
+	   Send program-friendly progress information to url.
+
+	   Progress information is written approximately every second and at the end of the encoding
+	   process. It is made of "key=value" lines. key consists of only alphanumeric characters. The
+	   last key of a sequence of progress information is always "progress".
+
+       -stdin
+	   Enable interaction on standard input. On by default unless standard input is used as an input.
+	   To explicitly disable interaction you need to specify "-nostdin".
+
+	   Disabling interaction on standard input is useful, for example, if ffmpeg is in the background
+	   process group. Roughly the same result can be achieved with "ffmpeg ... < /dev/null" but it
+	   requires a shell.
+
+       -debug_ts (global)
+	   Print timestamp information. It is off by default. This option is mostly useful for testing
+	   and debugging purposes, and the output format may change from one version to another, so it
+	   should not be employed by portable scripts.
+
+	   See also the option "-fdebug ts".
+
+       -attach filename (output)
+	   Add an attachment to the output file. This is supported by a few formats like Matroska for
+	   e.g. fonts used in rendering subtitles. Attachments are implemented as a specific type of
+	   stream, so this option will add a new stream to the file. It is then possible to use per-
+	   stream options on this stream in the usual way. Attachment streams created with this option
+	   will be created after all the other streams (i.e. those created with "-map" or automatic
+	   mappings).
+
+	   Note that for Matroska you also have to set the mimetype metadata tag:
+
+		   ffmpeg -i INPUT -attach DejaVuSans.ttf -metadata:s:2 mimetype=application/x-truetype-font out.mkv
+
+	   (assuming that the attachment stream will be third in the output file).
+
+       -dump_attachment[:stream_specifier] filename (input,per-stream)
+	   Extract the matching attachment stream into a file named filename. If filename is empty, then
+	   the value of the "filename" metadata tag will be used.
+
+	   E.g. to extract the first attachment to a file named 'out.ttf':
+
+		   ffmpeg -dump_attachment:t:0 out.ttf -i INPUT
+
+	   To extract all attachments to files determined by the "filename" tag:
+
+		   ffmpeg -dump_attachment:t "" -i INPUT
+
+	   Technical note -- attachments are implemented as codec extradata, so this option can actually
+	   be used to extract extradata from any stream, not just attachments.
+
+       -noautorotate
+	   Disable automatically rotating video based on file metadata.
+
+   Video Options
+       -vframes number (output)
+	   Set the number of video frames to output. This is an obsolete alias for "-frames:v", which you
+	   should use instead.
+
+       -r[:stream_specifier] fps (input/output,per-stream)
+	   Set frame rate (Hz value, fraction or abbreviation).
+
+	   As an input option, ignore any timestamps stored in the file and instead generate timestamps
+	   assuming constant frame rate fps.  This is not the same as the -framerate option used for some
+	   input formats like image2 or v4l2 (it used to be the same in older versions of FFmpeg).  If in
+	   doubt use -framerate instead of the input option -r.
+
+	   As an output option, duplicate or drop input frames to achieve constant output frame rate fps.
+
+       -s[:stream_specifier] size (input/output,per-stream)
+	   Set frame size.
+
+	   As an input option, this is a shortcut for the video_size private option, recognized by some
+	   demuxers for which the frame size is either not stored in the file or is configurable -- e.g.
+	   raw video or video grabbers.
+
+	   As an output option, this inserts the "scale" video filter to the end of the corresponding
+	   filtergraph. Please use the "scale" filter directly to insert it at the beginning or some
+	   other place.
+
+	   The format is wxh (default - same as source).
+
+       -aspect[:stream_specifier] aspect (output,per-stream)
+	   Set the video display aspect ratio specified by aspect.
+
+	   aspect can be a floating point number string, or a string of the form num:den, where num and
+	   den are the numerator and denominator of the aspect ratio. For example "4:3", "16:9",
+	   "1.3333", and "1.7777" are valid argument values.
+
+	   If used together with -vcodec copy, it will affect the aspect ratio stored at container level,
+	   but not the aspect ratio stored in encoded frames, if it exists.
+
+===============================================================================
+===============================================================================

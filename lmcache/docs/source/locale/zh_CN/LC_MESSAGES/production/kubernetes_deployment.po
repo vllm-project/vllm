@@ -1,0 +1,58 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/kubernetes_deployment.rst:2
+msgid "Kubernetes Deployment"
+msgstr "Kubernetes 部署"
+
+#: ../../source/production/kubernetes_deployment.rst:4
+msgid ""
+"For Kubernetes deployment of vLLM with LMCache integration, we recommend "
+"using the `vLLM Production Stack <https://github.com/vllm-project"
+"/production-stack>`_ project. This is a specialized production-ready "
+"implementation for K8S-native cluster-wide deployment for vllm & lmcache."
+msgstr "对于集成 LMCache 的 vLLM 的 Kubernetes 部署，我们建议使用 `vLLM Production Stack <https://github.com/vllm-project/production-stack>`_ 项目。这是一个专门为 vllm 和 lmcache 提供的 K8S 原生集群范围的生产就绪实现。"
+
+#: ../../source/production/kubernetes_deployment.rst:6
+msgid ""
+"For a quick start guide, please refer to the official `documentation "
+"<https://docs.vllm.ai/projects/production-"
+"stack/en/latest/getting_started/quickstart.html>`_"
+msgstr "有关快速入门指南，请参阅官方 `文档 <https://docs.vllm.ai/projects/production-stack/en/latest/getting_started/quickstart.html>`_。"
+
+#: ../../source/production/kubernetes_deployment.rst:8
+msgid ""
+"and replace the Helm values file with (`values-05-cpu-offloading.yaml "
+"<https://github.com/vllm-project/production-"
+"stack/blob/main/tutorials/assets/values-05-cpu-offloading.yaml>`_):"
+msgstr "并用 (`values-05-cpu-offloading.yaml <https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-05-cpu-offloading.yaml>`_) 替换 Helm 值文件："
+
+#: ../../source/production/kubernetes_deployment.rst:35
+msgid "OR"
+msgstr "或"
+
+#: ../../source/production/kubernetes_deployment.rst:37
+msgid ""
+"refer to a detailed `step-by-step tutorial <https://github.com/vllm-"
+"project/production-stack/blob/main/tutorials/05-offload-kv-cache.md>`_ on"
+" how to offload KV cache with LMCache in the production stack."
+msgstr "请参阅有关如何在生产环境中使用 LMCache 卸载 KV Cache 的详细 `逐步教程 <https://github.com/vllm-project/production-stack/blob/main/tutorials/05-offload-kv-cache.md>`_。"
+

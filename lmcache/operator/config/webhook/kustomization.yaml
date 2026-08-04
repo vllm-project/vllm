@@ -1,0 +1,15 @@
+resources:
+- manifests.yaml
+- service.yaml
+
+# The generated manifests.yaml only carries the fields controller-gen can emit
+# (path/failurePolicy/sideEffects/reinvocationPolicy/rules). controller-gen cannot
+# emit arbitrary objectSelector/namespaceSelector matchExpressions, so the
+# blast-radius gating is layered on here as a strategic-merge patch. Never edit the
+# generated manifests.yaml directly.
+patches:
+- path: mutating_webhook_selectors_patch.yaml
+
+# the following config is for teaching kustomize how to do var substitution
+configurations:
+- kustomizeconfig.yaml

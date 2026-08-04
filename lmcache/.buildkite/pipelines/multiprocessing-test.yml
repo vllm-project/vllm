@@ -1,0 +1,11 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":compression: Multiprocessing tests"
+    key: "test"
+    timeout_in_minutes: 60
+    commands:
+      - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Reuse the trigger condition for comprehensive tests
+      - chmod +x .buildkite/scripts/multiprocessing-test/*.sh
+      - BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/multiprocessing-test/run-mp-test.sh

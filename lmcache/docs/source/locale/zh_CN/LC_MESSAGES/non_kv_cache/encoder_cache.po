@@ -1,0 +1,332 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:2
+msgid "Encoder caching"
+msgstr "编码器缓存"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:9
+msgid ""
+"The **Encoder Cache (EC)** stores the output of a multimodal model's "
+"encoder stage, keyed by vLLM's per-input ``mm_hash``. When two requests "
+"share a multimodal input — the same image, video, or audio clip — the "
+"second request loads the encoder output from the cache and the encoder "
+"does not run."
+msgstr ""
+"**编码器缓存 (EC)** 存储多模态模型编码器阶段的输出，按 vLLM 的每个输入 ``mm_hash`` "
+"进行索引。当两个请求共享一个多模态输入——相同的图像、视频或音频片段——第二个请求将从缓存中加载编码器输出，而编码器不会运行。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:15
+msgid ""
+"This applies to any modality vLLM exposes through its encoder-cache "
+"extension point: vision encoders (CLIP / ViT-style towers used for images"
+" and sampled video frames), audio encoders (Whisper-style towers used for"
+" raw waveforms), and combined-modality encoders such as Qwen2.5-Omni. The"
+" connector is modality-agnostic — it caches a tensor of shape "
+"``[num_tokens, hidden_dim]`` keyed by ``mm_hash``, without knowing which "
+"encoder produced it."
+msgstr ""
+"这适用于 vLLM 通过其编码器缓存扩展点暴露的任何模态：视觉编码器（用于图像和采样视频帧的 CLIP / ViT "
+"风格塔）、音频编码器（用于原始波形的 Whisper 风格塔）以及诸如 Qwen2.5-Omni "
+"的组合模态编码器。连接器是模态无关的——它缓存一个形状为 ``[num_tokens, hidden_dim]`` 的张量，键为 "
+"``mm_hash``\\ ，而不知道是哪个编码器生成的。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:23
+msgid ""
+"vLLM exposes the encoder-cache extension point via ``ECConnectorBase`` "
+"(vLLM v1 only). LMCache provides an ``LMCacheECConnector`` shim on the "
+"vLLM side and an ``ECCacheEngine`` on the LMCache side; together they "
+"back the encoder cache with any of LMCache's storage backends (local CPU,"
+" local disk, remote, NIXL)."
+msgstr ""
+"vLLM 通过 ``ECConnectorBase``\\ （仅限 vLLM v1）暴露了编码器缓存扩展点。LMCache 在 vLLM "
+"端提供了一个 ``LMCacheECConnector`` 适配器，在 LMCache 端提供了一个 ``ECCacheEngine``\\ "
+"；它们共同支持使用 LMCache 的任何存储后端（本地 CPU、本地磁盘、远程、NIXL）来备份编码器缓存。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:30
+msgid "Enabling it"
+msgstr "启用它"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:32
+msgid "Pass ``--ec-transfer-config`` to ``vllm serve``:"
+msgstr "将 ``--ec-transfer-config`` 传递给 ``vllm serve``\\ ："
+
+#: ../../source/non_kv_cache/encoder_cache.rst:43
+msgid ""
+"``ec_role`` choices: ``ec_producer`` (saves only), ``ec_consumer`` (reads"
+" only), ``ec_both`` (single-instance default)."
+msgstr ""
+"``ec_role`` 选项： ``ec_producer``\\ （仅保存）， ``ec_consumer``\\ （仅读取）， "
+"``ec_both``\\ （单实例默认）。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:46
+msgid ""
+"Set ``LMCACHE_CONFIG_FILE`` to point at a YAML with at least one storage "
+"backend configured for EC:"
+msgstr "将 ``LMCACHE_CONFIG_FILE`` 设置为指向一个配置了至少一个 EC 存储后端的 YAML 文件："
+
+#: ../../source/non_kv_cache/encoder_cache.rst:57
+msgid ""
+"To size EC storage independently from the (separate) KV cache, prefix "
+"overrides with ``ec_`` in YAML or ``LMCACHE_EC_`` in the environment "
+"(e.g. ``ec_max_local_disk_size: 64`` or "
+"``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``). EC and KV always run with "
+"**separate** ``StorageManager`` instances so one cannot evict the other."
+msgstr ""
+"要独立于（单独的）KV Cache 调整 EC 存储大小，请在 YAML 中使用 ``ec_`` 前缀覆盖，或在环境中使用 "
+"``LMCACHE_EC_`` 前缀（例如 ``ec_max_local_disk_size: 64`` 或 "
+"``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``\\ ）。EC 和 KV 始终在 **独立** 的 "
+"``StorageManager`` 实例中运行，因此一个不能逐出另一个。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:64
+msgid ""
+"If you don't set ``local_disk`` (or its EC override) the engine still "
+"starts, but EC entries live in CPU memory only and do not survive process"
+" restart. Set ``local_disk`` (or ``ec_local_disk``) to a real path if you"
+" want cache persistence — there is no implicit on-disk default location."
+msgstr ""
+"如果您不设置 ``local_disk``\\ （或其 EC 覆盖），引擎仍然会启动，但 EC 条目仅存在于 CPU "
+"内存中，并且在进程重启时不会保留。如果您希望缓存持久化，请将 ``local_disk``\\ （或 ``ec_local_disk``\\ "
+"）设置为一个真实路径——没有隐式的磁盘默认位置。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:71
+msgid "Verifying it's working"
+msgstr "验证它是否正常工作"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:73
+msgid "Three independent signals:"
+msgstr "三个独立信号："
+
+#: ../../source/non_kv_cache/encoder_cache.rst:75
+msgid ""
+"**vLLM metric.** ``loggers.py`` reports ``MM cache hit rate: X%`` after "
+"warm requests."
+msgstr "**vLLM 指标。** ``loggers.py`` 在预热请求后报告 ``MM 缓存命中率：X%``\\ 。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:77
+msgid ""
+"**LMCache log line.** Cold (first-time) requests emit ``LMCache INFO: EC "
+"put: stored N bytes for mm_hash=H``. Warm requests emit no ``EC put``."
+msgstr ""
+"**LMCache 日志行。** 冷（首次）请求会发出 ``LMCache INFO: EC put: stored N bytes for "
+"mm_hash=H``\\ 。热请求不会发出 ``EC put``\\ 。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:80
+msgid ""
+"**On-disk file.** Under ``local_disk`` an entry of the form "
+"``<model>@1@0@<chunk_hash>@<dtype>.pt`` appears after the first request "
+"and is reused thereafter. The ``@1@0@`` prefix reflects sentinel "
+"``world_size=1, worker_id=0`` in the EC cache key, so all tensor-parallel"
+" ranks share one entry."
+msgstr ""
+"**磁盘文件。** 在 ``local_disk`` 下，形式为 ``<model>@1@0@<chunk_hash>@<dtype>.pt`` "
+"的条目在第一次请求后出现，并在此后被重用。\\ ``@1@0@`` 前缀反映了 EC 缓存键中的哨兵 ``world_size=1, "
+"worker_id=0``\\ ，因此所有张量并行的 rank 共享一个条目。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:87
+msgid "Design notes (user-visible)"
+msgstr "设计说明（用户可见）"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:89
+msgid ""
+"**Cache key uses sentinel TP shape.** Encoder outputs are replicated "
+"across TP ranks, so the EC key uses ``world_size=1, worker_id=0`` "
+"regardless of the deployment's actual TP. Concurrent puts from N ranks "
+"land on the same key with identical contents."
+msgstr ""
+"**缓存键使用哨兵 TP 形状。** 编码器输出在 TP 排中复制，因此 EC 键使用 ``world_size=1, "
+"worker_id=0``\\ ，而不管部署的实际 TP。来自 N 个排名的并发放置会落在相同的键上，内容相同。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:94
+msgid ""
+"**Dtype decoupled from KV quant.** The dtype field of the EC cache key is"
+" the encoder output dtype (``vllm_config.model_config.dtype``), not "
+"``metadata.kv_dtype``. Changing KV quantization does not invalidate EC "
+"entries."
+msgstr ""
+"**数据类型与 KV 量化解耦。** EC 缓存键的 dtype 字段是编码器输出的数据类型（\\ "
+"``vllm_config.model_config.dtype``\\ ），而不是 ``metadata.kv_dtype``\\ 。更改 KV"
+" 量化不会使 EC 条目失效。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:98
+msgid ""
+"**Separate StorageManager from KV.** KV and EC have very different access"
+" patterns (KV chunked / layerwise / high-volume; EC single-tensor / "
+"request-scoped). Sharing one allocator pool would let one cache evict the"
+" other in unpredictable ways. Per-cache sizing knobs (``ec_max_local_*``)"
+" are explicit instead."
+msgstr ""
+"**将 StorageManager 与 KV 分离。** KV 和 EC 的访问模式非常不同（KV 是分块/逐层/高吞吐量；EC "
+"是单张张量/请求范围）。共享一个分配器池会导致一个缓存以不可预测的方式逐出另一个缓存。因此，针对每个缓存的大小调整参数（\\ "
+"``ec_max_local_*``\\ ）是明确的。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:103
+msgid ""
+"**Connector role pinned to \"worker\".** vLLM's ``ECConnectorBase`` is "
+"dual-role (scheduler and worker). The LMCache connector calls "
+"``create_lmcache_metadata(..., role=\"worker\")`` regardless, because the"
+" scheduler-side ``has_cache_item`` needs a fully constructed "
+"``StorageManager`` and LMCache currently aborts disk-backend setup when "
+"``metadata.role == \"scheduler\"``."
+msgstr ""
+"**连接器角色固定为“worker”。** vLLM 的 ``ECConnectorBase`` 是双角色（调度器和工作者）。LMCache "
+"连接器无论如何都会调用 ``create_lmcache_metadata(..., role=\\\"worker\\\")``\\ "
+"，因为调度器端的 ``has_cache_item`` 需要一个完全构造的 ``StorageManager``\\ ，而 LMCache 当前在"
+" ``metadata.role == \\\"scheduler\\\"`` 时会中止磁盘后端的设置。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:110
+msgid ""
+"The full internal design (class layering, code paths, follow-up work) "
+"lives at :file:`docs/design/v1/encoder-cache.md` in the source tree."
+msgstr "完整的内部设计（类层次、代码路径、后续工作）位于源代码树中的 :file:`docs/design/v1/encoder-cache.md`。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:114
+msgid "Benchmark"
+msgstr "基准测试"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:116
+msgid ""
+"Live measurement on a single H100 80GB with ``Qwen/Qwen2.5-VL-7B-"
+"Instruct`` (bf16) and Big Buck Bunny (10:34, 720p, ≈ 60 MB MP4). Same "
+"chat-completion request sent 1 cold + N warm times against the same vLLM "
+"server."
+msgstr ""
+"在一台单个 H100 80GB 上进行实时测量，使用 ``Qwen/Qwen2.5-VL-7B-Instruct``\\ "
+"（bf16）和《大雄兔的故事》（10:34，720p，≈ 60 MB MP4）。对同一 vLLM 服务器发送相同的聊天完成请求，1 次冷启动 + "
+"N 次热启动。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:121
+msgid ""
+"Two configurations, varying only ``num_frames`` (how many frames vLLM "
+"samples from the video):"
+msgstr "两个配置，仅改变 ``num_frames``\\ （vLLM 从视频中采样的帧数）："
+
+#: ../../source/non_kv_cache/encoder_cache.rst:128
+msgid "num_frames"
+msgstr "num_frames"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:129
+msgid "EC entry"
+msgstr "EC 条目"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:130
+msgid "Cold TTFT (s)"
+msgstr "冷 TTFT (秒)"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:131
+msgid "Warm TTFT mean (s)"
+msgstr "温暖 TTFT 平均值 (秒)"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:132
+msgid "Saved"
+msgstr "已保存"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:133
+msgid "Speedup"
+msgstr "加速"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:134
+msgid "32 (vLLM default)"
+msgstr "32 (vLLM 默认)"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:135
+msgid "34.3 MB"
+msgstr "34.3 MB"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:136
+msgid "3.923"
+msgstr "3.923"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:137
+msgid "3.125"
+msgstr "3.125"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:138
+msgid "798 ms"
+msgstr "798 毫秒"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:139
+msgid "**1.26×**"
+msgstr "**1.26×**"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:140
+msgid "128"
+msgstr "128"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:141
+msgid "130.8 MB"
+msgstr "130.8 MB"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:142
+msgid "5.895"
+msgstr "5.895"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:143
+msgid "3.375"
+msgstr "3.375"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:144
+msgid "2.52 s"
+msgstr "2.52 秒"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:145
+msgid "**1.75×**"
+msgstr "**1.75×**"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:147
+msgid ""
+"Speedup grows with ``num_frames`` because the encoder workload scales "
+"linearly with frame count while the rest of prefill (LM forward over the "
+"resulting multimodal tokens + the short text prompt) scales sublinearly. "
+"The same principle applies to other modalities: the win is largest when "
+"the encoder is the dominant share of prefill (long videos at high frame "
+"counts, long audio clips, large images at high resolution) and smallest "
+"when text prefill dominates."
+msgstr ""
+"随着 ``num_frames`` 的增加，速度提升也会增加，因为编码器的工作负载与帧数呈线性扩展，而其余的 "
+"Prefill（对生成的多模态令牌和短文本提示的 LM 前向推理）则呈亚线性扩展。相同的原理适用于其他模态：当编码器占据 Prefill "
+"的主导份额时（高帧数的长视频、长音频片段、高分辨率的大图像），收益最大；而当文本 Prefill 占主导时，收益最小。"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:156
+msgid "Reproducing"
+msgstr "再现"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:158
+msgid "Server (heavier-encoder configuration):"
+msgstr "服务器（重型编码器配置）："
+
+#: ../../source/non_kv_cache/encoder_cache.rst:174
+msgid ""
+"Client: any streaming OpenAI-compatible client that re-sends the same "
+"multimodal payload. The benchmark measures TTFT (time to first token) "
+"because the encoder runs during prefill — any encoder savings show up "
+"there. Decode tokens-per-second is unaffected by EC."
+msgstr ""
+"客户端：任何重新发送相同多模态负载的流式 OpenAI 兼容客户端。基准测试测量 TTFT（首次令牌时间），因为编码器在 Prefill "
+"期间运行——任何编码器节省都在此处显现。解码每秒令牌数不受 EC 影响。"
+

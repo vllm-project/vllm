@@ -1,0 +1,190 @@
+body {
+    background-color: #f8f9fa;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+header {
+    border-radius: 0 0 10px 10px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+#currentNode {
+    padding: 10px 15px;
+    border-radius: 5px;
+}
+
+#refreshNodesBtn, #refreshPageBtn, #filterNodesBtn, #clearFilterBtn {
+    padding: 0.375rem 0.75rem;
+    font-size: 1rem;
+    color: #fff;
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+.bi {
+    margin-right: 0.25rem;
+}
+
+.tab-content {
+    background-color: white;
+    border-radius: 0 0 10px 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    min-height: 400px;
+}
+
+pre {
+    background-color: #f8f9fa;
+    padding: 15px;
+    border-radius: 5px;
+    max-height: 500px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.card {
+    margin-top: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+#logLevelContent {
+    min-height: 200px;
+}
+
+#loggerSelector {
+    margin-bottom: 15px;
+}
+
+#setLogLevelBtn {
+    margin-top: 10px;
+}
+
+/* Config tab styles */
+#configContent {
+    min-height: 200px;
+}
+
+#configKeyInput, #configValueInput {
+    margin-bottom: 15px;
+}
+
+#getConfigBtn, #setConfigBtn {
+    margin-top: 10px;
+}
+
+/* Meta and Inference tab styles */
+#metaContent, #inferenceContent {
+    min-height: 300px;
+}
+
+/* Config, Meta, and Inference content word wrapping */
+#configContent, #metaContent, #inferenceContent {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Proxy search dropdown styles */
+#proxySearchInput {
+    cursor: pointer;
+}
+
+#proxyDropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 1000;
+    display: none;
+    min-width: 100%;
+    padding: 0.5rem 0;
+    margin: 0.125rem 0 0;
+    font-size: 1rem;
+    color: #212529;
+    text-align: left;
+    list-style: none;
+    background-color: #fff;
+    background-clip: padding-box;
+    border: 1px solid rgba(0,0,0,.15);
+    border-radius: 0.25rem;
+    box-shadow: 0 0.5rem 1rem rgba(0,0,0,.175);
+}
+
+#proxyDropdown.show {
+    display: block;
+}
+
+#proxyDropdown .dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 0.25rem 1rem;
+    clear: both;
+    font-weight: 400;
+    color: #212529;
+    text-align: inherit;
+    text-decoration: none;
+    white-space: nowrap;
+    background-color: transparent;
+    border: 0;
+    cursor: pointer;
+}
+
+#proxyDropdown .dropdown-item:hover,
+#proxyDropdown .dropdown-item:focus {
+    color: #1e2125;
+    background-color: #e9ecef;
+}
+
+
+/* MultiProcess Overview card styles */
+.stat-card {
+    border: 1px solid #dee2e6;
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    margin-top: 0;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6c757d;
+    font-weight: 600;
+}
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.health-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.health-dot.healthy   { background-color: #198754; }
+.health-dot.unhealthy { background-color: #dc3545; }
+
+.memory-bar {
+    height: 18px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.memory-bar .bar-fill {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    color: #fff;
+    font-weight: 600;
+    min-width: 2rem;
+    transition: width 0.4s ease;
+}
+

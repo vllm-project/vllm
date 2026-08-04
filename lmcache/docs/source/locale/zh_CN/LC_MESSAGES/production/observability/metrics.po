@@ -1,0 +1,899 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/metrics.rst:4
+msgid "Metrics Reference"
+msgstr "指标参考"
+
+#: ../../source/production/observability/metrics.rst:6
+msgid ""
+"LMCache provides comprehensive metrics via Prometheus to help you monitor"
+" performance, cache efficiency, and system health. These metrics are "
+"exposed via the vLLM ``/metrics`` endpoint when LMCache is integrated "
+"with vLLM, or via the LMCache internal API server."
+msgstr "LMCache 通过 Prometheus 提供全面的指标，以帮助您监控性能、缓存效率和系统健康。这些指标在 LMCache 与 vLLM 集成时通过 vLLM ``/metrics`` 端点公开，或者通过 LMCache 内部 API 服务器公开。"
+
+#: ../../source/production/observability/metrics.rst:9
+msgid "Available Metrics"
+msgstr "可用指标"
+
+#: ../../source/production/observability/metrics.rst:11
+msgid ""
+"The following tables list all available LMCache metrics organized by "
+"category."
+msgstr "以下表格列出了按类别组织的所有可用 LMCache 指标。"
+
+#: ../../source/production/observability/metrics.rst:14
+#: ../../source/production/observability/metrics.rst:16
+msgid "Core Request Metrics"
+msgstr "核心请求指标"
+
+#: ../../source/production/observability/metrics.rst:20
+#: ../../source/production/observability/metrics.rst:40
+#: ../../source/production/observability/metrics.rst:72
+#: ../../source/production/observability/metrics.rst:95
+#: ../../source/production/observability/metrics.rst:127
+#: ../../source/production/observability/metrics.rst:162
+#: ../../source/production/observability/metrics.rst:185
+#: ../../source/production/observability/metrics.rst:229
+#: ../../source/production/observability/metrics.rst:255
+#: ../../source/production/observability/metrics.rst:278
+#: ../../source/production/observability/metrics.rst:301
+#: ../../source/production/observability/metrics.rst:333
+#: ../../source/production/observability/metrics.rst:371
+msgid "Metric Name"
+msgstr "指标名称"
+
+#: ../../source/production/observability/metrics.rst:21
+#: ../../source/production/observability/metrics.rst:41
+#: ../../source/production/observability/metrics.rst:73
+#: ../../source/production/observability/metrics.rst:96
+#: ../../source/production/observability/metrics.rst:128
+#: ../../source/production/observability/metrics.rst:163
+#: ../../source/production/observability/metrics.rst:186
+#: ../../source/production/observability/metrics.rst:230
+#: ../../source/production/observability/metrics.rst:256
+#: ../../source/production/observability/metrics.rst:279
+#: ../../source/production/observability/metrics.rst:302
+#: ../../source/production/observability/metrics.rst:334
+#: ../../source/production/observability/metrics.rst:372
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/production/observability/metrics.rst:22
+#: ../../source/production/observability/metrics.rst:42
+#: ../../source/production/observability/metrics.rst:74
+#: ../../source/production/observability/metrics.rst:97
+#: ../../source/production/observability/metrics.rst:129
+#: ../../source/production/observability/metrics.rst:164
+#: ../../source/production/observability/metrics.rst:187
+#: ../../source/production/observability/metrics.rst:231
+#: ../../source/production/observability/metrics.rst:257
+#: ../../source/production/observability/metrics.rst:280
+#: ../../source/production/observability/metrics.rst:303
+#: ../../source/production/observability/metrics.rst:335
+#: ../../source/production/observability/metrics.rst:373
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/metrics.rst:23
+msgid "``lmcache:num_retrieve_requests``"
+msgstr "``lmcache:num_retrieve_requests``"
+
+#: ../../source/production/observability/metrics.rst:24
+#: ../../source/production/observability/metrics.rst:27
+#: ../../source/production/observability/metrics.rst:30
+#: ../../source/production/observability/metrics.rst:44
+#: ../../source/production/observability/metrics.rst:47
+#: ../../source/production/observability/metrics.rst:50
+#: ../../source/production/observability/metrics.rst:53
+#: ../../source/production/observability/metrics.rst:56
+#: ../../source/production/observability/metrics.rst:59
+#: ../../source/production/observability/metrics.rst:62
+#: ../../source/production/observability/metrics.rst:85
+#: ../../source/production/observability/metrics.rst:114
+#: ../../source/production/observability/metrics.rst:117
+#: ../../source/production/observability/metrics.rst:189
+#: ../../source/production/observability/metrics.rst:192
+#: ../../source/production/observability/metrics.rst:195
+#: ../../source/production/observability/metrics.rst:198
+#: ../../source/production/observability/metrics.rst:213
+#: ../../source/production/observability/metrics.rst:216
+#: ../../source/production/observability/metrics.rst:233
+#: ../../source/production/observability/metrics.rst:236
+#: ../../source/production/observability/metrics.rst:239
+#: ../../source/production/observability/metrics.rst:265
+#: ../../source/production/observability/metrics.rst:282
+#: ../../source/production/observability/metrics.rst:285
+msgid "Counter"
+msgstr "计数器"
+
+#: ../../source/production/observability/metrics.rst:25
+msgid "Total number of retrieve requests sent to LMCache."
+msgstr "发送到 LMCache 的检索请求总数。"
+
+#: ../../source/production/observability/metrics.rst:26
+msgid "``lmcache:num_store_requests``"
+msgstr "``lmcache:num_store_requests``"
+
+#: ../../source/production/observability/metrics.rst:28
+msgid "Total number of store requests sent to LMCache."
+msgstr "发送到 LMCache 的存储请求总数。"
+
+#: ../../source/production/observability/metrics.rst:29
+msgid "``lmcache:num_lookup_requests``"
+msgstr "``lmcache:num_lookup_requests``"
+
+#: ../../source/production/observability/metrics.rst:31
+msgid "Total number of lookup requests sent to LMCache."
+msgstr "发送到 LMCache 的查找请求总数。"
+
+#: ../../source/production/observability/metrics.rst:34
+#: ../../source/production/observability/metrics.rst:36
+msgid "Token Metrics"
+msgstr "令牌指标"
+
+#: ../../source/production/observability/metrics.rst:43
+msgid "``lmcache:num_requested_tokens``"
+msgstr "``lmcache:num_requested_tokens``"
+
+#: ../../source/production/observability/metrics.rst:45
+msgid "Total number of tokens requested for retrieval."
+msgstr "请求检索的总令牌数。"
+
+#: ../../source/production/observability/metrics.rst:46
+msgid "``lmcache:num_hit_tokens``"
+msgstr "``lmcache:num_hit_tokens``"
+
+#: ../../source/production/observability/metrics.rst:48
+msgid "Total number of tokens hit in LMCache during retrieval."
+msgstr "在检索过程中，LMCache 中命中的总令牌数。"
+
+#: ../../source/production/observability/metrics.rst:49
+msgid "``lmcache:num_stored_tokens``"
+msgstr "``lmcache:num_stored_tokens``"
+
+#: ../../source/production/observability/metrics.rst:51
+msgid "Total number of tokens stored in LMCache."
+msgstr "LMCache 中存储的令牌总数。"
+
+#: ../../source/production/observability/metrics.rst:52
+msgid "``lmcache:num_lookup_tokens``"
+msgstr "``lmcache:num_lookup_tokens``"
+
+#: ../../source/production/observability/metrics.rst:54
+msgid "Total number of tokens requested in lookup operations."
+msgstr "查找操作中请求的令牌总数。"
+
+#: ../../source/production/observability/metrics.rst:55
+msgid "``lmcache:num_lookup_hits``"
+msgstr "``lmcache:num_lookup_hits``"
+
+#: ../../source/production/observability/metrics.rst:57
+msgid "Total number of tokens hit in lookup operations."
+msgstr "查找操作中命中的总令牌数。"
+
+#: ../../source/production/observability/metrics.rst:58
+msgid "``lmcache:num_vllm_hit_tokens``"
+msgstr "``lmcache:num_vllm_hit_tokens``"
+
+#: ../../source/production/observability/metrics.rst:60
+msgid "Number of hit tokens in vLLM."
+msgstr "vLLM 中的命中令牌数量。"
+
+#: ../../source/production/observability/metrics.rst:61
+msgid "``lmcache:num_prompt_tokens``"
+msgstr "``lmcache:num_prompt_tokens``"
+
+#: ../../source/production/observability/metrics.rst:63
+msgid "Number of prompt tokens in LMCache."
+msgstr "LMCache 中的提示令牌数量。"
+
+#: ../../source/production/observability/metrics.rst:66
+#: ../../source/production/observability/metrics.rst:68
+msgid "Hit Rate Metrics"
+msgstr "命中率指标"
+
+#: ../../source/production/observability/metrics.rst:75
+msgid "``lmcache:retrieve_hit_rate``"
+msgstr "``lmcache:retrieve_hit_rate``"
+
+#: ../../source/production/observability/metrics.rst:76
+#: ../../source/production/observability/metrics.rst:79
+#: ../../source/production/observability/metrics.rst:166
+#: ../../source/production/observability/metrics.rst:169
+#: ../../source/production/observability/metrics.rst:172
+#: ../../source/production/observability/metrics.rst:210
+#: ../../source/production/observability/metrics.rst:219
+#: ../../source/production/observability/metrics.rst:242
+#: ../../source/production/observability/metrics.rst:245
+#: ../../source/production/observability/metrics.rst:259
+#: ../../source/production/observability/metrics.rst:262
+#: ../../source/production/observability/metrics.rst:268
+#: ../../source/production/observability/metrics.rst:305
+#: ../../source/production/observability/metrics.rst:308
+#: ../../source/production/observability/metrics.rst:311
+#: ../../source/production/observability/metrics.rst:314
+#: ../../source/production/observability/metrics.rst:317
+#: ../../source/production/observability/metrics.rst:320
+#: ../../source/production/observability/metrics.rst:323
+#: ../../source/production/observability/metrics.rst:337
+#: ../../source/production/observability/metrics.rst:340
+#: ../../source/production/observability/metrics.rst:343
+#: ../../source/production/observability/metrics.rst:346
+#: ../../source/production/observability/metrics.rst:349
+#: ../../source/production/observability/metrics.rst:352
+#: ../../source/production/observability/metrics.rst:355
+#: ../../source/production/observability/metrics.rst:358
+#: ../../source/production/observability/metrics.rst:361
+#: ../../source/production/observability/metrics.rst:375
+#: ../../source/production/observability/metrics.rst:378
+#: ../../source/production/observability/metrics.rst:381
+#: ../../source/production/observability/metrics.rst:384
+#: ../../source/production/observability/metrics.rst:387
+#: ../../source/production/observability/metrics.rst:390
+#: ../../source/production/observability/metrics.rst:393
+msgid "Gauge"
+msgstr "仪表"
+
+#: ../../source/production/observability/metrics.rst:77
+msgid "The hit rate for retrieve requests since last log."
+msgstr "自上次日志以来，检索请求的命中率。"
+
+#: ../../source/production/observability/metrics.rst:78
+msgid "``lmcache:lookup_hit_rate``"
+msgstr "``lmcache:lookup_hit_rate``"
+
+#: ../../source/production/observability/metrics.rst:80
+msgid "The hit rate for lookup requests since last log."
+msgstr "自上次日志以来查找请求的命中率。"
+
+#: ../../source/production/observability/metrics.rst:81
+msgid "``lmcache:request_cache_hit_rate``"
+msgstr "``lmcache:request_cache_hit_rate``"
+
+#: ../../source/production/observability/metrics.rst:82
+#: ../../source/production/observability/metrics.rst:99
+#: ../../source/production/observability/metrics.rst:102
+#: ../../source/production/observability/metrics.rst:105
+#: ../../source/production/observability/metrics.rst:108
+#: ../../source/production/observability/metrics.rst:111
+#: ../../source/production/observability/metrics.rst:131
+#: ../../source/production/observability/metrics.rst:134
+#: ../../source/production/observability/metrics.rst:137
+#: ../../source/production/observability/metrics.rst:140
+#: ../../source/production/observability/metrics.rst:143
+#: ../../source/production/observability/metrics.rst:146
+#: ../../source/production/observability/metrics.rst:149
+#: ../../source/production/observability/metrics.rst:152
+#: ../../source/production/observability/metrics.rst:175
+#: ../../source/production/observability/metrics.rst:201
+#: ../../source/production/observability/metrics.rst:204
+#: ../../source/production/observability/metrics.rst:207
+#: ../../source/production/observability/metrics.rst:288
+#: ../../source/production/observability/metrics.rst:291
+msgid "Histogram"
+msgstr "直方图"
+
+#: ../../source/production/observability/metrics.rst:83
+msgid "Distribution of hit rates per request."
+msgstr "每个请求的命中率分布。"
+
+#: ../../source/production/observability/metrics.rst:84
+msgid "``lmcache:lookup_0_hit_requests``"
+msgstr "``lmcache:lookup_0_hit_requests``"
+
+#: ../../source/production/observability/metrics.rst:86
+msgid "Total number of lookup requests with zero hits."
+msgstr "查找请求的总数，其中没有命中。"
+
+#: ../../source/production/observability/metrics.rst:89
+#: ../../source/production/observability/metrics.rst:91
+msgid "Performance & Latency Metrics"
+msgstr "性能与延迟指标"
+
+#: ../../source/production/observability/metrics.rst:98
+msgid "``lmcache:time_to_retrieve``"
+msgstr "``lmcache:time_to_retrieve``"
+
+#: ../../source/production/observability/metrics.rst:100
+msgid "Time taken to retrieve from the cache (seconds)."
+msgstr "从缓存中检索所花费的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:101
+msgid "``lmcache:time_to_store``"
+msgstr "``lmcache:time_to_store``"
+
+#: ../../source/production/observability/metrics.rst:103
+msgid "Time taken to store to the cache (seconds)."
+msgstr "存储到缓存所需的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:104
+msgid "``lmcache:time_to_lookup``"
+msgstr "``lmcache:time_to_lookup``"
+
+#: ../../source/production/observability/metrics.rst:106
+msgid "Time taken to perform a lookup in the cache (seconds)."
+msgstr "在缓存中执行查找所花费的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:107
+msgid "``lmcache:retrieve_speed``"
+msgstr "``lmcache:retrieve_speed``"
+
+#: ../../source/production/observability/metrics.rst:109
+msgid "Retrieval speed (tokens per second)."
+msgstr "检索速度（每秒令牌数）。"
+
+#: ../../source/production/observability/metrics.rst:110
+msgid "``lmcache:store_speed``"
+msgstr "``lmcache:store_speed``"
+
+#: ../../source/production/observability/metrics.rst:112
+msgid "Storage speed (tokens per second)."
+msgstr "存储速度（每秒令牌数）。"
+
+#: ../../source/production/observability/metrics.rst:113
+msgid "``lmcache:num_slow_retrieval_by_time``"
+msgstr "``lmcache:num_slow_retrieval_by_time``"
+
+#: ../../source/production/observability/metrics.rst:115
+msgid "Total number of slow retrievals exceeding the time threshold."
+msgstr "超过时间阈值的慢检索总数。"
+
+#: ../../source/production/observability/metrics.rst:116
+msgid "``lmcache:num_slow_retrieval_by_speed``"
+msgstr "``lmcache:num_slow_retrieval_by_speed``"
+
+#: ../../source/production/observability/metrics.rst:118
+msgid "Total number of slow retrievals below the speed threshold."
+msgstr "低于速度阈值的慢检索总数。"
+
+#: ../../source/production/observability/metrics.rst:121
+msgid "Detailed Profiling Metrics"
+msgstr "详细剖析指标"
+
+#: ../../source/production/observability/metrics.rst:123
+msgid "Profiling Metrics"
+msgstr "剖析指标"
+
+#: ../../source/production/observability/metrics.rst:130
+msgid "``lmcache:retrieve_process_tokens_time``"
+msgstr "``lmcache:retrieve_process_tokens_time``"
+
+#: ../../source/production/observability/metrics.rst:132
+msgid "Time to process tokens in retrieve (seconds)."
+msgstr "处理检索中令牌的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:133
+msgid "``lmcache:retrieve_broadcast_time``"
+msgstr "``lmcache:retrieve_broadcast_time``"
+
+#: ../../source/production/observability/metrics.rst:135
+msgid "Time to broadcast memory objects in retrieve (seconds)."
+msgstr "在检索中广播内存对象的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:136
+msgid "``lmcache:retrieve_to_gpu_time``"
+msgstr "``lmcache:retrieve_to_gpu_time``"
+
+#: ../../source/production/observability/metrics.rst:138
+msgid "Time to move data to GPU in retrieve (seconds)."
+msgstr "将数据移动到 GPU 的检索时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:139
+msgid "``lmcache:store_process_tokens_time``"
+msgstr "``lmcache:store_process_tokens_time``"
+
+#: ../../source/production/observability/metrics.rst:141
+msgid "Time to process tokens in store (seconds)."
+msgstr "存储中处理令牌的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:142
+msgid "``lmcache:store_from_gpu_time``"
+msgstr "``lmcache:store_from_gpu_time``"
+
+#: ../../source/production/observability/metrics.rst:144
+msgid "Time to move data from GPU in store (seconds)."
+msgstr "从 GPU 移动数据到存储的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:145
+msgid "``lmcache:store_put_time``"
+msgstr "``lmcache:store_put_time``"
+
+#: ../../source/production/observability/metrics.rst:147
+msgid "Time to put data to storage in store (seconds)."
+msgstr "将数据存储到存储中的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:148
+msgid "``lmcache:remote_backend_batched_get_blocking_time``"
+msgstr "``lmcache:remote_backend_batched_get_blocking_time``"
+
+#: ../../source/production/observability/metrics.rst:150
+msgid "Time spent waiting for data from remote backend (seconds)."
+msgstr "等待从远程后端获取数据的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:151
+msgid "``lmcache:instrumented_connector_batched_get_time``"
+msgstr "``lmcache:instrumented_connector_batched_get_time``"
+
+#: ../../source/production/observability/metrics.rst:153
+msgid "Time spent in the connector layer (seconds)."
+msgstr "连接器层花费的时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:156
+msgid "Cache Usage & Lifecycle Metrics"
+msgstr "缓存使用与生命周期指标"
+
+#: ../../source/production/observability/metrics.rst:158
+msgid "Cache Usage Metrics"
+msgstr "缓存使用指标"
+
+#: ../../source/production/observability/metrics.rst:165
+msgid "``lmcache:local_cache_usage``"
+msgstr "``lmcache:local_cache_usage``"
+
+#: ../../source/production/observability/metrics.rst:167
+msgid "Local cache usage in bytes."
+msgstr "本地缓存使用量（以字节为单位）。"
+
+#: ../../source/production/observability/metrics.rst:168
+msgid "``lmcache:remote_cache_usage``"
+msgstr "``lmcache:remote_cache_usage``"
+
+#: ../../source/production/observability/metrics.rst:170
+msgid "Remote cache usage in bytes."
+msgstr "远程缓存使用量（以字节为单位）。"
+
+#: ../../source/production/observability/metrics.rst:171
+msgid "``lmcache:local_storage_usage``"
+msgstr "``lmcache:local_storage_usage``"
+
+#: ../../source/production/observability/metrics.rst:173
+msgid "Local storage usage in bytes."
+msgstr "本地存储使用量（以字节为单位）。"
+
+#: ../../source/production/observability/metrics.rst:174
+msgid "``lmcache:request_cache_lifespan``"
+msgstr "``lmcache:request_cache_lifespan``"
+
+#: ../../source/production/observability/metrics.rst:176
+msgid "Distribution of request cache lifespan in minutes."
+msgstr "请求缓存生命周期的分布（以分钟为单位）。"
+
+#: ../../source/production/observability/metrics.rst:179
+msgid "Remote Backend & Network Metrics"
+msgstr "远程后端与网络指标"
+
+#: ../../source/production/observability/metrics.rst:181
+msgid "Remote Backend Metrics"
+msgstr "远程后端指标"
+
+#: ../../source/production/observability/metrics.rst:188
+msgid "``lmcache:num_remote_read_requests``"
+msgstr "``lmcache:num_remote_read_requests``"
+
+#: ../../source/production/observability/metrics.rst:190
+msgid "Total number of read requests to remote backends."
+msgstr "对远程后端的读取请求总数。"
+
+#: ../../source/production/observability/metrics.rst:191
+msgid "``lmcache:num_remote_read_bytes``"
+msgstr "``lmcache:num_remote_read_bytes``"
+
+#: ../../source/production/observability/metrics.rst:193
+msgid "Total number of bytes read from remote backends."
+msgstr "从远程后端读取的字节总数。"
+
+#: ../../source/production/observability/metrics.rst:194
+msgid "``lmcache:num_remote_write_requests``"
+msgstr "``lmcache:num_remote_write_requests``"
+
+#: ../../source/production/observability/metrics.rst:196
+msgid "Total number of write requests to remote backends."
+msgstr "对远程后端的写请求总数。"
+
+#: ../../source/production/observability/metrics.rst:197
+msgid "``lmcache:num_remote_write_bytes``"
+msgstr "``lmcache:num_remote_write_bytes``"
+
+#: ../../source/production/observability/metrics.rst:199
+msgid "Total number of bytes written to remote backends."
+msgstr "写入远程后端的字节总数。"
+
+#: ../../source/production/observability/metrics.rst:200
+msgid "``lmcache:remote_time_to_get``"
+msgstr "``lmcache:remote_time_to_get``"
+
+#: ../../source/production/observability/metrics.rst:202
+msgid "Time taken to get data from remote backends (ms)."
+msgstr "从远程后端获取数据所花费的时间（毫秒）。"
+
+#: ../../source/production/observability/metrics.rst:203
+msgid "``lmcache:remote_time_to_put``"
+msgstr "``lmcache:remote_time_to_put``"
+
+#: ../../source/production/observability/metrics.rst:205
+msgid "Time taken to put data to remote backends (ms)."
+msgstr "将数据放入远程后端所花费的时间（毫秒）。"
+
+#: ../../source/production/observability/metrics.rst:206
+msgid "``lmcache:remote_time_to_get_sync``"
+msgstr "``lmcache:remote_time_to_get_sync``"
+
+#: ../../source/production/observability/metrics.rst:208
+msgid "Time taken to get data from remote backends synchronously (ms)."
+msgstr "从远程后端同步获取数据所花费的时间（毫秒）。"
+
+#: ../../source/production/observability/metrics.rst:209
+msgid "``lmcache:remote_ping_latency``"
+msgstr "``lmcache:remote_ping_latency``"
+
+#: ../../source/production/observability/metrics.rst:211
+msgid "Latest ping latency to remote backends (ms)."
+msgstr "最新的远程后端 ping 延迟（毫秒）。"
+
+#: ../../source/production/observability/metrics.rst:212
+msgid "``lmcache:remote_ping_errors``"
+msgstr "``lmcache:remote_ping_errors``"
+
+#: ../../source/production/observability/metrics.rst:214
+msgid "Total number of ping errors to remote backends."
+msgstr "远程后端的总 ping 错误数量。"
+
+#: ../../source/production/observability/metrics.rst:215
+msgid "``lmcache:remote_ping_successes``"
+msgstr "``lmcache:remote_ping_successes``"
+
+#: ../../source/production/observability/metrics.rst:217
+msgid "Total number of successful pings to remote backends."
+msgstr "成功 ping 远程后端的总次数。"
+
+#: ../../source/production/observability/metrics.rst:218
+msgid "``lmcache:remote_ping_error_code``"
+msgstr "``lmcache:remote_ping_error_code``"
+
+#: ../../source/production/observability/metrics.rst:220
+msgid "Latest ping error code to remote backends."
+msgstr "远程后端的最新 ping 错误代码。"
+
+#: ../../source/production/observability/metrics.rst:223
+#: ../../source/production/observability/metrics.rst:225
+msgid "Local CPU Backend Metrics"
+msgstr "本地 CPU 后端指标"
+
+#: ../../source/production/observability/metrics.rst:232
+msgid "``lmcache:local_cpu_evict_count``"
+msgstr "``lmcache:local_cpu_evict_count``"
+
+#: ../../source/production/observability/metrics.rst:234
+msgid "Total number of evictions in local CPU backend."
+msgstr "本地 CPU 后端的总逐出次数。"
+
+#: ../../source/production/observability/metrics.rst:235
+msgid "``lmcache:local_cpu_evict_keys_count``"
+msgstr "``lmcache:local_cpu_evict_keys_count``"
+
+#: ../../source/production/observability/metrics.rst:237
+msgid "Total number of evicted keys in local CPU backend."
+msgstr "本地 CPU 后端中被逐出的键的总数。"
+
+#: ../../source/production/observability/metrics.rst:238
+msgid "``lmcache:local_cpu_evict_failed_count``"
+msgstr "``lmcache:local_cpu_evict_failed_count``"
+
+#: ../../source/production/observability/metrics.rst:240
+msgid "Total number of failed evictions in local CPU backend."
+msgstr "本地 CPU 后端中失败的逐出总数。"
+
+#: ../../source/production/observability/metrics.rst:241
+msgid "``lmcache:local_cpu_hot_cache_count``"
+msgstr "``lmcache:local_cpu_hot_cache_count``"
+
+#: ../../source/production/observability/metrics.rst:243
+msgid "Current number of items in the hot cache."
+msgstr "热缓存中当前项目的数量。"
+
+#: ../../source/production/observability/metrics.rst:244
+msgid "``lmcache:local_cpu_keys_in_request_count``"
+msgstr "``lmcache:local_cpu_keys_in_request_count``"
+
+#: ../../source/production/observability/metrics.rst:246
+msgid "Current number of keys being processed in requests."
+msgstr "当前正在处理的请求中的键的数量。"
+
+#: ../../source/production/observability/metrics.rst:249
+#: ../../source/production/observability/metrics.rst:251
+msgid "Memory Management Metrics"
+msgstr "内存管理指标"
+
+#: ../../source/production/observability/metrics.rst:258
+msgid "``lmcache:active_memory_objs_count``"
+msgstr "``lmcache:active_memory_objs_count``"
+
+#: ../../source/production/observability/metrics.rst:260
+msgid "The number of currently active memory objects."
+msgstr "当前活动内存对象的数量。"
+
+#: ../../source/production/observability/metrics.rst:261
+msgid "``lmcache:pinned_memory_objs_count``"
+msgstr "``lmcache:pinned_memory_objs_count``"
+
+#: ../../source/production/observability/metrics.rst:263
+msgid "The number of currently pinned memory objects."
+msgstr "当前固定内存对象的数量。"
+
+#: ../../source/production/observability/metrics.rst:264
+msgid "``lmcache:forced_unpin_count``"
+msgstr "``lmcache:forced_unpin_count``"
+
+#: ../../source/production/observability/metrics.rst:266
+msgid "Total number of forced unpins due to timeout."
+msgstr "由于超时而强制逐出的总数。"
+
+#: ../../source/production/observability/metrics.rst:267
+msgid "``lmcache:pin_monitor_pinned_objects_count``"
+msgstr "``lmcache:pin_monitor_pinned_objects_count``"
+
+#: ../../source/production/observability/metrics.rst:269
+msgid "The number of pinned objects tracked by the PinMonitor."
+msgstr "PinMonitor 追踪的固定对象数量。"
+
+#: ../../source/production/observability/metrics.rst:272
+#: ../../source/production/observability/metrics.rst:274
+msgid "P2P Transfer Metrics"
+msgstr "P2P 转移指标"
+
+#: ../../source/production/observability/metrics.rst:281
+msgid "``lmcache:num_p2p_requests``"
+msgstr "``lmcache:num_p2p_requests``"
+
+#: ../../source/production/observability/metrics.rst:283
+msgid "Total number of P2P transfer requests."
+msgstr "P2P 转移请求的总数。"
+
+#: ../../source/production/observability/metrics.rst:284
+msgid "``lmcache:num_p2p_transferred_tokens``"
+msgstr "``lmcache:num_p2p_transferred_tokens``"
+
+#: ../../source/production/observability/metrics.rst:286
+msgid "Total number of tokens transferred via P2P."
+msgstr "通过 P2P 传输的令牌总数。"
+
+#: ../../source/production/observability/metrics.rst:287
+msgid "``lmcache:p2p_time_to_transfer``"
+msgstr "``lmcache:p2p_time_to_transfer``"
+
+#: ../../source/production/observability/metrics.rst:289
+msgid "Time taken for P2P transfers (seconds)."
+msgstr "P2P 传输所需时间（秒）。"
+
+#: ../../source/production/observability/metrics.rst:290
+msgid "``lmcache:p2p_transfer_speed``"
+msgstr "``lmcache:p2p_transfer_speed``"
+
+#: ../../source/production/observability/metrics.rst:292
+msgid "P2P transfer speed (tokens per second)."
+msgstr "P2P 传输速度（每秒令牌数）。"
+
+#: ../../source/production/observability/metrics.rst:295
+msgid "Health & Internal System Metrics"
+msgstr "健康与内部系统指标"
+
+#: ../../source/production/observability/metrics.rst:297
+msgid "Health & Internal Metrics"
+msgstr "健康与内部指标"
+
+#: ../../source/production/observability/metrics.rst:304
+msgid "``lmcache:lmcache_is_healthy``"
+msgstr "``lmcache:lmcache_is_healthy``"
+
+#: ../../source/production/observability/metrics.rst:306
+msgid "Overall health status of LMCache (1 = healthy, 0 = unhealthy)."
+msgstr "LMCache 的整体健康状态（1 = 健康，0 = 不健康）。"
+
+#: ../../source/production/observability/metrics.rst:307
+msgid "``lmcache:interval_get_blocking_failed_count``"
+msgstr "``lmcache:interval_get_blocking_failed_count``"
+
+#: ../../source/production/observability/metrics.rst:309
+msgid "Number of failed blocking get operations in the current interval."
+msgstr "当前时间间隔内失败的阻塞获取操作数量。"
+
+#: ../../source/production/observability/metrics.rst:310
+msgid "``lmcache:kv_msg_queue_size``"
+msgstr "``lmcache:kv_msg_queue_size``"
+
+#: ../../source/production/observability/metrics.rst:312
+msgid "Size of the KV message queue in the BatchedMessageSender."
+msgstr "批量消息发送器中 KV 消息队列的大小。"
+
+#: ../../source/production/observability/metrics.rst:313
+msgid "``lmcache:remote_put_task_num``"
+msgstr "``lmcache:remote_put_task_num``"
+
+#: ../../source/production/observability/metrics.rst:315
+msgid "Number of pending remote put tasks."
+msgstr "待处理的远程放置任务数量。"
+
+#: ../../source/production/observability/metrics.rst:316
+msgid "``lmcache:storage_events_ongoing_count``"
+msgstr "``lmcache:storage_events_ongoing_count``"
+
+#: ../../source/production/observability/metrics.rst:318
+msgid "Number of storage events currently in progress."
+msgstr "当前进行中的存储事件数量。"
+
+#: ../../source/production/observability/metrics.rst:319
+msgid "``lmcache:storage_events_done_count``"
+msgstr "``lmcache:storage_events_done_count``"
+
+#: ../../source/production/observability/metrics.rst:321
+msgid "Number of storage events completed successfully."
+msgstr "成功完成的存储事件数量。"
+
+#: ../../source/production/observability/metrics.rst:322
+msgid "``lmcache:storage_events_not_found_count``"
+msgstr "``lmcache:storage_events_not_found_count``"
+
+#: ../../source/production/observability/metrics.rst:324
+msgid "Number of storage events where the requested data was not found."
+msgstr "未找到请求数据的存储事件数量。"
+
+#: ../../source/production/observability/metrics.rst:327
+#: ../../source/production/observability/metrics.rst:329
+msgid "Chunk Statistics Metrics"
+msgstr "块统计指标"
+
+#: ../../source/production/observability/metrics.rst:336
+msgid "``lmcache:chunk_statistics_enabled``"
+msgstr "``lmcache:chunk_statistics_enabled``"
+
+#: ../../source/production/observability/metrics.rst:338
+msgid ""
+"Whether chunk statistics collection is enabled (1 = enabled, 0 = "
+"disabled)."
+msgstr "是否启用块统计收集（1 = 启用，0 = 禁用）。"
+
+#: ../../source/production/observability/metrics.rst:339
+msgid "``lmcache:chunk_statistics_total_requests``"
+msgstr "``lmcache:chunk_statistics_total_requests``"
+
+#: ../../source/production/observability/metrics.rst:341
+msgid "Total number of requests processed by chunk statistics."
+msgstr "按块统计处理的请求总数。"
+
+#: ../../source/production/observability/metrics.rst:342
+msgid "``lmcache:chunk_statistics_total_chunks``"
+msgstr "``lmcache:chunk_statistics_total_chunks``"
+
+#: ../../source/production/observability/metrics.rst:344
+msgid "Total number of chunks processed."
+msgstr "处理的块总数。"
+
+#: ../../source/production/observability/metrics.rst:345
+msgid "``lmcache:chunk_statistics_unique_chunks``"
+msgstr "``lmcache:chunk_statistics_unique_chunks``"
+
+#: ../../source/production/observability/metrics.rst:347
+msgid "Estimated number of unique chunks encountered."
+msgstr "估计遇到的唯一块的数量。"
+
+#: ../../source/production/observability/metrics.rst:348
+msgid "``lmcache:chunk_statistics_reuse_rate``"
+msgstr "``lmcache:chunk_statistics_reuse_rate``"
+
+#: ../../source/production/observability/metrics.rst:350
+msgid "Chunk reuse rate (0.0 to 1.0)."
+msgstr "块重用率（0.0 到 1.0）。"
+
+#: ../../source/production/observability/metrics.rst:351
+msgid "``lmcache:chunk_statistics_bloom_filter_size_mb``"
+msgstr "``lmcache:chunk_statistics_bloom_filter_size_mb``"
+
+#: ../../source/production/observability/metrics.rst:353
+msgid "Memory usage of the Bloom filter in megabytes."
+msgstr "布隆过滤器的内存使用量（以兆字节为单位）。"
+
+#: ../../source/production/observability/metrics.rst:354
+msgid "``lmcache:chunk_statistics_bloom_filter_fill_rate``"
+msgstr "``lmcache:chunk_statistics_bloom_filter_fill_rate``"
+
+#: ../../source/production/observability/metrics.rst:356
+msgid "Fill rate of the Bloom filter (0.0 to 1.0)."
+msgstr "布隆过滤器的填充率（0.0 到 1.0）。"
+
+#: ../../source/production/observability/metrics.rst:357
+msgid "``lmcache:chunk_statistics_file_count``"
+msgstr "``lmcache:chunk_statistics_file_count``"
+
+#: ../../source/production/observability/metrics.rst:359
+msgid "Number of files created when using the ``file_hash`` strategy."
+msgstr "使用 ``file_hash`` 策略时创建的文件数量。"
+
+#: ../../source/production/observability/metrics.rst:360
+msgid "``lmcache:chunk_statistics_current_file_size``"
+msgstr "``lmcache:chunk_statistics_current_file_size``"
+
+#: ../../source/production/observability/metrics.rst:362
+msgid "Current size of the active statistics file in bytes."
+msgstr "活动统计文件的当前大小（以字节为单位）。"
+
+#: ../../source/production/observability/metrics.rst:365
+#: ../../source/production/observability/metrics.rst:367
+msgid "Connector Metrics"
+msgstr "连接器指标"
+
+#: ../../source/production/observability/metrics.rst:374
+msgid "``lmcache:scheduler_unfinished_requests_count``"
+msgstr "``lmcache:scheduler_unfinished_requests_count``"
+
+#: ../../source/production/observability/metrics.rst:376
+msgid "Current count of unfinished requests in the scheduler."
+msgstr "调度器中未完成请求的当前计数。"
+
+#: ../../source/production/observability/metrics.rst:377
+msgid "``lmcache:connector_load_specs_count``"
+msgstr "``lmcache:connector_load_specs_count``"
+
+#: ../../source/production/observability/metrics.rst:379
+msgid "Number of load specifications currently in the connector."
+msgstr "连接器中当前的加载规范数量。"
+
+#: ../../source/production/observability/metrics.rst:380
+msgid "``lmcache:connector_request_trackers_count``"
+msgstr "``lmcache:connector_request_trackers_count``"
+
+#: ../../source/production/observability/metrics.rst:382
+msgid "Number of active request trackers in the connector."
+msgstr "连接器中活动请求跟踪器的数量。"
+
+#: ../../source/production/observability/metrics.rst:383
+msgid "``lmcache:connector_kv_caches_count``"
+msgstr "``lmcache:connector_kv_caches_count``"
+
+#: ../../source/production/observability/metrics.rst:385
+msgid "Number of KV caches currently managed by the connector."
+msgstr "连接器当前管理的 KV Cache 数量。"
+
+#: ../../source/production/observability/metrics.rst:386
+msgid "``lmcache:connector_layerwise_retrievers_count``"
+msgstr "``lmcache:connector_layerwise_retrievers_count``"
+
+#: ../../source/production/observability/metrics.rst:388
+msgid "Number of layer-wise retrievers active in the connector."
+msgstr "连接器中活动的逐层检索器数量。"
+
+#: ../../source/production/observability/metrics.rst:389
+msgid "``lmcache:connector_invalid_block_ids_count``"
+msgstr "``lmcache:connector_invalid_block_ids_count``"
+
+#: ../../source/production/observability/metrics.rst:391
+msgid "Number of invalid block IDs encountered by the connector."
+msgstr "连接器遇到的无效块 ID 的数量。"
+
+#: ../../source/production/observability/metrics.rst:392
+msgid "``lmcache:connector_requests_priority_count``"
+msgstr "``lmcache:connector_requests_priority_count``"
+
+#: ../../source/production/observability/metrics.rst:394
+msgid "Number of requests prioritized by the connector."
+msgstr "连接器优先处理的请求数量。"
+

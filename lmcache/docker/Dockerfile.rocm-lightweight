@@ -1,0 +1,43 @@
+# Lightweight ROCm image: latest LMCache release on top of vLLM-ROCm.
+# No NIXL, no Prefill-Decode Disaggregation.
+# For AMD Instinct GPUs (MI300X/MI325X, MI350X/MI355X).
+#
+# Note: lmcache is built from source with HIP extensions using
+# --no-build-isolation to link against the ROCm torch in the base image.
+FROM vllm/vllm-openai-rocm:latest
+
+# ROCm GPU architectures — required during build (no GPU present)
+ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+
+# Build LMCache from source with HIP extensions.
+# PyPI lmcache>=0.4 ships only binary wheels (no sdist), so `--no-binary`
+# cannot force a source build.  Cloning the repo ensures HIP extensions
+# are compiled against the ROCm torch already present in the base image.
+# Build deps are installed from the cloned source to stay version-consistent.
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+ARG LMCACHE_VERSION=dev
+RUN git clone --depth 1 -b ${LMCACHE_VERSION} https://github.com/LMCache/LMCache.git /tmp/lmcache && \
+    cd /tmp/lmcache && \
+    uv pip install --system --no-cache -r requirements/build.txt && \
+    BUILD_WITH_HIP=1 CXX=hipcc \
+    uv pip install --system --no-cache --no-build-isolation . && \
+    rm -rf /tmp/lmcache
+
+
+# Build (no repo context needed — everything is cloned from git):
+# docker build -f docker/Dockerfile.rocm-lightweight -t 'lmcache/vllm-openai-rocm:light' docker/
+
+# Run:
+# export HF_TOKEN=<your_huggingface_token>
+# docker run --device /dev/kfd --device /dev/dri --group-add video \
+#    -v ~/.cache/huggingface:/root/.cache/huggingface \
+#    --env "HF_TOKEN=$HF_TOKEN" \
+#    -p 8000:8000 \
+#    --ipc=host \
+#    lmcache/vllm-openai-rocm:light \
+#    --model Qwen/Qwen3-0.6B \
+#    --kv-transfer-config \
+#    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

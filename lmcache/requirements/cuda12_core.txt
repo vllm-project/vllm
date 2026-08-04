@@ -1,0 +1,4 @@
+# Vendor-specific runtime deps for CUDA 12.9 wheels. Selected by setup.py when
+# LMCACHE_CUDA_MAJOR=12. The cu13 default lives in cuda13_core.txt.
+
+cupy-cuda12x

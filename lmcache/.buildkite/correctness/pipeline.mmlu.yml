@@ -1,0 +1,36 @@
+agents:
+  queue: "shaoting-gcp"
+
+steps:
+  - label: "Run MMLU KV Transfer Test"
+    command: |
+      set -euo pipefail
+      echo "Starting MMLU test"
+      echo "Running setup.sh"
+      bash setup.sh
+      
+      # buildkite agents start at the root of the Git checkout
+      cd .buildkite/correctness
+  
+      echo "Starting Dense KV Transfer Test with meta-llama/Llama-3.1-8B-Instruct"
+      # produces Llama-3.1-8B-Instruct-baseline.jsonl
+      python mmlu-test.py --model meta-llama/Llama-3.1-8B-Instruct --number-of-subjects 25
+      # produces Llama-3.1-8B-Instruct-lmcache.jsonl
+      python mmlu-test.py --model meta-llama/Llama-3.1-8B-Instruct --number-of-subjects 25 --use-lmcache
+  
+      echo "Starting MLA KV Transfer Test with deepseek-ai/DeepSeek-V2-Lite"
+      # produces DeepSeek-V2-Lite-baseline.jsonl
+      python mmlu-test.py --model deepseek-ai/DeepSeek-V2-Lite --number-of-subjects 25
+      # produces DeepSeek-V2-Lite-lmcache.jsonl
+      python mmlu-test.py --model deepseek-ai/DeepSeek-V2-Lite --number-of-subjects 25 --use-lmcache
+  
+      echo "Summarizing Results"
+      # the summarize-results.py will look for jsonl files with the same techniqiue as the mmlu-test.py script
+      # which is with args.model.split("/")[-1]
+      python summarize-results.py meta-llama/Llama-3.1-8B-Instruct deepseek-ai/DeepSeek-V2-Lite
+  
+      # this produces correctness-summary.txt
+      buildkite-agent artifact upload correctness-summary.txt
+
+    artifact_paths:
+      - correctness-summary.txt

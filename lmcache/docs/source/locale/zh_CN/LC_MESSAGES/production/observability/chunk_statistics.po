@@ -1,0 +1,589 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/chunk_statistics.rst:4
+msgid "Chunk Statistics"
+msgstr "块统计"
+
+#: ../../source/production/observability/chunk_statistics.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/production/observability/chunk_statistics.rst:11
+msgid ""
+"The chunk statistics feature provides insights into KV cache chunk reuse "
+"patterns, helping you understand cache efficiency and optimize your "
+"deployment."
+msgstr "块统计功能提供了对 KV Cache 块重用模式的洞察，帮助您理解缓存效率并优化您的部署。"
+
+#: ../../source/production/observability/chunk_statistics.rst:14
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/production/observability/chunk_statistics.rst:16
+msgid ""
+"Chunk statistics tracks and analyzes KV cache chunks to provide metrics "
+"on:"
+msgstr "块统计跟踪和分析 KV Cache 块，以提供以下指标："
+
+#: ../../source/production/observability/chunk_statistics.rst:18
+msgid ""
+"**Total chunks processed**: The total number of chunks that have been "
+"processed"
+msgstr "**处理的总块数**\\ ：已处理的块的总数"
+
+#: ../../source/production/observability/chunk_statistics.rst:19
+msgid "**Unique chunks**: The number of distinct chunks encountered"
+msgstr "**唯一块**\\ ：遇到的不同块的数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:20
+msgid "**Duplicate chunks**: The number of repeated chunks"
+msgstr "**重复块**\\ ：重复块的数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:21
+msgid ""
+"**Reuse rate**: The ratio of duplicate chunks to total chunks, indicating"
+" cache efficiency"
+msgstr "**重用率**\\ ：重复块与总块的比例，指示缓存效率"
+
+#: ../../source/production/observability/chunk_statistics.rst:23
+msgid "This information is valuable for:"
+msgstr "此信息对以下内容很有价值："
+
+#: ../../source/production/observability/chunk_statistics.rst:25
+msgid "Understanding cache hit patterns"
+msgstr "理解缓存命中模式"
+
+#: ../../source/production/observability/chunk_statistics.rst:26
+msgid "Optimizing cache size and eviction policies"
+msgstr "优化缓存大小和逐出策略"
+
+#: ../../source/production/observability/chunk_statistics.rst:27
+msgid "Analyzing workload characteristics"
+msgstr "分析工作负载特征"
+
+#: ../../source/production/observability/chunk_statistics.rst:28
+msgid "Capacity planning for production deployments"
+msgstr "生产部署的容量规划"
+
+#: ../../source/production/observability/chunk_statistics.rst:31
+msgid "Recording Strategies"
+msgstr "记录策略"
+
+#: ../../source/production/observability/chunk_statistics.rst:33
+msgid ""
+"LMCache supports multiple recording strategies, each optimized for "
+"different use cases:"
+msgstr "LMCache 支持多种记录策略，每种策略都针对不同的使用案例进行了优化："
+
+#: ../../source/production/observability/chunk_statistics.rst:36
+msgid "Memory Bloom Filter Strategy"
+msgstr "内存布隆过滤器策略"
+
+#: ../../source/production/observability/chunk_statistics.rst:38
+msgid ""
+"A memory-efficient strategy using Bloom filters for probabilistic "
+"duplicate detection."
+msgstr "一种使用布隆过滤器进行概率重复检测的内存高效策略。"
+
+#: ../../source/production/observability/chunk_statistics.rst:40
+#: ../../source/production/observability/chunk_statistics.rst:69
+msgid "**Advantages:**"
+msgstr "**优点：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:42
+msgid "Low memory footprint"
+msgstr "低内存占用"
+
+#: ../../source/production/observability/chunk_statistics.rst:43
+msgid "Fast lookup operations"
+msgstr "快速查找操作"
+
+#: ../../source/production/observability/chunk_statistics.rst:44
+msgid "Suitable for large-scale deployments"
+msgstr "适合大规模部署"
+
+#: ../../source/production/observability/chunk_statistics.rst:46
+#: ../../source/production/observability/chunk_statistics.rst:75
+msgid "**Configuration:**"
+msgstr "**配置：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:56
+#: ../../source/production/observability/chunk_statistics.rst:86
+msgid "**Environment Variables:**"
+msgstr "**环境变量：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:65
+msgid "File Hash Strategy"
+msgstr "文件哈希策略"
+
+#: ../../source/production/observability/chunk_statistics.rst:67
+msgid ""
+"A file-based strategy that writes chunk hashes to disk for exact tracking"
+" and offline analysis."
+msgstr "一种基于文件的策略，将块哈希写入磁盘，以便进行精确跟踪和离线分析。"
+
+#: ../../source/production/observability/chunk_statistics.rst:71
+msgid "Exact duplicate detection (no false positives)"
+msgstr "精确重复检测（无误报）"
+
+#: ../../source/production/observability/chunk_statistics.rst:72
+msgid "Persistent storage for offline analysis"
+msgstr "离线分析的持久存储"
+
+#: ../../source/production/observability/chunk_statistics.rst:73
+msgid "Automatic file rotation and cleanup"
+msgstr "自动文件轮换和清理"
+
+#: ../../source/production/observability/chunk_statistics.rst:95
+msgid "Quick Start Guide"
+msgstr "快速入门指南"
+
+#: ../../source/production/observability/chunk_statistics.rst:98
+msgid "Step 1: Enable Chunk Statistics"
+msgstr "步骤 1：启用块统计信息"
+
+#: ../../source/production/observability/chunk_statistics.rst:100
+msgid "Configure your LMCache instance with chunk statistics enabled:"
+msgstr "配置您的 LMCache 实例以启用块统计信息："
+
+#: ../../source/production/observability/chunk_statistics.rst:102
+msgid "**Using YAML Configuration:**"
+msgstr "**使用 YAML 配置：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:123
+msgid "**Using vLLM with LMCache:**"
+msgstr "**使用 vLLM 和 LMCache:**"
+
+#: ../../source/production/observability/chunk_statistics.rst:140
+msgid "Step 2: Access Statistics"
+msgstr "步骤 2：访问统计信息"
+
+#: ../../source/production/observability/chunk_statistics.rst:142
+msgid "Retrieve statistics through the internal API server:"
+msgstr "通过内部 API 服务器检索统计信息："
+
+#: ../../source/production/observability/chunk_statistics.rst:149
+msgid "**Example Response:**"
+msgstr "**示例响应：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:192
+msgid "Configuration Options"
+msgstr "配置选项"
+
+#: ../../source/production/observability/chunk_statistics.rst:195
+msgid "Basic Configuration"
+msgstr "基本配置"
+
+#: ../../source/production/observability/chunk_statistics.rst:197
+msgid "Basic Configuration Options"
+msgstr "基本配置选项"
+
+#: ../../source/production/observability/chunk_statistics.rst:201
+#: ../../source/production/observability/chunk_statistics.rst:229
+#: ../../source/production/observability/chunk_statistics.rst:248
+msgid "Configuration Key"
+msgstr "配置键"
+
+#: ../../source/production/observability/chunk_statistics.rst:202
+#: ../../source/production/observability/chunk_statistics.rst:230
+#: ../../source/production/observability/chunk_statistics.rst:249
+msgid "Default Value"
+msgstr "默认值"
+
+#: ../../source/production/observability/chunk_statistics.rst:203
+#: ../../source/production/observability/chunk_statistics.rst:231
+#: ../../source/production/observability/chunk_statistics.rst:250
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/chunk_statistics.rst:204
+msgid "``enable_chunk_statistics``"
+msgstr "``enable_chunk_statistics``"
+
+#: ../../source/production/observability/chunk_statistics.rst:205
+#: ../../source/production/observability/chunk_statistics.rst:211
+msgid "``false``"
+msgstr "``false``"
+
+#: ../../source/production/observability/chunk_statistics.rst:206
+msgid "Enable chunk statistics tracking"
+msgstr "启用块统计跟踪"
+
+#: ../../source/production/observability/chunk_statistics.rst:207
+msgid "``chunk_statistics_strategy``"
+msgstr "``chunk_statistics_strategy``"
+
+#: ../../source/production/observability/chunk_statistics.rst:208
+msgid "``memory_bloom_filter``"
+msgstr "``memory_bloom_filter``"
+
+#: ../../source/production/observability/chunk_statistics.rst:209
+msgid "Recording strategy: ``memory_bloom_filter`` or ``file_hash``"
+msgstr "记录策略：\\ ``memory_bloom_filter`` 或 ``file_hash``"
+
+#: ../../source/production/observability/chunk_statistics.rst:210
+msgid "``chunk_statistics_auto_start_statistics``"
+msgstr "``chunk_statistics_auto_start_statistics``"
+
+#: ../../source/production/observability/chunk_statistics.rst:212
+msgid "Automatically start statistics collection on initialization"
+msgstr "在初始化时自动开始统计收集"
+
+#: ../../source/production/observability/chunk_statistics.rst:213
+msgid "``chunk_statistics_auto_exit_timeout_hours``"
+msgstr "``chunk_statistics_auto_exit_timeout_hours``"
+
+#: ../../source/production/observability/chunk_statistics.rst:214
+msgid "``0.0``"
+msgstr "``0.0``"
+
+#: ../../source/production/observability/chunk_statistics.rst:215
+msgid "Auto-stop after specified hours (0 = disabled)"
+msgstr "在指定小时后自动停止（0 = 禁用）"
+
+#: ../../source/production/observability/chunk_statistics.rst:216
+msgid "``chunk_statistics_auto_exit_target_unique_chunks``"
+msgstr "``chunk_statistics_auto_exit_target_unique_chunks``"
+
+#: ../../source/production/observability/chunk_statistics.rst:217
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/production/observability/chunk_statistics.rst:218
+msgid "Auto-stop after reaching target unique chunks (0 = disabled)"
+msgstr "达到目标唯一块后自动停止（0 = 禁用）"
+
+#: ../../source/production/observability/chunk_statistics.rst:221
+msgid "Memory Bloom Filter Options"
+msgstr "内存布隆过滤器选项"
+
+#: ../../source/production/observability/chunk_statistics.rst:223
+#: ../../source/production/observability/chunk_statistics.rst:242
+msgid "Configure these options in the ``extra_config`` section:"
+msgstr "在 ``extra_config`` 部分配置这些选项："
+
+#: ../../source/production/observability/chunk_statistics.rst:225
+msgid "Bloom Filter Configuration"
+msgstr "布隆过滤器配置"
+
+#: ../../source/production/observability/chunk_statistics.rst:232
+msgid "``chunk_statistics_mem_bf_expected_chunks``"
+msgstr "``chunk_statistics_mem_bf_expected_chunks``"
+
+#: ../../source/production/observability/chunk_statistics.rst:233
+msgid "``20000000``"
+msgstr "``20000000``"
+
+#: ../../source/production/observability/chunk_statistics.rst:234
+msgid "Expected number of chunks for capacity planning"
+msgstr "容量规划的预期块数"
+
+#: ../../source/production/observability/chunk_statistics.rst:235
+msgid "``chunk_statistics_mem_bf_false_positive_rate``"
+msgstr "``chunk_statistics_mem_bf_false_positive_rate``"
+
+#: ../../source/production/observability/chunk_statistics.rst:236
+msgid "``0.01``"
+msgstr "``0.01``"
+
+#: ../../source/production/observability/chunk_statistics.rst:237
+msgid "Target false positive rate (1%)"
+msgstr "目标假阳性率 (1%)"
+
+#: ../../source/production/observability/chunk_statistics.rst:240
+msgid "File Hash Options"
+msgstr "文件哈希选项"
+
+#: ../../source/production/observability/chunk_statistics.rst:244
+msgid "File Hash Configuration"
+msgstr "文件哈希配置"
+
+#: ../../source/production/observability/chunk_statistics.rst:251
+msgid "``chunk_statistics_file_output_dir``"
+msgstr "``chunk_statistics_file_output_dir``"
+
+#: ../../source/production/observability/chunk_statistics.rst:252
+msgid "``/tmp/lmcache_chunk_statistics``"
+msgstr "``/tmp/lmcache_chunk_statistics``"
+
+#: ../../source/production/observability/chunk_statistics.rst:253
+msgid "Directory for storing chunk hash files"
+msgstr "存储块哈希文件的目录"
+
+#: ../../source/production/observability/chunk_statistics.rst:254
+msgid "``chunk_statistics_file_rotation_size``"
+msgstr "``chunk_statistics_file_rotation_size``"
+
+#: ../../source/production/observability/chunk_statistics.rst:255
+msgid "``104857600``"
+msgstr "``104857600``"
+
+#: ../../source/production/observability/chunk_statistics.rst:256
+msgid "File size threshold for rotation (bytes, default 100MB)"
+msgstr "文件大小阈值用于轮换（字节，默认 100MB）"
+
+#: ../../source/production/observability/chunk_statistics.rst:257
+msgid "``chunk_statistics_file_max_count``"
+msgstr "``chunk_statistics_file_max_count``"
+
+#: ../../source/production/observability/chunk_statistics.rst:258
+msgid "``100``"
+msgstr "``100``"
+
+#: ../../source/production/observability/chunk_statistics.rst:259
+msgid "Maximum number of files to keep"
+msgstr "保留的最大文件数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:262
+msgid "Advanced Usage"
+msgstr "高级用法"
+
+#: ../../source/production/observability/chunk_statistics.rst:265
+msgid "Programmatic Control"
+msgstr "程序化控制"
+
+#: ../../source/production/observability/chunk_statistics.rst:267
+msgid "Control statistics collection programmatically through the internal API:"
+msgstr "通过内部 API 以编程方式控制统计信息收集："
+
+#: ../../source/production/observability/chunk_statistics.rst:287
+msgid "Auto-Stop Configuration"
+msgstr "自动停止配置"
+
+#: ../../source/production/observability/chunk_statistics.rst:289
+msgid "Configure automatic stopping based on time or chunk count:"
+msgstr "根据时间或块数配置自动停止："
+
+#: ../../source/production/observability/chunk_statistics.rst:296
+msgid "Prometheus Metrics"
+msgstr "Prometheus 指标"
+
+#: ../../source/production/observability/chunk_statistics.rst:298
+msgid ""
+"When using the internal API server, chunk statistics are exposed as "
+"Prometheus metrics:"
+msgstr "当使用内部 API 服务器时，块统计信息作为 Prometheus 指标公开："
+
+#: ../../source/production/observability/chunk_statistics.rst:300
+msgid ""
+"``lmcache_chunk_statistics_total_chunks``: Total number of chunks "
+"processed"
+msgstr "``lmcache_chunk_statistics_total_chunks``: 处理的块的总数"
+
+#: ../../source/production/observability/chunk_statistics.rst:301
+msgid "``lmcache_chunk_statistics_unique_chunks``: Number of unique chunks"
+msgstr "``lmcache_chunk_statistics_unique_chunks``: 唯一块的数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:302
+msgid "``lmcache_chunk_statistics_reuse_rate``: Cache reuse rate (0.0 to 1.0)"
+msgstr "``lmcache_chunk_statistics_reuse_rate``: 缓存重用率 (0.0 到 1.0)"
+
+#: ../../source/production/observability/chunk_statistics.rst:303
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_size_mb``: Bloom filter memory "
+"usage (MB)"
+msgstr "``lmcache_chunk_statistics_bloom_filter_size_mb``: 布隆过滤器内存使用量 (MB)"
+
+#: ../../source/production/observability/chunk_statistics.rst:304
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_fill_rate``: Bloom filter fill "
+"rate (0.0 to 1.0)"
+msgstr "``lmcache_chunk_statistics_bloom_filter_fill_rate``: 布隆过滤器填充率 (0.0 到 1.0)"
+
+#: ../../source/production/observability/chunk_statistics.rst:305
+msgid "``lmcache_chunk_statistics_file_count``: Number of hash files created"
+msgstr "``lmcache_chunk_statistics_file_count``: 创建的哈希文件数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:306
+msgid "``lmcache_chunk_statistics_current_file_size``: Current file size (bytes)"
+msgstr "``lmcache_chunk_statistics_current_file_size``: 当前文件大小（字节）"
+
+#: ../../source/production/observability/chunk_statistics.rst:309
+msgid "Offline Analysis"
+msgstr "离线分析"
+
+#: ../../source/production/observability/chunk_statistics.rst:311
+msgid ""
+"For the file hash strategy, you can perform detailed offline analysis of "
+"collected chunk hash data."
+msgstr "对于文件哈希策略，您可以对收集到的块哈希数据进行详细的离线分析。"
+
+#: ../../source/production/observability/chunk_statistics.rst:314
+msgid "Using the Analysis Script"
+msgstr "使用分析脚本"
+
+#: ../../source/production/observability/chunk_statistics.rst:316
+msgid ""
+"LMCache provides a comprehensive analysis script at "
+"``examples/chunk_statistics/analyze_chunk_hashes.py`` that supports "
+"multiple analysis modes."
+msgstr ""
+"LMCache 提供了一个全面的分析脚本，位于 "
+"``examples/chunk_statistics/analyze_chunk_hashes.py``\\ ，支持多种分析模式。"
+
+#: ../../source/production/observability/chunk_statistics.rst:319
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/production/observability/chunk_statistics.rst:321
+msgid "**Choose the Right Strategy:**"
+msgstr "**选择正确的策略：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:323
+msgid "Use **memory_bloom_filter** for real-time monitoring with minimal overhead"
+msgstr "使用 **memory_bloom_filter** 进行实时监控，且开销最小"
+
+#: ../../source/production/observability/chunk_statistics.rst:324
+msgid "Use **file_hash** when exact tracking is required or for offline analysis"
+msgstr "使用 **file_hash** 当需要精确跟踪或进行离线分析时。"
+
+#: ../../source/production/observability/chunk_statistics.rst:326
+msgid "**Tune Bloom Filter Parameters:**"
+msgstr "**调整布隆过滤器参数:**"
+
+#: ../../source/production/observability/chunk_statistics.rst:328
+msgid "Set ``expected_chunks`` based on your workload size"
+msgstr "根据您的工作负载大小设置 ``expected_chunks``"
+
+#: ../../source/production/observability/chunk_statistics.rst:329
+msgid "Lower ``false_positive_rate`` increases memory usage but improves accuracy"
+msgstr "降低 ``false_positive_rate`` 会增加内存使用，但提高准确性。"
+
+#: ../../source/production/observability/chunk_statistics.rst:331
+msgid "**Monitor Memory Usage:**"
+msgstr "**监控内存使用情况：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:333
+msgid ""
+"Track ``bloom_filter_size_mb`` metric to ensure it fits in available "
+"memory"
+msgstr "跟踪 ``bloom_filter_size_mb`` 指标以确保其适合可用内存"
+
+#: ../../source/production/observability/chunk_statistics.rst:334
+msgid "Adjust ``expected_chunks`` if memory usage is too high"
+msgstr "如果内存使用过高，请调整 ``expected_chunks``\\ 。"
+
+#: ../../source/production/observability/chunk_statistics.rst:336
+msgid "**File Rotation:**"
+msgstr "**文件轮换：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:338
+msgid ""
+"Configure appropriate ``file_rotation_size`` to balance file size and "
+"count"
+msgstr "配置适当的 ``file_rotation_size`` 以平衡文件大小和数量"
+
+#: ../../source/production/observability/chunk_statistics.rst:339
+msgid "Set ``file_max_count`` to prevent unlimited disk usage"
+msgstr "设置 ``file_max_count`` 以防止无限制的磁盘使用"
+
+#: ../../source/production/observability/chunk_statistics.rst:341
+msgid "**Production Deployment:**"
+msgstr "**生产部署：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:343
+msgid "Enable auto-stop to prevent indefinite data collection"
+msgstr "启用自动停止以防止无限期的数据收集"
+
+#: ../../source/production/observability/chunk_statistics.rst:344
+msgid "Use internal API server for centralized metrics collection"
+msgstr "使用内部 API 服务器进行集中式指标收集"
+
+#: ../../source/production/observability/chunk_statistics.rst:345
+msgid "Integrate with your monitoring stack (Prometheus, Grafana, etc.)"
+msgstr "与您的监控栈集成（Prometheus、Grafana 等）"
+
+#: ../../source/production/observability/chunk_statistics.rst:348
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/production/observability/chunk_statistics.rst:351
+msgid "Statistics Not Updating"
+msgstr "统计未更新"
+
+#: ../../source/production/observability/chunk_statistics.rst:353
+msgid "**Issue:** Statistics remain at zero or don't update."
+msgstr "**问题：** 统计数据保持为零或不更新。"
+
+#: ../../source/production/observability/chunk_statistics.rst:355
+#: ../../source/production/observability/chunk_statistics.rst:366
+#: ../../source/production/observability/chunk_statistics.rst:377
+msgid "**Solutions:**"
+msgstr "**解决方案：**"
+
+#: ../../source/production/observability/chunk_statistics.rst:357
+msgid "Verify ``enable_chunk_statistics`` is set to ``true``"
+msgstr "验证 ``enable_chunk_statistics`` 是否设置为 ``true``"
+
+#: ../../source/production/observability/chunk_statistics.rst:358
+msgid "Check that statistics collection is started (auto-start or manual start)"
+msgstr "检查统计收集是否已启动（自动启动或手动启动）"
+
+#: ../../source/production/observability/chunk_statistics.rst:359
+msgid "Ensure requests are being processed by the LMCache instance"
+msgstr "确保请求正在被 LMCache 实例处理"
+
+#: ../../source/production/observability/chunk_statistics.rst:362
+msgid "High Memory Usage"
+msgstr "高内存使用率"
+
+#: ../../source/production/observability/chunk_statistics.rst:364
+msgid "**Issue:** Bloom filter consuming too much memory."
+msgstr "**问题：** Bloom 过滤器消耗了过多的内存。"
+
+#: ../../source/production/observability/chunk_statistics.rst:368
+msgid "Reduce ``chunk_statistics_mem_bf_expected_chunks``"
+msgstr "减少 ``chunk_statistics_mem_bf_expected_chunks``"
+
+#: ../../source/production/observability/chunk_statistics.rst:369
+msgid ""
+"Increase ``chunk_statistics_mem_bf_false_positive_rate`` (trade accuracy "
+"for memory)"
+msgstr "增加 ``chunk_statistics_mem_bf_false_positive_rate`` （以牺牲准确性换取内存）"
+
+#: ../../source/production/observability/chunk_statistics.rst:370
+msgid "Consider switching to ``file_hash`` strategy"
+msgstr "考虑切换到 ``file_hash`` 策略"
+
+#: ../../source/production/observability/chunk_statistics.rst:373
+msgid "File System Full"
+msgstr "文件系统已满"
+
+#: ../../source/production/observability/chunk_statistics.rst:375
+msgid "**Issue:** Disk space exhausted with file hash strategy."
+msgstr "**问题：** 磁盘空间耗尽，使用文件哈希策略。"
+
+#: ../../source/production/observability/chunk_statistics.rst:379
+msgid "Reduce ``chunk_statistics_file_max_count``"
+msgstr "减少 ``chunk_statistics_file_max_count``"
+
+#: ../../source/production/observability/chunk_statistics.rst:380
+msgid "Decrease ``chunk_statistics_file_rotation_size``"
+msgstr "减少 ``chunk_statistics_file_rotation_size``"
+
+#: ../../source/production/observability/chunk_statistics.rst:381
+msgid "Implement external log rotation or archival"
+msgstr "实现外部日志轮换或归档"
+

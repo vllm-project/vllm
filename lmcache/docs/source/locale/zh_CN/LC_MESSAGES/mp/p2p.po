@@ -1,0 +1,373 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/p2p.rst:4
+msgid "P2P KV Cache Sharing"
+msgstr "P2P KV 缓存共享"
+
+#: ../../source/mp/p2p.rst:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/mp/p2p.rst:9
+msgid ""
+"In a multi-node deployment, every node runs its own LMCache server "
+"process, and each one caches the KV of the requests it has served in its "
+"local memory. Without sharing, a prefix that was computed on one node has"
+" to be recomputed from scratch when the same prefix arrives on a "
+"different node."
+msgstr "在多节点部署中，每个节点运行自己的 LMCache 服务器进程，每个节点在其本地内存中缓存它所服务请求的 KV。没有共享时，当相同的前缀到达不同节点时，必须从头开始重计算在一个节点上计算的前缀。"
+
+#: ../../source/mp/p2p.rst:14
+msgid ""
+"**Peer-to-peer (P2P) KV cache sharing turns the per-node caches into one "
+"logical cache.** When a node looks up a prefix that is not in its own "
+"memory, it can read that prefix's KV directly from the memory of the peer"
+" node that holds it, over the datacenter network using RDMA. The result "
+"is a much higher effective cache hit rate across the fleet, without any "
+"central storage tier in the hot path."
+msgstr "**点对点 (P2P) KV 缓存共享将每个节点的缓存转变为一个逻辑缓存。** 当一个节点查找不在其本地内存中的前缀时，它可以通过数据中心网络使用 RDMA 直接从持有该前缀的对等节点的内存中读取该前缀的 KV。结果是整个系统的有效缓存命中率大大提高，而无需在热路径中使用中央存储层。"
+
+#: ../../source/mp/p2p.rst:21
+msgid ""
+"The transfer is a one-sided RDMA read from the requesting node into its "
+"own L1 buffer; the node that owns the data is not interrupted to serve "
+"it. On an RDMA-capable network (InfiniBand / RoCE) this is dramatically "
+"faster than recomputing the prefix or round-tripping through a shared "
+"object store."
+msgstr "传输是从请求节点到其自身 L1 缓冲区的单向 RDMA 读取；拥有数据的节点不会被打断来提供数据。在支持 RDMA 的网络（如 InfiniBand / RoCE）上，这比重新计算前缀或通过共享对象存储进行往返要快得多。"
+
+#: ../../source/mp/p2p.rst:27
+msgid "How it works"
+msgstr "它是如何工作的"
+
+#: ../../source/mp/p2p.rst:29
+msgid "P2P involves three pieces:"
+msgstr "P2P 涉及三个部分："
+
+#: ../../source/mp/p2p.rst:31
+msgid ""
+"**Coordinator** — a small HTTP service (one per deployment) that tracks "
+"which LMCache servers are alive. Each server registers with it and "
+"heartbeats; the coordinator answers \"who are my live peers?\" queries. "
+"It only manages membership — it never sees KV data or participates in "
+"lookups. See :doc:`coordinator`."
+msgstr "**协调器** — 一个小型 HTTP 服务（每个部署一个），用于跟踪哪些 LMCache 服务器处于活动状态。每个服务器向其注册并发送心跳；协调器回答“我的活动对等体是谁？”的查询。它仅管理成员资格——它从不查看 KV 数据或参与查找。请参见 :doc:`coordinator`。"
+
+#: ../../source/mp/p2p.rst:36
+msgid ""
+"**LMCache server** — each server runs a P2P controller that periodically "
+"asks the coordinator for the current peer list and, for every live peer, "
+"opens a connection used to look up and read that peer's KV."
+msgstr "**LMCache 服务器** — 每个服务器运行一个 P2P 控制器，定期向协调器请求当前的对等体列表，并为每个活跃的对等体打开一个连接，用于查找和读取该对等体的 KV。"
+
+#: ../../source/mp/p2p.rst:39
+msgid ""
+"**Transfer channel** — the RDMA layer that performs the actual remote "
+"memory reads. Each server registers its L1 buffer once at startup so "
+"peers can read from it."
+msgstr "**传输通道** — 执行实际远程内存读取的 RDMA 层。每个服务器在启动时注册其 L1 缓冲区，以便对等体可以从中读取。"
+
+#: ../../source/mp/p2p.rst:43
+msgid ""
+"On a cache miss, a node asks the peer that owns the prefix to *lock and "
+"locate* it, receives the remote addresses, RDMA-reads the KV into its own"
+" L1, and serves the request from there. Peers are discovered and "
+"connected automatically as they join, and disconnected automatically as "
+"they leave — no static peer lists."
+msgstr "在缓存未命中时，一个节点请求拥有前缀的对等节点锁定并定位它，接收远程地址，将 KV 读取到自己的 L1 中，并从那里提供请求。对等节点在加入时会自动发现和连接，在离开时会自动断开 — 无需静态对等节点列表。"
+
+#: ../../source/mp/p2p.rst:49
+msgid "Requirements"
+msgstr "要求"
+
+#: ../../source/mp/p2p.rst:51
+msgid ""
+"**A coordinator.** P2P needs the coordinator for peer discovery. A server"
+" started with ``--p2p-advertise-url`` but no ``--coordinator-url`` "
+"refuses to start."
+msgstr "**一个协调者。** P2P 需要协调者进行对等发现。使用 ``--p2p-advertise-url`` 启动的服务器如果没有 ``--coordinator-url`` 则拒绝启动。"
+
+#: ../../source/mp/p2p.rst:54
+msgid ""
+"**An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended "
+"for production performance. By default P2P uses the ``nixl`` transfer "
+"engine, which is shipped with LMCache, so there is nothing extra to "
+"install."
+msgstr "**强烈推荐使用支持 RDMA 的网络**\\ （InfiniBand / RoCE）以获得生产性能。默认情况下，P2P 使用与 LMCache 一起提供的 ``nixl`` 传输引擎，因此无需额外安装任何东西。"
+
+#: ../../source/mp/p2p.rst:57
+msgid ""
+"**A single, contiguous L1 region.** The transfer channel registers the "
+"whole L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier "
+"(``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); "
+"the server refuses to start in those configurations."
+msgstr "**一个单一的、连续的 L1 区域。** 传输通道为 RDMA 注册整个 L1 缓冲区，因此 P2P 与 GDS L1 层（``--gds-l1-path``）和 Device-DAX L1 层（``--l1-devdax-path``）不兼容；在这些配置下，服务器拒绝启动。"
+
+#: ../../source/mp/p2p.rst:63
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/p2p.rst:65
+msgid ""
+"P2P is enabled per server by the ``--p2p-advertise-url`` flag. The "
+"relevant ``lmcache server`` flags are:"
+msgstr "P2P 通过 ``--p2p-advertise-url`` 标志在每个服务器上启用。相关的 ``lmcache server`` 标志包括："
+
+#: ../../source/mp/p2p.rst:72
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/mp/p2p.rst:73 ../../source/mp/p2p.rst:113
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/p2p.rst:74
+msgid "``--p2p-advertise-url HOST:PORT``"
+msgstr "``--p2p-advertise-url HOST:PORT``"
+
+#: ../../source/mp/p2p.rst:75
+msgid ""
+"Transfer-channel endpoint this server advertises to peers. Setting it "
+"enables P2P. Must be an address other nodes can reach."
+msgstr "此服务器向对等节点广告的传输通道端点。设置它可以启用 P2P。必须是其他节点可以访问的地址。"
+
+#: ../../source/mp/p2p.rst:77
+msgid "``--p2p-listen-url HOST:PORT``"
+msgstr "``--p2p-listen-url HOST:PORT``"
+
+#: ../../source/mp/p2p.rst:78
+msgid ""
+"Address the transfer-channel server binds to. Defaults to ``--p2p-"
+"advertise-url``; set it to bind ``0.0.0.0`` while advertising a routable "
+"IP."
+msgstr "传输通道服务器绑定的地址。默认为 ``--p2p-advertise-url``；在广告可路由 IP 时，将其设置为绑定 ``0.0.0.0``。"
+
+#: ../../source/mp/p2p.rst:81
+msgid "``--p2p-lookup-timeout SECONDS``"
+msgstr "``--p2p-lookup-timeout SECONDS``"
+
+#: ../../source/mp/p2p.rst:82
+msgid "Deadline for a peer lookup before it counts as a miss (default ``30``)."
+msgstr "对等查找的截止时间，超过该时间将视为未命中（默认 ``30``）。"
+
+#: ../../source/mp/p2p.rst:83
+msgid "``--p2p-load-timeout SECONDS``"
+msgstr "``--p2p-load-timeout SECONDS``"
+
+#: ../../source/mp/p2p.rst:84
+msgid ""
+"Deadline for a peer KV read before it counts as a failure (default "
+"``30``)."
+msgstr "对等 KV 读取的截止时间，超过该时间将视为失败（默认 ``30``）。"
+
+#: ../../source/mp/p2p.rst:86
+msgid "``--p2p-transfer-engine ENGINE``"
+msgstr "``--p2p-transfer-engine ENGINE``"
+
+#: ../../source/mp/p2p.rst:87
+msgid "Transfer-channel implementation (default ``nixl``)."
+msgstr "传输通道实现（默认 ``nixl``）。"
+
+#: ../../source/mp/p2p.rst:89
+msgid ""
+"P2P also reuses the coordinator connection flags (``--coordinator-url``, "
+"``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); "
+"the heartbeat interval doubles as the peer-discovery poll interval. See "
+":doc:`/cli/server` and :doc:`/cli/coordinator` for the full flag lists."
+msgstr "P2P 还重用协调器连接标志 (``--coordinator-url``, ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``)；心跳间隔同时作为对等发现轮询间隔。有关完整的标志列表，请参见 :doc:`/cli/server` 和 :doc:`/cli/coordinator`。"
+
+#: ../../source/mp/p2p.rst:96
+msgid ""
+"Increase the L1 buffer alignment to at least 64 KB (``--l1-align-bytes "
+"65536``) on servers that participate in P2P. A larger alignment lets the "
+"transfer channel issue bigger, better-aligned RDMA reads and noticeably "
+"improves transfer performance. The default (4 KB) is fine for non-P2P "
+"deployments."
+msgstr "在参与 P2P 的服务器上，将 L1 缓冲区对齐增加到至少 64 KB (``--l1-align-bytes 65536``)。更大的对齐可以让传输通道发出更大、更好对齐的 RDMA 读取，并显著提高传输性能。默认值（4 KB）对于非 P2P 部署是可以的。"
+
+#: ../../source/mp/p2p.rst:103
+msgid "Transfer engine backends"
+msgstr "传输引擎后端"
+
+#: ../../source/mp/p2p.rst:105
+msgid ""
+"The transfer engine is the component that performs the remote memory "
+"reads, selected per server with ``--p2p-transfer-engine``."
+msgstr "传输引擎是执行远程内存读取的组件，按服务器选择，使用 ``--p2p-transfer-engine``。"
+
+#: ../../source/mp/p2p.rst:112
+msgid "Engine"
+msgstr "引擎"
+
+#: ../../source/mp/p2p.rst:114
+msgid "``nixl`` (default)"
+msgstr "``nixl`` (默认)"
+
+#: ../../source/mp/p2p.rst:115
+msgid ""
+"RDMA-based transport, shipped with LMCache. Runs over InfiniBand / RoCE "
+"fabrics."
+msgstr "基于 RDMA 的传输，随 LMCache 一起提供。运行在 InfiniBand / RoCE 网络上。"
+
+#: ../../source/mp/p2p.rst:118
+msgid ""
+"``nixl`` is the only backend available today. The transfer engine is a "
+"pluggable abstraction, so additional backends can be added in the future "
+"without changing the rest of the P2P stack."
+msgstr "``nixl`` 是目前唯一可用的后端。传输引擎是一个可插拔的抽象，因此可以在未来添加其他后端，而无需更改 P2P 堆栈的其余部分。"
+
+#: ../../source/mp/p2p.rst:123
+msgid "Running a multi-node deployment"
+msgstr "运行多节点部署"
+
+#: ../../source/mp/p2p.rst:125
+msgid ""
+"The example below brings up a two-node fleet. Adding more nodes is just "
+"more copies of the per-node step, all pointing at the same coordinator."
+msgstr "下面的示例启动了一个两节点的集群。添加更多节点只需复制每个节点的步骤，所有节点都指向相同的协调器。"
+
+#: ../../source/mp/p2p.rst:128
+msgid ""
+"**Step 1 — start the coordinator** (on a host all nodes can reach, here "
+"``10.0.0.1``):"
+msgstr "**步骤 1 — 启动协调器**\\ （在所有节点都能访问的主机上，这里是 ``10.0.0.1``）："
+
+#: ../../source/mp/p2p.rst:135
+msgid ""
+"**Step 2 — on each node, start the LMCache server with P2P enabled.** "
+"Replace ``<NODE_IP>`` with that node's routable address (e.g. "
+"``10.0.0.2``, ``10.0.0.3``, ...):"
+msgstr "**步骤 2 — 在每个节点上启动启用 P2P 的 LMCache 服务器。** 将 ``<NODE_IP>`` 替换为该节点的可路由地址（例如 ``10.0.0.2``、``10.0.0.3`` 等）："
+
+#: ../../source/mp/p2p.rst:150
+msgid ""
+"``--coordinator-advertise-ip`` is the address peers use to reach this "
+"node's control plane, and ``--p2p-advertise-url`` is the RDMA transfer "
+"endpoint. Here the server binds ``0.0.0.0`` (all interfaces) and "
+"advertises ``<NODE_IP>``."
+msgstr "``--coordinator-advertise-ip`` 是对等节点用来访问该节点控制平面的地址，而 ``--p2p-advertise-url`` 是 RDMA 传输端点。这里服务器绑定 ``0.0.0.0``\\ （所有接口）并广播 ``<NODE_IP>``。"
+
+#: ../../source/mp/p2p.rst:154
+msgid ""
+"**Step 3 — on each node, start vLLM** pointed at the *local* LMCache "
+"server via the connector. vLLM never talks to peers directly — the "
+"LMCache server it connects to does P2P on its behalf:"
+msgstr "**步骤 3 — 在每个节点上，通过连接器启动指向本地 LMCache 服务器的 vLLM。vLLM 从不直接与对等节点通信 — 它连接的 LMCache 服务器代表它进行 P2P：**"
+
+#: ../../source/mp/p2p.rst:164
+msgid ""
+"Once both nodes have registered, a prefix first served on node 2 will be "
+"served from node 2's cache when the same prefix later arrives on node 3 —"
+" read over RDMA instead of recomputed."
+msgstr "一旦两个节点都已注册，当相同的前缀稍后到达节点 3 时，首先在节点 2 上提供的前缀将从节点 2 的缓存中提供——通过 RDMA 读取，而不是重计算。"
+
+#: ../../source/mp/p2p.rst:169
+msgid "Running on a single node (testing & debugging)"
+msgstr "在单个节点上运行（测试和调试）"
+
+#: ../../source/mp/p2p.rst:171
+msgid ""
+"You can exercise the entire P2P path on a single multi-GPU machine by "
+"running two LMCache servers and two vLLM servers over ``localhost``, plus"
+" one coordinator. This is the recommended way to develop and debug P2P."
+msgstr "您可以通过在 ``localhost`` 上运行两个 LMCache 服务器和两个 vLLM 服务器，以及一个协调器，在单个多 GPU 机器上执行整个 P2P 路径。这是开发和调试 P2P 的推荐方式。"
+
+#: ../../source/mp/p2p.rst:208
+msgid ""
+"The two servers must differ in **every** port: ZMQ (``--port``), HTTP "
+"(``--http-port``), and the P2P transfer endpoint (``--p2p-advertise-"
+"url``). Give each a distinct ``--instance-id`` so they are easy to tell "
+"apart."
+msgstr "这两个服务器必须在 **每个** 端口上有所不同：ZMQ (``--port``)、HTTP (``--http-port``) 和 P2P 传输端点 (``--p2p-advertise-url``)。为每个服务器指定一个独特的 ``--instance-id``，以便于区分。"
+
+#: ../../source/mp/p2p.rst:212
+msgid ""
+"To test the path, send a long prompt to vLLM **A** (port ``8000``) and "
+"then the *same* prompt to vLLM **B** (port ``8001``). B has never seen "
+"the prompt and its own cache is empty, so any LMCache hit on B must have "
+"been read from A over P2P."
+msgstr "要测试路径，向 vLLM **A**\\ （端口 ``8000``）发送一个长提示，然后向 vLLM **B**\\ （端口 ``8001``）发送相同的提示。B 从未见过该提示，并且它自己的缓存是空的，因此 B 上的任何 LMCache 命中必须是通过 P2P 从 A 读取的。"
+
+#: ../../source/mp/p2p.rst:218
+msgid ""
+"On a single host, ``localhost`` traffic typically uses the loopback/TCP "
+"path rather than RDMA, so latencies are not representative of a real RDMA"
+" fabric. Single-node mode is for **functional** testing and debugging; "
+"benchmark performance on a real multi-node RDMA deployment."
+msgstr "在单个主机上，``localhost`` 流量通常使用回环/TCP 路径而不是 RDMA，因此延迟并不能代表真实的 RDMA 结构。单节点模式用于 **功能** 测试和调试；在真实的多节点 RDMA 部署上进行基准性能测试。"
+
+#: ../../source/mp/p2p.rst:224
+msgid "Verifying P2P is working"
+msgstr "验证 P2P 是否正常工作"
+
+#: ../../source/mp/p2p.rst:226
+msgid ""
+"Query a server's status endpoint to see its P2P state and discovered "
+"peers:"
+msgstr "查询服务器的状态端点以查看其 P2P 状态和发现的对等节点："
+
+#: ../../source/mp/p2p.rst:232
+msgid ""
+"Look for ``p2p_state`` (``registered`` once it has joined the "
+"coordinator) and ``p2p_peer_count`` (the number of connected peers; ``1``"
+" in the two-node example). You can also list the fleet from the "
+"coordinator:"
+msgstr "查找 ``p2p_state`` （一旦加入协调器则为 ``registered``）和 ``p2p_peer_count`` （连接的对等节点数量；在两个节点的示例中为 ``1``）。您还可以从协调器列出整个集群："
+
+#: ../../source/mp/p2p.rst:240
+msgid ""
+"With ``LMCACHE_LOG_LEVEL=DEBUG``, each server logs ``Added P2P adapter "
+"... for peer <instance-id>`` when it connects to a peer, and ``Removed "
+"P2P adapter ...`` when a peer leaves."
+msgstr "在 ``LMCACHE_LOG_LEVEL=DEBUG`` 下，每个服务器在连接到对等体时记录 ``Added P2P adapter ... for peer <instance-id>``，在对等体离开时记录 ``Removed P2P adapter ...``。"
+
+#: ../../source/mp/p2p.rst:245
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/mp/p2p.rst:247
+msgid ""
+"**Read-only.** A node reads KV from its peers; it never writes into a "
+"peer's memory. This keeps each node the sole owner of its L1."
+msgstr "**只读。** 节点从其对等节点读取 KV；它永远不会写入对等节点的内存。这使得每个节点都是其 L1 的唯一拥有者。"
+
+#: ../../source/mp/p2p.rst:249
+msgid ""
+"**One hop.** A node reads directly from the peer that holds the prefix; "
+"reads are not chained across multiple peers."
+msgstr "**单跳。** 节点直接从持有前缀的对等节点读取；读取不会跨多个对等节点链式进行。"
+
+#~ msgid ""
+#~ "The multiprocess (MP) implementation of "
+#~ "peer-to-peer (P2P) KV cache sharing"
+#~ " is **coming soon**."
+#~ msgstr "对等网络 (P2P) KV 缓存共享的多进程 (MP) 实现将于 **即将推出**。"
+
+#~ msgid ""
+#~ "Until it lands, the in-process "
+#~ "implementation is documented in the "
+#~ ":doc:`Legacy section <../legacy/index>`: "
+#~ ":doc:`../kv_cache/p2p_sharing`."
+#~ msgstr ""
+#~ "在它发布之前，进程内实现的文档记录在 :doc:`遗留部分 <../legacy/index>`： "
+#~ ":doc:`../kv_cache/p2p_sharing`。"
+

@@ -1,0 +1,317 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:2
+msgid "Filesystem Backend"
+msgstr "文件系统后端"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/fs`."
+msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/l2_storage/fs`。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:9
+msgid ""
+"The filesystem backend uses ``FSConnector`` to store LMCache remote "
+"chunks as files under one or more POSIX filesystem directories. It is "
+"useful when you want a simple persistent remote backend, or when multiple"
+" inference workers can see the same mounted directory through local disk,"
+" NFS, a parallel filesystem, or a container volume."
+msgstr ""
+"文件系统后端使用 ``FSConnector`` 将 LMCache 远程缓存块存储为一个或多个 POSIX "
+"文件系统目录下的文件。当您需要一个简单的持久远程后端，或者当多个推理进程可以通过本地磁盘、NFS、并行文件系统或容器卷访问同一挂载目录时，它非常有用。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:15
+msgid ""
+"This backend is different from :doc:`local_storage`. Local disk "
+"offloading is a per-process local tier configured through ``local_disk``."
+" ``FSConnector`` is a remote backend configured through "
+"``remote_storage_plugins`` or the legacy ``remote_url`` field, so it "
+"participates in the same remote backend path as Redis, S3, Mooncake, and "
+"other remote connectors."
+msgstr ""
+"该后端与 :doc:`local_storage` 不同。本地磁盘卸载是通过 ``local_disk`` 配置的按进程本地层。\\ "
+"``FSConnector`` 是通过 ``remote_storage_plugins`` 或旧版 ``remote_url`` "
+"字段配置的远程后端，因此它与 Redis、S3、Mooncake 及其他远程连接器共用同一远程后端路径。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:22
+msgid "When to use it"
+msgstr "何时使用它"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:24
+msgid "Use ``FSConnector`` when:"
+msgstr "在以下情况下使用 ``FSConnector``\\ ："
+
+#: ../../source/kv_cache/storage_backends/fs.rst:26
+msgid ""
+"You need a lightweight persistent remote backend for development, "
+"examples, or benchmark runs."
+msgstr "您需要一个轻量级的持久远程后端，用于开发、示例或基准测试。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:28
+msgid "Multiple LMCache or vLLM processes share a mounted cache directory."
+msgstr "多个 LMCache 或 vLLM 进程共享一个挂载的缓存目录。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:29
+msgid ""
+"Your storage is already exposed as a filesystem and does not need a "
+"separate object-store or key-value service."
+msgstr "您的存储已以文件系统形式对外提供，无需额外的对象存储或键值服务。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:31
+msgid ""
+"You want to test remote-backend behavior before moving to a production "
+"backend such as Redis, Valkey, S3, Mooncake, or InfiniStore."
+msgstr "您希望在迁移到生产后端（如 Redis、Valkey、S3、Mooncake 或 InfiniStore）之前测试远程后端的行为。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:34
+msgid "Avoid using it when:"
+msgstr "在以下情况下请避免使用："
+
+#: ../../source/kv_cache/storage_backends/fs.rst:36
+msgid "The filesystem is not shared by every process that must read the cache."
+msgstr "文件系统未被所有需要读取缓存的进程共享。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:37
+msgid ""
+"You need object-store semantics, cross-region persistence, or service-"
+"level access control."
+msgstr "您需要对象存储语义、跨区域持久性或服务级访问控制。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:39
+msgid ""
+"The storage path is on a slow network filesystem and sits on the hot "
+"request path."
+msgstr "存储路径位于慢速网络文件系统上，且处于请求热路径中。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:43
+msgid "Recommended configuration"
+msgstr "推荐配置"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:45
+msgid ""
+"The recommended form is the built-in remote storage plugin configuration."
+" The plugin name ``fs`` selects ``FSConnector`` and the base path is "
+"configured in ``extra_config``."
+msgstr ""
+"推荐方式是使用内置远程存储插件配置。插件名称 ``fs`` 对应 ``FSConnector``\\ ，基础路径在 "
+"``extra_config`` 中配置。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:63
+msgid ""
+"``FSConnector`` creates the base directory if it does not already exist. "
+"Each cache chunk is written as a ``.data`` file whose name is derived "
+"from the LMCache cache key."
+msgstr "``FSConnector`` 会在目录不存在时创建基础目录。每个缓存块作为 ``.data`` 文件写入，其名称源自 LMCache 缓存键。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:68
+msgid "Multiple filesystem instances"
+msgstr "多个文件系统实例"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:70
+msgid ""
+"You can configure multiple named ``fs`` instances by appending an "
+"instance name after the connector type. The part before the first dot is "
+"still the connector type; the full plugin name becomes the "
+"``extra_config`` prefix."
+msgstr ""
+"您可以通过在连接器类型后附加实例名称来配置多个命名的 ``fs`` 实例。在第一个点之前的部分仍然是连接器类型；完整的插件名称成为 "
+"``extra_config`` 前缀。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:82
+msgid ""
+"This is useful when a deployment wants separate filesystem-backed remote "
+"stores for different cache policies, traffic classes, or experiments."
+msgstr "当一个部署希望为不同的缓存策略、流量类别或实验提供独立的基于文件系统的远程存储时，这非常有用。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:86
+msgid "Multiple base paths"
+msgstr "多个基础路径"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:88
+msgid ""
+"``remote_storage_plugin.<name>.base_path`` may contain a comma-separated "
+"list of directories. The connector chooses a directory by hashing the "
+"cache chunk key, which spreads files across the configured paths."
+msgstr ""
+"``remote_storage_plugin.<name>.base_path`` "
+"可以包含一个以逗号分隔的目录列表。连接器通过对缓存块键进行哈希来选择一个目录，从而将文件分散到配置的路径中。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:99
+msgid ""
+"Use multiple paths when each path maps to an independent storage device "
+"or mount point. For best results, keep every path visible to the LMCache "
+"processes that need to retrieve the same chunks."
+msgstr "当每个路径映射到独立的存储设备或挂载点时，请使用多个路径。为了获得最佳效果，请确保每个路径对需要检索相同块的 LMCache 进程可见。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:104
+msgid "Legacy ``remote_url`` configuration"
+msgstr "旧版 ``remote_url`` 配置"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:106
+msgid ""
+"The legacy ``remote_url`` form is still supported. The host and port are "
+"parsed for compatibility with other remote URL formats; ``FSConnector`` "
+"uses the path."
+msgstr ""
+"旧版 ``remote_url`` 形式仍受支持。主机和端口会被解析以兼容其他远程 URL 格式；\\ ``FSConnector`` "
+"实际只使用其中的路径部分。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:121
+msgid ""
+"Prefer ``remote_storage_plugins`` for new deployments because it also "
+"supports named instances and keeps connector-specific settings grouped by"
+" plugin name."
+msgstr ""
+"对于新部署，建议优先使用 ``remote_storage_plugins``\\ "
+"，因为它支持命名实例，并可按插件名称对连接器专属配置进行分组管理。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:125
+msgid "Optional settings"
+msgstr "可选设置"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:127
+msgid "The connector reads the following optional settings from ``extra_config``."
+msgstr "连接器从 ``extra_config`` 中读取以下可选设置。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:129
+msgid "``fs_connector_relative_tmp_dir``"
+msgstr "``fs_connector_relative_tmp_dir``"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:130
+msgid ""
+"Relative directory used for temporary files before an atomic rename into "
+"the final chunk path. The value must be relative, not absolute. When "
+"omitted, temporary files are created next to the final file with a "
+"``.tmp`` suffix."
+msgstr ""
+"用于在原子重命名到最终块路径之前存放临时文件的相对目录。该值必须是相对的，而不是绝对的。当省略时，临时文件会在最终文件旁边创建，并带有 "
+"``.tmp`` 后缀。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:134
+msgid "``fs_connector_read_ahead_size``"
+msgstr "``fs_connector_read_ahead_size``"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:135
+msgid ""
+"Number of bytes to read first when loading a chunk. If the read fills "
+"that window, the connector reads the remaining bytes. This can trigger "
+"filesystem readahead on filesystems that support it."
+msgstr "加载缓存块时首次读取的字节数。若读取填满了该窗口，连接器将继续读取剩余字节。在支持预读的文件系统上，此选项可触发文件系统级预读。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:139
+msgid "``fs_connector_use_odirect``"
+msgstr "``fs_connector_use_odirect``"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:140
+msgid ""
+"Enables ``O_DIRECT`` for aligned reads and writes on platforms that "
+"expose it. The connector falls back to normal I/O when a chunk size is "
+"not aligned to the filesystem block size. ``O_DIRECT`` is disabled "
+"automatically when ``save_chunk_meta`` is enabled because the metadata "
+"prefix is not block aligned."
+msgstr ""
+"在支持的平台上启用 ``O_DIRECT`` 以执行对齐读写。当缓存块大小未对齐到文件系统块大小时，连接器将回退到普通 I/O。启用 "
+"``save_chunk_meta`` 后，\\ ``O_DIRECT`` 会自动关闭，因为元数据前缀不满足块对齐要求。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:146
+msgid "``fs_base_path``"
+msgstr "``fs_base_path``"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:147
+msgid ""
+"Compatibility fallback for plugin mode. Prefer "
+"``remote_storage_plugin.<name>.base_path`` so the setting remains scoped "
+"to a specific plugin instance."
+msgstr ""
+"插件模式的兼容性回退选项。建议优先使用 ``remote_storage_plugin.<name>.base_path``\\ "
+"，以将配置范围限定到特定插件实例。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:151
+msgid "Example with optional settings:"
+msgstr "带可选设置的示例："
+
+#: ../../source/kv_cache/storage_backends/fs.rst:164
+msgid "Operational notes"
+msgstr "操作说明"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:166
+msgid ""
+"Ensure the LMCache process has permission to create directories and write"
+" files under every configured base path."
+msgstr "确保 LMCache 进程有权限在每个配置的基础路径下创建目录和写入文件。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:168
+msgid ""
+"Put the path on durable storage if cache reuse must survive process "
+"restarts. Temporary directories such as ``/tmp`` are convenient for tests"
+" but may be cleaned by the operating system."
+msgstr "若缓存需要在进程重启后仍可复用，请将路径配置在持久存储上。\\ ``/tmp`` 等临时目录便于测试使用，但可能会被操作系统自动清理。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:171
+msgid ""
+"Use the same mounted path for every process that should share cache "
+"chunks. If one process writes to a private container path, other "
+"processes will miss those chunks even if they use the same configuration "
+"text."
+msgstr "所有需要共享缓存块的进程必须使用相同的挂载路径。若某个进程写入的是私有容器路径，其他进程将无法命中这些缓存块，即使它们使用完全相同的配置。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:174
+msgid ""
+"Leave ``save_chunk_meta`` enabled when workers may infer different "
+"metadata for the same chunk. Disable it only when you need the lower "
+"overhead path and the workers share compatible cache metadata."
+msgstr ""
+"当工作进程可能对相同缓存块推断出不同元数据时，请保持 ``save_chunk_meta`` "
+"启用。仅当您需要降低额外开销且各工作进程共享兼容的缓存元数据时，才可将其禁用。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:177
+msgid ""
+"For MP mode L2 storage, see :doc:`../../mp/l2_storage/index`, which "
+"documents the ``fs`` and ``fs_native`` L2 adapters configured through "
+"``--l2-adapter``."
+msgstr ""
+"有关 MP 模式 L2 存储，请参见 :doc:`../../mp/l2_storage/index`，该文档介绍了通过 "
+"``--l2-adapter`` 配置的 ``fs`` 和 ``fs_native`` L2 适配器。"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:181
+msgid "Minimal vLLM usage"
+msgstr "最简 vLLM 使用示例"
+
+#: ../../source/kv_cache/storage_backends/fs.rst:183
+msgid ""
+"After writing ``fs.yaml`` with one of the configurations above, start "
+"vLLM with LMCache enabled:"
+msgstr "使用上述任一配置编写 ``fs.yaml`` 后，以 LMCache 模式启动 vLLM："
+
+#: ../../source/kv_cache/storage_backends/fs.rst:192
+msgid ""
+"Then send the same long-prefix request twice. The first request stores "
+"chunks in the filesystem backend. The second request should report "
+"LMCache hit tokens and load matching chunks from the configured "
+"filesystem path."
+msgstr ""
+"然后发送相同的长前缀请求两次。第一次请求会将缓存块写入文件系统后端。第二次请求应报告 LMCache 命中的 token "
+"数，并从配置的文件系统路径加载匹配的缓存块。"
+

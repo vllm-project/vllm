@@ -1,0 +1,218 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/usage/basic_check.rst:2
+msgid "Basic Check Tool"
+msgstr "基本检查工具"
+
+#: ../../source/developer_guide/usage/basic_check.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/developer_guide/usage/basic_check.rst:9
+msgid ""
+"The LMCache Basic Check Tool is a testing and validation utility that "
+"helps you verify your LMCache installation, configuration, and "
+"functionality. It provides multiple testing modes to validate different "
+"components of the LMCache system."
+msgstr ""
+"LMCache 基本检查工具是一个测试和验证工具，帮助您验证 LMCache 的安装、配置和功能。它提供多种测试模式以验证 LMCache "
+"系统的不同组件。"
+
+#: ../../source/developer_guide/usage/basic_check.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/developer_guide/usage/basic_check.rst:14
+msgid "The basic check tool (``lmcache.v1.basic_check``) is designed to:"
+msgstr "基本检查工具（``lmcache.v1.basic_check``）旨在："
+
+#: ../../source/developer_guide/usage/basic_check.rst:16
+msgid "Test remote backend connectivity and functionality"
+msgstr "测试远程后端的连接性和功能性"
+
+#: ../../source/developer_guide/usage/basic_check.rst:17
+msgid "Validate storage manager operations"
+msgstr "验证存储管理器操作"
+
+#: ../../source/developer_guide/usage/basic_check.rst:18
+msgid "Generate test keys for performance testing"
+msgstr "生成用于性能测试的测试键"
+
+#: ../../source/developer_guide/usage/basic_check.rst:19
+msgid "Verify configuration settings"
+msgstr "验证配置设置"
+
+#: ../../source/developer_guide/usage/basic_check.rst:20
+msgid "Provide diagnostic information for troubleshooting"
+msgstr "提供故障排除的诊断信息"
+
+#: ../../source/developer_guide/usage/basic_check.rst:23
+msgid "Available Check Modes"
+msgstr "可用检查模式"
+
+#: ../../source/developer_guide/usage/basic_check.rst:25
+msgid ""
+"The tool supports several check modes, each targeting specific "
+"functionality:"
+msgstr "该工具支持几种检查模式，每种模式针对特定功能："
+
+#: ../../source/developer_guide/usage/basic_check.rst:28
+msgid "test_remote"
+msgstr "test_remote"
+
+#: ../../source/developer_guide/usage/basic_check.rst:30
+msgid "Tests the remote backend functionality including:"
+msgstr "测试远程后端功能，包括："
+
+#: ../../source/developer_guide/usage/basic_check.rst:32
+msgid "Connection establishment to remote backends (fs, etc.)"
+msgstr "与远程后端（文件系统等）的连接建立"
+
+#: ../../source/developer_guide/usage/basic_check.rst:33
+msgid "put/get operations with data integrity validation"
+msgstr "带数据完整性验证的 put/get 操作"
+
+#: ../../source/developer_guide/usage/basic_check.rst:34
+msgid "put/get/exists operations with performance reports"
+msgstr "带性能报告的 put/get/exists 操作"
+
+#: ../../source/developer_guide/usage/basic_check.rst:36
+#: ../../source/developer_guide/usage/basic_check.rst:51
+#: ../../source/developer_guide/usage/basic_check.rst:67
+msgid "**Usage:**"
+msgstr "**用法：**"
+
+#: ../../source/developer_guide/usage/basic_check.rst:43
+msgid "test_storage_manager"
+msgstr "test_storage_manager"
+
+#: ../../source/developer_guide/usage/basic_check.rst:45
+msgid "Tests the storage manager operations including:"
+msgstr "测试存储管理器操作，包括："
+
+#: ../../source/developer_guide/usage/basic_check.rst:47
+msgid "Configuration validation"
+msgstr "配置验证"
+
+#: ../../source/developer_guide/usage/basic_check.rst:48
+msgid "batched_put/get operations with data integrity validation"
+msgstr "带数据完整性验证的批量放入/获取操作"
+
+#: ../../source/developer_guide/usage/basic_check.rst:49
+msgid "batched_put/get/contains operations with performance reports"
+msgstr "带批量放入/获取/包含操作的性能报告"
+
+#: ../../source/developer_guide/usage/basic_check.rst:58
+msgid "gen (Key Generation)"
+msgstr "键生成 (Key Generation)"
+
+#: ../../source/developer_guide/usage/basic_check.rst:60
+msgid "Generates test keys for performance testing and benchmarking:"
+msgstr "生成用于性能测试和基准测试的测试密钥："
+
+#: ../../source/developer_guide/usage/basic_check.rst:62
+msgid "Configurable number of keys and concurrency levels"
+msgstr "可配置的键数量和并发级别"
+
+#: ../../source/developer_guide/usage/basic_check.rst:63
+msgid "Memory-efficient batch processing"
+msgstr "内存高效的批处理"
+
+#: ../../source/developer_guide/usage/basic_check.rst:64
+msgid "Progress tracking and performance metrics"
+msgstr "进度跟踪和性能指标"
+
+#: ../../source/developer_guide/usage/basic_check.rst:65
+msgid "Offset support for distributed testing"
+msgstr "分布式测试的偏移支持"
+
+#: ../../source/developer_guide/usage/basic_check.rst:74
+msgid "Command Line Interface"
+msgstr "命令行接口"
+
+#: ../../source/developer_guide/usage/basic_check.rst:77
+msgid "Basic Usage"
+msgstr "基本用法"
+
+#: ../../source/developer_guide/usage/basic_check.rst:84
+msgid "List Available Modes"
+msgstr "列出可用模式"
+
+#: ../../source/developer_guide/usage/basic_check.rst:91
+msgid "Command Line Options"
+msgstr "命令行选项"
+
+#: ../../source/developer_guide/usage/basic_check.rst:95
+msgid "**Required.** Operation mode to run. Use ``list`` to see available modes."
+msgstr "**必需。** 操作模式。使用 ``list`` 查看可用模式。"
+
+#: ../../source/developer_guide/usage/basic_check.rst:99
+msgid ""
+"Model name for testing, just a part of key of persist kv-cache. Default: "
+"``/lmcache_test_model/``"
+msgstr "用于测试的模型名称，仅为持久 KV Cache 的键的一部分。默认值：``/lmcache_test_model/``"
+
+#: ../../source/developer_guide/usage/basic_check.rst:103
+msgid "Number of keys to generate (gen mode only). Default: 100"
+msgstr "生成的键的数量（仅限生成模式）。默认值：100"
+
+#: ../../source/developer_guide/usage/basic_check.rst:107
+msgid "Concurrency level for operations (gen mode only). Default: 16"
+msgstr "操作的并发级别（仅限生成模式）。默认值：16"
+
+#: ../../source/developer_guide/usage/basic_check.rst:111
+msgid "Offset for key generation (gen mode only). Default: 0"
+msgstr "密钥生成的偏移量（仅限生成模式）。默认值：0"
+
+#: ../../source/developer_guide/usage/basic_check.rst:114
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/developer_guide/usage/basic_check.rst:116
+msgid ""
+"The basic check tool uses your existing LMCache configuration. You can "
+"specify configuration in several ways:"
+msgstr "基本检查工具使用您现有的 LMCache 配置。您可以通过几种方式指定配置："
+
+#: ../../source/developer_guide/usage/basic_check.rst:119
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/developer_guide/usage/basic_check.rst:127
+msgid "Example Configuration"
+msgstr "示例配置"
+
+#: ../../source/developer_guide/usage/basic_check.rst:129
+msgid "Here's an example configuration optimized for basic checks:"
+msgstr "这是一个针对基本检查优化的示例配置："
+
+#: ../../source/developer_guide/usage/basic_check.rst:142
+msgid "Examples"
+msgstr "示例"
+
+#: ../../source/developer_guide/usage/basic_check.rst:144
+msgid "The ``examples/basic_check/`` directory contains comprehensive examples:"
+msgstr "``examples/basic_check/`` 目录包含全面的示例："
+

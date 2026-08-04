@@ -1,0 +1,317 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/controller_apis.rst:4
+msgid "Controller APIs"
+msgstr "控制器 API"
+
+#: ../../source/internal_api_server/controller_apis.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/http_api`。"
+
+#: ../../source/internal_api_server/controller_apis.rst:11
+msgid ""
+"These APIs are specific to the LMCache Controller component. They provide"
+" visibility into registered instances, workers, and key statistics."
+msgstr "这些 API 是特定于 LMCache Controller 组件的。它们提供对注册实例、工作者和关键统计信息的可见性。"
+
+#: ../../source/internal_api_server/controller_apis.rst:17
+msgid "Endpoints"
+msgstr "端点"
+
+#: ../../source/internal_api_server/controller_apis.rst:20
+msgid "``GET /controller/key-stats`` — Key Statistics"
+msgstr "``GET /controller/key-stats`` — 关键统计信息"
+
+#: ../../source/internal_api_server/controller_apis.rst:22
+msgid "Get key statistics across all instances and workers."
+msgstr "获取所有实例和工作节点的关键统计信息。"
+
+#: ../../source/internal_api_server/controller_apis.rst:24
+#: ../../source/internal_api_server/controller_apis.rst:95
+msgid "**Method**: ``GET``"
+msgstr "**方法**: ``GET``"
+
+#: ../../source/internal_api_server/controller_apis.rst:25
+msgid "**Path**: ``/controller/key-stats``"
+msgstr "**路径**: ``/controller/key-stats``"
+
+#: ../../source/internal_api_server/controller_apis.rst:26
+msgid "**Parameters**: None"
+msgstr "**参数**: 无"
+
+#: ../../source/internal_api_server/controller_apis.rst:27
+#: ../../source/internal_api_server/controller_apis.rst:106
+msgid "**Response**: ``application/json``"
+msgstr "**响应**: ``application/json``"
+
+#: ../../source/internal_api_server/controller_apis.rst:33
+msgid "**Example Response** (HTTP 200):"
+msgstr "**示例响应** (HTTP 200):"
+
+#: ../../source/internal_api_server/controller_apis.rst:55
+#: ../../source/internal_api_server/controller_apis.rst:180
+msgid "**Error Response** (controller not available, HTTP 503):"
+msgstr "**错误响应**\\ （控制器不可用，HTTP 503）："
+
+#: ../../source/internal_api_server/controller_apis.rst:63
+msgid "**Response Schema**:"
+msgstr "**响应模式**:"
+
+#: ../../source/internal_api_server/controller_apis.rst:66
+#: ../../source/internal_api_server/controller_apis.rst:77
+#: ../../source/internal_api_server/controller_apis.rst:191
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/internal_api_server/controller_apis.rst:66
+#: ../../source/internal_api_server/controller_apis.rst:77
+#: ../../source/internal_api_server/controller_apis.rst:100
+#: ../../source/internal_api_server/controller_apis.rst:191
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/internal_api_server/controller_apis.rst:66
+#: ../../source/internal_api_server/controller_apis.rst:77
+#: ../../source/internal_api_server/controller_apis.rst:100
+#: ../../source/internal_api_server/controller_apis.rst:191
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/internal_api_server/controller_apis.rst:68
+msgid "``total_key_count``"
+msgstr "``total_key_count``"
+
+#: ../../source/internal_api_server/controller_apis.rst:68
+#: ../../source/internal_api_server/controller_apis.rst:69
+#: ../../source/internal_api_server/controller_apis.rst:70
+#: ../../source/internal_api_server/controller_apis.rst:80
+#: ../../source/internal_api_server/controller_apis.rst:81
+#: ../../source/internal_api_server/controller_apis.rst:103
+#: ../../source/internal_api_server/controller_apis.rst:194
+#: ../../source/internal_api_server/controller_apis.rst:196
+#: ../../source/internal_api_server/controller_apis.rst:200
+msgid "int"
+msgstr "整数"
+
+#: ../../source/internal_api_server/controller_apis.rst:68
+msgid "Total number of KV keys across all instances"
+msgstr "所有实例中 KV 键的总数"
+
+#: ../../source/internal_api_server/controller_apis.rst:69
+msgid "``total_instance_count``"
+msgstr "``total_instance_count``"
+
+#: ../../source/internal_api_server/controller_apis.rst:69
+msgid "Total number of registered instances"
+msgstr "注册实例的总数"
+
+#: ../../source/internal_api_server/controller_apis.rst:70
+msgid "``total_worker_count``"
+msgstr "``total_worker_count``"
+
+#: ../../source/internal_api_server/controller_apis.rst:70
+msgid "Total number of workers across all instances"
+msgstr "所有实例的工作线程总数"
+
+#: ../../source/internal_api_server/controller_apis.rst:71
+msgid "``instances``"
+msgstr "``instances``"
+
+#: ../../source/internal_api_server/controller_apis.rst:71
+msgid "list"
+msgstr "列表"
+
+#: ../../source/internal_api_server/controller_apis.rst:71
+msgid "Per-instance breakdown (see below)"
+msgstr "每个实例的详细信息（见下文）"
+
+#: ../../source/internal_api_server/controller_apis.rst:74
+msgid "**Instance Schema**:"
+msgstr "**实例架构**:"
+
+#: ../../source/internal_api_server/controller_apis.rst:79
+#: ../../source/internal_api_server/controller_apis.rst:102
+#: ../../source/internal_api_server/controller_apis.rst:193
+msgid "``instance_id``"
+msgstr "``instance_id``"
+
+#: ../../source/internal_api_server/controller_apis.rst:79
+#: ../../source/internal_api_server/controller_apis.rst:102
+#: ../../source/internal_api_server/controller_apis.rst:193
+#: ../../source/internal_api_server/controller_apis.rst:195
+#: ../../source/internal_api_server/controller_apis.rst:197
+msgid "str"
+msgstr "字符串"
+
+#: ../../source/internal_api_server/controller_apis.rst:79
+msgid "Unique identifier of the instance"
+msgstr "实例的唯一标识符"
+
+#: ../../source/internal_api_server/controller_apis.rst:80
+#: ../../source/internal_api_server/controller_apis.rst:200
+msgid "``key_count``"
+msgstr "``key_count``"
+
+#: ../../source/internal_api_server/controller_apis.rst:80
+msgid "Number of KV keys held by this instance"
+msgstr "此实例持有的 KV 键数量"
+
+#: ../../source/internal_api_server/controller_apis.rst:81
+msgid "``worker_count``"
+msgstr "``worker_count``"
+
+#: ../../source/internal_api_server/controller_apis.rst:81
+msgid "Number of workers in this instance"
+msgstr "此实例中的工作线程数量"
+
+#: ../../source/internal_api_server/controller_apis.rst:86
+msgid "``GET /controller/workers`` — Worker Information"
+msgstr "``GET /controller/workers`` — 工作信息"
+
+#: ../../source/internal_api_server/controller_apis.rst:88
+msgid ""
+"Get worker information with flexible query parameters. Behavior depends "
+"on the combination of parameters:"
+msgstr "使用灵活的查询参数获取工作信息。行为取决于参数的组合："
+
+#: ../../source/internal_api_server/controller_apis.rst:91
+msgid "**No parameters**: List all registered workers across all instances."
+msgstr "**无参数**\\ ：列出所有实例中注册的所有工作者。"
+
+#: ../../source/internal_api_server/controller_apis.rst:92
+msgid "**``instance_id`` only**: List all workers for a specific instance."
+msgstr "**``instance_id`` 仅**: 列出特定实例的所有工作者。"
+
+#: ../../source/internal_api_server/controller_apis.rst:93
+msgid ""
+"**``instance_id`` and ``worker_id``**: Get detailed info about a specific"
+" worker."
+msgstr "**``instance_id`` 和 ``worker_id``**: 获取特定工作者的详细信息。"
+
+#: ../../source/internal_api_server/controller_apis.rst:96
+msgid "**Path**: ``/controller/workers``"
+msgstr "**路径**: ``/controller/workers``"
+
+#: ../../source/internal_api_server/controller_apis.rst:97
+msgid "**Parameters**:"
+msgstr "**参数**:"
+
+#: ../../source/internal_api_server/controller_apis.rst:100
+msgid "Name"
+msgstr "名称"
+
+#: ../../source/internal_api_server/controller_apis.rst:102
+msgid "(Optional) Instance ID to filter workers"
+msgstr "（可选）用于过滤工作节点的实例 ID"
+
+#: ../../source/internal_api_server/controller_apis.rst:103
+#: ../../source/internal_api_server/controller_apis.rst:194
+msgid "``worker_id``"
+msgstr "``worker_id``"
+
+#: ../../source/internal_api_server/controller_apis.rst:103
+msgid ""
+"(Optional) Worker ID for specific worker details (requires "
+"``instance_id``)"
+msgstr "（可选）特定工作者详细信息的工作者 ID（需要 ``instance_id``\\ ）"
+
+#: ../../source/internal_api_server/controller_apis.rst:119
+msgid "**Example Response** (list workers):"
+msgstr "**示例响应**\\ （列出工作者）："
+
+#: ../../source/internal_api_server/controller_apis.rst:149
+msgid "**Example Response** (single worker):"
+msgstr "**示例响应**\\ （单个工作者）："
+
+#: ../../source/internal_api_server/controller_apis.rst:164
+msgid "**Error Response** (worker not found, HTTP 404):"
+msgstr "**错误响应**\\ （未找到工作者，HTTP 404）："
+
+#: ../../source/internal_api_server/controller_apis.rst:172
+msgid "**Error Response** (instance not found, HTTP 404):"
+msgstr "**错误响应**\\ （实例未找到，HTTP 404）："
+
+#: ../../source/internal_api_server/controller_apis.rst:188
+msgid "**Worker Response Schema**:"
+msgstr "**工作者响应模式**:"
+
+#: ../../source/internal_api_server/controller_apis.rst:193
+msgid "Instance this worker belongs to"
+msgstr "该工作者所属的实例"
+
+#: ../../source/internal_api_server/controller_apis.rst:194
+msgid "Worker index within the instance"
+msgstr "实例内的工作线程索引"
+
+#: ../../source/internal_api_server/controller_apis.rst:195
+msgid "``ip``"
+msgstr "``ip``"
+
+#: ../../source/internal_api_server/controller_apis.rst:195
+msgid "Worker IP address"
+msgstr "工作节点 IP 地址"
+
+#: ../../source/internal_api_server/controller_apis.rst:196
+msgid "``port``"
+msgstr "``port``"
+
+#: ../../source/internal_api_server/controller_apis.rst:196
+msgid "Worker port number"
+msgstr "工作端口号"
+
+#: ../../source/internal_api_server/controller_apis.rst:197
+msgid "``peer_init_url``"
+msgstr "``peer_init_url``"
+
+#: ../../source/internal_api_server/controller_apis.rst:197
+msgid "(Optional) Peer initialization URL"
+msgstr "(可选) 对等初始化 URL"
+
+#: ../../source/internal_api_server/controller_apis.rst:198
+msgid "``registration_time``"
+msgstr "``registration_time``"
+
+#: ../../source/internal_api_server/controller_apis.rst:198
+#: ../../source/internal_api_server/controller_apis.rst:199
+msgid "float"
+msgstr "浮点数"
+
+#: ../../source/internal_api_server/controller_apis.rst:198
+msgid "Unix timestamp of worker registration"
+msgstr "工作节点注册的 Unix 时间戳"
+
+#: ../../source/internal_api_server/controller_apis.rst:199
+msgid "``last_heartbeat_time``"
+msgstr "``last_heartbeat_time``"
+
+#: ../../source/internal_api_server/controller_apis.rst:199
+msgid "Unix timestamp of last heartbeat"
+msgstr "最后心跳的 Unix 时间戳"
+
+#: ../../source/internal_api_server/controller_apis.rst:200
+msgid "Number of KV keys held by this worker"
+msgstr "此工作线程持有的 KV 键数量"
+

@@ -1,0 +1,36 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache-with-redis
+  namespace: default
+spec:
+  image:
+    tag: "nightly-2026-04-06"
+
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  server:
+    port: 5555
+    maxWorkers: 4
+
+  l1:
+    sizeGB: 100
+
+  eviction:
+    triggerWatermark: 0.8
+    evictionRatio: 0.2
+
+  # Redis/Valkey L2 adapter backed by the native C++ RESP connector.
+  l2Backend:
+    resp:
+      host: redb.redis.svc.cluster.local
+      port: 14084
+      numWorkers: 8
+      # Optional: reference a Secret with "username" and "password" keys.
+      # Credentials are injected as env vars and never appear in pod args.
+      # The Secret can live in a different namespace — the operator creates
+      # a managed copy in this LMCacheEngine's namespace automatically.
+      authSecretRef:
+        name: redb-redb
+        namespace: redis # omit if the Secret is in the same namespace

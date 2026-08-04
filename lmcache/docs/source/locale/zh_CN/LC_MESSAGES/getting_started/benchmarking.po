@@ -1,0 +1,267 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/benchmarking.rst:2
+msgid "Benchmarking"
+msgstr "基准测试"
+
+#: ../../source/getting_started/benchmarking.rst:4
+msgid ""
+"This is a simple tutorial on how to deploy and benchmark LMCache using "
+"the ``lmcache bench engine`` CLI."
+msgstr "这是一个关于如何使用 ``lmcache bench engine`` CLI 部署和基准测试 LMCache 的简单教程。"
+
+#: ../../source/getting_started/benchmarking.rst:7
+msgid ""
+"The ``lmcache bench engine`` command is a flexible traffic simulator that"
+" sends configurable workloads to your inference engine and reports TTFT, "
+"decoding speed, and throughput metrics. This tutorial walks through a "
+"long-document Q&A benchmark that exercises LMCache's CPU offloading path."
+msgstr ""
+"``lmcache bench engine`` 命令是一个灵活的流量模拟器，可以向您的推理引擎发送可配置的工作负载，并报告 "
+"TTFT、解码速度和吞吐量指标。本教程将介绍一个长文档问答基准测试，测试 LMCache 的 CPU 卸载路径。"
+
+#: ../../source/getting_started/benchmarking.rst:12
+msgid ""
+"For the full CLI reference -- including every flag, every workload type, "
+"and config-file usage -- see :doc:`/cli/bench`."
+msgstr "有关完整的 CLI 参考 -- 包括每个标志、每种工作负载类型和配置文件用法 -- 请参见 :doc:`/cli/bench`。"
+
+#: ../../source/getting_started/benchmarking.rst:16
+msgid "Long Doc QA workload"
+msgstr "长文档问答工作负载"
+
+#: ../../source/getting_started/benchmarking.rst:18
+msgid ""
+"The ``long-doc-qa`` workload simulates repeated Q&A over long synthetic "
+"documents: a warmup round primes the KV cache with each document, then a "
+"benchmark round dispatches the questions. The number of documents is "
+"derived from ``--kv-cache-volume`` and the model's tokens-per-GB rather "
+"than set directly. See :doc:`/cli/bench` for the full flag list."
+msgstr ""
+"``long-doc-qa`` 工作负载模拟对长的合成文档进行重复的问答：预热轮次用每个文档预热 KV "
+"Cache，然后基准轮次分发问题。文档的数量是根据 ``--kv-cache-volume`` 和模型的每 GB "
+"令牌数推导的，而不是直接设置的。有关完整的标志列表，请参见 :doc:`/cli/bench`。"
+
+#: ../../source/getting_started/benchmarking.rst:25
+msgid "Example"
+msgstr "示例"
+
+#: ../../source/getting_started/benchmarking.rst:27
+msgid ""
+"To measure the benefit of LMCache, run the **same benchmark against two "
+"setups** and compare the results:"
+msgstr "要衡量 LMCache 的收益，请对 **两种配置运行相同的基准测试** 并比较结果："
+
+#: ../../source/getting_started/benchmarking.rst:30
+msgid "**Setup A (baseline)** -- vLLM alone."
+msgstr "**配置 A（基准线）** -- 仅 vLLM。"
+
+#: ../../source/getting_started/benchmarking.rst:31
+msgid "**Setup B (with LMCache)** -- vLLM plus a standalone LMCache server."
+msgstr "**配置 B（使用 LMCache）** -- vLLM 加上独立的 LMCache 服务器。"
+
+#: ../../source/getting_started/benchmarking.rst:33
+msgid ""
+"The steps below reproduce both runs on ``Qwen/Qwen3-8B``. Adjust the "
+"sizes to match your hardware."
+msgstr "以下步骤将在 ``Qwen/Qwen3-8B`` 上重现上述两次运行。请根据您的硬件规格调整相应参数。"
+
+#: ../../source/getting_started/benchmarking.rst:37
+msgid "Setup A: vLLM alone (baseline)"
+msgstr "配置 A：仅 vLLM（基准线）"
+
+#: ../../source/getting_started/benchmarking.rst:44
+msgid "Setup B: vLLM with LMCache"
+msgstr "配置 B：vLLM 与 LMCache 配合使用"
+
+#: ../../source/getting_started/benchmarking.rst:46
+msgid ""
+"Run LMCache as a standalone service and point vLLM at it with the "
+"``LMCacheMPConnector``. See :doc:`/getting_started/quickstart` for the "
+"full MP-mode walkthrough."
+msgstr "将 LMCache 作为独立服务运行，并通过 ``LMCacheMPConnector`` 将 vLLM 指向它。有关完整的 MP 模式操作指南，请参见 :doc:`/getting_started/quickstart`。"
+
+#: ../../source/getting_started/benchmarking.rst:50
+msgid "**Start the LMCache server:**"
+msgstr "**启动 LMCache 服务器：**"
+
+#: ../../source/getting_started/benchmarking.rst:57
+msgid ""
+"The ZMQ port defaults to **5555** (used by vLLM) and the HTTP frontend "
+"defaults to **8080** (used by ``lmcache bench engine --lmcache-url``)."
+msgstr "ZMQ 端口默认为 **5555**\\ （由 vLLM 使用），HTTP 前端默认为 **8080**\\ （由 ``lmcache bench engine --lmcache-url`` 使用）。"
+
+#: ../../source/getting_started/benchmarking.rst:60
+msgid "**Start vLLM with the MP connector in a separate terminal:**"
+msgstr "**在另一个终端中使用 MP 连接器启动 vLLM：**"
+
+#: ../../source/getting_started/benchmarking.rst:69
+msgid "Run the benchmark"
+msgstr "运行基准测试"
+
+#: ../../source/getting_started/benchmarking.rst:71
+msgid ""
+"To make the comparison fair, capture the benchmark settings **once** in a"
+" config file, then replay the same config against both setups."
+msgstr "为确保比较公平，请将基准测试参数\\ **一次性**\\ 写入配置文件，再对两种配置分别重放相同的设置。"
+
+#: ../../source/getting_started/benchmarking.rst:74
+msgid ""
+"**Step 1 -- export a shared config.** With the LMCache server from Setup "
+"B still running, launch ``lmcache bench engine`` in interactive mode:"
+msgstr "**步骤 1 -- 导出共享配置。** 在 Setup B 的 LMCache 服务器仍在运行的情况下，以交互模式启动 ``lmcache bench engine``\\ ："
+
+#: ../../source/getting_started/benchmarking.rst:81
+msgid ""
+"Interactive mode triggers because ``--engine-url`` and ``--workload`` are"
+" missing, and ``--lmcache-url`` auto-detects ``tokens-per-gb-kvcache`` "
+"from the server. Walk through the prompts and pick:"
+msgstr "交互模式被触发，因为缺少 ``--engine-url`` 和 ``--workload``\\ ，而 ``--lmcache-url`` 从服务器自动检测 ``tokens-per-gb-kvcache``\\ 。按照提示进行操作并选择："
+
+#: ../../source/getting_started/benchmarking.rst:85
+msgid "Engine URL: ``http://localhost:8000``"
+msgstr "引擎 URL: ``http://localhost:8000``"
+
+#: ../../source/getting_started/benchmarking.rst:86
+msgid "Workload: ``long-doc-qa``"
+msgstr "工作负载: ``long-doc-qa``"
+
+#: ../../source/getting_started/benchmarking.rst:87
+msgid "Model: auto-detected from the engine (or type ``Qwen/Qwen3-8B``)"
+msgstr "模型：从引擎自动检测（或手动输入 ``Qwen/Qwen3-8B``\\ ）"
+
+#: ../../source/getting_started/benchmarking.rst:88
+msgid "KV cache volume (GB): ``10``"
+msgstr "KV cache volume (GB): ``10``"
+
+#: ../../source/getting_started/benchmarking.rst:89
+msgid "``ldqa-query-per-document``: ``1``"
+msgstr "``ldqa-query-per-document``: ``1``"
+
+#: ../../source/getting_started/benchmarking.rst:90
+msgid "``ldqa-shuffle-policy``: ``tile``"
+msgstr "``ldqa-shuffle-policy``: ``tile``"
+
+#: ../../source/getting_started/benchmarking.rst:91
+msgid "``ldqa-num-inflight-requests``: ``4``"
+msgstr "``ldqa-num-inflight-requests``: ``4``"
+
+#: ../../source/getting_started/benchmarking.rst:92
+msgid "Leave the rest at their defaults."
+msgstr "将其余选项保留为默认值。"
+
+#: ../../source/getting_started/benchmarking.rst:94
+msgid ""
+"At the **summary** step, choose **\"Export configuration for later use "
+"and exit\"** and save to ``bench_config.json``. The file looks like:"
+msgstr "在 **总结** 步骤中，选择 **“导出配置以供后用并退出”** 并保存为 ``bench_config.json``\\ 。该文件如下所示："
+
+#: ../../source/getting_started/benchmarking.rst:110
+msgid ""
+"Note that the exported config stores ``tokens_per_gb_kvcache`` (resolved "
+"from ``--lmcache-url``) but **not** the engine URL or the LMCache URL, so"
+" the same file is portable across environments."
+msgstr "请注意，导出的配置存储了 ``tokens_per_gb_kvcache``\\ （从 ``--lmcache-url`` 解析得出），但\\ **不**\\ 包括引擎 URL 或 LMCache URL，因此同一个文件可以在不同环境中使用。"
+
+#: ../../source/getting_started/benchmarking.rst:114
+msgid ""
+"**Step 2 -- replay against each setup.** Point ``--engine-url`` at "
+"whichever vLLM you want to benchmark and pass the shared config:"
+msgstr "**步骤 2 -- 针对每种配置重放。** 将 ``--engine-url`` 指向目标 vLLM 实例，并传入共享配置文件："
+
+#: ../../source/getting_started/benchmarking.rst:123
+msgid ""
+"Run this once against Setup A's vLLM and once against Setup B's vLLM-"
+"plus-LMCache, recording the metrics from each run."
+msgstr "分别对配置 A 的 vLLM 和配置 B 的 vLLM-plus-LMCache 各运行一次，记录每次的指标数据。"
+
+#: ../../source/getting_started/benchmarking.rst:127
+msgid "Results"
+msgstr "结果"
+
+#: ../../source/getting_started/benchmarking.rst:129
+msgid ""
+"Pull the headline numbers out of each run's ``Engine Benchmark Result "
+"(long-doc-qa)`` summary:"
+msgstr "从每次运行输出的 ``Engine Benchmark Result (long-doc-qa)`` 汇总中提取关键指标："
+
+#: ../../source/getting_started/benchmarking.rst:136
+msgid "Metric"
+msgstr "指标"
+
+#: ../../source/getting_started/benchmarking.rst:137
+msgid "Setup A (vLLM)"
+msgstr "配置 A (vLLM)"
+
+#: ../../source/getting_started/benchmarking.rst:138
+msgid "Setup B (+ LMCache)"
+msgstr "配置 B (+ LMCache)"
+
+#: ../../source/getting_started/benchmarking.rst:139
+msgid "Successful requests"
+msgstr "成功的请求"
+
+#: ../../source/getting_started/benchmarking.rst:140
+#: ../../source/getting_started/benchmarking.rst:141
+msgid "46"
+msgstr "46"
+
+#: ../../source/getting_started/benchmarking.rst:142
+msgid "Benchmark duration (s)"
+msgstr "基准测试持续时间（秒）"
+
+#: ../../source/getting_started/benchmarking.rst:143
+msgid "23.47"
+msgstr "23.47"
+
+#: ../../source/getting_started/benchmarking.rst:144
+msgid "13.79"
+msgstr "13.79"
+
+#: ../../source/getting_started/benchmarking.rst:145
+msgid "Mean TTFT (ms)"
+msgstr "平均 TTFT (毫秒)"
+
+#: ../../source/getting_started/benchmarking.rst:146
+msgid "757.00"
+msgstr "757.00"
+
+#: ../../source/getting_started/benchmarking.rst:147
+msgid "185.00"
+msgstr "185.00"
+
+#: ../../source/getting_started/benchmarking.rst:149
+msgid ""
+"That's a **75%** reduction in Mean TTFT (757 ms → 185 ms) and a **41%** "
+"reduction in benchmark duration (23.47 s → 13.79 s) from LMCache "
+"offloading."
+msgstr "在 LMCache CPU 卸载的加持下，平均 TTFT 降低了 **75%**\\ （757 毫秒 → 185 毫秒），基准测试总耗时缩短了 **41%**\\ （23.47 秒 → 13.79 秒）。"
+
+#: ../../source/getting_started/benchmarking.rst:153
+msgid ""
+"Without LMCache, once the benchmark's working set overflows the GPU KV "
+"cache the second round has to recompute every prefix, so TTFT and "
+"throughput don't improve even when content repeats. LMCache keeps the "
+"evicted blocks on CPU RAM and restores them on demand -- that's where the"
+" speedup comes from."
+msgstr "若不使用 LMCache，一旦基准测试的工作集超出 GPU KV 缓存容量，第二轮就必须重新计算每个前缀，导致即使内容重复，TTFT 和吞吐量也无法提升。LMCache 将被逐出的块保存在 CPU 内存中并按需恢复——这正是加速效果的来源。"
+

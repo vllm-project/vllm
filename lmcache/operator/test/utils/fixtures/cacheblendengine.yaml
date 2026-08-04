@@ -1,0 +1,50 @@
+# CacheBlendEngine used by the e2e_gpu CacheBlend integration spec.
+#
+# NewCBEFromFixture decodes this YAML into a typed CacheBlendEngine and
+# overrides metadata.name / metadata.namespace. The spec then overrides the
+# two env-driven, deployment-specific bits before applying:
+#
+#   - spec.image                       (CACHEBLEND_ENGINE_IMAGE; the lmcache
+#                                       blend server image — public by default)
+#   - spec.injection.payloadImage      (CACHEBLEND_PAYLOAD_IMAGE; the PRIVATE
+#                                       cacheblend-plugin init-container image)
+#
+# spec.injection.imagePullSecrets references the docker-registry Secret the
+# spec creates in this namespace from CACHEBLEND_REGISTRY_USER/TOKEN. The
+# mutating webhook appends it to the vLLM pod so the payload init container
+# can pull the private image.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: CacheBlendEngine
+metadata:
+  name: cb-integration
+spec:
+  # The lmcache blend server image. Public; pinned to the same image the
+  # vLLM workload uses so a fresh GPU node pulls it only once. Nightly to stay
+  # in the CacheBlend compatibility window with the latest-nightly payload.
+  image:
+    repository: lmcache/vllm-openai
+    tag: latest-nightly
+    pullPolicy: IfNotPresent
+
+  # L1 cache is REQUIRED. 8 GiB is plenty for the small smoke model.
+  l1:
+    sizeGB: 8
+
+  injection:
+    # The PRIVATE cacheblend-plugin init-container image. The spec overrides
+    # repository/tag from CACHEBLEND_PAYLOAD_IMAGE; these are the defaults.
+    payloadImage:
+      repository: tensormesh/cacheblend-plugin
+      tag: latest-nightly
+      pullPolicy: IfNotPresent
+    # Pull secret for the private payload image. Created by the spec in this
+    # namespace (name must match the spec's pullSecretName constant).
+    imagePullSecrets:
+      - name: cacheblend-registry
+
+  # Place the engine on the GPU worker so the vLLM pod (same nodeSelector)
+  # co-schedules — CacheBlend's CUDA-IPC KV handoff requires colocation.
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  logLevel: INFO

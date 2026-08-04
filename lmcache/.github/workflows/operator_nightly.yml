@@ -1,0 +1,80 @@
+name: "Operator: Nightly"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: lmcache/lmcache-operator
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+    working-directory: operator
+
+jobs:
+  nightly:
+    name: Build, push, and release nightly
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute nightly tag
+        id: tag
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          echo "TAG=nightly-${DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.IMAGE_NAME }}:nightly
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+
+      - name: Build installer manifest
+        run: make build-installer IMG=${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}
+
+      - name: Update nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: operator-nightly-latest
+          name: "Operator Nightly Latest (${{ steps.tag.outputs.TAG }})"
+          prerelease: true
+          make_latest: false
+          body: |
+            Automated nightly operator build from `dev` branch.
+
+            **Image:** `${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}`
+
+            ```bash
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-nightly-latest/install.yaml
+            ```
+          files: operator/dist/install.yaml

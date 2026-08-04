@@ -1,0 +1,31 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/dynamo_coordination.rst:2
+msgid "Dynamo Integration"
+msgstr "Dynamo 集成"
+
+#: ../../source/production/dynamo_coordination.rst:6
+msgid ""
+"Integration with `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ "
+"is **coming soon**."
+msgstr "与 `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ 的集成\\ **即将推出**\\ 。"
+

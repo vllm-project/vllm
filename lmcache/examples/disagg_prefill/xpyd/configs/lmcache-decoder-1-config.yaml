@@ -1,0 +1,49 @@
+local_cpu: False
+max_local_cpu_size: 0
+
+enable_pd: True
+transfer_channel: "nixl"
+pd_role: "receiver"
+pd_peer_host: "localhost"
+pd_peer_init_port: 7300
+pd_peer_alloc_port: 7400
+pd_buffer_size: 2147483648 # 2GB
+pd_buffer_device: "cuda"
+nixl_backends: [UCX]
+
+# ==============================================================================
+# Async PD Backend Configuration
+# ==============================================================================
+
+# Defines the backend execution mode.
+# Options: "async" (default), "sync"
+pd_backend_mode: "async"
+
+# ------------------------------------------------------------------------------
+# Async Mode Settings
+# Note: The following configurations are valid ONLY when pd_backend_mode: "async"
+# ------------------------------------------------------------------------------
+
+# Maximum length for the prefill phase.
+# Default: 0 (skips buffer size check for backward compatibility).
+# Recommendation: Set a specific limit to prevent resource exhaustion.
+# Dependency: `pd_buffer_size` must accommodate the prefill chunks and KV size.
+# Formula: pd_buffer_size >= (pd_max_prefill_len // chunk_size + 1) * kv_size.
+pd_max_prefill_len: 16384
+
+# Timeout for resource allocation in seconds.
+# Default: 5.
+# Note: Adjust this value based on system load. Higher concurrency generally
+# requires a larger timeout.
+pd_allocation_timeout_sec: 10
+
+# Timeout for system shutdown in seconds.
+# Default: 5.
+# Note: This applies only during system shutdown and has no impact on runtime 
+# performance.
+pd_shutdown_timeout_sec: 5
+
+# Interval for condition polling in seconds.
+# Default: 0.05. (often implicitly understood, but good to state if changed)
+# Note: Decrease this value for more timely responses.
+pd_condition_poll_interval_sec: 0.05

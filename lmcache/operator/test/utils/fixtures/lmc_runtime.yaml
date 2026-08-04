@@ -1,0 +1,22 @@
+# Runtime fixture used by the e2e_gpu smoke tier.
+#
+# This fixture deliberately OMITS spec.nodeSelector so the operator's
+# SetDefaults adds nvidia.com/gpu.present="true" and the DaemonSet pod
+# lands only on GPU nodes. (Compare with lmc_minimal.yaml which sets
+# nodeSelector: {} to allow scheduling on no-GPU Kind for the M1 tier.)
+#
+# Custom server.port + server.chunkSize values are non-defaults so the
+# /conf round-trip spec can prove "what the CR said" was actually
+# applied to the running LMCache server — not just to the K8s objects.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: smoke-runtime
+spec:
+  l1:
+    sizeGB: 10
+  server:
+    port: 6555
+    chunkSize: 128
+    maxWorkers: 2
+    hashAlgorithm: blake3

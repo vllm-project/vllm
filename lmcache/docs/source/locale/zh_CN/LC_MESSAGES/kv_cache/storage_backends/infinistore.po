@@ -1,0 +1,257 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:2
+msgid "InfiniStore"
+msgstr "InfiniStore"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:14
+msgid ""
+"`InfiniStore <https://github.com/bytedance/InfiniStore>`_ is an open-"
+"source high-performance KV store. It's designed to support LLM Inference "
+"clusters, whether the cluster is in prefill-decoding disaggregation mode "
+"or not. InfiniStore provides high-performance and low-latency KV cache "
+"transfer and KV cache reuse among inference nodes in the cluster."
+msgstr ""
+"`InfiniStore <https://github.com/bytedance/InfiniStore>`_ 是一个开源的高性能 KV "
+"存储。它旨在支持 LLM 推理集群，无论集群是否处于分离式 Prefill-解码模式。InfiniStore 提供高性能和低延迟的 KV "
+"Cache 传输以及集群中推理节点之间的 KV Cache 重用。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:16
+msgid "There are two major scenarios how InfiniStore supports:"
+msgstr "InfiniStore 支持的主要场景有两个："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:18
+msgid ""
+"Prefill-Decoding disaggregation clusters: in such mode inference "
+"workloads are separated into two node pools: prefill nodes and decoding "
+"nodes. InfiniStore enables KV cache transfer among these two types of "
+"nodes, and also KV cache reuse."
+msgstr ""
+"分离式 Prefill-解码集群：在这种模式下，推理工作负载被分为两个节点池：Prefill 节点和解码节点。InfiniStore "
+"允许这两种类型节点之间的 KV Cache 转移，并且支持 KV Cache 重用。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:19
+msgid ""
+"Non-disaggregated clusters: in such mode prefill and decoding workloads "
+"are mixed on every node. InfiniStore serves as an extra large KV cache "
+"pool in addition to GPU cache and local CPU cache, and also enables "
+"cross-node KV cache reuse."
+msgstr ""
+"非分离式集群：在这种模式下，Prefill 和解码工作负载在每个节点上混合。InfiniStore 作为一个额外的大型 KV Cache 池，除了"
+" GPU 缓存和本地 CPU 缓存外，还支持跨节点的 KV Cache 重用。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:21
+msgid "InfiniStore Usage Diagram"
+msgstr "InfiniStore 使用示意图"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:24
+msgid ""
+"For more details, please refer to the `InfiniStore Documentation "
+"<https://bytedance.github.io/InfiniStore/index.html>`_."
+msgstr ""
+"有关更多详细信息，请参阅 `InfiniStore 文档 "
+"<https://bytedance.github.io/InfiniStore/index.html>`_。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:26
+msgid ""
+"InfiniStore supports both RDMA and TCP for transport. LMCache’s "
+"InfiniStore connector only uses the RDMA transport."
+msgstr "InfiniStore 支持 RDMA 和 TCP 作为传输方式。LMCache 的 InfiniStore 连接器仅使用 RDMA 传输。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:30
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:32
+msgid "Install InfiniStore via pip:"
+msgstr "通过 pip 安装 InfiniStore："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:38
+msgid "This package includes the InfiniStore server and the Python bindings."
+msgstr "该软件包包括 InfiniStore 服务器和 Python 绑定。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:40
+msgid ""
+"To build InfiniStore from source, follow the instructions in the `GitHub "
+"repository <https://github.com/bytedance/InfiniStore>`_."
+msgstr ""
+"要从源代码构建 InfiniStore，请按照 `GitHub 仓库 "
+"<https://github.com/bytedance/InfiniStore>`_ 中的说明进行操作。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:43
+msgid "Setup and Deployment"
+msgstr "设置和部署"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:45
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:47
+msgid "Machine with at least one GPU for vLLM inference"
+msgstr "具有至少一个 GPU 的机器用于 vLLM 推理"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:48
+msgid "RDMA-capable network hardware and drivers"
+msgstr "支持 RDMA 的网络硬件和驱动程序"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:49
+msgid "Python 3.8+ with pip"
+msgstr "Python 3.8+ 和 pip"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:50
+msgid "vLLM and LMCache installed"
+msgstr "已安装 vLLM 和 LMCache"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:52
+msgid "**Step 1: Start InfiniStore Server**"
+msgstr "**步骤 1：启动 InfiniStore 服务器**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:54
+msgid "For InfiniBand based RDMA:"
+msgstr "对于基于 InfiniBand 的 RDMA："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:60
+msgid "For RoCE based RDMA:"
+msgstr "对于基于 RoCE 的 RDMA："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:66
+msgid ""
+"You can also specify the ``--hint-gid-index`` option to set the GID index"
+" for the InfiniStore server. This is useful when you are in a k8s managed"
+" environment."
+msgstr ""
+"您还可以指定 ``--hint-gid-index`` 选项来设置 InfiniStore 服务器的 GID 索引。当您处于 k8s "
+"管理的环境中时，这非常有用。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:68
+msgid "**Step 2: Create Configuration File**"
+msgstr "**步骤 2：创建配置文件**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:70
+msgid "Create your ``infinistore-config.yaml``:"
+msgstr "创建你的 ``infinistore-config.yaml``："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:80
+msgid "**Step 3: Start vLLM with InfiniStore**"
+msgstr "**步骤 3：使用 InfiniStore 启动 vLLM**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:93
+msgid "**Step 4: Verify the Setup**"
+msgstr "**步骤 4：验证设置**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:95
+msgid "Test the integration with a sample request:"
+msgstr "使用示例请求测试集成："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:108
+msgid "**Debugging Tips:**"
+msgstr "**调试提示：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:110
+msgid "**Enable verbose logging:**"
+msgstr "**启用详细日志记录：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:116
+msgid "**Check server status:**"
+msgstr "**检查服务器状态：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:125
+msgid "Query TTFT Improvement"
+msgstr "查询 TTFT 改进"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:127
+msgid ""
+"Once the OpenAI compatible server is running, let's query it twice and "
+"see the TTFT improvement."
+msgstr "一旦 OpenAI 兼容的服务器运行起来，我们就可以查询两次，看看 TTFT 的改进。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:129
+msgid "Run vLLM's serving benchmark twice with the following parameters:"
+msgstr "使用以下参数运行 vLLM 的服务基准测试两次："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:144
+msgid "**Example Output:**"
+msgstr "**示例输出：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:146
+msgid "For the first run, you might see:"
+msgstr "首次运行时，您可能会看到："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:171
+msgid "For the second run, you should see a significant reduction in TTFT:"
+msgstr "对于第二次运行，您应该看到 TTFT 有显著减少："
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:196
+msgid "TTFT Improvement: 33.323 seconds (12.6x faster)."
+msgstr "TTFT 改进：33.323 秒（快 12.6 倍）。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:198
+msgid "**Tips:**"
+msgstr "**提示：**"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:200
+msgid ""
+"If you want to run vLLM's serving benchmark multiple times, you'll need "
+"to either restart the vLLM LMCache server and the InfiniStore server, or "
+"change the ``--seed`` parameter to a different value each time, since "
+"you've already warmed up LMCache."
+msgstr ""
+"如果您想多次运行 vLLM 的服务基准测试，您需要重启 vLLM LMCache 服务器和 InfiniStore 服务器，或者每次将 "
+"``--seed`` 参数更改为不同的值，因为您已经预热了 LMCache。"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:201
+msgid ""
+"The benchmark result here was produced by running an L40 with 48GB of GPU"
+" memory with ``--gpu-memory-utilization 0.8``. You can adjust the GPU "
+"memory utilization and increase the max model length to use more of the "
+"long context. LMCache TTFT improvement becomes more pronounced as the "
+"context length increases!"
+msgstr ""
+"这里的基准测试结果是通过运行一个具有 48GB 显存的 L40，并使用 ``--gpu-memory-utilization 0.8`` "
+"生成的。您可以调整显存利用率并增加最大模型长度，以使用更多的长上下文。随着上下文长度的增加，LMCache 的 TTFT 改进变得更加明显！"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:205
+msgid "Additional Resources"
+msgstr "附加资源"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:207
+msgid ""
+"`InfiniStore Documentation "
+"<https://bytedance.github.io/InfiniStore/index.html>`_"
+msgstr "`InfiniStore 文档 <https://bytedance.github.io/InfiniStore/index.html>`_"
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:208
+msgid "`GitHub Repository <https://github.com/bytedance/InfiniStore>`_"
+msgstr "`GitHub 仓库 <https://github.com/bytedance/InfiniStore>`_"
+

@@ -1,0 +1,15 @@
+# LMCache Configuration File
+# This replaces the individual environment variables for cleaner configuration
+
+# Basic configurations
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 5
+
+internal_api_server_enabled: true
+internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
+internal_api_server_include_index_list: [1]
+
+extra_config:
+  save_only_first_rank: true
+  first_rank_max_local_cpu_size: 5

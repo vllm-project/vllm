@@ -1,0 +1,17 @@
+# Paste this into the Buildkite pipeline's "Steps" editor.
+# It uploads the real pipeline definition from the repo.
+#
+# Public repo — no secrets here. Configure in the Buildkite UI:
+#   HF_TOKEN        — env var (gated model access)
+#   GH_TOKEN        — secret BLEND_TM_PAT (clone auth), resolved by run.sh
+#   CB_PLUGIN_REPO  — secret CB_PLUGIN_REPO (private owner/name), resolved by run.sh
+agents:
+  queue: "k8s"
+
+env:
+  CB_PLUGIN_REF: "main"            # plugin git ref to test the PR against
+  CB_PLUGIN_DIR: "/tmp/cb-plugin"  # clone destination in the pod
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/blend/pipeline.yml

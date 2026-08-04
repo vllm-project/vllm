@@ -1,0 +1,203 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/controller/freeze_mode.rst:2
+msgid "Freeze Mode"
+msgstr "冻结模式"
+
+#: ../../source/controller/freeze_mode.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/coordinator`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/controller/freeze_mode.rst:10
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/controller/freeze_mode.rst:12
+msgid ""
+"Freeze Mode is a safety mechanism in LMCache Controller designed to "
+"prevent data inconsistency and potential data loss during critical system"
+" events. When the controller detects severe state inconsistencies or is "
+"undergoing restart/recovery, it can activate Freeze Mode to temporarily "
+"restrict certain operations."
+msgstr ""
+"冻结模式是 LMCache "
+"控制器中的一种安全机制，旨在防止在关键系统事件期间出现数据不一致和潜在的数据丢失。当控制器检测到严重的状态不一致或正在进行重启/恢复时，它可以激活冻结模式，以暂时限制某些操作。"
+
+#: ../../source/controller/freeze_mode.rst:15
+msgid "Motivation"
+msgstr "动机"
+
+#: ../../source/controller/freeze_mode.rst:17
+msgid "The primary motivations for Freeze Mode are:"
+msgstr "冻结模式的主要动机包括："
+
+#: ../../source/controller/freeze_mode.rst:19
+msgid ""
+"**Controller Failure Recovery** - When the controller crashes and "
+"restarts, it may need to perform a full synchronization with workers - "
+"During this sync period, the system state may be incomplete or "
+"inconsistent"
+msgstr "**控制器故障恢复** - 当控制器崩溃并重启时，它可能需要与工作节点进行完全同步 - 在此同步期间，系统状态可能不完整或不一致"
+
+#: ../../source/controller/freeze_mode.rst:23
+msgid ""
+"**State Inconsistency Detection** - When severe state mismatches are "
+"detected between the controller and workers - This could happen due to "
+"network issues, worker failures, or unexpected system behavior"
+msgstr "**状态不一致检测** - 当检测到控制器与工作节点之间存在严重的状态不匹配时 - 这可能是由于网络问题、工作节点故障或意外的系统行为导致的"
+
+#: ../../source/controller/freeze_mode.rst:27
+msgid ""
+"**Full Synchronization Safety** - During full sync operations triggered "
+"by the above events - To prevent operations that could cause eviction or "
+"admission events while state is being rebuilt"
+msgstr "**完全同步安全** - 在上述事件触发的完全同步操作期间 - 为了防止在状态重建时可能导致逐出或接纳事件的操作"
+
+#: ../../source/controller/freeze_mode.rst:32
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/controller/freeze_mode.rst:34
+msgid "When Freeze Mode is activated:"
+msgstr "当冻结模式被激活时："
+
+#: ../../source/controller/freeze_mode.rst:36
+msgid "**All operations that could generate evict/admit events are disabled**"
+msgstr "**所有可能生成逐出/接纳事件的操作均被禁用**"
+
+#: ../../source/controller/freeze_mode.rst:37
+msgid "Only read operations and basic queries are allowed"
+msgstr "仅允许读取操作和基本查询"
+
+#: ../../source/controller/freeze_mode.rst:38
+msgid ""
+"The system essentially enters a \"read-only\" state for cache management "
+"operations"
+msgstr "系统本质上进入了一个“只读”状态，以进行缓存管理操作。"
+
+#: ../../source/controller/freeze_mode.rst:39
+msgid "This prevents data corruption or loss during the recovery/sync process"
+msgstr "这可以防止在恢复/同步过程中数据损坏或丢失。"
+
+#: ../../source/controller/freeze_mode.rst:42
+msgid "Current Implementation Status"
+msgstr "当前实现状态"
+
+#: ../../source/controller/freeze_mode.rst:44
+msgid "**Currently Implemented:**"
+msgstr "**当前实现：**"
+
+#: ../../source/controller/freeze_mode.rst:46
+msgid ""
+"**Freeze Mode Mechanism** - StorageManager supports freeze mode - When "
+"frozen, only LocalCPUBackend is used for retrieval operations - Other "
+"storage backends are temporarily excluded from active use"
+msgstr ""
+"**冻结模式机制** - StorageManager 支持冻结模式 - 当处于冻结状态时，仅使用 LocalCPUBackend 进行检索操作 "
+"- 其他存储后端暂时不参与活动使用"
+
+#: ../../source/controller/freeze_mode.rst:51
+msgid ""
+"**API Endpoints** - Freeze mode can be toggled via controller API - "
+"Status can be queried to check if system is in freeze mode"
+msgstr "**API 端点** - 冻结模式可以通过控制器 API 切换 - 可以查询状态以检查系统是否处于冻结模式"
+
+#: ../../source/controller/freeze_mode.rst:55
+msgid "**Not Yet Implemented:**"
+msgstr "**尚未实现：**"
+
+#: ../../source/controller/freeze_mode.rst:57
+msgid ""
+"**Automatic Triggering** - Controller does not yet automatically trigger "
+"freeze mode - Manual activation via API is currently required"
+msgstr "**自动触发** - 控制器尚未自动触发冻结模式 - 目前需要通过 API 手动激活"
+
+#: ../../source/controller/freeze_mode.rst:61
+msgid ""
+"**Full Sync Integration** - Full synchronization process that would "
+"trigger freeze mode is not implemented - Controller restart detection and"
+" automatic freeze mode activation not yet developed"
+msgstr "**完全同步集成** - 触发冻结模式的完整同步过程尚未实现 - 控制器重启检测和自动冻结模式激活尚未开发"
+
+#: ../../source/controller/freeze_mode.rst:65
+msgid ""
+"**Recovery Completion** - Automatic unfreeze after sync completion not "
+"yet implemented - Manual intervention currently required to exit freeze "
+"mode"
+msgstr "**恢复完成** - 同步完成后自动解冻尚未实现 - 目前需要手动干预以退出冻结模式"
+
+#: ../../source/controller/freeze_mode.rst:70
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/controller/freeze_mode.rst:72
+msgid "**Manual Activation/Deactivation:**"
+msgstr "**手动激活/停用：**"
+
+#: ../../source/controller/freeze_mode.rst:74
+msgid "Freeze mode can be manually controlled through the Controller API:"
+msgstr "冻结模式可以通过控制器 API 手动控制："
+
+#: ../../source/controller/freeze_mode.rst:87
+msgid "**System Behavior in Freeze Mode:**"
+msgstr "**冻结模式下的系统行为：**"
+
+#: ../../source/controller/freeze_mode.rst:89
+msgid "Cache retrieval operations continue to work"
+msgstr "缓存检索操作继续正常工作"
+
+#: ../../source/controller/freeze_mode.rst:90
+msgid "Only LocalCPUBackend is used for all retrievals"
+msgstr "仅使用 LocalCPUBackend 进行所有检索。"
+
+#: ../../source/controller/freeze_mode.rst:91
+msgid "Cache admission/eviction operations are blocked"
+msgstr "缓存接纳/逐出操作被阻止"
+
+#: ../../source/controller/freeze_mode.rst:92
+msgid "Write operations to storage backends are prevented"
+msgstr "对存储后端的写入操作被阻止"
+
+#: ../../source/controller/freeze_mode.rst:93
+msgid "Monitoring and health checks continue normally"
+msgstr "监控和健康检查正常进行"
+
+#: ../../source/controller/freeze_mode.rst:96
+msgid "Related Documentation"
+msgstr "相关文档"
+
+#: ../../source/controller/freeze_mode.rst:98
+msgid ":doc:`index` - Controller WebUI overview"
+msgstr ":doc:`index` - 控制器 WebUI 概述"
+
+#: ../../source/controller/freeze_mode.rst:99
+msgid ":doc:`../api_reference/configurations` - API and configuration reference"
+msgstr ":doc:`../api_reference/configurations` - API 和配置参考"
+
+#: ../../source/controller/freeze_mode.rst:100
+msgid ":doc:`../storage_backend/index` - Storage backend architecture"
+msgstr ":doc:`../storage_backend/index` - 存储后端架构"
+

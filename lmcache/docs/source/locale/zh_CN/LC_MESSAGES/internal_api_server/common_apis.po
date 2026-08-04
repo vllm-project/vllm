@@ -1,0 +1,415 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/common_apis.rst:4
+msgid "Common APIs"
+msgstr "通用 API"
+
+#: ../../source/internal_api_server/common_apis.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/http_api`。"
+
+#: ../../source/internal_api_server/common_apis.rst:11
+msgid ""
+"Common APIs are available across all components (scheduler, worker, "
+"controller)."
+msgstr "所有组件（调度器、工作者、控制器）都提供公共 API。"
+
+#: ../../source/internal_api_server/common_apis.rst:16
+msgid "Endpoints"
+msgstr "端点"
+
+#: ../../source/internal_api_server/common_apis.rst:19
+msgid "``GET /env`` — Environment Variables"
+msgstr "``GET /env`` — 环境变量"
+
+#: ../../source/internal_api_server/common_apis.rst:21
+msgid "Get all environment variables of the running process."
+msgstr "获取运行进程的所有环境变量。"
+
+#: ../../source/internal_api_server/common_apis.rst:23
+#: ../../source/internal_api_server/common_apis.rst:52
+#: ../../source/internal_api_server/common_apis.rst:108
+#: ../../source/internal_api_server/common_apis.rst:138
+#: ../../source/internal_api_server/common_apis.rst:168
+#: ../../source/internal_api_server/common_apis.rst:233
+#: ../../source/internal_api_server/common_apis.rst:264
+msgid "**Method**: ``GET``"
+msgstr "**方法**: ``GET``"
+
+#: ../../source/internal_api_server/common_apis.rst:24
+msgid "**Path**: ``/env``"
+msgstr "**路径**: ``/env``"
+
+#: ../../source/internal_api_server/common_apis.rst:25
+#: ../../source/internal_api_server/common_apis.rst:110
+#: ../../source/internal_api_server/common_apis.rst:125
+#: ../../source/internal_api_server/common_apis.rst:266
+msgid "**Parameters**: None"
+msgstr "**参数**: 无"
+
+#: ../../source/internal_api_server/common_apis.rst:26
+msgid ""
+"**Response**: ``application/json`` — JSON object of all environment "
+"variables (sorted by key)."
+msgstr "**响应**: ``application/json`` — 所有环境变量的 JSON 对象（按键排序）。"
+
+#: ../../source/internal_api_server/common_apis.rst:32
+#: ../../source/internal_api_server/common_apis.rst:193
+#: ../../source/internal_api_server/common_apis.rst:339
+msgid "**Example Response**:"
+msgstr "**示例响应**:"
+
+#: ../../source/internal_api_server/common_apis.rst:44
+msgid "``GET /loglevel`` — Log Level Management"
+msgstr "``GET /loglevel`` — 日志级别管理"
+
+#: ../../source/internal_api_server/common_apis.rst:46
+msgid ""
+"Get or set the log level for Python loggers. Behavior depends on query "
+"parameters:"
+msgstr "获取或设置 Python 日志记录器的日志级别。行为取决于查询参数："
+
+#: ../../source/internal_api_server/common_apis.rst:48
+msgid "**No parameters**: List all loggers and their levels."
+msgstr "**无参数**\\ ：列出所有记录器及其级别。"
+
+#: ../../source/internal_api_server/common_apis.rst:49
+msgid "**``logger_name`` only**: Get the level of the specified logger."
+msgstr "**``logger_name`` 仅**: 获取指定记录器的级别。"
+
+#: ../../source/internal_api_server/common_apis.rst:50
+msgid ""
+"**``logger_name`` and ``level``**: Set the level of the specified logger "
+"(including all its handlers)."
+msgstr "**``logger_name`` 和 ``level``**: 设置指定记录器（包括其所有处理程序）的级别。"
+
+#: ../../source/internal_api_server/common_apis.rst:53
+msgid "**Path**: ``/loglevel``"
+msgstr "**路径**: ``/loglevel``"
+
+#: ../../source/internal_api_server/common_apis.rst:54
+#: ../../source/internal_api_server/common_apis.rst:140
+#: ../../source/internal_api_server/common_apis.rst:170
+#: ../../source/internal_api_server/common_apis.rst:312
+msgid "**Parameters**:"
+msgstr "**参数**:"
+
+#: ../../source/internal_api_server/common_apis.rst:57
+#: ../../source/internal_api_server/common_apis.rst:143
+#: ../../source/internal_api_server/common_apis.rst:173
+#: ../../source/internal_api_server/common_apis.rst:238
+#: ../../source/internal_api_server/common_apis.rst:315
+msgid "Name"
+msgstr "名称"
+
+#: ../../source/internal_api_server/common_apis.rst:57
+#: ../../source/internal_api_server/common_apis.rst:143
+#: ../../source/internal_api_server/common_apis.rst:173
+#: ../../source/internal_api_server/common_apis.rst:238
+#: ../../source/internal_api_server/common_apis.rst:315
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/internal_api_server/common_apis.rst:57
+#: ../../source/internal_api_server/common_apis.rst:143
+#: ../../source/internal_api_server/common_apis.rst:173
+#: ../../source/internal_api_server/common_apis.rst:238
+#: ../../source/internal_api_server/common_apis.rst:315
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/internal_api_server/common_apis.rst:59
+msgid "``logger_name``"
+msgstr "``logger_name``"
+
+#: ../../source/internal_api_server/common_apis.rst:59
+#: ../../source/internal_api_server/common_apis.rst:60
+#: ../../source/internal_api_server/common_apis.rst:145
+#: ../../source/internal_api_server/common_apis.rst:175
+#: ../../source/internal_api_server/common_apis.rst:240
+msgid "str"
+msgstr "字符串"
+
+#: ../../source/internal_api_server/common_apis.rst:59
+msgid "(Optional) Logger name to query or set"
+msgstr "(可选) 查询或设置的日志记录器名称"
+
+#: ../../source/internal_api_server/common_apis.rst:60
+#: ../../source/internal_api_server/common_apis.rst:175
+msgid "``level``"
+msgstr "``level``"
+
+#: ../../source/internal_api_server/common_apis.rst:60
+msgid ""
+"(Optional) Log level to set (e.g. ``DEBUG``, ``INFO``, ``WARNING``, "
+"``ERROR``)"
+msgstr "(可选) 设置的日志级别 (例如 ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``)"
+
+#: ../../source/internal_api_server/common_apis.rst:63
+msgid "**Response**: ``text/plain``"
+msgstr "**响应**: ``text/plain``"
+
+#: ../../source/internal_api_server/common_apis.rst:76
+msgid "**Example Response** (list all):"
+msgstr "**示例响应**\\ （列出所有）："
+
+#: ../../source/internal_api_server/common_apis.rst:84
+msgid "**Example Response** (get):"
+msgstr "**示例响应**\\ （获取）："
+
+#: ../../source/internal_api_server/common_apis.rst:90
+msgid "**Example Response** (set):"
+msgstr "**示例响应** (设置):"
+
+#: ../../source/internal_api_server/common_apis.rst:96
+#: ../../source/internal_api_server/common_apis.rst:219
+msgid "**Error Response** (invalid level, HTTP 400):"
+msgstr "**错误响应**\\ （无效级别，HTTP 400）："
+
+#: ../../source/internal_api_server/common_apis.rst:104
+msgid "``GET /metrics`` — Prometheus Metrics"
+msgstr "``GET /metrics`` — Prometheus 指标"
+
+#: ../../source/internal_api_server/common_apis.rst:106
+msgid "Get Prometheus metrics data in the standard exposition format."
+msgstr "以标准展示格式获取 Prometheus 指标数据。"
+
+#: ../../source/internal_api_server/common_apis.rst:109
+msgid "**Path**: ``/metrics``"
+msgstr "**路径**: ``/metrics``"
+
+#: ../../source/internal_api_server/common_apis.rst:111
+msgid "**Response**: ``text/plain`` — Prometheus text-based exposition format."
+msgstr "**响应**: ``text/plain`` — Prometheus 文本格式的展示。"
+
+#: ../../source/internal_api_server/common_apis.rst:119
+msgid "``POST /metrics/reset`` — Reset Prometheus Metrics"
+msgstr "``POST /metrics/reset`` — 重置 Prometheus 指标"
+
+#: ../../source/internal_api_server/common_apis.rst:121
+msgid "Reset all Prometheus metrics to their initial state."
+msgstr "重置所有 Prometheus 指标为其初始状态。"
+
+#: ../../source/internal_api_server/common_apis.rst:123
+#: ../../source/internal_api_server/common_apis.rst:309
+msgid "**Method**: ``POST``"
+msgstr "**方法**: ``POST``"
+
+#: ../../source/internal_api_server/common_apis.rst:124
+msgid "**Path**: ``/metrics/reset``"
+msgstr "**路径**: ``/metrics/reset``"
+
+#: ../../source/internal_api_server/common_apis.rst:126
+msgid "**Response**: ``text/plain`` — ``\"ok\"`` on success."
+msgstr "**响应**: ``text/plain`` — ``\"ok\"`` 表示成功。"
+
+#: ../../source/internal_api_server/common_apis.rst:134
+msgid "``GET /threads`` — Thread Information"
+msgstr "``GET /threads`` — 线程信息"
+
+#: ../../source/internal_api_server/common_apis.rst:136
+msgid "Get information about active threads with optional filtering."
+msgstr "获取有关活动线程的信息，并可选择性地进行过滤。"
+
+#: ../../source/internal_api_server/common_apis.rst:139
+msgid "**Path**: ``/threads``"
+msgstr "**路径**: ``/threads``"
+
+#: ../../source/internal_api_server/common_apis.rst:145
+msgid "``name``"
+msgstr "``name``"
+
+#: ../../source/internal_api_server/common_apis.rst:145
+msgid "(Optional) Filter by thread name (fuzzy match, case-insensitive)"
+msgstr "(可选) 按线程名称过滤（模糊匹配，大小写不敏感）"
+
+#: ../../source/internal_api_server/common_apis.rst:146
+msgid "``thread_id``"
+msgstr "``thread_id``"
+
+#: ../../source/internal_api_server/common_apis.rst:146
+msgid "int"
+msgstr "整数"
+
+#: ../../source/internal_api_server/common_apis.rst:146
+msgid "(Optional) Filter by thread ID"
+msgstr "（可选）按线程 ID 过滤"
+
+#: ../../source/internal_api_server/common_apis.rst:149
+msgid "**Response**: ``text/plain`` — Thread info with stack traces and summary."
+msgstr "**响应**: ``text/plain`` — 包含堆栈跟踪和摘要的线程信息。"
+
+#: ../../source/internal_api_server/common_apis.rst:164
+msgid "``GET /periodic-threads`` — Periodic Thread Status"
+msgstr "``GET /periodic-threads`` — 周期性线程状态"
+
+#: ../../source/internal_api_server/common_apis.rst:166
+msgid "Get information about registered periodic threads."
+msgstr "获取有关注册的周期性线程的信息。"
+
+#: ../../source/internal_api_server/common_apis.rst:169
+msgid "**Path**: ``/periodic-threads``"
+msgstr "**路径**: ``/periodic-threads``"
+
+#: ../../source/internal_api_server/common_apis.rst:175
+msgid ""
+"(Optional) Filter by thread level: ``critical``, ``high``, ``medium``, "
+"``low``"
+msgstr "(可选) 按线程级别过滤：\\ ``critical``\\ 、\\ ``high``\\ 、\\ ``medium``\\ 、\\ ``low``"
+
+#: ../../source/internal_api_server/common_apis.rst:176
+msgid "``running_only``"
+msgstr "``running_only``"
+
+#: ../../source/internal_api_server/common_apis.rst:176
+#: ../../source/internal_api_server/common_apis.rst:177
+msgid "bool"
+msgstr "布尔值"
+
+#: ../../source/internal_api_server/common_apis.rst:176
+msgid "(Optional) Only show running threads (default: ``false``)"
+msgstr "(可选) 仅显示正在运行的线程（默认值：\\ ``false``\\ ）"
+
+#: ../../source/internal_api_server/common_apis.rst:177
+msgid "``active_only``"
+msgstr "``active_only``"
+
+#: ../../source/internal_api_server/common_apis.rst:177
+msgid "(Optional) Only show active threads (default: ``false``)"
+msgstr "(可选) 仅显示活动线程（默认值：\\ ``false``\\ ）"
+
+#: ../../source/internal_api_server/common_apis.rst:180
+#: ../../source/internal_api_server/common_apis.rst:243
+#: ../../source/internal_api_server/common_apis.rst:267
+msgid "**Response**: ``application/json``"
+msgstr "**响应**: ``application/json``"
+
+#: ../../source/internal_api_server/common_apis.rst:229
+#, python-brace-format
+msgid "``GET /periodic-threads/{thread_name}`` — Single Periodic Thread"
+msgstr "``GET /periodic-threads/{thread_name}`` — 单个周期线程"
+
+#: ../../source/internal_api_server/common_apis.rst:231
+msgid "Get detailed information about a specific periodic thread by name."
+msgstr "通过名称获取特定周期线程的详细信息。"
+
+#: ../../source/internal_api_server/common_apis.rst:234
+#, python-brace-format
+msgid "**Path**: ``/periodic-threads/{thread_name}``"
+msgstr "**路径**: ``/periodic-threads/{thread_name}``"
+
+#: ../../source/internal_api_server/common_apis.rst:235
+msgid "**Path Parameters**:"
+msgstr "**路径参数**\\ ："
+
+#: ../../source/internal_api_server/common_apis.rst:240
+msgid "``thread_name``"
+msgstr "``thread_name``"
+
+#: ../../source/internal_api_server/common_apis.rst:240
+msgid "Name of the periodic thread"
+msgstr "周期性线程的名称"
+
+#: ../../source/internal_api_server/common_apis.rst:249
+msgid "**Error Response** (not found, HTTP 404):"
+msgstr "**错误响应**\\ （未找到，HTTP 404）："
+
+#: ../../source/internal_api_server/common_apis.rst:259
+msgid "``GET /periodic-threads-health`` — Periodic Thread Health Check"
+msgstr "``GET /periodic-threads-health`` — 周期性线程健康检查"
+
+#: ../../source/internal_api_server/common_apis.rst:261
+msgid ""
+"Quick health check for periodic threads. Returns healthy status if all "
+"``critical`` and ``high`` level threads are active."
+msgstr "对周期性线程的快速健康检查。如果所有 ``critical`` 和 ``high`` 级别的线程都处于活动状态，则返回健康状态。"
+
+#: ../../source/internal_api_server/common_apis.rst:265
+msgid "**Path**: ``/periodic-threads-health``"
+msgstr "**路径**: ``/periodic-threads-health``"
+
+#: ../../source/internal_api_server/common_apis.rst:273
+msgid "**Example Response** (healthy):"
+msgstr "**示例响应**\\ （健康）："
+
+#: ../../source/internal_api_server/common_apis.rst:283
+msgid "**Example Response** (unhealthy):"
+msgstr "**示例响应**\\ （不健康）："
+
+#: ../../source/internal_api_server/common_apis.rst:302
+msgid "``POST /run_script`` — Run Script"
+msgstr "``POST /run_script`` — 运行脚本"
+
+#: ../../source/internal_api_server/common_apis.rst:304
+msgid ""
+"Upload and execute a Python script in a restricted sandbox environment. "
+"The script has access to ``app`` (the FastAPI application instance) and a"
+" limited set of builtins. Import is restricted to modules configured in "
+"``script_allowed_imports``."
+msgstr ""
+"在受限的沙箱环境中上传并执行 Python 脚本。该脚本可以访问 ``app``\\ （FastAPI 应用实例）和有限的内置函数。导入仅限于在 "
+"``script_allowed_imports`` 中配置的模块。"
+
+#: ../../source/internal_api_server/common_apis.rst:310
+msgid "**Path**: ``/run_script``"
+msgstr "**路径**: ``/run_script``"
+
+#: ../../source/internal_api_server/common_apis.rst:311
+msgid "**Content-Type**: ``multipart/form-data``"
+msgstr "**内容类型**: ``multipart/form-data``"
+
+#: ../../source/internal_api_server/common_apis.rst:317
+msgid "``script``"
+msgstr "``script``"
+
+#: ../../source/internal_api_server/common_apis.rst:317
+msgid "file"
+msgstr "文件"
+
+#: ../../source/internal_api_server/common_apis.rst:317
+msgid "Python script file to execute"
+msgstr "要执行的 Python 脚本文件"
+
+#: ../../source/internal_api_server/common_apis.rst:320
+msgid ""
+"**Response**: ``text/plain`` — The ``result`` variable from the script, "
+"or ``\"Script executed successfully\"`` if no ``result`` is set."
+msgstr ""
+"**响应**: ``text/plain`` — 脚本中的 ``result`` 变量，或者如果没有设置 ``result`` 则为 "
+"``\"脚本执行成功\"``\\ 。"
+
+#: ../../source/internal_api_server/common_apis.rst:328
+msgid "**Example Script** (``scratch.py``):"
+msgstr "**示例脚本** (``scratch.py``):"
+
+#: ../../source/internal_api_server/common_apis.rst:345
+msgid "**Error Response** (no script, HTTP 400):"
+msgstr "**错误响应**\\ （无脚本，HTTP 400）："
+
+#: ../../source/internal_api_server/common_apis.rst:351
+msgid "**Error Response** (execution error, HTTP 500):"
+msgstr "**错误响应**\\ （执行错误，HTTP 500）："
+

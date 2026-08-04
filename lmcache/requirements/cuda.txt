@@ -1,0 +1,21 @@
+# Common project dependencies
+-r common.txt
+# Vendor-specific runtime deps (cupy) baked into install_requires.
+# Defaults to the cu13 list; the cu12.9 build path overrides via setup.py
+# (LMCACHE_CUDA_MAJOR=12) and does not consume cuda.txt directly.
+-r cuda13_core.txt
+# NIXL ships as the optional `lmcache[nixl]` extra in wheels, but dev/CI
+# environments built from this file keep it installed by default.
+-r nixl.txt
+
+# Dependencies for NVIDIA GPUs
+ray >= 2.9
+nvidia-ml-py # for pynvml package
+
+
+# do not pin version because the dockerfile requires cuda.txt
+torch
+# Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchvision
+# platform_system == 'Linux' and platform_machine == 'x86_64' 
+xformers

@@ -1,0 +1,143 @@
+/* Force white background on all Mermaid diagrams and fix sizing */
+.mermaid {
+    background-color: #ffffff !important;
+    padding: 10px !important;
+    border-radius: 8px !important;
+    margin: 10px 0 !important;
+    display: flex !important;
+    justify-content: center !important;
+}
+
+.mermaid svg {
+    background-color: #ffffff !important;
+    height: auto !important;
+    max-height: 300px !important;
+}
+
+/* Tighter fit for flowcharts */
+.mermaid[data-processed="true"] {
+    overflow: visible !important;
+}
+
+.mermaid svg[id^="flowchart"] {
+    max-height: 250px !important;
+}
+
+/* Hide extra buttons if multiple are showing */
+div.highlight button.copybtn + button.copybtn {
+    display: none;
+  }
+
+  /* Remove unwanted "Copy code" text from clipboard (for older versions) */
+  .copybtn::before {
+    content: none !important;
+  }
+
+  /* Style the copy button */
+  button.copybtn {
+    background-color: #4a90e2;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    padding: 4px 8px;
+    cursor: pointer;
+    position: absolute;
+    top: 0.4em;
+    right: 0.6em;
+    opacity: 0.8;
+    transition: opacity 0.2s ease-in-out;
+    z-index: 3;
+  }
+
+  button.copybtn:hover {
+    opacity: 1;
+  }
+
+  /* Optional: Hide the copied tooltip or style it */
+  .copybtn:after {
+    content: "Copied!";
+    display: none;
+    position: absolute;
+    top: -1.5em;
+    right: 0;
+    background: #333;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+  }
+
+/* Language switcher (中文 | Eng) — lives in the top nav bar,
+   or floats at top-right if the nav bar isn't found. */
+.lmcache-language-switcher {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 6px;
+    padding: 4px 10px;
+    white-space: nowrap;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--foreground);
+    border-radius: 8px;
+}
+
+/* When there's no nav bar, float at top-right instead */
+.lmcache-language-switcher--fallback {
+    position: fixed;
+    top: 10px;
+    right: 72px;
+    z-index: 60;
+}
+
+.lmcache-language-switcher a {
+    color: inherit;
+    opacity: 0.72;
+    text-decoration: none;
+}
+
+.lmcache-language-switcher a:hover,
+.lmcache-language-switcher a:focus-visible,
+.lmcache-language-switcher a[aria-current="page"] {
+    opacity: 1;
+}
+
+.lmcache-language-switcher__divider {
+    opacity: 0.38;
+}
+
+/* Make top-level collapsible nav items read as section headers:
+   when a section is represented as a single index page (no toctree
+   :caption:), bold its top-level entry so it still looks like a section
+   while remaining a fold-out dropdown. */
+nav .toctree-l1 > a.expandable {
+    font-weight: 700;
+}
+
+/* Separate top-level collapsible sections with spacing + a subtle divider
+   so each reads as its own section even without a :caption: header. */
+nav .toctree-l1:has(> a.expandable) {
+    margin-top: 0.85rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+/* Homepage hero text (translatable RST replacing former raw HTML) */
+.hero-tagline {
+    text-align: center;
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.hero-description {
+    text-align: justify;
+}
+
+/* Theme-aware images: show the light variant by default, swap to the dark
+   variant when the sphinxawesome theme is in dark mode (html.dark). */
+.only-dark { display: none; }
+html.dark .only-light { display: none; }
+html.dark .only-dark { display: revert; }

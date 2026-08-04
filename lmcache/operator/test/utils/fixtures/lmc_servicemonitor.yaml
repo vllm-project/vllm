@@ -1,0 +1,20 @@
+# ServiceMonitor smoke fixture.
+#
+# Enabling prometheus.serviceMonitor.enabled is the only way the operator
+# creates a monitoring.coreos.com/v1 ServiceMonitor. We pin a release
+# label here so the test can assert it round-trips into the CR.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: smoke-servicemonitor
+spec:
+  nodeSelector: {}
+  l1:
+    sizeGB: 10
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels:
+        release: kube-prometheus-stack

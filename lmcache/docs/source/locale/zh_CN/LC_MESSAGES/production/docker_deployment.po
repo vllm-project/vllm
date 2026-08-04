@@ -1,0 +1,107 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/docker_deployment.rst:4
+msgid "Docker deployment"
+msgstr "Docker 部署"
+
+#: ../../source/production/docker_deployment.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/deployment`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/deployment`。"
+
+#: ../../source/production/docker_deployment.rst:11
+msgid "**Prerequisites:** Docker Engine 27.0+"
+msgstr "**前提条件：** Docker Engine 27.0+"
+
+#: ../../source/production/docker_deployment.rst:13
+msgid "See :ref:`installation_guide` for pulling images."
+msgstr "请参阅 :ref:`installation_guide` 以获取拉取镜像的信息。"
+
+#: ../../source/production/docker_deployment.rst:16
+msgid "Running the container"
+msgstr "运行容器"
+
+#: ../../source/production/docker_deployment.rst:32
+msgid ""
+"See the `docker run example "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details."
+msgstr ""
+"有关更多详细信息，请参见 `docker run 示例 "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
+
+#: ../../source/production/docker_deployment.rst:35
+msgid "ROCm (AMD)"
+msgstr "ROCm (AMD)"
+
+#: ../../source/production/docker_deployment.rst:37
+msgid ""
+"The `AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ for "
+"vLLM offers a prebuilt, optimized image for the AMD Instinct™ MI300X. See"
+" `LLM inference performance validation on AMD Instinct MI300X "
+"<https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference"
+"/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__ for full "
+"instructions."
+msgstr ""
+"`AMD Infinity hub <https://hub.docker.com/r/rocm/vllm-dev>`__ 为 vLLM "
+"提供了一个预构建的、优化的镜像，适用于 AMD Instinct™ MI300X。有关完整说明，请参见 `LLM 推理性能验证在 AMD "
+"Instinct MI300X 上 <https://rocm.docs.amd.com/en/latest/how-to/rocm-for-"
+"ai/inference/benchmark-docker/vllm.html?model=pyt_vllm_llama-3.1-8b>`__。"
+
+#: ../../source/production/docker_deployment.rst:42
+msgid ""
+"Validated environment: ``rocm/vllm-"
+"dev:nightly_0624_rc2_0624_rc2_20250620``, MI300X, vLLM V1."
+msgstr ""
+"验证的环境：``rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620``, MI300X, vLLM "
+"V1."
+
+#: ../../source/production/docker_deployment.rst:61
+msgid "XPU (Intel)"
+msgstr "XPU（英特尔）"
+
+#: ../../source/production/docker_deployment.rst:63
+msgid ""
+"The `Intel vLLM XPU hub <https://hub.docker.com/r/intel/vllm>`__ offers a"
+" prebuilt, optimized docker image designed for validating inference "
+"performance on the Intel GPU accelerators like ARC770, B60/B70, and "
+"future products."
+msgstr ""
+"`Intel vLLM XPU hub <https://hub.docker.com/r/intel/vllm>`__ "
+"提供了一个预构建的、优化的 Docker 镜像，旨在验证在 Intel GPU 加速器（如 ARC770、B60/B70 "
+"及未来产品）上的推理性能。"
+
+#: ../../source/production/docker_deployment.rst:65
+msgid "Validated environment: ``intel/vllm:0.17.0-xpu``, Intel B60 GPU, vLLM V1."
+msgstr "验证环境：``intel/vllm:0.17.0-xpu``, Intel B60 GPU, vLLM V1。"
+
+#~ msgid ""
+#~ "The `Intel vLLM XPU "
+#~ "hub<https://hub.docker.com/r/intel/vllm>`__ offers a "
+#~ "prebuilt, optimized docker image designed "
+#~ "for validating inference performance on "
+#~ "the Intel GPU accelerators like ARC770,"
+#~ " B60/B70, and future products."
+#~ msgstr ""
+

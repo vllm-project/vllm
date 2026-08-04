@@ -1,0 +1,8 @@
+# This configuration is for teaching kustomize how to update name ref substitution.
+nameReference:
+- kind: Issuer
+  group: cert-manager.io
+  fieldSpecs:
+  - kind: Certificate
+    group: cert-manager.io
+    path: spec/issuerRef/name

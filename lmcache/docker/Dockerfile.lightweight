@@ -1,0 +1,21 @@
+# This is a lightweight image of the latest release of LMCache (without NIXL) bundled with the latest release of vLLM.
+# Note: You will not be able to run Prefill-Decode Disaggregation (PD) with this image because NIXL is not installed.
+FROM vllm/vllm-openai:latest
+
+RUN uv pip install --system --no-cache lmcache
+
+
+# Build: 
+# docker build -f Dockerfile.lightweight -t 'lmcache/vllm-openai:lightweight' .
+
+# Run: 
+# export HF_TOKEN=<your_huggingface_token>
+# docker run --runtime nvidia --gpus all \
+#    -v ~/.cache/huggingface:/root/.cache/huggingface \
+#    --env "HF_TOKEN=$HF_TOKEN" \
+#    -p 8000:8000 \
+#    --ipc=host \
+#    lmcache/vllm-openai:lightweight \
+#    --model Qwen/Qwen3-0.6B \
+#    --kv-transfer-config \
+#    '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'

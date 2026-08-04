@@ -1,0 +1,133 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:2
+msgid "SageMaker HyperPod"
+msgstr "SageMaker HyperPod"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:4
+msgid ""
+"An L2 adapter backed by the **ai-toolkit** daemon of Amazon SageMaker "
+"HyperPod, which provides shared memory access for LMCache."
+msgstr "一个由 Amazon SageMaker HyperPod 的 **ai-toolkit** 守护进程支持的 L2 适配器，提供 LMCache 的共享内存访问。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:7
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:9
+msgid "``url``: ai-toolkit daemon URL (``sagemaker-hyperpod://host:port``)."
+msgstr "``url``: ai-toolkit 守护进程 URL (``sagemaker-hyperpod://host:port``)。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:11
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:13
+msgid "``bucket`` (string, default ``\"lmcache\"``): ai-toolkit cache namespace."
+msgstr "``bucket`` (字符串，默认 ``\"lmcache\"``)：ai-toolkit 缓存命名空间。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:14
+msgid ""
+"``shared_memory_name`` (string, default ``\"shared_memory\"``): Name of "
+"shared memory segment."
+msgstr "``shared_memory_name`` (string, default ``\\\"shared_memory\\\"``): 共享内存段的名称。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:16
+msgid ""
+"``max_concurrent_requests`` (int, default ``100``): Maximum concurrent "
+"HTTP requests."
+msgstr "``max_concurrent_requests`` (int, default ``100``): 最大并发 HTTP 请求数。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:18
+msgid ""
+"``max_connections`` (int, default ``256``): Total HTTP connection-pool "
+"limit."
+msgstr "``max_connections`` (int, default ``256``): 总的 HTTP 连接池限制。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:20
+msgid ""
+"``max_connections_per_host`` (int, default ``128``): Per-host connection "
+"limit."
+msgstr "``max_connections_per_host`` (int, default ``128``): 每个主机的连接限制。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:22
+msgid "``timeout_ms`` (int, default ``5000``): HTTP transport timeout."
+msgstr "``timeout_ms`` (int, default ``5000``): HTTP 传输超时。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:23
+msgid ""
+"``lease_wait_timeout_ms`` (int, default ``1000``): How long the daemon "
+"may hold a lease request before answering."
+msgstr "``lease_wait_timeout_ms`` (int, default ``1000``): 守护进程在回答之前可以持有租约请求的时间。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:25
+msgid "``lease_ttl_ms`` (int, default ``30000``): Server-side lease lifetime."
+msgstr "``lease_ttl_ms`` (int, default ``30000``): 服务器端租约生命周期。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:26
+msgid "``put_stream_chunk_bytes`` (int, default ``65536``): HTTP PUT chunk size."
+msgstr "``put_stream_chunk_bytes`` (int, default ``65536``): HTTP PUT 块大小。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:27
+msgid ""
+"``max_lease_size_mb`` (float, optional): Upper bound for accepted lease "
+"payloads."
+msgstr "``max_lease_size_mb`` (float, optional): 接受的租约有效负载的上限。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:29
+msgid "``use_https`` (bool, default ``false``): Enable HTTPS instead of HTTP."
+msgstr "``use_https`` (bool, default ``false``): 启用 HTTPS 而不是 HTTP。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:31
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:42
+msgid "Kubernetes Deployment Requirements"
+msgstr "Kubernetes 部署要求"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:44
+msgid ""
+"The ai-toolkit daemon is node-local (hostNetwork, port 9200), so the "
+"LMCache server must run on the same node as the daemon."
+msgstr "ai-toolkit 守护进程是节点本地的（hostNetwork，端口 9200），因此 LMCache 服务器必须在与守护进程相同的节点上运行。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:48
+msgid "Environment Variable for Node IP"
+msgstr "节点 IP 的环境变量"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:50
+msgid ""
+"Add the ``NODE_IP`` environment variable to resolve the local node's IP "
+"address:"
+msgstr "添加 ``NODE_IP`` 环境变量以解析本地节点的 IP 地址："
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:62
+msgid "/dev/shm Volume Configuration"
+msgstr "/dev/shm 卷配置"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:64
+msgid ""
+"SageMaker Hyperpod requires /dev/shm for high-performance shared memory "
+"operations:"
+msgstr "SageMaker Hyperpod 需要 /dev/shm 以进行高性能共享内存操作："
+

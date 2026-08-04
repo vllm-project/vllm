@@ -1,0 +1,4 @@
+chunk_size: 256
+local_device: "file:///tmp"
+remote_url: null
+remote_serde: null

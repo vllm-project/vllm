@@ -1,0 +1,86 @@
+# Sample vLLM Deployment that OPTS IN to CacheBlend dependency injection.
+#
+# The mutating webhook injects everything CacheBlend needs at pod CREATE — you
+# only supply the two highlighted bits below (the opt-in label + the engine
+# annotation) and a normal, args-only vLLM launch. After admission the webhook
+# adds: pod hostIPC=true; the `cb-plugin` emptyDir + payload init container;
+# a readOnly mount + PYTHONPATH on the vLLM container; the required vLLM flags
+# (--attention-backend CUSTOM, --kv-transfer-config <node-local engine>,
+# --block-size 64, --pipeline-parallel-size 1, --no-enable-chunked-prefill,
+# --no-async-scheduling, --enforce-eager); and the private-payload imagePullSecrets.
+#
+# PREREQUISITES (else injection silently no-ops or the pod is rejected):
+#   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled
+#      (its `<name>-connection` ConfigMap exists — the webhook reads it).
+#   2. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
+#      (the injected hostIPC/privileged is rejected by baseline/restricted PSS).
+#   3. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
+#      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
+#      override makes the webhook SKIP injection (appended args can't reach
+#      `vllm serve`); it stamps lmcache.ai/cacheblend-skip-reason=command-override.
+#   4. The private payload image's pull secret exists in THIS namespace
+#      (referenced by the engine's injection.imagePullSecrets, or overridden via
+#      the annotation below).
+#
+# Verify after creation:
+#   kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "hostIPC|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cacheblend
+  namespace: default            # must match the CacheBlendEngine's namespace + be PSS-privileged
+  labels:
+    app: vllm-cacheblend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-cacheblend
+  template:
+    metadata:
+      labels:
+        app: vllm-cacheblend
+        # (1) OPT-IN — the webhook's objectSelector matches this label.
+        lmcache.ai/cacheblend-inject: "true"
+      annotations:
+        # (2) BIND — names the CacheBlendEngine (same namespace) to inject for.
+        lmcache.ai/cacheblend-engine: "my-cacheblend"
+        # Optional: name the vLLM container if it is not the first one.
+        # lmcache.ai/cacheblend-container: "vllm"
+        # Optional: override the engine's payload imagePullSecrets (comma-separated).
+        # lmcache.ai/cacheblend-image-pull-secrets: "my-registry-secret"
+    spec:
+      # Needed for GPU access unless `nvidia` is the default containerd runtime.
+      # The blend engine shares THIS pod's GPU via CUDA IPC (it does not claim
+      # its own), so the engine + this pod must land on the same GPU node.
+      runtimeClassName: nvidia
+      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
+      # webhook injects hostIPC=true, which shares the host's /dev/shm for CUDA
+      # IPC; an emptyDir would shadow it and break cudaIpcOpenMemHandle.
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly # vLLM + lmcache; must be in the cacheblend-supported version window
+          env:
+            # Deterministic prefix hashing across processes — required by LMCache.
+            - name: PYTHONHASHSEED
+              value: "0"
+          # Args-only launch (image ENTRYPOINT is ["vllm","serve"]). Put the
+          # model + your NON-CacheBlend serving flags here; the webhook APPENDS
+          # the CacheBlend flags. Do NOT add --attention-backend / --kv-transfer-config
+          # yourself (a user-supplied --kv-transfer-config makes the webhook skip it).
+          args:
+            - "Qwen/Qwen3-4B-Instruct-2507"
+            - "--port"
+            - "8000"
+            - "--gpu-memory-utilization"
+            - "0.8"
+            - "--load-format"        # uncomment for a weightless smoke test
+            - "dummy"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              # vLLM claims its GPU normally; the blend engine (NVIDIA_VISIBLE_DEVICES=all)
+              # opens CUDA IPC handles on whichever GPU this pod is assigned.
+              nvidia.com/gpu: "1"

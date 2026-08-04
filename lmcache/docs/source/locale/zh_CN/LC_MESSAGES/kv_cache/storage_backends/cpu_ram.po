@@ -1,0 +1,319 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:2
+msgid "CPU RAM"
+msgstr "CPU 内存"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:14
+msgid ""
+"CPU RAM and Local Storage are the two ways of offloading KV cache onto "
+"non-GPU memory of the same machine that is running inference."
+msgstr "CPU RAM 和本地存储是将 KV Cache 卸载到同一台运行推理的机器的非 GPU 内存的两种方式。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:18
+msgid "Two ways to configure LMCache CPU Offloading:"
+msgstr "配置 LMCache CPU 卸载的两种方式："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:20
+msgid "**1. Environment Variables:**"
+msgstr "**1. 环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:31
+msgid "**2. Configuration File**:"
+msgstr "**2. 配置文件**:"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:33
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:35
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:47
+msgid "CPU RAM Explanation:"
+msgstr "CPU RAM 说明："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:49
+msgid ""
+"The ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is the amount of page-locked (for fast"
+" GPU transfer) CPU memory that LMCache will reserve and must be set to a "
+"number greater than 0 since local and remote backends also use CPU RAM as"
+" an intermediate buffer when transferring KV caches with the GPU. This "
+"means it is possible to set ``LMCACHE_LOCAL_CPU=False`` even though "
+"``LMCACHE_MAX_LOCAL_CPU_SIZE`` is set to a non-zero number."
+msgstr ""
+"``LMCACHE_MAX_LOCAL_CPU_SIZE`` 是 LMCache 将保留的页面锁定（用于快速 GPU 传输）CPU "
+"内存的数量，必须设置为大于 0 的数字，因为本地和远程后端在使用 GPU 传输 KV 缓存时也会使用 CPU 内存作为中间缓冲区。这意味着即使 "
+"``LMCACHE_MAX_LOCAL_CPU_SIZE`` 设置为非零数字，也可以将 ``LMCACHE_LOCAL_CPU=False``\\"
+" 。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:56
+msgid ""
+"However, it is recommended to *always* set ``LMCACHE_LOCAL_CPU=True`` "
+"(the default is ``True`` so if you don't specify, CPU offloading will "
+"automatically be enabled) since this allows all currently unused pinned "
+"CPU RAM that LMCache has reserved to hold KV caches. When the pinned CPU "
+"RAM is required for any disk or remote transfers, the CPU KV caches will "
+"be LRU evicted to make space so there is no danger of running out of "
+"pinned CPU RAM."
+msgstr ""
+"然而，建议始终将\\ ``LMCACHE_LOCAL_CPU=True``\\ 设置为真（默认值为\\ ``True``\\ "
+"，因此如果不指定，CPU 卸载将自动启用），因为这允许 LMCache 保留的所有当前未使用的固定 CPU 内存用于保存 KV 缓存。当固定 "
+"CPU 内存需要用于任何磁盘或远程传输时，CPU KV 缓存将被 LRU 逐出以腾出空间，因此不会出现固定 CPU 内存耗尽的危险。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:61
+msgid ""
+"When ``LMCACHE_LOCAL_CPU=True`` is used in conjunction with the disk "
+"backend or a remote backend (:doc:`Redis <./redis>`, :doc:`Mooncake "
+"<./mooncake>`, :doc:`Valkey <./valkey>`, or :doc:`Infinistore "
+"<./infinistore>`), we can think of the CPU RAM as a \"hot cache\" that "
+"will contain the \"hottest\" (most recently accessed)subset of KV caches "
+"from Disk and Remote storage."
+msgstr ""
+"当 ``LMCACHE_LOCAL_CPU=True`` 与磁盘后端或远程后端 (:doc:`Redis "
+"<./redis>`、:doc:`Mooncake <./mooncake>`、:doc:`Valkey <./valkey>` 或 "
+":doc:`Infinistore <./infinistore>`) 一起使用时，我们可以将 CPU "
+"内存视为一个“热缓存”，它将包含来自磁盘和远程存储的“最热”（最近访问过的）KV 缓存子集。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:66
+msgid ""
+"Thus, the cache engine also has a **prefetch** mechanism to preload the "
+"KV caches for specified tokens into the pinned CPU RAM from the disk or "
+"remote storage (*if* the KV caches for these tokens are already stored "
+"there). This can preemptively avoid the latency of the disk and remote KV"
+" transfer if we predict these tokens will be requested soon (e.g. "
+"structured or agentic workflows)."
+msgstr ""
+"因此，缓存引擎还具有一个 **预取** 机制，可以将指定令牌的 KV 缓存从磁盘或远程存储预加载到固定的 CPU RAM 中（前提是这些令牌的 "
+"KV 缓存已经存储在那里）。如果我们预测这些令牌将很快被请求（例如，结构化或自主工作流），这可以预先避免磁盘和远程 KV 传输的延迟。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:74
+msgid "Hugepage Support"
+msgstr "大页支持"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:76
+msgid ""
+"By default LMCache allocates CPU-pinned memory using regular 4 KiB pages."
+" For large KV cache buffers (multiple gigabytes), enabling **Linux "
+"hugepages** (2 MiB pages) can reduce TLB (Translation Lookaside Buffer) "
+"pressure and improve memory access performance."
+msgstr ""
+"默认情况下，LMCache 使用常规的 4 KiB 页面分配 CPU 固定内存。对于大型 KV Cache 缓冲区（多个千兆字节），启用 "
+"**Linux 大页**\\ （2 MiB 页面）可以减少 TLB（转换后备缓冲区）压力并提高内存访问性能。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:81
+msgid "**System prerequisite**"
+msgstr "**系统先决条件**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:83
+msgid ""
+"Hugepages must be pre-allocated at the OS level before LMCache starts. TO"
+" find the number of pages needed, divide the desired buffer size by 2 MiB"
+" and round up. For example, 5 GB requires at least 2560 pages:"
+msgstr ""
+"在 LMCache 启动之前，必须在操作系统级别预先分配大页面。要找到所需的页面数量，将所需的缓冲区大小除以 2 MiB 并向上取整。例如，5 "
+"GB 至少需要 2560 页："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:95
+msgid "Verify that pages are available:"
+msgstr "验证页面是否可用："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:103
+msgid "**Configuration**"
+msgstr "**配置**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:109
+msgid "Or via environment variable:"
+msgstr "或者通过环境变量："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:115
+msgid "**Restrictions**"
+msgstr "**限制**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:117
+msgid "Hugepages are **not compatible with P2P mode** (``enable_p2p: true``)."
+msgstr "大页 **与 P2P 模式不兼容** (``enable_p2p: true``)。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:118
+msgid "Hugepages are **not compatible with shared memory** (``shm_name`` is set)."
+msgstr "大页与 **共享内存** 不兼容（\\ ``shm_name`` 已设置）。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:119
+msgid ""
+"On non-CUDA platforms, hugepages are not supported. Regular allocation "
+"will be used as fallback."
+msgstr "在非CUDA平台上，不支持大页。将使用常规分配作为后备。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:124
+msgid "Online Inference Example"
+msgstr "在线推理示例"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:126
+msgid "Let's feel the TTFT (time to first token) differential!"
+msgstr "让我们感受一下 TTFT（首次令牌时间）差异！"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:130
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:132
+msgid ""
+"A Machine with at least one GPU. Adjust the max model length of your vllm"
+" instance depending on your GPU memory and the long context you want to "
+"use."
+msgstr "一台至少配备一块 GPU 的机器。根据您的显存和希望使用的长上下文调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:134
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr "vllm 和 lmcache 已安装 (:doc:`安装指南 <../../getting_started/installation>`)"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:136
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr "Hugging Face 访问 ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:142
+msgid "A few packages:"
+msgstr "一些软件包："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:148
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr "**第 0 步. 为此示例设置一个目录:**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:155
+msgid "**Step 1. Prepare a long context!**"
+msgstr "**步骤 1. 准备一个长上下文！**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:157
+msgid ""
+"We want a context long enough that vllm's prefix caching will not be able"
+" to hold the KV caches in GPU memory and LMCache is necessary to keep KV "
+"caches in non-GPU memory:"
+msgstr "我们希望上下文足够长，以至于 vLLM 的前缀缓存无法将 KV 缓存保留在显存中，因此需要 LMCache 将 KV 缓存保留在非显存中："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:165
+msgid "**Step 2. Start a vLLM server with CPU offloading enabled:**"
+msgstr "**步骤 2. 启动一个启用 CPU 卸载的 vLLM 服务器:**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:167
+msgid "Create a an lmcache configuration file called: ``cpu-offload.yaml``"
+msgstr "创建一个名为 ``cpu-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:175
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr "如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:190
+msgid ""
+"``--kv-transfer-config``: This is the parameter that actually tells vLLM "
+"to use LMCache for KV cache offloading."
+msgstr "``--kv-transfer-config``: 这是实际告诉 vLLM 使用 LMCache 进行 KV Cache 卸载的参数。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:191
+msgid "``kv_connector``: Specifies the LMCache connector for vLLM V1"
+msgstr "``kv_connector``: 指定 vLLM V1 的 LMCache 连接器"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:192
+msgid ""
+"``kv_role``: Set to \"kv_both\" for both storing and loading KV cache "
+"(important because we will run two queries and the first will "
+"produce/store a KV cache while the second will consume/load that KV "
+"cache)"
+msgstr ""
+"``kv_role``: 设置为 \\\"kv_both\\\" 以同时存储和加载 KV "
+"Cache（重要，因为我们将运行两个查询，第一个将生成/存储一个 KV Cache，而第二个将消费/加载该 KV Cache）"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:194
+msgid "**Step 3. Query TTFT improvements with LMCache:**"
+msgstr "**步骤 3. 使用 LMCache 查询 TTFT 改进：**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:196
+msgid ""
+"Once the Open AI compatible server is running on default vllm port 8000, "
+"let's query it twice with the same long context!"
+msgstr "一旦 Open AI 兼容的服务器在默认的 vllm 端口 8000 上运行，让我们用相同的长上下文查询两次！"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:198
+msgid "Create a script called ``query-twice.py`` and paste the following code:"
+msgstr "创建一个名为 ``query-twice.py`` 的脚本，并粘贴以下代码："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:264
+msgid "Then run:"
+msgstr "然后运行："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:270
+msgid ""
+"Since we're in streaming mode, you'll be able to feel the TTFT "
+"differential in real time!"
+msgstr "由于我们处于流式模式，您将能够实时感受到 TTFT 差异！"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:273
+msgid "**Example Output:**"
+msgstr "**示例输出：**"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:298
+msgid ""
+"If you look at the logs of your vLLM server, you should see (the logs are"
+" truncated for cleanliness):"
+msgstr "如果你查看 vLLM 服务器的日志，你应该会看到（日志已为整洁而截断）："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:326
+msgid "Tips:"
+msgstr "提示："
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:328
+msgid ""
+"If you want to run the ``query-twice.py`` script multiple times, you'll "
+"need to either restart the vLLM LMCache server or change the prefix of "
+"the context you pass in since you've already warmed LMCache."
+msgstr ""
+"如果您想多次运行 ``query-twice.py`` 脚本，您需要重启 vLLM LMCache "
+"服务器或更改您传入的上下文前缀，因为您已经预热了 LMCache。"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:330
+msgid ""
+"The max model length here was decided by running an L4 with only 23GB of "
+"GPU memory. If you have more memory, you can increase the max model "
+"length and modify ``query-twice.py`` to use more of the long context. "
+"LMCache TTFT improvement becomes more pronounced as the context length "
+"increases!"
+msgstr ""
+"这里的最大模型长度是通过仅使用 23GB 显存的 L4 运行决定的。如果您有更多内存，可以增加最大模型长度并修改 ``query-"
+"twice.py`` 以使用更多的长上下文。随着上下文长度的增加，LMCache 的 TTFT 改进变得更加明显！"
+

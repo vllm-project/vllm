@@ -1,0 +1,169 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:2
+msgid "Mooncake Store"
+msgstr "Mooncake Store"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:4
+msgid ""
+"An L2 adapter backed by the native C++ Mooncake Store connector.  Uses "
+"`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance"
+" distributed KV cache storage with RDMA support."
+msgstr "一个由原生 C++ Mooncake Store 连接器支持的 L2 适配器。使用 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ 进行高性能分布式 KV Cache 存储，并支持 RDMA。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:8
+msgid ""
+"When Mooncake is configured with ``\"protocol\": \"rdma\"``, LMCache must"
+" also have a valid contiguous L1 memory region available.  The "
+"distributed storage manager passes this L1 memory descriptor to the "
+"adapter factory automatically in MP mode.  If the descriptor is missing "
+"or invalid, adapter creation fails with ``ValueError`` instead of "
+"silently falling back to a non-RDMA path."
+msgstr "当 Mooncake 配置为 ``\"protocol\": \"rdma\"`` 时，LMCache 还必须有一个有效的连续 L1 内存区域可用。分布式存储管理器会在 MP 模式下自动将此 L1 内存描述符传递给适配器工厂。如果描述符缺失或无效，适配器创建将失败并抛出 ``ValueError``\\ ，而不是默默地回退到非 RDMA 路径。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:14
+msgid "**Prerequisites -- Building with Mooncake support:**"
+msgstr "**前提条件——启用 Mooncake 支持的构建：**"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:16
+msgid ""
+"The Mooncake extension is **not** built by default.  You must explicitly "
+"enable it:"
+msgstr "Mooncake 扩展\\ **默认不**\\ 构建。您必须显式启用它："
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:23
+msgid "The ``BUILD_MOONCAKE`` environment variable controls compilation:"
+msgstr "``BUILD_MOONCAKE`` 环境变量控制编译："
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:25
+msgid "``BUILD_MOONCAKE=1``: Enable the Mooncake C++ extension."
+msgstr "``BUILD_MOONCAKE=1``: 启用 Mooncake C++ 扩展。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:26
+msgid ""
+"``BUILD_MOONCAKE=0``: Force disable (highest priority), even if "
+"``MOONCAKE_INCLUDE_DIR`` is set."
+msgstr "``BUILD_MOONCAKE=0``: 强制禁用（优先级最高），即使 ``MOONCAKE_INCLUDE_DIR`` 已设置。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:28
+msgid ""
+"**Not set**: Falls back to checking ``MOONCAKE_INCLUDE_DIR`` for backward"
+" compatibility.  If ``MOONCAKE_INCLUDE_DIR`` is also unset, the extension"
+" is skipped."
+msgstr "**未设置**\\ ：回退到检查 ``MOONCAKE_INCLUDE_DIR`` 以保持向后兼容。如果 ``MOONCAKE_INCLUDE_DIR`` 也未设置，则跳过该扩展。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:32
+msgid ""
+"If the Mooncake headers are not installed in the system include path "
+"(e.g., ``/usr/local/include``), you must point to them explicitly:"
+msgstr "如果系统包含路径中未安装 Mooncake 头文件（例如，\\ ``/usr/local/include``\\ ），则必须显式指向它们："
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:42
+msgid "**LMCache-specific fields:**"
+msgstr "**LMCache 专有字段：**"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:44
+msgid ""
+"``num_workers``: Number of C++ worker threads for the shared pool "
+"(default ``4``, must be > 0)."
+msgstr "``num_workers``: 共享池的 C++ 工作线程数量（默认 ``4``\\ ，必须大于 0）。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:47
+msgid ""
+"``per_op_workers`` (``dict[str, int]``, optional): A dict mapping lane "
+"keys to dedicated worker thread counts.  Supported keys:"
+msgstr "``per_op_workers`` (``dict[str, int]``, 可选)：将操作类型键映射到专用工作线程数的字典。支持的键："
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:50
+msgid "``\"lookup\"`` — threads for ``EXISTS`` operations."
+msgstr "``\"lookup\"`` — 用于 ``EXISTS`` 操作的线程。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:51
+msgid "``\"retrieve\"`` — threads for ``GET`` / load operations."
+msgstr "``\"retrieve\"`` — 处理 ``GET`` / 加载操作的线程。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:52
+msgid "``\"store\"`` — threads for ``SET`` / put operations."
+msgstr "``\"store\"`` — 处理 ``SET`` / 放置操作的线程。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:53
+msgid "``\"delete\"`` — threads for ``DELETE`` operations."
+msgstr "``\"delete\"`` — 用于 ``DELETE`` 操作的线程。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:55
+msgid ""
+"Operations whose lane key is **not** present in the dict use the shared "
+"``num_workers`` pool.  There is no requirement to set all keys — you can "
+"configure only the lanes that need dedicated pools."
+msgstr "未在字典中列出的操作类型键将使用共享的 ``num_workers`` 池。无需设置所有键——您只需配置需要专用池的操作类型即可。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:59
+msgid "**Mooncake fields:**"
+msgstr "**Mooncake 字段：**"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:61
+msgid ""
+"All other keys in the JSON config (except ``type``, ``num_workers``, "
+"``per_op_workers``, and ``eviction``) are forwarded **as-is** to "
+"Mooncake's ``setup_internal(ConfigDict)``.  Refer to the `Mooncake "
+"documentation <https://github.com/kvcache-ai/Mooncake>`_ for available "
+"setup keys (e.g., ``local_hostname``, ``metadata_server``, "
+"``master_server_addr``, ``protocol``, ``rdma_devices``, "
+"``global_segment_size``)."
+msgstr "JSON 配置中的所有其他键（除了 ``type``, ``num_workers``, ``per_op_workers`` 和 ``eviction``\\ ）都将 **原样** 转发给 Mooncake 的 ``setup_internal(ConfigDict)``\\ 。有关可用的设置键（例如 ``local_hostname``, ``metadata_server``, ``master_server_addr``, ``protocol``, ``rdma_devices``, ``global_segment_size``\\ ），请参阅 `Mooncake 文档 <https://github.com/kvcache-ai/Mooncake>`_。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:69
+msgid "**Configuration example:**"
+msgstr "**配置示例：**"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:99
+msgid ""
+"For full Mooncake setup instructions (master service, metadata server, "
+"etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ ."
+msgstr "有关完整的 Mooncake 设置说明（主服务、元数据服务器等），请参阅 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ 。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:102
+msgid "**RDMA notes:**"
+msgstr "**RDMA 注意事项：**"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:104
+msgid "``protocol: \"rdma\"`` requires a valid LMCache L1 memory descriptor."
+msgstr "``protocol: \"rdma\"`` 需要一个有效的 LMCache L1 内存描述符。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:105
+msgid ""
+"When using ``protocol: \"rdma\"``, it is recommended to disable lazy L1 "
+"allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated "
+"before Mooncake registers it."
+msgstr "使用 ``protocol: \"rdma\"`` 时，建议通过 ``--no-l1-use-lazy`` 禁用延迟 L1 分配，以便在 Mooncake 注册前完整分配 L1 缓冲区。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:108
+msgid "``protocol: \"tcp\"`` does not require L1 preregistration."
+msgstr "``protocol: \"tcp\"`` 不需要 L1 预注册。"
+
+#: ../../source/mp/l2_storage/mooncake_store.rst:109
+msgid ""
+"If Mooncake RDMA initialization fails at adapter creation time, verify "
+"that LMCache L1 memory is enabled and that the descriptor has a non-zero "
+"pointer and size."
+msgstr "如果 Mooncake RDMA 初始化在适配器创建时失败，请验证 LMCache L1 内存是否已启用，并确保描述符具有非零指针和大小。"
+

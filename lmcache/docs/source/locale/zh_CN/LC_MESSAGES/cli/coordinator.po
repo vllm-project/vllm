@@ -1,0 +1,227 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/coordinator.rst:2
+msgid "lmcache coordinator"
+msgstr "lmcache coordinator"
+
+#: ../../source/cli/coordinator.rst:4
+msgid ""
+"The ``lmcache coordinator`` command launches the LMCache MP "
+"**coordinator**, a standalone HTTP service that tracks the MP server "
+"instances in a deployment. MP servers register with it and send periodic "
+"heartbeats; the coordinator evicts any instance whose heartbeat lapses "
+"past ``--instance-timeout``."
+msgstr ""
+"``lmcache coordinator`` 命令启动 LMCache MP **协调器**\\ ，这是一个独立的 HTTP "
+"服务，用于跟踪部署中的 MP 服务器实例。MP 服务器向其注册并发送定期心跳；协调器会逐出任何心跳超时的实例，该超时时间由 "
+"``--instance-timeout`` 指定。"
+
+#: ../../source/cli/coordinator.rst:9
+msgid ""
+"It replaces ``python -m lmcache.v1.mp_coordinator``. The process runs in "
+"the foreground; stop it with ``Ctrl-C``."
+msgstr ""
+"它替代了 ``python -m lmcache.v1.mp_coordinator``\\ 。该进程在前台运行；使用 ``Ctrl-C`` "
+"停止它。"
+
+#: ../../source/cli/coordinator.rst:17
+msgid "Quick start"
+msgstr "快速开始"
+
+#: ../../source/cli/coordinator.rst:27
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/coordinator.rst:33
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/coordinator.rst:34
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/coordinator.rst:35
+msgid "``--host HOST``"
+msgstr "``--host HOST``"
+
+#: ../../source/cli/coordinator.rst:36
+msgid "Bind address for the coordinator's HTTP server (default: ``0.0.0.0``)."
+msgstr "协调器 HTTP 服务器的绑定地址（默认：\\ ``0.0.0.0``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:37
+msgid "``--port PORT``"
+msgstr "``--port PORT``"
+
+#: ../../source/cli/coordinator.rst:38
+msgid "HTTP port (default: ``9300``)."
+msgstr "HTTP 端口（默认值：\\ ``9300``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:39
+msgid "``--instance-timeout SECS``"
+msgstr "``--instance-timeout SECS``"
+
+#: ../../source/cli/coordinator.rst:40
+msgid ""
+"Seconds without a heartbeat after which an instance is evicted (default: "
+"``30``)."
+msgstr "在没有心跳的情况下，经过多少秒后实例被逐出（默认值：\\ ``30``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:42
+msgid "``--health-check-interval SECS``"
+msgstr "``--health-check-interval SECS``"
+
+#: ../../source/cli/coordinator.rst:43
+msgid ""
+"Seconds between health-check sweeps; ``0`` disables the loop (default: "
+"``10``)."
+msgstr "健康检查扫描之间的秒数；\\ ``0`` 禁用循环（默认值：\\ ``10``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:45
+msgid "``--eviction-check-interval SECS``"
+msgstr "``--eviction-check-interval SECS``"
+
+#: ../../source/cli/coordinator.rst:46
+msgid ""
+"Seconds between L2 eviction sweeps; ``0`` disables the loop (default: "
+"``5``)."
+msgstr "L2 逐出扫描之间的秒数；\\ ``0`` 禁用循环（默认值：\\ ``5``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:48
+msgid "``--eviction-ratio RATIO``"
+msgstr "``--eviction-ratio RATIO``"
+
+#: ../../source/cli/coordinator.rst:49
+msgid ""
+"Fraction of tracked keys (by count) to evict per cycle, ``0.0`` to "
+"``1.0`` (default: ``0.2``)."
+msgstr "每个周期逐出的跟踪键的比例（按计数），\\ ``0.0`` 到 ``1.0``\\ （默认值：\\ ``0.2``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:51
+msgid "``--trigger-watermark RATIO``"
+msgstr "``--trigger-watermark RATIO``"
+
+#: ../../source/cli/coordinator.rst:52
+msgid ""
+"Eviction fires when usage reaches this fraction of the quota, ``0.0`` "
+"(exclusive) to ``1.0`` (default: ``1.0``)."
+msgstr "当使用量达到配额的这个比例时会触发逐出，\\ ``0.0``\\ （不包括）到\\ ``1.0``\\ （默认值：\\ ``1.0``\\ ）。"
+
+#: ../../source/cli/coordinator.rst:54
+msgid "``--chunk-size N``"
+msgstr "``--chunk-size N``"
+
+#: ../../source/cli/coordinator.rst:55
+msgid ""
+"Tokens per KV chunk: the CacheBlend match unit and the unit used to "
+"resolve pin ``token_ids`` to keys. Must equal the MP servers' ``--chunk-"
+"size`` (default: ``256``)."
+msgstr "每个 KV 块的令牌数：CacheBlend 匹配单元以及用于将固定的 ``token_ids`` 解析为键的单元。必须等于 MP 服务器的 ``--chunk-size``（默认值：``256``）。"
+
+#: ../../source/cli/coordinator.rst:58
+msgid "``--hash-algorithm NAME``"
+msgstr "``--hash-algorithm NAME``"
+
+#: ../../source/cli/coordinator.rst:59
+msgid ""
+"Token hash algorithm for pin key resolution; must equal the MP servers' "
+"``--hash-algorithm``. ``blake3`` (default) is self-contained; other "
+"algorithms require vLLM importable in the coordinator."
+msgstr "用于固定密钥解析的令牌哈希算法；必须与 MP 服务器的 ``--hash-algorithm`` 相等。``blake3``（默认）是自包含的；其他算法需要在协调器中可导入的 vLLM。"
+
+#: ../../source/cli/coordinator.rst:62
+msgid "``--blend-probe-stride N``"
+msgstr "``--blend-probe-stride N``"
+
+#: ../../source/cli/coordinator.rst:63
+msgid ""
+"Positions between CacheBlend match probes; ``1`` probes every offset for "
+"full recall (default: ``1``)."
+msgstr "在 CacheBlend 匹配探测之间的位置；``1`` 在每个偏移量处探测以实现完全回忆（默认值：``1``）。"
+
+#: ../../source/cli/coordinator.rst:65
+msgid "``--timeout-keep-alive SECS``"
+msgstr "``--timeout-keep-alive SECS``"
+
+#: ../../source/cli/coordinator.rst:66
+msgid ""
+"Seconds the HTTP server keeps idle connections open before closing them. "
+"Must be greater than the MP servers' heartbeat interval (default ``5``), "
+"otherwise heartbeat requests may hit a closing connection and fail with "
+"``Server disconnected without sending a response`` (default: ``10``)."
+msgstr "HTTP服务器在关闭空闲连接之前保持连接打开的秒数。必须大于MP服务器的心跳间隔（默认``5``），否则心跳请求可能会遇到关闭的连接并失败，错误信息为``服务器在未发送响应的情况下断开连接``（默认值：``10``）。"
+
+#: ../../source/cli/coordinator.rst:73
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/cli/coordinator.rst:75
+msgid ""
+"Every flag is optional. Unset flags fall back to the "
+"``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``, "
+"``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, "
+"``EVICTION_CHECK_INTERVAL``, ``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, "
+"``CHUNK_SIZE``, ``HASH_ALGORITHM``, ``BLEND_PROBE_STRIDE``, "
+"``TIMEOUT_KEEP_ALIVE``), and then to the built-in defaults. A supplied "
+"flag always overrides the matching env-derived value, so env-only "
+"deployments keep working unchanged."
+msgstr "每个标志都是可选的。未设置的标志将回退到 ``LMCACHE_MP_COORDINATOR_*`` 环境变量（``HOST``、``PORT``、``INSTANCE_TIMEOUT``、``HEALTH_CHECK_INTERVAL``、``EVICTION_CHECK_INTERVAL``、``EVICTION_RATIO``、``TRIGGER_WATERMARK``、``CHUNK_SIZE``、``HASH_ALGORITHM``、``BLEND_PROBE_STRIDE``、``TIMEOUT_KEEP_ALIVE``），然后回退到内置默认值。提供的标志始终会覆盖匹配的环境派生值，因此仅环境的部署保持不变。"
+
+#: ../../source/cli/coordinator.rst:83
+msgid ""
+"A second set of env-only knobs controls the startup L2 resync — "
+"``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``), "
+"``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL`` (``1``), "
+"``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` (``60``), and "
+"``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE`` (``1000``). See "
+":doc:`/mp/coordinator` for the boot-time resync flow and the active "
+"eviction loop."
+msgstr ""
+"第二组仅环境的控制选项控制启动 L2 重新同步 — "
+"``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``\\ （默认 "
+"``True``）、``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``\\ "
+"（``1``）、``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``\\ （``60``）和 "
+"``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``\\ "
+"（``1000``）。有关启动时重新同步流程和活动逐出循环，请参见 :doc:`/mp/coordinator`。"
+
+#: ../../source/cli/coordinator.rst:91
+msgid ""
+"The coordinator drives fleet-wide L2 eviction by calling each MP server's"
+" ``DELETE /l2`` endpoint, and resync paginates ``GET /l2/keys`` on a "
+"registered MP server. Both endpoints are documented at :ref:`mp-http-l2"
+"-keys-api`."
+msgstr ""
+"协调器通过调用每个 MP 服务器的 ``DELETE /l2`` 端点来驱动全队列的 L2 逐出，并且 resync 在注册的 MP 服务器上对 "
+"``GET /l2/keys`` 进行分页。这两个端点的文档见 :ref:`mp-http-l2-keys-api`。"
+
+#: ../../source/cli/coordinator.rst:96
+msgid ""
+"See :doc:`/mp/coordinator` for the coordinator's architecture, "
+"registration protocol, and HTTP API."
+msgstr "请参阅 :doc:`/mp/coordinator` 以了解协调器的架构、注册协议和 HTTP API。"
+
+#~ msgid ""
+#~ "Tokens per chunk for the global "
+#~ "CacheBlend directory; must equal the "
+#~ "LMCache chunk size the blend servers "
+#~ "use (default: ``256``)."
+#~ msgstr "全局 CacheBlend 目录中每个块的令牌数；必须等于混合服务器使用的 LMCache 块大小（默认值：``256``）。"
+

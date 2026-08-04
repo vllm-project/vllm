@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel", "pybind11>=2.11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmc-external-native-connector"
+version = "0.1.0"
+description = "Example external C++ native connector plugin for LMCache"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "lmcache",
+    "pybind11>=2.11",
+]
+
+[project.urls]
+homepage = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lmc_external_native_connector*"]
+
+[tool.ruff]
+line-length = 88

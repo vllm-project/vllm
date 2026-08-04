@@ -1,0 +1,27 @@
+# Correctness test — verifies LMCache produces identical output to base vLLM.
+# Runs: base vLLM → LMCache vLLM → man bash prefix test → ShareGPT diff.
+# Requires pre-downloaded model weights and ShareGPT dataset.
+
+steps:
+  - label: ":white_check_mark: Correctness"
+    command: .buildkite/k3_tests/correctness/run.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  - { name: datasets, mountPath: /root/correctness }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: datasets, hostPath: { path: /data/datasets, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "build_*.log"

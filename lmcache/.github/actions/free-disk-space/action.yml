@@ -1,0 +1,29 @@
+name: 'Free Disk Space'
+description: 'Frees disk space on the runner safely'
+runs:
+  using: "composite"
+  steps:
+    - name: Print disk space before cleanup
+      run: df -h
+      shell: bash
+
+    - name: Free Disk Space Linux
+      if: runner.os == 'Linux'
+      run: |
+        # 1. Remove massive toolsets first (fastest gain)
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /usr/local/lib/node_modules || true
+        
+        # 2. Clean Docker images
+        sudo docker image prune -af >/dev/null 2>&1 || true
+
+        # 3. Clean APT (Skip aptitude, use standard apt-get)
+        # We wrap this in a block to ensure the script continues even if apt is locked
+        sudo apt-get update >/dev/null 2>&1 || true
+        sudo apt-get purge -y mysql-client mysql-server google-cloud-sdk azure-cli >/dev/null 2>&1 || true
+        sudo apt-get autoremove -y >/dev/null 2>&1 || true
+        sudo apt-get clean >/dev/null 2>&1 || true
+      shell: bash
+
+    - name: Print disk space after cleanup
+      run: df -h
+      shell: bash

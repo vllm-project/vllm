@@ -1,0 +1,9 @@
+# Vendor-specific runtime deps baked into install_requires by setup.py
+# when building for ROCm (BUILD_WITH_HIP=1).
+# cupy-rocm-7-0 is the AMD analogue of cupy-cuda12x.
+# torch/torchvision are NOT listed here because ROCm wheels live on a
+# non-PyPI index (https://download.pytorch.org/whl/rocm7.0) that pip
+# cannot be told about via install_requires; users install them manually
+# per the "LMCache on ROCm / Without vLLM docker base image" docs.
+
+cupy-rocm-7-0

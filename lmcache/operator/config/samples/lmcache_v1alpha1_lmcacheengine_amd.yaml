@@ -1,0 +1,16 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: amd-cache
+spec:
+  gpuVendor: amd
+  # AMD has no NVIDIA-style RuntimeClass to inject GPU device files, so the ROCm
+  # engine needs privileged mode to reach /dev/kfd and /dev/dri. (privileged
+  # defaults to false, which suits NVIDIA clusters where NVIDIA_VISIBLE_DEVICES
+  # already exposes the GPUs.) The namespace must allow the privileged Pod
+  # Security Standard.
+  privileged: true
+  nodeSelector:
+    feature.node.kubernetes.io/amd-gpu: "true"
+  l1:
+    sizeGB: 60

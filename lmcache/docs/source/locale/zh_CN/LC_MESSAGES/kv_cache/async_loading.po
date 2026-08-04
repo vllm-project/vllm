@@ -1,0 +1,232 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/async_loading.rst:2
+msgid "Async Loading"
+msgstr "异步加载"
+
+#: ../../source/kv_cache/async_loading.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache/async_loading.rst:11
+msgid "Table of Contents"
+msgstr "目录"
+
+#: ../../source/kv_cache/async_loading.rst:14
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/async_loading.rst:16
+msgid ""
+"This document explains the principle, benefits, differences from vLLM PR "
+"`19330 <https://github.com/vllm-project/vllm/pull/19330>`_, and "
+"limitations of the LMCache ``async_loading`` feature. It focuses on "
+"LMCache v1 integration with vLLM and the internal storage pipeline."
+msgstr ""
+"本文解释了 LMCache ``async_loading`` 功能的原理、优点、与 vLLM PR `19330 "
+"<https://github.com/vllm-project/vllm/pull/19330>`_ 的区别以及局限性。它重点介绍了 "
+"LMCache v1 与 vLLM 的集成以及内部存储管道。"
+
+#: ../../source/kv_cache/async_loading.rst:19
+msgid "Key change of components in this feature include:"
+msgstr "此功能中组件的主要变化包括："
+
+#: ../../source/kv_cache/async_loading.rst:21
+msgid "LMCache async lookup client/server (ZMQ-based)"
+msgstr "LMCache 异步查找客户端/服务器（基于 ZMQ）"
+
+#: ../../source/kv_cache/async_loading.rst:22
+msgid "Storage manager orchestrating backends and concurrency"
+msgstr "存储管理器协调后端和并发性"
+
+#: ../../source/kv_cache/async_loading.rst:23
+msgid "Cache engine async API entrypoints"
+msgstr "缓存引擎异步 API 入口点"
+
+#: ../../source/kv_cache/async_loading.rst:24
+msgid "vLLM adapter integration points"
+msgstr "vLLM 适配器集成点"
+
+#: ../../source/kv_cache/async_loading.rst:27
+msgid "Principle and Theory"
+msgstr "原理与理论"
+
+#: ../../source/kv_cache/async_loading.rst:29
+msgid ""
+"At a high level, ``async_loading`` decouples scheduler-side lookup from "
+"worker-side prefetch/retrieval, allowing overlap between I/O and "
+"computation while preserving prefix-based correctness."
+msgstr ""
+"从高层次来看，\\ ``async_loading`` 将调度器端的查找与工作端的预取/检索解耦，允许 I/O "
+"和计算之间的重叠，同时保持基于前缀的正确性。"
+
+#: ../../source/kv_cache/async_loading.rst:31
+msgid "The scheduler sends lookup requests with token chunk hashes and offsets."
+msgstr "调度器发送带有令牌块哈希和偏移量的查找请求。"
+
+#: ../../source/kv_cache/async_loading.rst:32
+msgid ""
+"Worker-side servers perform tiered ``batched_async_contains`` over "
+"available backends and eagerly launch non-blocking batched get operations"
+" for hit prefixes."
+msgstr "工作端服务器在可用后端上执行分层的 ``batched_async_contains``\\ ，并积极启动非阻塞的批量获取操作以处理命中前缀。"
+
+#: ../../source/kv_cache/async_loading.rst:33
+msgid ""
+"Completion is tracked via an ``EventManager`` to safely deliver loaded "
+"memory objects back to the requesting path."
+msgstr "完成情况通过 ``EventManager`` 进行跟踪，以安全地将加载的内存对象返回给请求路径。"
+
+#: ../../source/kv_cache/async_loading.rst:34
+msgid ""
+"A weighted semaphore with an ``AsyncSerializer`` prevents allocator "
+"deadlocks by shaping concurrency according to chunk budget."
+msgstr "带权信号量与 ``AsyncSerializer`` 结合使用，通过根据块预算调整并发性来防止分配器死锁。"
+
+#: ../../source/kv_cache/async_loading.rst:36
+msgid "The following Mermaid sequence diagram illustrates the end-to-end flow:"
+msgstr "以下的 Mermaid 序列图展示了端到端的流程："
+
+#: ../../source/kv_cache/async_loading.rst:68
+msgid "Architecture (Worker Side)"
+msgstr "架构（工作端）"
+
+#: ../../source/kv_cache/async_loading.rst:101
+msgid "Benefits"
+msgstr "好处"
+
+#: ../../source/kv_cache/async_loading.rst:103
+msgid "Performance overlap"
+msgstr "性能重叠"
+
+#: ../../source/kv_cache/async_loading.rst:104
+msgid ""
+"**I/O–Compute Overlap**: Decoupling lookup/prefetch from loading enables "
+"fetching KV chunks while vLLM continues scheduling/computation."
+msgstr "**I/O–计算重叠**\\ ：将查找/预取与加载解耦，使得在 vLLM 继续调度/计算的同时可以获取 KV 块。"
+
+#: ../../source/kv_cache/async_loading.rst:105
+msgid "Robustness and error handling"
+msgstr "鲁棒性和错误处理"
+
+#: ../../source/kv_cache/async_loading.rst:106
+msgid ""
+"**Event-driven Synchronization**: ``EventManager`` ensures safe hand-off "
+"of futures and avoids race conditions between threads and the async loop."
+msgstr "**事件驱动同步**\\ ：\\ ``EventManager`` 确保未来对象的安全交接，并避免线程与异步循环之间的竞争条件。"
+
+#: ../../source/kv_cache/async_loading.rst:107
+msgid ""
+"**Backpressure & Deadlock Avoidance**: ``AsyncSerializer`` with a "
+"weighted semaphore caps concurrent chunk retrievals based on allocator "
+"budget, preventing starvation or allocator lockups."
+msgstr "**背压与死锁避免**\\ ：\\ ``AsyncSerializer`` 使用加权信号量限制并发块检索，基于分配器预算，防止饥饿或分配器锁定。"
+
+#: ../../source/kv_cache/async_loading.rst:108
+msgid ""
+"**Graceful Miss Path**: Immediate response with ``None`` hit tokens when "
+"nothing is retrievable; worker returns quickly without stalling the "
+"scheduler."
+msgstr "**优雅未命中路径**\\ ：当无法检索到任何内容时，立即响应 ``None`` 命中令牌；工作线程快速返回，不会阻塞调度器。"
+
+#: ../../source/kv_cache/async_loading.rst:111
+msgid "Comparison with vLLM Load Failure Recovery feature"
+msgstr "与 vLLM 加载失败恢复功能的比较"
+
+#: ../../source/kv_cache/async_loading.rst:113
+msgid ""
+"The `VLLM_PR_19330 <https://github.com/vllm-project/vllm/pull/19330>`_ "
+"introduces a fault recovery mechanism for vLLM's KV connector "
+"infrastructure that enables graceful handling of KV cache load failures "
+"by automatically detecting failed block loads and rescheduling only "
+"affected requests for recomputation from a valid prefix. By contrast, "
+"LMCache’s ``async_loading`` is an externalized caching layer with its own"
+" client/server, storage backends, and concurrency control."
+msgstr ""
+"`VLLM_PR_19330 <https://github.com/vllm-project/vllm/pull/19330>`_ "
+"引入了一个故障恢复机制，用于 vLLM 的 KV 连接器基础设施，能够优雅地处理 KV "
+"缓存加载失败，通过自动检测失败的块加载并仅重新调度受影响的请求，从有效前缀中进行重计算。相比之下，LMCache 的 "
+"``async_loading`` 是一个外部缓存层，具有自己的客户端/服务器、存储后端和并发控制。"
+
+#: ../../source/kv_cache/async_loading.rst:117
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/kv_cache/async_loading.rst:119
+msgid ""
+"Only works with vllm merged `VLLM_PR_23620 <https://github.com/vllm-"
+"project/vllm/pull/23620>`_"
+msgstr ""
+"仅适用于合并了 `VLLM_PR_23620 <https://github.com/vllm-"
+"project/vllm/pull/23620>`_ 的 vllm"
+
+#: ../../source/kv_cache/async_loading.rst:120
+msgid ""
+"Backend support constraint: This feature currently requires backends that"
+" implement ``batched_async_contains``; limited to a few backends, e.g.:"
+msgstr "后端支持限制：此功能当前需要实现 ``batched_async_contains`` 的后端；仅限于少数后端，例如："
+
+#: ../../source/kv_cache/async_loading.rst:121
+msgid "``LocalCpuBackend``"
+msgstr "``LocalCpuBackend``"
+
+#: ../../source/kv_cache/async_loading.rst:122
+msgid "``LocalDiskBackend``"
+msgstr "``LocalDiskBackend``"
+
+#: ../../source/kv_cache/async_loading.rst:123
+msgid "``S3Connector``"
+msgstr "``S3Connector``"
+
+#: ../../source/kv_cache/async_loading.rst:124
+msgid "``FSConnector``"
+msgstr "``FSConnector``"
+
+#: ../../source/kv_cache/async_loading.rst:125
+msgid "``RedisConnector/RedisClusterConnector``"
+msgstr "``RedisConnector/RedisClusterConnector``"
+
+#: ../../source/kv_cache/async_loading.rst:128
+msgid "Future Work"
+msgstr "未来工作"
+
+#: ../../source/kv_cache/async_loading.rst:130
+msgid ""
+"Introduce a default ``batched_async_contains`` implementation, so all "
+"backends can support ``async_loading``."
+msgstr "引入默认的 ``batched_async_contains`` 实现，以便所有后端都可以支持 ``async_loading``\\ 。"
+
+#: ../../source/kv_cache/async_loading.rst:131
+msgid ""
+"Add metrics and observability to track the number of asynchronous lookup "
+"requests and the number of occupied ``MemoryObj`` instances."
+msgstr "添加指标和可观察性，以跟踪异步查找请求的数量和占用的 ``MemoryObj`` 实例的数量。"
+
+#: ../../source/kv_cache/async_loading.rst:132
+msgid ""
+"Improve the lookup framework by passing vLLM prefix cache hit tokens so "
+"that async lookup can skip loading parts already hit in vLLM."
+msgstr "通过传递 vLLM 前缀缓存命中令牌来改进查找框架，以便异步查找可以跳过已在 vLLM 中命中的部分加载。"
+

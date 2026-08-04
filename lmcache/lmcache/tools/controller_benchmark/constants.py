@@ -1,0 +1,10 @@
+"""Constants for LMCache Controller ZMQ Benchmark"""
+
+# SPDX-License-Identifier: Apache-2.0
+
+# ZMQ socket configuration
+DEFAULT_SEND_TIMEOUT_MS = 5000
+DEFAULT_RECV_TIMEOUT_MS = 5000
+DEFAULT_SEND_HWM = 10000
+DEFAULT_BATCH_SEND_SIZE = 50
+DEFAULT_OP_DISTRIBUTION_BASE = 1000

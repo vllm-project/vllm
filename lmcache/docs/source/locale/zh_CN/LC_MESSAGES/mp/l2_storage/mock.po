@@ -1,0 +1,43 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/mock.rst:2
+msgid "Mock"
+msgstr "模拟"
+
+#: ../../source/mp/l2_storage/mock.rst:4
+msgid ""
+"Simulates L2 storage with configurable size and bandwidth.  Useful for "
+"testing the L2 pipeline without real storage hardware."
+msgstr "模拟具有可配置大小和带宽的 L2 存储。适用于在无真实存储硬件的情况下对 L2 流水线进行测试。"
+
+#: ../../source/mp/l2_storage/mock.rst:7
+msgid "**Fields:**"
+msgstr "**字段：**"
+
+#: ../../source/mp/l2_storage/mock.rst:9
+msgid "``max_size_gb``: Maximum size in GB (> 0)."
+msgstr "``max_size_gb``：最大容量（单位：GB，须大于 0）。"
+
+#: ../../source/mp/l2_storage/mock.rst:10
+msgid "``mock_bandwidth_gb``: Simulated bandwidth in GB/sec (> 0)."
+msgstr "``mock_bandwidth_gb``：模拟带宽（单位：GB/秒，须大于 0）。"
+

@@ -1,0 +1,68 @@
+name: Code Quality
+
+on:
+  workflow_call:
+  pull_request:
+
+# Cancel older in-flight runs on the same PR / branch.
+concurrency:
+  group: code-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      lmcache: ${{ github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            lmcache:
+              - '**'
+              - '!operator/**'
+              - '!.github/workflows/operator_*.yml'
+
+  pre-commit:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: Check code quality
+    runs-on: ubuntu-latest
+    steps:
+        - name: Harden Runner
+          uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+          with:
+            disable-sudo-and-containers: true
+            egress-policy: audit
+
+        - name: Checkout code
+          uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+          with:
+            # for setuptools-scm
+            fetch-depth: 0
+
+        - name: Setup Python 3.13
+          uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+          with:
+            python-version: "3.13"
+
+        - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+        - name: Run code quality checks - lint, format, spell, & static checks
+          uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+          with:
+            extra_args: --all-files
+

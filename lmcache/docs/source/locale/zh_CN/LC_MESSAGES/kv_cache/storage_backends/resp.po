@@ -1,0 +1,716 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:2
+msgid "RESP (Native Redis/Valkey)"
+msgstr "RESP (原生 Redis/Valkey)"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:9
+msgid ""
+"The RESP backend is a high-performance native C++ storage connector for "
+"Redis and Valkey servers, using the RESP2 wire protocol over TCP. It is "
+"designed for maximum throughput on KV cache store and retrieval "
+"operations, achieving **6+ GB/s** on reads with optimal configuration."
+msgstr "RESP 后端是一个高性能的原生 C++ 存储连接器，适用于 Redis 和 Valkey 服务器，使用 TCP 上的 RESP2 传输协议。它旨在实现 KV Cache 存储和检索操作的最大吞吐量，在最佳配置下读取速度可达到 **6+ GB/s**\\ 。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:13
+msgid "Key advantages over the standard Redis connector:"
+msgstr "相较于标准 Redis 连接器的主要优势："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:15
+msgid ""
+"**Multi-threaded C++ I/O**: Worker threads operate in parallel with zero-"
+"copy buffer passing and full GIL release"
+msgstr "**多线程 C++ I/O**\\ ：工作线程并行操作，采用零拷贝缓冲区传递和完全释放全局解释器锁（GIL）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:16
+msgid ""
+"**Batched tiling**: Large batch operations are automatically split across"
+" worker threads for maximum parallelism"
+msgstr "**批处理切片**\\ ：大型批处理操作会自动在工作线程之间拆分，以实现最大并行性"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:17
+msgid ""
+"**eventfd-based completions**: The kernel wakes Python on completion -- "
+"no polling overhead"
+msgstr "**基于 eventfd 的完成**\\ ：内核在完成时唤醒 Python——没有轮询开销"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:18
+msgid ""
+"**Dual-mode support**: The same C++ connector works in both non-MP mode "
+"(via ``ConnectorClientBase``) and MP mode (via "
+"``NativeConnectorL2Adapter`` as an L2 adapter)"
+msgstr "**双模式支持**\\ ：相同的 C++ 连接器在非 MP 模式（通过 ``ConnectorClientBase``\\ ）和 MP 模式（通过 ``NativeConnectorL2Adapter`` 作为 L2 适配器）下均可工作。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:20
+msgid ""
+"The native C++ source lives in ``csrc/storage_backends/redis/``. See "
+":doc:`Adding Native Connectors "
+"<../../developer_guide/extending_lmcache/native_connectors>` for the full"
+" architecture."
+msgstr "本地 C++ 源代码位于 ``csrc/storage_backends/redis/``\\ 。有关完整架构，请参见 :doc:`添加本地连接器 <../../developer_guide/extending_lmcache/native_connectors>`。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:24
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:26
+msgid ""
+"LMCache installed from source (``pip install -e .``) to compile the C++ "
+"extension"
+msgstr "从源代码安装的 LMCache (``pip install -e .``) 以编译 C++ 扩展"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:27
+msgid ""
+"A Redis 8.2+ or Valkey server (Redis 8.2 recommended for IO threads "
+"support)"
+msgstr "支持 IO 线程的 Redis 8.2+ 或 Valkey 服务器（推荐使用 Redis 8.2）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:28
+msgid "A machine with at least one GPU for vLLM inference"
+msgstr "一台至少配备一个 GPU 的机器用于 vLLM 推理"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:32
+msgid "Redis Server Setup"
+msgstr "Redis 服务器设置"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:35
+msgid ""
+"Redis version and server configuration have a **major** impact on "
+"throughput. Using Redis 8.2 with IO threads yields ~6 GB/s reads vs ~1.5 "
+"GB/s with Redis 6.0 defaults."
+msgstr "Redis 版本和服务器配置对吞吐量有 **重大** 影响。使用 IO 线程的 Redis 8.2 读取速度约为 6 GB/s，而使用 Redis 6.0 默认配置时约为 1.5 GB/s。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:38
+msgid "**Build Redis 8.2 from source (recommended):**"
+msgstr "**从源代码构建 Redis 8.2（推荐）：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:47
+msgid "**Start the server with IO threads enabled:**"
+msgstr "**启用 IO 线程启动服务器：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:58
+msgid "Recommended Server Flags"
+msgstr "推荐的服务器标志"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:62
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:63
+msgid "Why"
+msgstr "为什么"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:64
+msgid "``--protected-mode no``"
+msgstr "``--protected-mode no``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:65
+msgid "Allow connections from other hosts (use auth in production)"
+msgstr "允许来自其他主机的连接（在生产环境中使用认证）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:66
+msgid "``--save '' --appendonly no``"
+msgstr "``--save '' --appendonly no``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:67
+msgid "Disable persistence -- KV cache is ephemeral, persistence wastes bandwidth"
+msgstr "禁用持久性 -- KV Cache 是短暂的，持久性会浪费带宽"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:68
+msgid "``--io-threads 4``"
+msgstr "``--io-threads 4``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:69
+msgid "Enable multi-threaded I/O for parallel read/write handling"
+msgstr "启用多线程 I/O 以实现并行读/写处理"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:70
+msgid "``--port 6379``"
+msgstr "``--port 6379``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:71
+msgid "Default port (adjust if running multiple instances)"
+msgstr "默认端口（如果运行多个实例，请调整）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:74
+msgid ""
+"The number of ``--io-threads`` should roughly match the number of "
+"physical cores available to the Redis process. 4 is a good starting "
+"point; benchmark with your hardware to find the optimum."
+msgstr "``--io-threads`` 的数量应大致与 Redis 进程可用的物理核心数量相匹配。4 是一个不错的起点；请根据您的硬件进行基准测试以找到最佳值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:80
+msgid "Chunk Size Selection and Throughput Tuning"
+msgstr "块大小选择与吞吐量调优"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:82
+msgid ""
+"The chunk size (in tokens) determines how many bytes each Redis key-value"
+" pair holds. This is the **single most important parameter** for "
+"throughput."
+msgstr "块大小（以令牌为单位）决定了每个 Redis 键值对所占用的字节数。这是 **吞吐量最重要的参数**\\ 。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:85
+msgid ""
+"**The sweet spot is ~4 MB per chunk.** Both smaller and larger chunks "
+"degrade throughput:"
+msgstr "**最佳块大小约为 4 MB。** 较小或较大的块都会降低吞吐量："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:87
+msgid "Chunk Size vs Throughput (Redis 8.2, 8 workers)"
+msgstr "块大小与吞吐量（Redis 8.2，8 个工作线程）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:91
+msgid "Chunk Size"
+msgstr "块大小"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:92
+msgid "Total Data"
+msgstr "总数据"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:93
+msgid "SET Throughput"
+msgstr "设置吞吐量"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:94
+msgid "GET Throughput"
+msgstr "获取吞吐量"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:95
+msgid "1 MB (500 keys)"
+msgstr "1 MB (500 个键)"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:96
+msgid "500 MB"
+msgstr "500 MB"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:97
+msgid "~3.5 GB/s"
+msgstr "约 3.5 GB/s"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:98
+msgid "~5.2 GB/s"
+msgstr "~5.2 GB/s"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:99
+msgid "**4 MB (500 keys)**"
+msgstr "**4 MB (500 个键)**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:100
+msgid "**2 GB**"
+msgstr "**2 GB**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:101
+msgid "**~4.4 GB/s**"
+msgstr "**~4.4 GB/s**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:102
+msgid "**~5.9 GB/s**"
+msgstr "**~5.9 GB/s**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:103
+msgid "8 MB (200 keys)"
+msgstr "8 MB (200 个键)"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:104
+msgid "1.6 GB"
+msgstr "1.6 GB"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:105
+msgid "~4.2 GB/s"
+msgstr "约 4.2 GB/s"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:106
+msgid "~1.4 GB/s"
+msgstr "~1.4 GB/s"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:108
+msgid "**Why 4 MB?**"
+msgstr "**为什么是 4 MB？**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:110
+msgid "Below ~2 MB, per-key overhead (RESP framing, TCP round-trips) dominates"
+msgstr "在 ~2 MB 以下，每个键的开销（RESP 帧、TCP 往返时间）占主导地位"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:111
+msgid ""
+"Above ~4 MB, Redis server-side memory allocation and TCP window sizes "
+"become bottlenecks"
+msgstr "超过 ~4 MB 时，Redis 服务器端内存分配和 TCP 窗口大小成为瓶颈。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:112
+msgid ""
+"At 4 MB, the balance between amortized overhead and memory pressure is "
+"optimal"
+msgstr "在 4 MB 时，摊销开销与内存压力之间的平衡是最佳的。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:114
+msgid "**Calculating chunk size in tokens:**"
+msgstr "**计算块大小（以 token 为单位）：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:116
+msgid ""
+"The chunk size in bytes depends on the model's hidden dimension, number "
+"of KV heads, number of layers, and dtype:"
+msgstr "块大小（以字节为单位）取决于模型的隐藏维度、KV 头的数量、层数和数据类型："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:123
+msgid "For ``meta-llama/Llama-3.1-8B-Instruct`` with BFloat16:"
+msgstr "对于 ``meta-llama/Llama-3.1-8B-Instruct`` 使用 BFloat16："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:135
+msgid ""
+"The bytes-per-token calculation varies by model architecture. Larger "
+"models (e.g., 70B) have more layers and larger hidden dimensions, so "
+"fewer tokens are needed per chunk to reach the 4 MB sweet spot."
+msgstr "每个令牌的字节计算因模型架构而异。较大的模型（例如，70B）具有更多的层和更大的隐藏维度，因此每个块所需的令牌数量较少，以达到 4 MB 的最佳点。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:141
+msgid "Throughput Sweep"
+msgstr "吞吐量扫描"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:143
+msgid ""
+"To find the optimal configuration for your hardware, use the included "
+"benchmark:"
+msgstr "要找到适合您硬件的最佳配置，请使用随附的基准测试："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:165
+msgid "Expected output:"
+msgstr "预期输出："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:181
+msgid "Environment Variable Configuration"
+msgstr "环境变量配置"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:183
+msgid ""
+"Sensitive credentials (and optionally host/port) can be provided via "
+"environment variables instead of config files or CLI arguments. This "
+"prevents secrets from appearing in logged configuration at startup."
+msgstr "敏感凭据（可选的主机/端口）可以通过环境变量提供，而不是配置文件或 CLI 参数。这可以防止在启动时将秘密记录到配置日志中。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:191
+msgid "Variable"
+msgstr "变量"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:192
+#: ../../source/kv_cache/storage_backends/resp.rst:322
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:193
+msgid "``LMCACHE_RESP_USERNAME``"
+msgstr "``LMCACHE_RESP_USERNAME``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:194
+msgid ""
+"Redis ACL username. Used as default when ``username`` is not set in "
+"config/JSON."
+msgstr "Redis ACL 用户名。当 ``username`` 在 config/JSON 中未设置时使用该默认值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:195
+msgid "``LMCACHE_RESP_PASSWORD``"
+msgstr "``LMCACHE_RESP_PASSWORD``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:196
+msgid ""
+"Redis AUTH password. Used as default when ``password`` is not set in "
+"config/JSON."
+msgstr "Redis AUTH 密码。当 config/JSON 中未设置 ``password`` 时使用该密码作为默认值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:197
+msgid "``LMCACHE_RESP_HOST``"
+msgstr "``LMCACHE_RESP_HOST``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:198
+msgid ""
+"Redis hostname or IP. Used as default when ``host`` is not set in "
+"config/JSON/URL."
+msgstr "Redis 主机名或 IP。当配置/JSON/URL 中未设置 ``host`` 时使用此默认值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:199
+msgid "``LMCACHE_RESP_PORT``"
+msgstr "``LMCACHE_RESP_PORT``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:200
+msgid "Redis port. Used as default when ``port`` is not set in config/JSON/URL."
+msgstr "Redis 端口。当 ``port`` 在 config/JSON/URL 中未设置时使用此端口作为默认值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:202
+msgid ""
+"Config files (non-MP) and ``--l2-adapter`` JSON (MP) take precedence over"
+" environment variables. Environment variables serve as defaults — they "
+"are used when the corresponding config value is empty or unset. They are "
+"read at adapter creation time inside the adapter itself, so they are "
+"**never stored in the config object** and **never printed in startup "
+"logs**."
+msgstr "配置文件（非多租户）和 ``--l2-adapter`` JSON（多租户）优先于环境变量。环境变量作为默认值使用——当相应的配置值为空或未设置时使用。它们在适配器创建时被读取，因此\\ **从不存储在配置对象中**\\ ，并且\\ **从不在启动日志中打印**\\ 。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:208
+msgid "**Example — MP mode with env vars:**"
+msgstr "**示例 — MP 模式与环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:222
+msgid "**Example — Non-MP mode with env vars:**"
+msgstr "**示例 — 非 MP 模式与环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:236
+msgid ""
+"For production deployments, always use environment variables for "
+"credentials rather than embedding them in config files or CLI arguments."
+msgstr "在生产环境中，始终使用环境变量来存储凭据，而不是将其嵌入配置文件或命令行参数中。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:241
+msgid "Non-MP Mode (Single Process)"
+msgstr "非 MP 模式（单进程）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:243
+msgid ""
+"In non-MP mode, the RESP connector is used directly as a remote storage "
+"backend via the ``RESPClient`` asyncio wrapper."
+msgstr "在非多进程模式下，RESP 连接器通过 ``RESPClient`` asyncio 包装器直接用作远程存储后端。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:246
+msgid "**Configuration file** (``resp-config.yaml``):"
+msgstr "**配置文件** (``resp-config.yaml``):"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:254
+msgid ""
+"Credentials can be set via environment variables (recommended) or in the "
+"config file under ``extra_config`` (see `Environment Variable "
+"Configuration`_ above)."
+msgstr "凭据可以通过环境变量（推荐）或在配置文件的 ``extra_config`` 中设置（请参见上面的 `环境变量配置`_）。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:257
+msgid "**Launch vLLM:**"
+msgstr "**启动 vLLM:**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:268
+msgid ""
+"``save_unfull_chunk`` must be off (default) and chunk metadata saving "
+"must be disabled for optimal throughput with the native RESP connector."
+msgstr "``save_unfull_chunk`` 必须关闭（默认）并且必须禁用块元数据保存，以便在使用原生 RESP 连接器时实现最佳吞吐量。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:273
+msgid "MP Mode (Multiprocess)"
+msgstr "MP 模式（多进程）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:275
+msgid ""
+"In MP mode, LMCache runs as a separate server process communicating with "
+"vLLM over ZMQ. The RESP connector serves as an L2 adapter with variable-"
+"size chunk support."
+msgstr "在 MP 模式下，LMCache 作为一个独立的服务器进程运行，通过 ZMQ 与 vLLM 进行通信。RESP 连接器作为一个具有可变大小块支持的 L2 适配器。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:278
+msgid "**Step 1: Start Redis** (see `Redis Server Setup`_ above)"
+msgstr "**步骤 1：启动 Redis**\\ （请参见上面的 `Redis Server Setup`_）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:280
+msgid "**Step 2: Launch LMCache MP Server:**"
+msgstr "**步骤 2：启动 LMCache MP 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:291
+msgid "**Step 3: Launch vLLM with LMCache MP Connector:**"
+msgstr "**步骤 3：启动带有 LMCache MP 连接器的 vLLM：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:311
+msgid "L2 Adapter Configuration"
+msgstr "L2 适配器配置"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:313
+msgid "The ``--l2-adapter`` JSON accepts these fields:"
+msgstr "``--l2-adapter`` JSON 接受以下字段："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:319
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:320
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:321
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:323
+msgid "``type``"
+msgstr "``type``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:324
+#: ../../source/kv_cache/storage_backends/resp.rst:328
+#: ../../source/kv_cache/storage_backends/resp.rst:340
+#: ../../source/kv_cache/storage_backends/resp.rst:344
+msgid "str"
+msgstr "字符串"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:325
+#: ../../source/kv_cache/storage_backends/resp.rst:329
+#: ../../source/kv_cache/storage_backends/resp.rst:333
+msgid "(required)"
+msgstr "（必需）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:326
+msgid "Must be ``\"resp\"``"
+msgstr "必须是 ``\"resp\"``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:327
+msgid "``host``"
+msgstr "``host``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:330
+msgid "Redis/Valkey hostname or IP"
+msgstr "Redis/Valkey 主机名或 IP"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:331
+msgid "``port``"
+msgstr "``port``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:332
+#: ../../source/kv_cache/storage_backends/resp.rst:336
+msgid "int"
+msgstr "整数"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:334
+msgid "Redis/Valkey port"
+msgstr "Redis/Valkey 端口"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:335
+msgid "``num_workers``"
+msgstr "``num_workers``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:337
+msgid "8"
+msgstr "8"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:338
+msgid "C++ worker threads for parallel I/O"
+msgstr "用于并行 I/O 的 C++ 工作线程"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:339
+msgid "``username``"
+msgstr "``username``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:341
+#: ../../source/kv_cache/storage_backends/resp.rst:345
+msgid "``\"\"``"
+msgstr "``\"\"``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:342
+msgid ""
+"Redis ACL username (leave empty for no auth). Falls back to "
+"``LMCACHE_RESP_USERNAME`` env var if empty."
+msgstr "Redis ACL 用户名（留空以不进行身份验证）。如果为空，将回退到 ``LMCACHE_RESP_USERNAME`` 环境变量。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:343
+msgid "``password``"
+msgstr "``密码``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:346
+msgid ""
+"Redis AUTH password (leave empty for no auth). Falls back to "
+"``LMCACHE_RESP_PASSWORD`` env var if empty."
+msgstr "Redis AUTH 密码（留空表示不进行身份验证）。如果为空，将回退到 ``LMCACHE_RESP_PASSWORD`` 环境变量。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:347
+msgid "``max_capacity_gb``"
+msgstr "``max_capacity_gb``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:348
+msgid "float"
+msgstr "浮点数"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:349
+msgid "0"
+msgstr "0"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:350
+msgid ""
+"Maximum L2 storage capacity in GB for client-side usage tracking. "
+"Required for L2 eviction. Set to 0 (default) to disable usage tracking."
+msgstr "用于客户端使用跟踪的最大 L2 存储容量（以 GB 为单位）。这是 L2 逐出的必要条件。设置为 0（默认值）以禁用使用跟踪。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:353
+msgid "L2 Eviction"
+msgstr "L2 逐出"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:355
+msgid ""
+"To enable automatic eviction of least-recently-used keys when the Redis "
+"backend fills up, set ``max_capacity_gb`` and add an ``\"eviction\"`` "
+"block:"
+msgstr "要启用在 Redis 后端填满时自动逐出最近最少使用的键，请设置 ``max_capacity_gb`` 并添加一个 ``\"eviction\"`` 块："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:378
+#, python-format
+msgid ""
+"This configures a 10 GB capacity limit. When usage exceeds 80% "
+"(``trigger_watermark``), the eviction controller will delete the least-"
+"recently-used ~20% of stored keys (``eviction_ratio``) using the Redis "
+"``DEL`` command."
+msgstr "这配置了 10 GB 的容量限制。当使用量超过 80%（\\ ``trigger_watermark``\\ ）时，逐出控制器将使用 Redis ``DEL`` 命令删除最近最少使用的 ~20% 存储的键（\\ ``eviction_ratio``\\ ）。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:383
+msgid ""
+"``max_capacity_gb`` enables **client-side** size tracking. It does not "
+"configure the Redis server's ``maxmemory`` setting. You should set "
+"``max_capacity_gb`` to match or be slightly below your Redis server's "
+"available memory."
+msgstr "``max_capacity_gb`` 启用 **客户端** 大小跟踪。它并不配置 Redis 服务器的 ``maxmemory`` 设置。您应该将 ``max_capacity_gb`` 设置为与 Redis 服务器的可用内存相匹配或略低于该值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:389
+msgid "Testing the Setup"
+msgstr "测试设置"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:391
+msgid ""
+"Send the same prompt twice. The first request stores KV cache to Redis; "
+"the second retrieves it."
+msgstr "两次发送相同的提示。第一次请求将 KV Cache 存储到 Redis；第二次请求检索它。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:408
+msgid "Verify data was stored:"
+msgstr "验证数据是否已存储："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:414
+msgid "Clear state between runs:"
+msgstr "在运行之间清除状态："
+
+#: ../../source/kv_cache/storage_backends/resp.rst:422
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:424
+msgid "**Server deployment:**"
+msgstr "**服务器部署：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:426
+msgid "Use Redis 8.2+ with ``--io-threads 4`` (or more, matching available cores)"
+msgstr "使用 Redis 8.2+ 和 ``--io-threads 4``\\ （或更多，匹配可用核心）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:427
+msgid "Disable persistence (``--save '' --appendonly no``) for KV cache workloads"
+msgstr "禁用持久化（\\ ``--save '' --appendonly no``\\ ）以支持 KV Cache 工作负载"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:428
+msgid "Pin Redis to its own NUMA node if running on multi-socket systems"
+msgstr "在多插槽系统上将 Redis 固定到其自己的 NUMA 节点"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:429
+msgid ""
+"For production, enable authentication with ``--requirepass`` and supply "
+"credentials via ``LMCACHE_RESP_USERNAME`` / ``LMCACHE_RESP_PASSWORD`` "
+"environment variables to keep them out of logs"
+msgstr "在生产环境中，使用 ``--requirepass`` 启用身份验证，并通过 ``LMCACHE_RESP_USERNAME`` / ``LMCACHE_RESP_PASSWORD`` 环境变量提供凭据，以避免将其记录到日志中。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:431
+msgid "**Client tuning:**"
+msgstr "**客户端调优:**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:433
+msgid ""
+"Start with ``num_workers: 8`` and increase if the server has spare CPU "
+"and you're not saturating the network"
+msgstr "从 ``num_workers: 8`` 开始，如果服务器有多余的 CPU 并且网络没有饱和，则可以增加该值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:434
+msgid ""
+"More workers help when chunk sizes are smaller (more keys per batch = "
+"more parallelism needed)"
+msgstr "当块大小较小时，更多的工作线程会有所帮助（每批次更多的键 = 需要更多的并行性）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:435
+msgid ""
+"On NUMA systems, ensure the LMCache process runs on the same NUMA node as"
+" the NIC"
+msgstr "在 NUMA 系统上，确保 LMCache 进程与 NIC 运行在同一个 NUMA 节点上。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:437
+msgid "**Chunk size:**"
+msgstr "**块大小:**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:439
+msgid "Target ~4 MB per chunk for maximum throughput"
+msgstr "每个块目标约 4 MB，以实现最大吞吐量"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:440
+msgid ""
+"Calculate the token count using your model's per-token byte size (see "
+"formula above)"
+msgstr "使用模型的每个 token 字节大小计算 token 数量（请参见上面的公式）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:441
+msgid ""
+"If unsure, run the benchmark sweep to find the optimum for your specific "
+"hardware"
+msgstr "如果不确定，请运行基准测试以找到适合您特定硬件的最佳值。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:443
+msgid "**Network:**"
+msgstr "**网络：**"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:445
+msgid "Use localhost or loopback for single-machine deployments"
+msgstr "在单机部署中使用 localhost 或回环地址"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:446
+msgid ""
+"For cross-machine setups, ensure low-latency networking (ideally <100 us "
+"RTT)"
+msgstr "对于跨机器设置，确保低延迟网络（理想情况下 <100 微秒 RTT）"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:447
+msgid ""
+"The RESP connector uses TCP; RDMA is not currently supported (consider "
+":doc:`Mooncake <./mooncake>` for RDMA)"
+msgstr "RESP 连接器使用 TCP；目前不支持 RDMA（考虑使用 :doc:`Mooncake <./mooncake>` 进行 RDMA）。"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:451
+msgid "Additional Resources"
+msgstr "附加资源"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:453
+msgid ""
+"Benchmark script: "
+"``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
+msgstr "基准测试脚本：\\ ``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:454
+msgid "C++ source: ``csrc/storage_backends/redis/``"
+msgstr "C++ 源码: ``csrc/storage_backends/redis/``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:455
+msgid "Native connector architecture: ``csrc/storage_backends/README.md``"
+msgstr "本地连接器架构: ``csrc/storage_backends/README.md``"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:456
+msgid ""
+"Developer guide for adding new native connectors: :doc:`Adding Native "
+"Connectors <../../developer_guide/extending_lmcache/native_connectors>`"
+msgstr "添加新原生连接器的开发者指南： :doc:`添加原生连接器 <../../developer_guide/extending_lmcache/native_connectors>`"
+

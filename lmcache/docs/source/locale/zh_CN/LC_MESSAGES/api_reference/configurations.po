@@ -1,0 +1,1698 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/api_reference/configurations.rst:2
+msgid "Configuring LMCache"
+msgstr "配置 LMCache"
+
+#: ../../source/api_reference/configurations.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/configuration`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/configuration`。"
+
+#: ../../source/api_reference/configurations.rst:9
+msgid "LMCache supports two types of configurations:"
+msgstr "LMCache 支持两种类型的配置："
+
+#: ../../source/api_reference/configurations.rst:11
+msgid ""
+"**Configuration file**: a YAML (recommended) or JSON file that contains "
+"the configuration items."
+msgstr "**配置文件**\\ ：一个包含配置项的 YAML（推荐）或 JSON 文件。"
+
+#: ../../source/api_reference/configurations.rst:12
+msgid ""
+"**Environment variables**: environment variables that start with "
+"``LMCACHE_``."
+msgstr "**环境变量**\\ ：以 ``LMCACHE_`` 开头的环境变量。"
+
+#: ../../source/api_reference/configurations.rst:14
+msgid ""
+"To use a configuration file, you can set the ``LMCACHE_CONFIG_FILE`` "
+"environment variable to the path of the configuration file."
+msgstr "要使用配置文件，您可以将 ``LMCACHE_CONFIG_FILE`` 环境变量设置为配置文件的路径。"
+
+#: ../../source/api_reference/configurations.rst:18
+msgid ""
+"The environment variable configurations will be ignored if the "
+"configuration file is present."
+msgstr "如果配置文件存在，则环境变量配置将被忽略。"
+
+#: ../../source/api_reference/configurations.rst:22
+msgid "General Configurations"
+msgstr "通用配置"
+
+#: ../../source/api_reference/configurations.rst:24
+msgid "Basic cache settings that control the core functionality of LMCache."
+msgstr "控制 LMCache 核心功能的基本缓存设置。"
+
+#: ../../source/api_reference/configurations.rst:30
+#: ../../source/api_reference/configurations.rst:122
+#: ../../source/api_reference/configurations.rst:158
+#: ../../source/api_reference/configurations.rst:183
+#: ../../source/api_reference/configurations.rst:211
+#: ../../source/api_reference/configurations.rst:244
+#: ../../source/api_reference/configurations.rst:403
+#: ../../source/api_reference/configurations.rst:507
+#: ../../source/api_reference/configurations.rst:535
+#: ../../source/api_reference/configurations.rst:551
+msgid "YAML Config Name"
+msgstr "YAML 配置名称"
+
+#: ../../source/api_reference/configurations.rst:31
+#: ../../source/api_reference/configurations.rst:123
+#: ../../source/api_reference/configurations.rst:159
+#: ../../source/api_reference/configurations.rst:184
+#: ../../source/api_reference/configurations.rst:212
+#: ../../source/api_reference/configurations.rst:245
+#: ../../source/api_reference/configurations.rst:404
+#: ../../source/api_reference/configurations.rst:508
+#: ../../source/api_reference/configurations.rst:536
+#: ../../source/api_reference/configurations.rst:552
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/api_reference/configurations.rst:32
+#: ../../source/api_reference/configurations.rst:124
+#: ../../source/api_reference/configurations.rst:160
+#: ../../source/api_reference/configurations.rst:185
+#: ../../source/api_reference/configurations.rst:213
+#: ../../source/api_reference/configurations.rst:246
+#: ../../source/api_reference/configurations.rst:322
+#: ../../source/api_reference/configurations.rst:347
+#: ../../source/api_reference/configurations.rst:379
+#: ../../source/api_reference/configurations.rst:405
+#: ../../source/api_reference/configurations.rst:442
+#: ../../source/api_reference/configurations.rst:509
+#: ../../source/api_reference/configurations.rst:537
+#: ../../source/api_reference/configurations.rst:553
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/api_reference/configurations.rst:33
+msgid "chunk_size"
+msgstr "chunk_size"
+
+#: ../../source/api_reference/configurations.rst:34
+msgid "LMCACHE_CHUNK_SIZE"
+msgstr "LMCACHE_CHUNK_SIZE"
+
+#: ../../source/api_reference/configurations.rst:35
+msgid "Size of cache chunks. Default: 256"
+msgstr "缓存块的大小。默认值：256"
+
+#: ../../source/api_reference/configurations.rst:36
+msgid "local_cpu"
+msgstr "local_cpu"
+
+#: ../../source/api_reference/configurations.rst:37
+msgid "LMCACHE_LOCAL_CPU"
+msgstr "LMCACHE_LOCAL_CPU"
+
+#: ../../source/api_reference/configurations.rst:38
+msgid "Whether to enable CPU caching. Values: true/false. Default: true"
+msgstr "是否启用 CPU 缓存。值：true/false。默认：true"
+
+#: ../../source/api_reference/configurations.rst:39
+msgid "max_local_cpu_size"
+msgstr "max_local_cpu_size"
+
+#: ../../source/api_reference/configurations.rst:40
+msgid "LMCACHE_MAX_LOCAL_CPU_SIZE"
+msgstr "LMCACHE_MAX_LOCAL_CPU_SIZE"
+
+#: ../../source/api_reference/configurations.rst:41
+msgid "Maximum CPU cache size in GB. Default: 5.0"
+msgstr "最大 CPU 缓存大小（以 GB 为单位）。默认值：5.0"
+
+#: ../../source/api_reference/configurations.rst:42
+msgid "local_cpu_use_hugepages"
+msgstr "local_cpu_use_hugepages"
+
+#: ../../source/api_reference/configurations.rst:43
+msgid "LMCACHE_LOCAL_CPU_USE_HUGEPAGES"
+msgstr "LMCACHE_LOCAL_CPU_USE_HUGEPAGES"
+
+#: ../../source/api_reference/configurations.rst:44
+msgid ""
+"Whether to use Linux hugepages (2 MB) for CPU-pinned KV cache memory. Not"
+" compatible with P2P mode or shared memory (multiprocess). Requires pre-"
+"allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. "
+"Default: false"
+msgstr ""
+"是否使用 Linux 大页（2 MB）作为 CPU 固定的 KV Cache 内存。不兼容 P2P 模式或共享内存（多进程）。需要预分配大页（\\"
+" ``sysctl vm.nr_hugepages``\\ ）。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:45
+msgid "local_disk"
+msgstr "local_disk"
+
+#: ../../source/api_reference/configurations.rst:46
+msgid "LMCACHE_LOCAL_DISK"
+msgstr "LMCACHE_LOCAL_DISK"
+
+#: ../../source/api_reference/configurations.rst:47
+msgid ""
+"Path (or comma-separated paths) to local disk cache directories. Format: "
+"``\"file:///path/to/cache\"`` or ``\"/path/a,/path/b\"`` for multi-device"
+" I/O. See ``local_disk_path_sharding`` for how paths are assigned to "
+"GPUs."
+msgstr ""
+"本地磁盘缓存目录的路径（或以逗号分隔的路径）。格式：\\ ``\"file:///path/to/cache\"`` 或 "
+"``\"/path/a,/path/b\"`` 用于多设备 I/O。有关路径如何分配给 GPU，请参见 "
+"``local_disk_path_sharding``\\ 。"
+
+#: ../../source/api_reference/configurations.rst:48
+msgid "local_disk_path_sharding"
+msgstr "local_disk_path_sharding"
+
+#: ../../source/api_reference/configurations.rst:49
+msgid "LMCACHE_LOCAL_DISK_PATH_SHARDING"
+msgstr "LMCACHE_LOCAL_DISK_PATH_SHARDING"
+
+#: ../../source/api_reference/configurations.rst:50
+#: ../../source/api_reference/configurations.rst:411
+msgid ""
+"Strategy for selecting a path when multiple paths are provided. Currently"
+" only ``\"by_gpu\"`` is supported, which selects paths based on GPU "
+"device ID (default: \"by_gpu\")."
+msgstr ""
+"当提供多个路径时选择路径的策略。目前仅支持 ``\"by_gpu\"``\\ ，该策略根据 GPU 设备 ID "
+"选择路径（默认值：\\\"by_gpu\\\"）。"
+
+#: ../../source/api_reference/configurations.rst:51
+msgid "max_local_disk_size"
+msgstr "max_local_disk_size"
+
+#: ../../source/api_reference/configurations.rst:52
+msgid "LMCACHE_MAX_LOCAL_DISK_SIZE"
+msgstr "LMCACHE_MAX_LOCAL_DISK_SIZE"
+
+#: ../../source/api_reference/configurations.rst:53
+msgid "Maximum disk cache size in GB. Default: 0.0"
+msgstr "最大磁盘缓存大小（以 GB 为单位）。默认值：0.0"
+
+#: ../../source/api_reference/configurations.rst:54
+msgid "remote_url"
+msgstr "remote_url"
+
+#: ../../source/api_reference/configurations.rst:55
+msgid "LMCACHE_REMOTE_URL"
+msgstr "LMCACHE_REMOTE_URL"
+
+#: ../../source/api_reference/configurations.rst:56
+msgid "Remote storage URL. Format: \"protocol://host:port\"."
+msgstr "远程存储 URL。格式：\\\"protocol://host:port\\\"。"
+
+#: ../../source/api_reference/configurations.rst:57
+msgid "remote_serde"
+msgstr "remote_serde"
+
+#: ../../source/api_reference/configurations.rst:58
+msgid "LMCACHE_REMOTE_SERDE"
+msgstr "LMCACHE_REMOTE_SERDE"
+
+#: ../../source/api_reference/configurations.rst:59
+msgid ""
+"Serialization format. Values: \"naive\" or \"cachegen\". Default: "
+"\"naive\""
+msgstr "序列化格式。值：\\\"naive\\\" 或 \\\"cachegen\\\"。默认值：\\\"naive\\\""
+
+#: ../../source/api_reference/configurations.rst:60
+msgid "save_decode_cache"
+msgstr "save_decode_cache"
+
+#: ../../source/api_reference/configurations.rst:61
+msgid "LMCACHE_SAVE_DECODE_CACHE"
+msgstr "LMCACHE_SAVE_DECODE_CACHE"
+
+#: ../../source/api_reference/configurations.rst:62
+msgid "Whether to store decode KV cache. Values: true/false. Default: false"
+msgstr "是否存储解码 KV Cache。值：true/false。默认：false"
+
+#: ../../source/api_reference/configurations.rst:63
+msgid "use_layerwise"
+msgstr "use_layerwise"
+
+#: ../../source/api_reference/configurations.rst:64
+msgid "LMCACHE_USE_LAYERWISE"
+msgstr "LMCACHE_USE_LAYERWISE"
+
+#: ../../source/api_reference/configurations.rst:65
+msgid "Whether to enable layerwise pipelining. Values: true/false. Default: false"
+msgstr "是否启用逐层流水线。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:66
+msgid "pre_caching_hash_algorithm"
+msgstr "pre_caching_hash_algorithm"
+
+#: ../../source/api_reference/configurations.rst:67
+msgid "LMCACHE_PRE_CACHING_HASH_ALGORITHM"
+msgstr "LMCACHE_PRE_CACHING_HASH_ALGORITHM"
+
+#: ../../source/api_reference/configurations.rst:68
+msgid "Hash algorithm for prefix-caching. Default: \"builtin\""
+msgstr "前缀缓存的哈希算法。默认值：“builtin”"
+
+#: ../../source/api_reference/configurations.rst:69
+msgid "save_unfull_chunk"
+msgstr "save_unfull_chunk"
+
+#: ../../source/api_reference/configurations.rst:70
+msgid "LMCACHE_SAVE_UNFULL_CHUNK"
+msgstr "LMCACHE_SAVE_UNFULL_CHUNK"
+
+#: ../../source/api_reference/configurations.rst:71
+msgid "Whether to save unfull chunks. Values: true/false. Default: false"
+msgstr "是否保存未满块。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:72
+msgid "blocking_timeout_secs"
+msgstr "blocking_timeout_secs"
+
+#: ../../source/api_reference/configurations.rst:73
+msgid "LMCACHE_BLOCKING_TIMEOUT_SECS"
+msgstr "LMCACHE_BLOCKING_TIMEOUT_SECS"
+
+#: ../../source/api_reference/configurations.rst:74
+msgid "Timeout for blocking operations in seconds. Default: 10"
+msgstr "阻塞操作的超时时间（以秒为单位）。默认值：10"
+
+#: ../../source/api_reference/configurations.rst:75
+msgid "py_enable_gc"
+msgstr "py_enable_gc"
+
+#: ../../source/api_reference/configurations.rst:76
+msgid "LMCACHE_PY_ENABLE_GC"
+msgstr "LMCACHE_PY_ENABLE_GC"
+
+#: ../../source/api_reference/configurations.rst:77
+msgid ""
+"Whether to enable Python garbage collection. Values: true/false. Default:"
+" true"
+msgstr "是否启用 Python 垃圾回收。值：true/false。默认：true"
+
+#: ../../source/api_reference/configurations.rst:78
+msgid "cache_policy"
+msgstr "cache_policy"
+
+#: ../../source/api_reference/configurations.rst:79
+msgid "LMCACHE_CACHE_POLICY"
+msgstr "LMCACHE_CACHE_POLICY"
+
+#: ../../source/api_reference/configurations.rst:80
+msgid "Cache eviction policy (e.g. \"LRU\", \"LFU\", \"FIFO\"). Default: \"LRU\""
+msgstr "缓存逐出策略（例如“LRU”、“LFU”、“FIFO”）。默认值：“LRU”"
+
+#: ../../source/api_reference/configurations.rst:81
+msgid "numa_mode"
+msgstr "numa_mode"
+
+#: ../../source/api_reference/configurations.rst:82
+msgid "LMCACHE_NUMA_MODE"
+msgstr "LMCACHE_NUMA_MODE"
+
+#: ../../source/api_reference/configurations.rst:83
+msgid ""
+"NUMA-aware memory allocation mode. Values: \"auto\" (detect from system),"
+" \"manual\" (use extra_config mapping), null (disabled). When enabled, "
+"allocates pinned memory on specific NUMA nodes for better GPU-CPU memory "
+"bandwidth. Default: null"
+msgstr ""
+"NUMA 感知内存分配模式。值：\\\"auto\\\"（从系统检测）、\\\"manual\\\"（使用 extra_config "
+"映射）、null（禁用）。启用时，在特定的 NUMA 节点上分配固定内存，以提高 GPU-CPU 内存带宽。默认值：null"
+
+#: ../../source/api_reference/configurations.rst:84
+msgid "external_lookup_client"
+msgstr "external_lookup_client"
+
+#: ../../source/api_reference/configurations.rst:85
+msgid "LMCACHE_EXTERNAL_LOOKUP_CLIENT"
+msgstr "LMCACHE_EXTERNAL_LOOKUP_CLIENT"
+
+#: ../../source/api_reference/configurations.rst:86
+msgid ""
+"External KV lookup service URI (e.g., \"mooncakestore://address\"). If "
+"null, defaults to LMCache's internal lookup client. Default: null"
+msgstr ""
+"外部 KV 查找服务 URI（例如，\\\"mooncakestore://address\\\"）。如果为 null，则默认为 LMCache "
+"的内部查找客户端。默认值：null"
+
+#: ../../source/api_reference/configurations.rst:87
+msgid "priority_limit"
+msgstr "priority_limit"
+
+#: ../../source/api_reference/configurations.rst:88
+msgid "LMCACHE_PRIORITY_LIMIT"
+msgstr "LMCACHE_PRIORITY_LIMIT"
+
+#: ../../source/api_reference/configurations.rst:89
+msgid ""
+"Caches requests only if priority value ≤ limit. (**Not applicable for PD "
+"Disaggregation**) Type: int. Default: None"
+msgstr "仅在优先级值 ≤ 限制时缓存请求。（\\ **不适用于 PD 分离**\\ ）类型：int。默认值：无"
+
+#: ../../source/api_reference/configurations.rst:90
+msgid "min_retrieve_tokens"
+msgstr "min_retrieve_tokens"
+
+#: ../../source/api_reference/configurations.rst:91
+msgid "LMCACHE_MIN_RETRIEVE_TOKENS"
+msgstr "LMCACHE_MIN_RETRIEVE_TOKENS"
+
+#: ../../source/api_reference/configurations.rst:92
+msgid ""
+"Minimum number of hit tokens required to perform retrieve. If hit tokens "
+"< this value, skip retrieve but still record the hits to avoid re-storing"
+" existing chunks. See :ref:`performance_tuning` for a working example. "
+"Default: 0 (disabled)"
+msgstr ""
+"执行检索所需的最小命中令牌数。如果命中令牌少于此值，则跳过检索，但仍记录命中以避免重新存储现有块。有关工作示例，请参见 "
+":ref:`performance_tuning`。默认值：0（禁用）"
+
+#: ../../source/api_reference/configurations.rst:93
+msgid "store_location"
+msgstr "store_location"
+
+#: ../../source/api_reference/configurations.rst:94
+msgid "LMCACHE_STORE_LOCATION"
+msgstr "LMCACHE_STORE_LOCATION"
+
+#: ../../source/api_reference/configurations.rst:95
+msgid ""
+"A single storage backend name to store KV caches into. When specified, "
+"only the matching backend receives store operations. Valid values are the"
+" backend class names registered in the storage manager, including: "
+"``\"LocalCPUBackend\"``, ``\"LocalDiskBackend\"``, ``\"RemoteBackend\"``,"
+" ``\"PDBackend\"``, ``\"P2PBackend\"``, ``\"GdsBackend\"``, etc, and any "
+"storage plugin backends. Note: ``\"PDBackend\"`` cannot be used as a "
+"store location for a decoder instance in a PD setup, since PDBackend is "
+"one-way from prefiller to decoder only. Default: null (store to all "
+"active backends)"
+msgstr ""
+"一个存储后端名称，用于存储 KV 缓存。当指定时，只有匹配的后端接收存储操作。有效值是存储管理器中注册的后端类名称，包括：\\ "
+"``\\\"LocalCPUBackend\\\"``\\ 、\\ ``\\\"LocalDiskBackend\\\"``\\ 、\\ "
+"``\\\"RemoteBackend\\\"``\\ 、\\ ``\\\"PDBackend\\\"``\\ 、\\ "
+"``\\\"P2PBackend\\\"``\\ 、\\ ``\\\"GdsBackend\\\"`` 等，以及任何存储插件后端。注意：\\ "
+"``\\\"PDBackend\\\"`` 不能用作 PD 设置中解码器实例的存储位置，因为 PDBackend "
+"仅从预填充器到解码器是单向的。默认值：null（存储到所有活动后端）"
+
+#: ../../source/api_reference/configurations.rst:96
+msgid "retrieve_locations"
+msgstr "retrieve_locations"
+
+#: ../../source/api_reference/configurations.rst:97
+msgid "LMCACHE_RETRIEVE_LOCATIONS"
+msgstr "LMCACHE_RETRIEVE_LOCATIONS"
+
+#: ../../source/api_reference/configurations.rst:98
+msgid ""
+"List of storage backend names to search when retrieving or looking up KV "
+"caches. When specified, only the listed backends are searched. Valid "
+"values are the backend class names registered in the storage manager, "
+"including: ``\"LocalCPUBackend\"``, ``\"LocalDiskBackend\"``, "
+"``\"RemoteBackend\"``, ``\"PDBackend\"``, ``\"P2PBackend\"``, "
+"``\"GdsBackend\"``, etc, and any storage plugin backends. Default: null "
+"(search all active backends)"
+msgstr ""
+"检索或查找 KV Cache 时要搜索的存储后端名称列表。当指定时，仅搜索列出的后端。有效值为在存储管理器中注册的后端类名称，包括：\\ "
+"``\\\"LocalCPUBackend\\\"``\\ 、\\ ``\\\"LocalDiskBackend\\\"``\\ 、\\ "
+"``\\\"RemoteBackend\\\"``\\ 、\\ ``\\\"PDBackend\\\"``\\ 、\\ "
+"``\\\"P2PBackend\\\"``\\ 、\\ ``\\\"GdsBackend\\\"`` "
+"等，以及任何存储插件后端。默认值：null（搜索所有活动后端）"
+
+#: ../../source/api_reference/configurations.rst:99
+msgid "extra_config"
+msgstr "extra_config"
+
+#: ../../source/api_reference/configurations.rst:100
+#, python-brace-format
+msgid "LMCACHE_EXTRA_CONFIG={\"key\": value, ...}"
+msgstr "LMCACHE_EXTRA_CONFIG={\\\"key\\\": value, ...}"
+
+#: ../../source/api_reference/configurations.rst:101
+#, python-brace-format
+msgid ""
+"Additional configuration as JSON dict. For NUMA manual mode, include "
+"\"gpu_to_numa_mapping\": {gpu_id: numa_node, ...}. Default: {}"
+msgstr ""
+"额外的配置作为 JSON 字典。对于 NUMA 手动模式，包含 \\\"gpu_to_numa_mapping\\\": {gpu_id: "
+"numa_node, ...}。默认值：{}"
+
+#: ../../source/api_reference/configurations.rst:104
+msgid "Lazy Memory Allocator Configurations"
+msgstr "惰性内存分配器配置"
+
+#: ../../source/api_reference/configurations.rst:106
+msgid ""
+"Settings for the lazy memory allocator that enables gradual memory "
+"allocation to reduce startup time and initial memory footprint."
+msgstr "用于懒惰内存分配器的设置，允许逐步分配内存以减少启动时间和初始内存占用。"
+
+#: ../../source/api_reference/configurations.rst:110
+msgid ""
+"The lazy memory allocator is designed for scenarios with large CPU memory"
+" configurations. It starts with a small initial allocation and gradually "
+"expands as needed, reducing startup wait time and avoiding unnecessary "
+"memory consumption when the full capacity is not required."
+msgstr ""
+"懒惰内存分配器旨在处理大 CPU "
+"内存配置的场景。它从小的初始分配开始，并根据需要逐渐扩展，从而减少启动等待时间，并避免在不需要全部容量时的不必要内存消耗。"
+
+#: ../../source/api_reference/configurations.rst:112
+msgid "**Key characteristics:**"
+msgstr "**关键特性：**"
+
+#: ../../source/api_reference/configurations.rst:114
+msgid ""
+"**One-time expansion**: Memory expands until target size is reached, then"
+" stops"
+msgstr "**一次性扩展**\\ ：内存扩展直到达到目标大小，然后停止"
+
+#: ../../source/api_reference/configurations.rst:115
+msgid ""
+"**No shrinking**: Once allocated, memory is never released back to the "
+"system"
+msgstr "**不收缩**\\ ：一旦分配，内存将永远不会释放回系统"
+
+#: ../../source/api_reference/configurations.rst:116
+msgid ""
+"**Automatic activation**: Only activates when ``max_local_cpu_size`` "
+"exceeds ``lazy_memory_safe_size``"
+msgstr "**自动激活**\\ ：仅在 ``max_local_cpu_size`` 超过 ``lazy_memory_safe_size`` 时激活"
+
+#: ../../source/api_reference/configurations.rst:125
+msgid "enable_lazy_memory_allocator"
+msgstr "enable_lazy_memory_allocator"
+
+#: ../../source/api_reference/configurations.rst:126
+msgid "LMCACHE_ENABLE_LAZY_MEMORY_ALLOCATOR"
+msgstr "LMCACHE_ENABLE_LAZY_MEMORY_ALLOCATOR"
+
+#: ../../source/api_reference/configurations.rst:127
+msgid ""
+"Whether to enable lazy memory allocator. Values: true/false. Default: "
+"false"
+msgstr "是否启用延迟内存分配器。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:128
+msgid "lazy_memory_initial_ratio"
+msgstr "lazy_memory_initial_ratio"
+
+#: ../../source/api_reference/configurations.rst:129
+msgid "LMCACHE_LAZY_MEMORY_INITIAL_RATIO"
+msgstr "LMCACHE_LAZY_MEMORY_INITIAL_RATIO"
+
+#: ../../source/api_reference/configurations.rst:130
+msgid ""
+"Initial memory allocation ratio (0.0-1.0). Determines the fraction of "
+"max_local_cpu_size to allocate at startup. Default: 0.2 (20%)"
+msgstr "初始内存分配比例 (0.0-1.0)。决定在启动时分配的 max_local_cpu_size 的比例。默认值：0.2 (20%)"
+
+#: ../../source/api_reference/configurations.rst:131
+msgid "lazy_memory_expand_trigger_ratio"
+msgstr "lazy_memory_expand_trigger_ratio"
+
+#: ../../source/api_reference/configurations.rst:132
+msgid "LMCACHE_LAZY_MEMORY_EXPAND_TRIGGER_RATIO"
+msgstr "LMCACHE_LAZY_MEMORY_EXPAND_TRIGGER_RATIO"
+
+#: ../../source/api_reference/configurations.rst:133
+msgid ""
+"Memory usage ratio (0.0-1.0) that triggers expansion. When used memory "
+"exceeds this ratio of current capacity, expansion begins. Default: 0.5 "
+"(50%)"
+msgstr "触发扩展的内存使用比例（0.0-1.0）。当使用的内存超过当前容量的此比例时，扩展开始。默认值：0.5（50%）"
+
+#: ../../source/api_reference/configurations.rst:134
+msgid "lazy_memory_step_ratio"
+msgstr "lazy_memory_step_ratio"
+
+#: ../../source/api_reference/configurations.rst:135
+msgid "LMCACHE_LAZY_MEMORY_STEP_RATIO"
+msgstr "LMCACHE_LAZY_MEMORY_STEP_RATIO"
+
+#: ../../source/api_reference/configurations.rst:136
+msgid ""
+"Memory expansion step ratio (0.0-1.0). Each expansion adds this fraction "
+"of max_local_cpu_size. Default: 0.1 (10%)"
+msgstr "内存扩展步骤比例（0.0-1.0）。每次扩展增加此比例的 max_local_cpu_size。默认值：0.1（10%）"
+
+#: ../../source/api_reference/configurations.rst:137
+msgid "lazy_memory_safe_size"
+msgstr "lazy_memory_safe_size"
+
+#: ../../source/api_reference/configurations.rst:138
+msgid "LMCACHE_LAZY_MEMORY_SAFE_SIZE"
+msgstr "LMCACHE_LAZY_MEMORY_SAFE_SIZE"
+
+#: ../../source/api_reference/configurations.rst:139
+msgid ""
+"Threshold in GB above which lazy allocator activates. If "
+"max_local_cpu_size ≤ this value, lazy allocator is disabled regardless of"
+" enable_lazy_memory_allocator setting. Default: 0.0"
+msgstr ""
+"在 GB 中的阈值，超过该值后懒惰分配器激活。如果 max_local_cpu_size ≤ 此值，则无论 "
+"enable_lazy_memory_allocator 设置如何，懒惰分配器都将被禁用。默认值：0.0"
+
+#: ../../source/api_reference/configurations.rst:140
+msgid "reserve_local_cpu_size"
+msgstr "reserve_local_cpu_size"
+
+#: ../../source/api_reference/configurations.rst:141
+msgid "LMCACHE_RESERVE_LOCAL_CPU_SIZE"
+msgstr "LMCACHE_RESERVE_LOCAL_CPU_SIZE"
+
+#: ../../source/api_reference/configurations.rst:142
+msgid ""
+"Reserved system memory in GB that should not be allocated by LMCache. "
+"Used to prevent out-of-memory conditions. Default: 0.0"
+msgstr "保留的系统内存（以 GB 为单位），不应由 LMCache 分配。用于防止内存不足的情况。默认值：0.0"
+
+#: ../../source/api_reference/configurations.rst:145
+msgid "Cache Blending Configurations"
+msgstr "缓存混合配置"
+
+#: ../../source/api_reference/configurations.rst:147
+msgid "Settings related to cache blending functionality."
+msgstr "与缓存混合功能相关的设置。"
+
+#: ../../source/api_reference/configurations.rst:151
+msgid ""
+"We have an end-to-end `example "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_. We "
+"also have more :doc:`detailed documentation "
+"<../kv_cache_optimizations/blending>`."
+msgstr ""
+"我们有一个端到端的 `示例 "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1>`_。我们还有更多的"
+" :doc:`详细文档 <../kv_cache_optimizations/blending>`。"
+
+#: ../../source/api_reference/configurations.rst:161
+msgid "enable_blending"
+msgstr "enable_blending"
+
+#: ../../source/api_reference/configurations.rst:162
+msgid "LMCACHE_ENABLE_BLENDING"
+msgstr "LMCACHE_ENABLE_BLENDING"
+
+#: ../../source/api_reference/configurations.rst:163
+msgid "Whether to enable blending. Values: true/false. Default: false"
+msgstr "是否启用混合。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:164
+msgid "blend_recompute_ratios"
+msgstr "blend_recompute_ratios"
+
+#: ../../source/api_reference/configurations.rst:165
+msgid "LMCACHE_BLEND_RECOMPUTE_RATIOS"
+msgstr "LMCACHE_BLEND_RECOMPUTE_RATIOS"
+
+#: ../../source/api_reference/configurations.rst:166
+msgid "Ratio of blending recompute. Default: 0.15"
+msgstr "混合重计算的比例。默认值：0.15"
+
+#: ../../source/api_reference/configurations.rst:167
+msgid "blend_check_layers"
+msgstr "blend_check_layers"
+
+#: ../../source/api_reference/configurations.rst:168
+msgid "LMCACHE_BLEND_CHECK_LAYERS"
+msgstr "LMCACHE_BLEND_CHECK_LAYERS"
+
+#: ../../source/api_reference/configurations.rst:169
+msgid "Layers to determine the recomputed tokens. Default: 1"
+msgstr "确定重计算令牌的层数。默认值：1"
+
+#: ../../source/api_reference/configurations.rst:170
+msgid "blend_special_str"
+msgstr "blend_special_str"
+
+#: ../../source/api_reference/configurations.rst:171
+msgid "LMCACHE_BLEND_SPECIAL_STR"
+msgstr "LMCACHE_BLEND_SPECIAL_STR"
+
+#: ../../source/api_reference/configurations.rst:172
+msgid "Separator string for blending. Default: \" # # \""
+msgstr "用于混合的分隔符字符串。默认值：\\\" # # \\\""
+
+#: ../../source/api_reference/configurations.rst:175
+msgid "Peer-to-Peer Sharing Configurations"
+msgstr "点对点共享配置"
+
+#: ../../source/api_reference/configurations.rst:177
+msgid ""
+"Settings for enabling and configuring peer-to-peer CPU KV cache sharing "
+"and global KV cache lookup."
+msgstr "用于启用和配置点对点 CPU KV Cache 共享及全局 KV Cache 查找的设置。"
+
+#: ../../source/api_reference/configurations.rst:186
+msgid "enable_p2p"
+msgstr "enable_p2p"
+
+#: ../../source/api_reference/configurations.rst:187
+msgid "LMCACHE_ENABLE_P2P"
+msgstr "LMCACHE_ENABLE_P2P"
+
+#: ../../source/api_reference/configurations.rst:188
+msgid "Whether to enable peer-to-peer sharing. Values: true/false. Default: false"
+msgstr "是否启用点对点共享。值：true/false。默认：false"
+
+#: ../../source/api_reference/configurations.rst:189
+msgid "p2p_host"
+msgstr "p2p_host"
+
+#: ../../source/api_reference/configurations.rst:190
+msgid "LMCACHE_P2P_HOST"
+msgstr "LMCACHE_P2P_HOST"
+
+#: ../../source/api_reference/configurations.rst:191
+msgid "Ip address. Required if enable_p2p is true"
+msgstr "IP 地址。如果 enable_p2p 为 true，则必需。"
+
+#: ../../source/api_reference/configurations.rst:192
+msgid "peer_init_ports"
+msgstr "peer_init_ports"
+
+#: ../../source/api_reference/configurations.rst:193
+msgid "LMCACHE_PEER_INIT_PORTS"
+msgstr "LMCACHE_PEER_INIT_PORTS"
+
+#: ../../source/api_reference/configurations.rst:194
+msgid "Ports for p2p peer init. Required if enable_p2p is true"
+msgstr "p2p 对等初始化的端口。如果 enable_p2p 为 true，则需要此项。"
+
+#: ../../source/api_reference/configurations.rst:195
+msgid "peer_lookup_ports"
+msgstr "peer_lookup_ports"
+
+#: ../../source/api_reference/configurations.rst:196
+msgid "LMCACHE_PEER_lookup_PORTS"
+msgstr "LMCACHE_PEER_lookup_PORTS"
+
+#: ../../source/api_reference/configurations.rst:197
+msgid "Ports for p2p peer lookup. Required if enable_p2p is true"
+msgstr "用于点对点（p2p）对等查找的端口。如果 enable_p2p 为 true，则必需。"
+
+#: ../../source/api_reference/configurations.rst:198
+#: ../../source/api_reference/configurations.rst:250
+msgid "transfer_channel"
+msgstr "transfer_channel"
+
+#: ../../source/api_reference/configurations.rst:199
+#: ../../source/api_reference/configurations.rst:251
+msgid "LMCACHE_TRANSFER_CHANNEL"
+msgstr "LMCACHE_TRANSFER_CHANNEL"
+
+#: ../../source/api_reference/configurations.rst:200
+msgid "Such as `nixl`. Required if enable_p2p is true"
+msgstr "例如 `nixl`。如果 enable_p2p 为 true，则必需。"
+
+#: ../../source/api_reference/configurations.rst:203
+msgid "Controller Configurations"
+msgstr "控制器配置"
+
+#: ../../source/api_reference/configurations.rst:205
+msgid "Settings for the KV cache controller functionality."
+msgstr "KV 缓存控制器功能的设置。"
+
+#: ../../source/api_reference/configurations.rst:214
+msgid "enable_controller"
+msgstr "enable_controller"
+
+#: ../../source/api_reference/configurations.rst:215
+msgid "LMCACHE_ENABLE_CONTROLLER"
+msgstr "LMCACHE_ENABLE_CONTROLLER"
+
+#: ../../source/api_reference/configurations.rst:216
+msgid "Whether to enable controller. Values: true/false. Default: false"
+msgstr "是否启用控制器。值：true/false。默认：false"
+
+#: ../../source/api_reference/configurations.rst:217
+msgid "lmcache_instance_id"
+msgstr "lmcache_instance_id"
+
+#: ../../source/api_reference/configurations.rst:218
+msgid "LMCACHE_LMCACHE_INSTANCE_ID"
+msgstr "LMCACHE_LMCACHE_INSTANCE_ID"
+
+#: ../../source/api_reference/configurations.rst:219
+msgid "ID of the LMCache instance. Default: \"lmcache_default_instance\""
+msgstr "LMCache 实例的 ID。默认值：\\\"lmcache_default_instance\\\""
+
+#: ../../source/api_reference/configurations.rst:220
+msgid "controller_url"
+msgstr "controller_url"
+
+#: ../../source/api_reference/configurations.rst:221
+msgid "LMCACHE_CONTROLLER_URL"
+msgstr "LMCACHE_CONTROLLER_URL"
+
+#: ../../source/api_reference/configurations.rst:222
+msgid "URL of the controller server"
+msgstr "控制器服务器的 URL"
+
+#: ../../source/api_reference/configurations.rst:223
+msgid "lmcache_worker_port"
+msgstr "lmcache_worker_port"
+
+#: ../../source/api_reference/configurations.rst:224
+msgid "LMCACHE_LMCACHE_WORKER_PORT"
+msgstr "LMCACHE_LMCACHE_WORKER_PORT"
+
+#: ../../source/api_reference/configurations.rst:225
+msgid "Port number for LMCache worker"
+msgstr "LMCache 工作进程的端口号"
+
+#: ../../source/api_reference/configurations.rst:228
+msgid "Disaggregated Prefill Configurations"
+msgstr "分离式 Prefill 配置"
+
+#: ../../source/api_reference/configurations.rst:230
+msgid ""
+"Settings for disaggregated prefill functionality. The latest/default PD "
+"is implemented inside of `lmcache/v1/storage_backend/pd_backend.py`."
+msgstr ""
+"分离式 Prefill 功能的设置。最新/默认的 PD 实现在 "
+"`lmcache/v1/storage_backend/pd_backend.py` 中。"
+
+#: ../../source/api_reference/configurations.rst:234
+msgid ""
+"When PD is enabled, the following restrictions apply (welcome "
+"contributions to remove these restrictions):"
+msgstr "启用 PD 时，以下限制适用（欢迎贡献以消除这些限制）："
+
+#: ../../source/api_reference/configurations.rst:236
+msgid "remote_url must be null"
+msgstr "remote_url 必须为 null"
+
+#: ../../source/api_reference/configurations.rst:237
+msgid "save_decode_cache must be false"
+msgstr "save_decode_cache 必须为 false"
+
+#: ../../source/api_reference/configurations.rst:238
+msgid "enable_p2p must be false"
+msgstr "enable_p2p 必须为 false"
+
+#: ../../source/api_reference/configurations.rst:247
+msgid "enable_pd"
+msgstr "enable_pd"
+
+#: ../../source/api_reference/configurations.rst:248
+msgid "LMCACHE_ENABLE_PD"
+msgstr "LMCACHE_ENABLE_PD"
+
+#: ../../source/api_reference/configurations.rst:249
+msgid "Whether to enable PD. Values: true/false. Default: false"
+msgstr "是否启用 PD。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:252
+msgid "Transfer channel used for PD. Values: \"nixl\". Default: none"
+msgstr "用于 PD 的传输通道。值：“nixl”。默认：无"
+
+#: ../../source/api_reference/configurations.rst:253
+msgid "pd_role"
+msgstr "pd_role"
+
+#: ../../source/api_reference/configurations.rst:254
+msgid "LMCACHE_PD_ROLE"
+msgstr "LMCACHE_PD_ROLE"
+
+#: ../../source/api_reference/configurations.rst:255
+msgid "PD role. Values: \"sender\" (prefiller) or \"receiver\" (decoder)."
+msgstr "PD 角色。值：\\\"sender\\\"（预填充器）或 \\\"receiver\\\"（解码器）。"
+
+#: ../../source/api_reference/configurations.rst:256
+msgid "pd_buffer_size"
+msgstr "pd_buffer_size"
+
+#: ../../source/api_reference/configurations.rst:257
+msgid "LMCACHE_PD_BUFFER_SIZE"
+msgstr "LMCACHE_PD_BUFFER_SIZE"
+
+#: ../../source/api_reference/configurations.rst:258
+msgid ""
+"Upper bound of PD transport buffer size (in bytes), aligned to chunk "
+"size. Required for both senders and receivers when enable_pd=true"
+msgstr "PD 传输缓冲区大小的上限（以字节为单位），与块大小对齐。当 enable_pd=true 时，发送方和接收方均需要此设置。"
+
+#: ../../source/api_reference/configurations.rst:259
+msgid "pd_buffer_device"
+msgstr "pd_buffer_device"
+
+#: ../../source/api_reference/configurations.rst:260
+msgid "LMCACHE_PD_BUFFER_DEVICE"
+msgstr "LMCACHE_PD_BUFFER_DEVICE"
+
+#: ../../source/api_reference/configurations.rst:261
+msgid ""
+"Device for PD buffer. Values: \"cpu\", \"cuda\". Required for both "
+"senders and receivers when enable_pd=true"
+msgstr "PD 缓冲区的设备。值：\\\"cpu\\\"，\\\"cuda\\\"。当 enable_pd=true 时，发送者和接收者都需要此项。"
+
+#: ../../source/api_reference/configurations.rst:262
+msgid "nixl_backends"
+msgstr "nixl_backends"
+
+#: ../../source/api_reference/configurations.rst:263
+msgid "LMCACHE_NIXL_BACKENDS"
+msgstr "LMCACHE_NIXL_BACKENDS"
+
+#: ../../source/api_reference/configurations.rst:264
+msgid ""
+"List of Nixl transport backends. Useful for non-disaggregated use case "
+"(see below). UCX default is sufficient for disagg use case. Default: "
+"[\"UCX\"]"
+msgstr "Nixl 传输后端列表。适用于非分离式用例（见下文）。UCX 默认设置足以满足分离式用例。默认值：[\\\"UCX\\\"]"
+
+#: ../../source/api_reference/configurations.rst:265
+msgid "pd_peer_host"
+msgstr "pd_peer_host"
+
+#: ../../source/api_reference/configurations.rst:266
+msgid "LMCACHE_PD_PEER_HOST"
+msgstr "LMCACHE_PD_PEER_HOST"
+
+#: ../../source/api_reference/configurations.rst:267
+msgid "Host for peer connections. Required for receivers to bind to"
+msgstr "对等连接的主机。接收方绑定所需。"
+
+#: ../../source/api_reference/configurations.rst:268
+msgid "pd_peer_init_port"
+msgstr "pd_peer_init_port"
+
+#: ../../source/api_reference/configurations.rst:269
+msgid "LMCACHE_PD_PEER_INIT_PORT"
+msgstr "LMCACHE_PD_PEER_INIT_PORT"
+
+#: ../../source/api_reference/configurations.rst:270
+msgid ""
+"Initialization port for peer connections. Required for receivers to bind "
+"to"
+msgstr "用于对等连接的初始化端口。接收方需要绑定到此端口。"
+
+#: ../../source/api_reference/configurations.rst:271
+msgid "pd_peer_alloc_port"
+msgstr "pd_peer_alloc_port"
+
+#: ../../source/api_reference/configurations.rst:272
+msgid "LMCACHE_PD_PEER_ALLOC_PORT"
+msgstr "LMCACHE_PD_PEER_ALLOC_PORT"
+
+#: ../../source/api_reference/configurations.rst:273
+msgid "Allocation port for peer connections. Required for receivers to bind to"
+msgstr "用于对等连接的分配端口。接收方需要绑定到此端口。"
+
+#: ../../source/api_reference/configurations.rst:274
+msgid "pd_proxy_host"
+msgstr "pd_proxy_host"
+
+#: ../../source/api_reference/configurations.rst:275
+msgid "LMCACHE_PD_PROXY_HOST"
+msgstr "LMCACHE_PD_PROXY_HOST"
+
+#: ../../source/api_reference/configurations.rst:276
+msgid ""
+"Host for proxy server. Required for senders to connect to inform the "
+"proxy when transfer to decoder has been completed"
+msgstr "代理服务器的主机。发送方连接以通知代理解码器传输完成时必需。"
+
+#: ../../source/api_reference/configurations.rst:277
+msgid "pd_proxy_port"
+msgstr "pd_proxy_port"
+
+#: ../../source/api_reference/configurations.rst:278
+msgid "LMCACHE_PD_PROXY_PORT"
+msgstr "LMCACHE_PD_PROXY_PORT"
+
+#: ../../source/api_reference/configurations.rst:279
+msgid ""
+"Port for proxy server. Required for senders to connect to inform the "
+"proxy when transfer to decoder has been completed"
+msgstr "代理服务器的端口。发送方需要连接以通知代理传输到解码器已完成。"
+
+#: ../../source/api_reference/configurations.rst:280
+msgid "pd_allocation_timeout_sec"
+msgstr "pd_allocation_timeout_sec"
+
+#: ../../source/api_reference/configurations.rst:281
+msgid "LMCACHE_PD_ALLOCATION_TIMEOUT_SEC"
+msgstr "LMCACHE_PD_ALLOCATION_TIMEOUT_SEC"
+
+#: ../../source/api_reference/configurations.rst:282
+msgid "Maximum seconds to retry memory allocation before giving up. Default: 5.0"
+msgstr "在放弃之前重试内存分配的最大秒数。默认值：5.0"
+
+#: ../../source/api_reference/configurations.rst:283
+msgid "pd_shutdown_timeout_sec"
+msgstr "pd_shutdown_timeout_sec"
+
+#: ../../source/api_reference/configurations.rst:284
+msgid "LMCACHE_PD_SHUTDOWN_TIMEOUT_SEC"
+msgstr "LMCACHE_PD_SHUTDOWN_TIMEOUT_SEC"
+
+#: ../../source/api_reference/configurations.rst:285
+msgid ""
+"Maximum seconds to wait for event loop shutdown and thread join. Default:"
+" 5.0"
+msgstr "事件循环关闭和线程加入的最大等待秒数。默认值：5.0"
+
+#: ../../source/api_reference/configurations.rst:286
+msgid "pd_condition_poll_interval_sec"
+msgstr "pd_condition_poll_interval_sec"
+
+#: ../../source/api_reference/configurations.rst:287
+msgid "LMCACHE_PD_CONDITION_POLL_INTERVAL_SEC"
+msgstr "LMCACHE_PD_CONDITION_POLL_INTERVAL_SEC"
+
+#: ../../source/api_reference/configurations.rst:288
+msgid ""
+"Polling interval in seconds when waiting on a threading/asyncio "
+"Condition. Small enough to be responsive, large enough not to spin-waste "
+"CPU. Default: 0.05"
+msgstr "在等待线程/asyncio Condition 时的轮询间隔（以秒为单位）。足够小以保持响应，足够大以避免浪费 CPU。默认值：0.05"
+
+#: ../../source/api_reference/configurations.rst:289
+msgid "pd_max_prefill_len"
+msgstr "pd_max_prefill_len"
+
+#: ../../source/api_reference/configurations.rst:290
+msgid "LMCACHE_PD_MAX_PREFILL_LEN"
+msgstr "LMCACHE_PD_MAX_PREFILL_LEN"
+
+#: ../../source/api_reference/configurations.rst:291
+msgid ""
+"Maximum prefill token length that the PD buffer must be able to hold. If "
+"> 0, initialization raises ValueError when the buffer capacity (in "
+"tokens) is smaller than this value. Set to 0 (default) to skip the check."
+msgstr ""
+"PD 缓冲区必须能够容纳的最大 Prefill 令牌长度。如果大于 0，当缓冲区容量（以令牌为单位）小于此值时，初始化将引发 "
+"ValueError。设置为 0（默认值）以跳过检查。"
+
+#: ../../source/api_reference/configurations.rst:292
+msgid "pd_backend_mode"
+msgstr "pd_backend_mode"
+
+#: ../../source/api_reference/configurations.rst:293
+msgid "LMCACHE_PD_BACKEND_MODE"
+msgstr "LMCACHE_PD_BACKEND_MODE"
+
+#: ../../source/api_reference/configurations.rst:294
+msgid ""
+"Select the PD backend implementation: 'async' (default) uses the asyncio-"
+"based implementation; 'sync' uses the original thread-based synchronous "
+"implementation. Default: \"async\""
+msgstr ""
+"选择 PD 后端实现：'async'（默认）使用基于 asyncio 的实现；'sync' "
+"使用原始的基于线程的同步实现。默认值：\\\"async\\\""
+
+#: ../../source/api_reference/configurations.rst:295
+msgid "pd_skip_proxy_notification"
+msgstr "pd_skip_proxy_notification"
+
+#: ../../source/api_reference/configurations.rst:296
+msgid "LMCACHE_PD_SKIP_PROXY_NOTIFICATION"
+msgstr "LMCACHE_PD_SKIP_PROXY_NOTIFICATION"
+
+#: ../../source/api_reference/configurations.rst:297
+msgid ""
+"When true, the sender skips ZMQ proxy notification after KV transfer and "
+"does not require pd_proxy_host/pd_proxy_port. This option is intended for"
+" external orchestrators only (e.g., vLLM Production Stack router) that "
+"manage the prefill-decode request flow via HTTP and do not rely on ZMQ "
+"notifications. It must not be used with LMCache's built-in disaggregation"
+" proxy (``disagg_proxy_server.py``), which depends on ZMQ notifications "
+"to know when KV transfer is complete before forwarding the decode "
+"request. Values: true/false. Default: false"
+msgstr ""
+"当为真时，发送方在 KV 传输后跳过 ZMQ 代理通知，并且不需要 pd_proxy_host/pd_proxy_port。此选项仅适用于管理通过"
+" HTTP 的分离式解码请求流的外部调度器（例如，vLLM 生产堆栈路由器），并且不依赖于 ZMQ 通知。它不得与 LMCache "
+"的内置分离代理（\\ ``disagg_proxy_server.py``\\ ）一起使用，因为该代理依赖于 ZMQ 通知来知道 KV "
+"传输何时完成，然后再转发解码请求。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:298
+msgid "pd_bidirectional"
+msgstr "pd_bidirectional"
+
+#: ../../source/api_reference/configurations.rst:299
+msgid "LMCACHE_PD_BIDIRECTIONAL"
+msgstr "LMCACHE_PD_BIDIRECTIONAL"
+
+#: ../../source/api_reference/configurations.rst:300
+msgid ""
+"When true, enables bidirectional NIXL cache probe. The prefiller queries "
+"the decoder for cached KV blocks before transfer, and reads cached blocks"
+" via NIXL RDMA instead of recomputing. Values: true/false. Default: false"
+msgstr ""
+"当为真时，启用双向 NIXL 缓存探测。Prefiller 在传输之前查询解码器以获取缓存的 KV 块，并通过 NIXL RDMA "
+"读取缓存的块，而不是重计算。值：true/false。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:301
+msgid "pd_peer_query_port"
+msgstr "pd_peer_query_port"
+
+#: ../../source/api_reference/configurations.rst:302
+msgid "LMCACHE_PD_PEER_QUERY_PORT"
+msgstr "LMCACHE_PD_PEER_QUERY_PORT"
+
+#: ../../source/api_reference/configurations.rst:303
+msgid ""
+"ZMQ ports for the bidirectional cache query channel (one per TP rank). "
+"Required on both prefiller and decoder when pd_bidirectional=true. "
+"Example: [7500, 7501, 7502, 7503]"
+msgstr ""
+"用于双向缓存查询通道的 ZMQ 端口（每个 TP 排名一个）。当 pd_bidirectional=true "
+"时，预填充器和解码器都需要此配置。示例：[7500, 7501, 7502, 7503]"
+
+#: ../../source/api_reference/configurations.rst:306
+msgid "P2P Backend Configurations"
+msgstr "P2P 后端配置"
+
+#: ../../source/api_reference/configurations.rst:308
+msgid ""
+"Settings for P2P (peer-to-peer) backend timeout behavior. These "
+"configurations are specified through ``extra_config``."
+msgstr "P2P（点对点）后端超时行为的设置。这些配置通过 ``extra_config`` 指定。"
+
+#: ../../source/api_reference/configurations.rst:320
+#: ../../source/api_reference/configurations.rst:345
+#: ../../source/api_reference/configurations.rst:378
+msgid "Configuration Key"
+msgstr "配置键"
+
+#: ../../source/api_reference/configurations.rst:321
+#: ../../source/api_reference/configurations.rst:346
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/api_reference/configurations.rst:323
+msgid "p2p_socket_recv_timeout_ms"
+msgstr "p2p_socket_recv_timeout_ms"
+
+#: ../../source/api_reference/configurations.rst:324
+msgid "30000"
+msgstr "30000"
+
+#: ../../source/api_reference/configurations.rst:325
+msgid "Timeout in milliseconds for socket receive operations"
+msgstr "套接字接收操作的超时时间（以毫秒为单位）"
+
+#: ../../source/api_reference/configurations.rst:326
+msgid "p2p_socket_send_timeout_ms"
+msgstr "p2p_socket_send_timeout_ms"
+
+#: ../../source/api_reference/configurations.rst:327
+msgid "10000"
+msgstr "10000"
+
+#: ../../source/api_reference/configurations.rst:328
+msgid "Timeout in milliseconds for socket send operations"
+msgstr "套接字发送操作的超时时间（以毫秒为单位）"
+
+#: ../../source/api_reference/configurations.rst:331
+msgid "Disk I/O Backend Configurations"
+msgstr "磁盘 I/O 后端配置"
+
+#: ../../source/api_reference/configurations.rst:333
+msgid ""
+"Settings shared by disk-based storage backends (local disk and GDS). "
+"These configurations are specified through ``extra_config``."
+msgstr "由基于磁盘的存储后端（本地磁盘和 GDS）共享的设置。这些配置通过 ``extra_config`` 指定。"
+
+#: ../../source/api_reference/configurations.rst:348
+msgid "use_odirect"
+msgstr "use_odirect"
+
+#: ../../source/api_reference/configurations.rst:349
+msgid "false"
+msgstr "假"
+
+#: ../../source/api_reference/configurations.rst:350
+msgid ""
+"Enable O_DIRECT for disk I/O, bypassing the kernel page cache. "
+"Recommended when most local CPU memory is already used for KV cache "
+"offloading."
+msgstr "启用 O_DIRECT 进行磁盘 I/O，绕过内核页面缓存。当大多数本地 CPU 内存已用于 KV Cache 卸载时，建议使用此选项。"
+
+#: ../../source/api_reference/configurations.rst:351
+msgid "disk_io_threads"
+msgstr "disk_io_threads"
+
+#: ../../source/api_reference/configurations.rst:352
+msgid "4"
+msgstr "4"
+
+#: ../../source/api_reference/configurations.rst:353
+msgid ""
+"Number of worker threads in the disk I/O thread pool. Applies to both the"
+" local disk backend and the GDS backend. Increase for higher parallelism "
+"on fast NVMe drives. (Replaces the deprecated ``gds_io_threads`` key.)"
+msgstr "磁盘 I/O 线程池中的工作线程数量。适用于本地磁盘后端和 GDS 后端。在快速 NVMe 驱动器上增加以提高并行性。（替代已弃用的 ``gds_io_threads`` 键。）"
+
+#: ../../source/api_reference/configurations.rst:356
+msgid "Nixl (as a storage backend) Configurations"
+msgstr "Nixl（作为存储后端）配置"
+
+#: ../../source/api_reference/configurations.rst:358
+msgid ""
+"Settings for using Nixl as a storage backend instead of disaggregated "
+"prefill. This mode requires additional configurations in "
+"``extra_config``."
+msgstr "将 Nixl 用作存储后端而不是分离式 Prefill 的设置。此模式需要在 ``extra_config`` 中进行额外配置。"
+
+#: ../../source/api_reference/configurations.rst:362
+msgid ""
+"This is a different mode from disaggregated prefill. When using Nixl as a"
+" storage backend, you need to configure it through ``extra_config``."
+msgstr "这是一种不同于分离式 Prefill 的模式。当使用 Nixl 作为存储后端时，您需要通过 ``extra_config`` 进行配置。"
+
+#: ../../source/api_reference/configurations.rst:380
+msgid "enable_nixl_storage"
+msgstr "enable_nixl_storage"
+
+#: ../../source/api_reference/configurations.rst:381
+msgid "Whether to enable Nixl storage backend. Values: true/false"
+msgstr "是否启用 Nixl 存储后端。值：true/false"
+
+#: ../../source/api_reference/configurations.rst:382
+msgid "nixl_backend"
+msgstr "nixl_backend"
+
+#: ../../source/api_reference/configurations.rst:383
+msgid ""
+"Storage backend type. Options: \"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\","
+" \"OBJ\""
+msgstr "存储后端类型。选项：“GDS”、“GDS_MT”、“POSIX”、“HF3FS”、“OBJ”"
+
+#: ../../source/api_reference/configurations.rst:384
+msgid "nixl_path"
+msgstr "nixl_path"
+
+#: ../../source/api_reference/configurations.rst:385
+msgid "File system path for Nixl storage"
+msgstr "Nixl 存储的文件系统路径"
+
+#: ../../source/api_reference/configurations.rst:386
+msgid "nixl_pool_size"
+msgstr "nixl_pool_size"
+
+#: ../../source/api_reference/configurations.rst:387
+msgid "Number of files or objects in the storage pool"
+msgstr "存储池中的文件或对象数量"
+
+#: ../../source/api_reference/configurations.rst:388
+msgid "nixl_endpoint_list"
+msgstr "nixl_endpoint_list"
+
+#: ../../source/api_reference/configurations.rst:389
+msgid ""
+"List of object-storage endpoint URLs for per-worker distribution. Each TP"
+" worker selects an entry round-robin by ``local_worker_id``, overriding "
+"``nixl_backend_params.endpoint_override``. Only applied when "
+"``nixl_backend`` is ``\"OBJ\"`` (silently ignored otherwise). Each entry "
+"must start with ``http://`` or ``https://``; an empty list raises "
+"``ValueError`` at engine init."
+msgstr ""
+"每个工作节点的对象存储端点 URL 列表。每个 TP 工作节点通过 ``local_worker_id`` 轮询选择一个条目，覆盖 "
+"``nixl_backend_params.endpoint_override``\\ 。仅在 ``nixl_backend`` 为 "
+"``\"OBJ\"`` 时应用（否则静默忽略）。每个条目必须以 ``http://`` 或 ``https://`` "
+"开头；空列表在引擎初始化时会引发 ``ValueError``\\ 。"
+
+#: ../../source/api_reference/configurations.rst:390
+msgid "nixl_use_hugepages"
+msgstr "nixl_use_hugepages"
+
+#: ../../source/api_reference/configurations.rst:391
+msgid ""
+"**Deprecated.** Use ``local_cpu_use_hugepages`` instead. When set, the "
+"value is copied into ``local_cpu_use_hugepages`` (a warning is logged) "
+"and the key is dropped. Hugepages have never applied to GPU buffers; in "
+"CPU mode the NIXL pool is now owned by ``LocalCPUBackend``."
+msgstr ""
+"**已弃用。** 请改用 ``local_cpu_use_hugepages``\\ 。设置后，该值将被复制到 "
+"``local_cpu_use_hugepages``\\ （会记录警告），并且该键将被丢弃。大页从未应用于 GPU 缓冲区；在 CPU "
+"模式下，NIXL 池现在由 ``LocalCPUBackend`` 拥有。"
+
+#: ../../source/api_reference/configurations.rst:395
+msgid "Additional Storage Configurations"
+msgstr "附加存储配置"
+
+#: ../../source/api_reference/configurations.rst:397
+msgid "Settings for different storage backends and paths."
+msgstr "不同存储后端和路径的设置。"
+
+#: ../../source/api_reference/configurations.rst:406
+msgid "gds_path"
+msgstr "gds_path"
+
+#: ../../source/api_reference/configurations.rst:407
+msgid "LMCACHE_GDS_PATH"
+msgstr "LMCACHE_GDS_PATH"
+
+#: ../../source/api_reference/configurations.rst:408
+msgid ""
+"Path for GDS backend. Supports comma-separated paths for multi-device I/O"
+" (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). See ``gds_path_sharding`` "
+"for how paths are assigned to GPUs."
+msgstr ""
+"GDS 后端的路径。支持以逗号分隔的多设备 I/O 路径（例如 ``/mnt/nvme0/cache,/mnt/nvme1/cache``\\ "
+"）。有关路径如何分配给 GPU，请参见 ``gds_path_sharding``\\ 。"
+
+#: ../../source/api_reference/configurations.rst:409
+msgid "gds_path_sharding"
+msgstr "gds_path_sharding"
+
+#: ../../source/api_reference/configurations.rst:410
+msgid "LMCACHE_GDS_PATH_SHARDING"
+msgstr "LMCACHE_GDS_PATH_SHARDING"
+
+#: ../../source/api_reference/configurations.rst:412
+msgid "gds_buffer_size"
+msgstr "gds_buffer_size"
+
+#: ../../source/api_reference/configurations.rst:413
+msgid "LMCACHE_GDS_BUFFER_SIZE"
+msgstr "LMCACHE_GDS_BUFFER_SIZE"
+
+#: ../../source/api_reference/configurations.rst:414
+msgid "Buffer size for GDS operations"
+msgstr "GDS 操作的缓冲区大小"
+
+#: ../../source/api_reference/configurations.rst:415
+msgid "use_gds"
+msgstr "use_gds"
+
+#: ../../source/api_reference/configurations.rst:416
+msgid "LMCACHE_USE_GDS"
+msgstr "LMCACHE_USE_GDS"
+
+#: ../../source/api_reference/configurations.rst:417
+msgid "Enable or disable GPU Direct Storage API usage (default: true)"
+msgstr "启用或禁用 GPU 直接存储 API 的使用（默认：true）"
+
+#: ../../source/api_reference/configurations.rst:418
+msgid "gds_backend"
+msgstr "gds_backend"
+
+#: ../../source/api_reference/configurations.rst:419
+msgid "LMCACHE_GDS_BACKEND"
+msgstr "LMCACHE_GDS_BACKEND"
+
+#: ../../source/api_reference/configurations.rst:420
+msgid "GDS library backend to use (default: \"cufile\")"
+msgstr "使用的 GDS 库后端（默认：\\\"cufile\\\"）"
+
+#: ../../source/api_reference/configurations.rst:423
+msgid "Custom Prometheus Histogram Buckets"
+msgstr "自定义 Prometheus 直方图桶"
+
+#: ../../source/api_reference/configurations.rst:425
+msgid ""
+"You can override the default bucket boundaries for any Prometheus "
+"histogram metric by adding a key ``histogram_bucket_<name>`` to "
+"``extra_config``, where ``<name>`` is the metric name **without** the "
+"``lmcache:`` prefix."
+msgstr ""
+"您可以通过向 ``extra_config`` 添加一个键 ``histogram_bucket_<name>`` 来覆盖任何 "
+"Prometheus 直方图度量的默认桶边界，其中 ``<name>`` 是度量名称 **不带** ``lmcache:`` 前缀。"
+
+#: ../../source/api_reference/configurations.rst:429
+msgid "The value must be a list of numeric boundaries (floats or ints)."
+msgstr "值必须是一个数字边界的列表（浮点数或整数）。"
+
+#: ../../source/api_reference/configurations.rst:441
+msgid "Available Histogram Names"
+msgstr "可用直方图名称"
+
+#: ../../source/api_reference/configurations.rst:443
+msgid "``time_to_retrieve``"
+msgstr "``time_to_retrieve``"
+
+#: ../../source/api_reference/configurations.rst:444
+msgid "Time to retrieve from cache (seconds)"
+msgstr "从缓存中检索所需时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:445
+msgid "``time_to_store``"
+msgstr "``time_to_store``"
+
+#: ../../source/api_reference/configurations.rst:446
+msgid "Time to store to cache (seconds)"
+msgstr "缓存存储时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:447
+msgid "``time_to_lookup``"
+msgstr "``time_to_lookup``"
+
+#: ../../source/api_reference/configurations.rst:448
+msgid "Time to lookup in cache (seconds)"
+msgstr "缓存查找时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:449
+msgid "``retrieve_process_tokens_time``"
+msgstr "``retrieve_process_tokens_time``"
+
+#: ../../source/api_reference/configurations.rst:450
+msgid "Time to process tokens in retrieve (seconds)"
+msgstr "在检索中处理令牌的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:451
+msgid "``retrieve_broadcast_time``"
+msgstr "``retrieve_broadcast_time``"
+
+#: ../../source/api_reference/configurations.rst:452
+msgid "Time to broadcast memory objects in retrieve (seconds)"
+msgstr "在检索中广播内存对象的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:453
+msgid "``retrieve_to_gpu_time``"
+msgstr "``retrieve_to_gpu_time``"
+
+#: ../../source/api_reference/configurations.rst:454
+msgid "Time to move data to GPU in retrieve (seconds)"
+msgstr "在检索中将数据移动到 GPU 的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:455
+msgid "``remote_backend_batched_get_blocking_time``"
+msgstr "``remote_backend_batched_get_blocking_time``"
+
+#: ../../source/api_reference/configurations.rst:456
+msgid "Time to get data from remote backend (seconds)"
+msgstr "从远程后端获取数据的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:457
+msgid "``instrumented_connector_batched_get_time``"
+msgstr "``instrumented_connector_batched_get_time``"
+
+#: ../../source/api_reference/configurations.rst:458
+msgid "Time used by the connector (seconds)"
+msgstr "连接器使用的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:459
+msgid "``store_process_tokens_time``"
+msgstr "``store_process_tokens_time``"
+
+#: ../../source/api_reference/configurations.rst:460
+msgid "Time to process tokens in store (seconds)"
+msgstr "存储中处理令牌的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:461
+msgid "``store_from_gpu_time``"
+msgstr "``store_from_gpu_time``"
+
+#: ../../source/api_reference/configurations.rst:462
+msgid "Time to move data from GPU in store (seconds)"
+msgstr "从 GPU 移动数据到存储的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:463
+msgid "``store_put_time``"
+msgstr "``store_put_time``"
+
+#: ../../source/api_reference/configurations.rst:464
+msgid "Time to put data to storage in store (seconds)"
+msgstr "将数据存储到存储中的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:465
+msgid "``retrieve_speed``"
+msgstr "``retrieve_speed``"
+
+#: ../../source/api_reference/configurations.rst:466
+msgid "Retrieve speed (tokens per second)"
+msgstr "检索速度（每秒令牌数）"
+
+#: ../../source/api_reference/configurations.rst:467
+msgid "``store_speed``"
+msgstr "``store_speed``"
+
+#: ../../source/api_reference/configurations.rst:468
+msgid "Store speed (tokens per second)"
+msgstr "存储速度（每秒令牌数）"
+
+#: ../../source/api_reference/configurations.rst:469
+msgid "``p2p_time_to_transfer``"
+msgstr "``p2p_time_to_transfer``"
+
+#: ../../source/api_reference/configurations.rst:470
+msgid "Time to transfer via P2P (seconds)"
+msgstr "通过 P2P 传输的时间（秒）"
+
+#: ../../source/api_reference/configurations.rst:471
+msgid "``p2p_transfer_speed``"
+msgstr "``p2p_transfer_speed``"
+
+#: ../../source/api_reference/configurations.rst:472
+msgid "P2P transfer speed (tokens per second)"
+msgstr "P2P 传输速度（每秒令牌数）"
+
+#: ../../source/api_reference/configurations.rst:473
+msgid "``remote_time_to_get``"
+msgstr "``remote_time_to_get``"
+
+#: ../../source/api_reference/configurations.rst:474
+msgid "Time to get from remote backends (ms)"
+msgstr "从远程后端获取的时间（毫秒）"
+
+#: ../../source/api_reference/configurations.rst:475
+msgid "``remote_time_to_put``"
+msgstr "``remote_time_to_put``"
+
+#: ../../source/api_reference/configurations.rst:476
+msgid "Time to put to remote backends (ms)"
+msgstr "远程后端的放置时间（毫秒）"
+
+#: ../../source/api_reference/configurations.rst:477
+msgid "``remote_time_to_get_sync``"
+msgstr "``remote_time_to_get_sync``"
+
+#: ../../source/api_reference/configurations.rst:478
+msgid "Time to get from remote backends synchronously (ms)"
+msgstr "从远程后端同步获取的时间（毫秒）"
+
+#: ../../source/api_reference/configurations.rst:479
+msgid "``request_cache_hit_rate``"
+msgstr "``request_cache_hit_rate``"
+
+#: ../../source/api_reference/configurations.rst:480
+msgid "Request cache hit rate (0.0 to 1.0)"
+msgstr "请求缓存命中率 (0.0 到 1.0)"
+
+#: ../../source/api_reference/configurations.rst:481
+msgid "``request_cache_lifespan``"
+msgstr "``request_cache_lifespan``"
+
+#: ../../source/api_reference/configurations.rst:482
+msgid "Request cache lifespan (minutes)"
+msgstr "请求缓存生命周期（分钟）"
+
+#: ../../source/api_reference/configurations.rst:485
+msgid "Internal API Server Configurations"
+msgstr "内部 API 服务器配置"
+
+#: ../../source/api_reference/configurations.rst:487
+msgid ""
+"Settings for the internal API server that provides management and "
+"debugging APIs for LMCache engines. The API server runs on each worker "
+"and scheduler, allowing you to inspect and control LMCache behavior at "
+"runtime."
+msgstr ""
+"用于内部 API 服务器的设置，该服务器为 LMCache 引擎提供管理和调试 API。API "
+"服务器在每个工作节点和调度器上运行，允许您在运行时检查和控制 LMCache 的行为。"
+
+#: ../../source/api_reference/configurations.rst:491
+msgid "The internal API server provides endpoints for:"
+msgstr "内部 API 服务器提供以下端点："
+
+#: ../../source/api_reference/configurations.rst:493
+msgid "**Metrics**: Performance and cache statistics"
+msgstr "**指标**\\ ：性能和缓存统计信息"
+
+#: ../../source/api_reference/configurations.rst:494
+msgid "**Configuration**: Runtime configuration inspection"
+msgstr "**配置**: 运行时配置检查"
+
+#: ../../source/api_reference/configurations.rst:495
+msgid "**Metadata**: Engine and model metadata"
+msgstr "**元数据**\\ ：引擎和模型元数据"
+
+#: ../../source/api_reference/configurations.rst:496
+msgid "**Threads**: Thread debugging information"
+msgstr "**线程**\\ ：线程调试信息"
+
+#: ../../source/api_reference/configurations.rst:497
+msgid "**Log Level**: Dynamic log level adjustment"
+msgstr "**日志级别**\\ ：动态日志级别调整"
+
+#: ../../source/api_reference/configurations.rst:498
+msgid ""
+"**Script Execution**: Run custom Python scripts with access to the "
+"LMCache engine"
+msgstr "**脚本执行**\\ ：运行自定义 Python 脚本，访问 LMCache 引擎"
+
+#: ../../source/api_reference/configurations.rst:501
+msgid "Configuration Options"
+msgstr "配置选项"
+
+#: ../../source/api_reference/configurations.rst:510
+msgid "internal_api_server_enabled"
+msgstr "internal_api_server_enabled"
+
+#: ../../source/api_reference/configurations.rst:511
+msgid "LMCACHE_INTERNAL_API_SERVER_ENABLED"
+msgstr "LMCACHE_INTERNAL_API_SERVER_ENABLED"
+
+#: ../../source/api_reference/configurations.rst:512
+msgid "Whether to enable internal API server. Default: false"
+msgstr "是否启用内部 API 服务器。默认值：false"
+
+#: ../../source/api_reference/configurations.rst:513
+msgid "internal_api_server_host"
+msgstr "internal_api_server_host"
+
+#: ../../source/api_reference/configurations.rst:514
+msgid "LMCACHE_INTERNAL_API_SERVER_HOST"
+msgstr "LMCACHE_INTERNAL_API_SERVER_HOST"
+
+#: ../../source/api_reference/configurations.rst:515
+msgid "Host for internal API server to bind to. Default: \"0.0.0.0\""
+msgstr "用于绑定内部 API 服务器的主机。默认值：“0.0.0.0”"
+
+#: ../../source/api_reference/configurations.rst:516
+msgid "internal_api_server_port_start"
+msgstr "internal_api_server_port_start"
+
+#: ../../source/api_reference/configurations.rst:517
+msgid "LMCACHE_INTERNAL_API_SERVER_PORT_START"
+msgstr "LMCACHE_INTERNAL_API_SERVER_PORT_START"
+
+#: ../../source/api_reference/configurations.rst:518
+msgid ""
+"Starting port for internal API server. Port assignment: Scheduler = "
+"port_start + 0, Worker i = port_start + i + 1. Example: If "
+"port_start=6999, then Scheduler=6999, Worker 0=7000, Worker 1=7001, etc. "
+"Default: 6999"
+msgstr ""
+"内部 API 服务器的起始端口。端口分配：调度器 = port_start + 0，工作者 i = port_start + i + "
+"1。示例：如果 port_start=6999，则调度器=6999，工作者 0=7000，工作者 1=7001，等等。默认值：6999"
+
+#: ../../source/api_reference/configurations.rst:519
+msgid "internal_api_server_include_index_list"
+msgstr "internal_api_server_include_index_list"
+
+#: ../../source/api_reference/configurations.rst:520
+msgid "LMCACHE_INTERNAL_API_SERVER_INCLUDE_INDEX_LIST"
+msgstr "LMCACHE_INTERNAL_API_SERVER_INCLUDE_INDEX_LIST"
+
+#: ../../source/api_reference/configurations.rst:521
+msgid ""
+"List of worker/scheduler indices to enable API server on. Use 0 for "
+"scheduler, 1 for worker 0, 2 for worker 1, etc. If null, enables on all "
+"workers/scheduler. Example: [0, 1] enables only on scheduler and worker "
+"0. Default: null"
+msgstr ""
+"启用 API 服务器的工作者/调度器索引列表。使用 0 表示调度器，1 表示工作者 0，2 表示工作者 1，依此类推。如果为 "
+"null，则在所有工作者/调度器上启用。示例：[0, 1] 仅在调度器和工作者 0 上启用。默认值：null"
+
+#: ../../source/api_reference/configurations.rst:522
+msgid "internal_api_server_socket_path_prefix"
+msgstr "internal_api_server_socket_path_prefix"
+
+#: ../../source/api_reference/configurations.rst:523
+msgid "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX"
+msgstr "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX"
+
+#: ../../source/api_reference/configurations.rst:524
+#, python-brace-format
+msgid ""
+"If specified, use Unix domain sockets instead of TCP ports. Socket paths "
+"will be \"{prefix}_{port}\". Example: \"/tmp/lmcache_api_socket\" creates"
+" \"/tmp/lmcache_api_socket_6999\", \"/tmp/lmcache_api_socket_7000\", etc."
+" Default: null"
+msgstr ""
+"如果指定，则使用 Unix 域套接字而不是 TCP 端口。套接字路径将为 "
+"\\\"{prefix}_{port}\\\"。示例：\\\"/tmp/lmcache_api_socket\\\" 创建 "
+"\\\"/tmp/lmcache_api_socket_6999\\\"、\\\"/tmp/lmcache_api_socket_7000\\\""
+" 等。默认值：null"
+
+#: ../../source/api_reference/configurations.rst:527
+msgid "Plugin Configurations"
+msgstr "插件配置"
+
+#: ../../source/api_reference/configurations.rst:529
+msgid "Settings for plugin system."
+msgstr "插件系统的设置。"
+
+#: ../../source/api_reference/configurations.rst:538
+msgid "plugin_locations"
+msgstr "plugin_locations"
+
+#: ../../source/api_reference/configurations.rst:539
+msgid "LMCACHE_PLUGIN_LOCATIONS"
+msgstr "LMCACHE_PLUGIN_LOCATIONS"
+
+#: ../../source/api_reference/configurations.rst:540
+msgid "List of plugin locations. Default: []"
+msgstr "插件位置列表。默认值：[]"
+
+#: ../../source/api_reference/configurations.rst:543
+msgid "Deprecated Configurations"
+msgstr "已弃用的配置"
+
+#: ../../source/api_reference/configurations.rst:545
+msgid "These configurations are deprecated and may be removed in future versions."
+msgstr "这些配置已被弃用，可能会在未来的版本中被移除。"
+
+#: ../../source/api_reference/configurations.rst:554
+msgid "audit_actual_remote_url"
+msgstr "audit_actual_remote_url"
+
+#: ../../source/api_reference/configurations.rst:555
+msgid "LMCACHE_AUDIT_ACTUAL_REMOTE_URL"
+msgstr "LMCACHE_AUDIT_ACTUAL_REMOTE_URL"
+
+#: ../../source/api_reference/configurations.rst:556
+msgid ""
+"(Deprecated) URL of actual remote LMCache instance for auditing. Use "
+"extra_config['audit_actual_remote_url'] instead"
+msgstr ""
+"(已弃用) 用于审计的实际远程 LMCache 实例的 URL。请改用 "
+"extra_config['audit_actual_remote_url']。"
+
+#~ msgid ""
+#~ "List of object-storage endpoint URLs "
+#~ "for per-worker distribution. Overrides "
+#~ "``nixl_backend_params.endpoint_override`` when set."
+#~ msgstr ""
+#~ "每个工作节点分发的对象存储端点 URL 列表。当设置时，会覆盖 "
+#~ "``nixl_backend_params.endpoint_override``。"
+
+#~ msgid ""
+#~ "Whether to use Linux hugepages (2 "
+#~ "MiB) for the NIXL CPU buffer. "
+#~ "Requires pre-allocated hugepages (``sysctl "
+#~ "vm.nr_hugepages``). Values: true/false. Default: "
+#~ "false"
+#~ msgstr ""
+#~ "是否为 NIXL CPU 缓冲区使用 Linux 大页（2 "
+#~ "MiB）。需要预分配大页（``sysctl vm.nr_hugepages``）。值：true/false。默认值：false"
+

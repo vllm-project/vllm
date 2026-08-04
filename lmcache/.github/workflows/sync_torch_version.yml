@@ -1,0 +1,147 @@
+name: Sync Torch Version
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-torch-version
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync torch pin with vLLM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          token: ${{ github.token }}
+          fetch-depth: 0
+
+      - name: Sync torch version with vLLM
+        id: sync
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          readonly UPSTREAM_URL="https://raw.githubusercontent.com/vllm-project/vllm/main/pyproject.toml"
+          readonly TARGET_FILE="pyproject.toml"
+
+          tmp_upstream="$(mktemp)"
+          tmp_output="$(mktemp)"
+
+          cleanup() {
+            rm -f "$tmp_upstream" "$tmp_output"
+          }
+          trap cleanup EXIT
+
+          echo "Fetching upstream pyproject.toml from vLLM..."
+          curl \
+            --fail \
+            --show-error \
+            --silent \
+            --location \
+            --retry 3 \
+            --retry-delay 2 \
+            --connect-timeout 10 \
+            "$UPSTREAM_URL" \
+            -o "$tmp_upstream"
+
+          extract_torch_version() {
+            local file="$1"
+            sed -nE 's/.*torch[[:space:]]*==[[:space:]]*([0-9]+(\.[0-9]+){1,2}).*/\1/p' "$file"
+          }
+
+          mapfile -t upstream_matches < <(extract_torch_version "$tmp_upstream")
+          mapfile -t current_matches < <(extract_torch_version "$TARGET_FILE")
+
+          if [[ "${#upstream_matches[@]}" -ne 1 ]]; then
+            echo "Expected exactly one torch pin in upstream file, found ${#upstream_matches[@]}"
+            printf 'Matches: %s\n' "${upstream_matches[@]:-<none>}"
+            exit 1
+          fi
+
+          if [[ "${#current_matches[@]}" -ne 1 ]]; then
+            echo "Expected exactly one torch pin in ${TARGET_FILE}, found ${#current_matches[@]}"
+            printf 'Matches: %s\n' "${current_matches[@]:-<none>}"
+            exit 1
+          fi
+
+          upstream="${upstream_matches[0]}"
+          current="${current_matches[0]}"
+
+          echo "Current torch version : $current"
+          echo "Upstream torch version: $upstream"
+
+          {
+            echo "current=$current"
+            echo "upstream=$upstream"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$upstream" == "$current" ]]; then
+            echo "Torch version already up to date."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          awk -v new_ver="$upstream" '
+            BEGIN { updated = 0 }
+            {
+              if ($0 ~ /torch[[:space:]]*==[[:space:]]*[0-9]+(\.[0-9]+){1,2}/) {
+                sub(/torch[[:space:]]*==[[:space:]]*[0-9]+(\.[0-9]+){1,2}/, "torch==" new_ver)
+                updated++
+              }
+              print
+            }
+            END {
+              if (updated != 1) {
+                printf("Expected to update exactly one torch pin, updated %d\n", updated) > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' "$TARGET_FILE" > "$tmp_output"
+
+          mv "$tmp_output" "$TARGET_FILE"
+
+          if git diff --quiet -- "$TARGET_FILE"; then
+            echo "No file change detected after update."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ github.token }}
+          branch: automation/sync-torch-version
+          base: dev
+          delete-branch: true
+          signoff: true
+          add-paths: |
+            pyproject.toml
+          commit-message: "[Build] sync torch version with vLLM (${{
+            steps.sync.outputs.upstream }})"
+          title: "[Build] sync torch version with vLLM (${{
+            steps.sync.outputs.upstream }})"
+          body: |
+            Auto-sync the pinned torch version in `pyproject.toml` with vLLM.
+
+            - Current: `${{ steps.sync.outputs.current }}`
+            - Upstream: `${{ steps.sync.outputs.upstream }}`
+
+            This PR was generated automatically by GitHub Actions.
+          labels: |
+            dependencies
+            automation

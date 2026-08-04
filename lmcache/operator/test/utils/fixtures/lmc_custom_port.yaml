@@ -1,0 +1,18 @@
+# Custom-port LMCacheEngine fixture for the custom-port smoke spec.
+#
+# Exercises the non-default code paths in BuildContainerArgs and
+# BuildLookupService: the controller must propagate spec.server.port
+# (6555) and spec.server.chunkSize (128) into both the DaemonSet
+# container args and the lookup Service port. The golden assertion in
+# crd_smoke_test.go pairs this fixture with the expected ConfigMap.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: smoke-custom-port
+spec:
+  nodeSelector: {}
+  server:
+    port: 6555
+    chunkSize: 128
+  l1:
+    sizeGB: 10

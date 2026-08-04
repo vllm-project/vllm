@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pre-commit hook: checks format, lint, and spelling on staged Go files.
+# Install with: make install-hooks
+set -euo pipefail
+
+# Only run if Go files are staged.
+STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
+if [ -z "$STAGED_GO" ]; then
+  exit 0
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+LOCALBIN="${REPO_ROOT}/operator/bin"
+GOLANGCI_LINT="${LOCALBIN}/golangci-lint"
+
+printf '==> Checking format (go fmt)...\n'
+UNFMT=$(gofmt -l $STAGED_GO)
+if [ -n "$UNFMT" ]; then
+  printf 'ERROR: The following files are not formatted:\n'
+  printf '  %s\n' $UNFMT
+  printf 'Run "go fmt ./..." to fix.\n'
+  exit 1
+fi
+
+printf '==> Running go vet...\n'
+go vet ./...
+
+printf '==> Running golangci-lint (lint + spelling)...\n'
+if [ ! -x "$GOLANGCI_LINT" ]; then
+  printf 'golangci-lint not found. Run "make golangci-lint" first.\n'
+  exit 1
+fi
+"$GOLANGCI_LINT" run --timeout 5m
+
+printf 'All pre-commit checks passed.\n'

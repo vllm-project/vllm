@@ -1,0 +1,126 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache
+  namespace: default
+spec:
+  # -- Container image --
+  # image:
+  #   repository: lmcache/vllm-openai   # default
+  #   tag: latest                        # default
+  #   pullPolicy: IfNotPresent           # Always | Never | IfNotPresent
+  # imagePullSecrets:
+  #   - name: my-registry-secret
+
+  # -- Server config --
+  # server:
+  #   port: 5555                  # default, ZMQ server port [1024, 65535]
+  #   httpPort: 8080              # default, HTTP frontend port (health, admin)
+  #   chunkSize: 256              # default, token chunk size
+  #   maxWorkers: 1               # default, worker threads
+  #   hashAlgorithm: blake3       # builtin | sha256_cbor | blake3
+
+  # -- L1 cache (REQUIRED) --
+  l1:
+    sizeGB: 60
+
+  # -- Eviction --
+  # eviction:
+  #   policy: LRU                 # default (only supported value)
+  #   triggerWatermark: 0.8       # default, range (0.0, 1.0]
+  #   evictionRatio: 0.2          # default, range (0.0, 1.0]
+
+  # -- Prometheus monitoring --
+  # prometheus:
+  #   enabled: true               # default
+  #   port: 9090                  # default
+  #   serviceMonitor:
+  #     enabled: false            # default, requires Prometheus Operator
+  #     interval: 30s             # default
+  #     labels:
+  #       release: kube-prometheus-stack
+
+  # -- L2 storage backend (single adapter) --
+  # l2Backend:
+  #   # Option A: Redis/Valkey (native RESP connector)
+  #   resp:
+  #     host: redis.default.svc.cluster.local
+  #     port: 6379
+  #     numWorkers: 8             # default, C++ I/O threads
+  #     maxCapacityGB: 0          # default (0 = no eviction tracking)
+  #     authSecretRef:            # optional, Secret with "username"/"password" keys
+  #       name: redis-auth
+  #       namespace: redis        # omit if same namespace as LMCacheEngine
+  #
+  #   # Option B: Raw escape hatch (for nixl_store, fs, mock, etc.)
+  #   # raw:
+  #   #   type: nixl_store
+  #   #   config:
+  #   #     backend: "POSIX"
+  #   #     backend_params:
+  #   #       file_path: "/data/lmcache/l2"
+  #   #       use_direct_io: "false"
+  #   #     pool_size: 64
+  #
+  #   # L2 policies
+  #   storePolicy: default        # default | skip_l1 (buffer-only mode)
+  #   prefetchPolicy: default     # default
+  #   prefetchMaxInFlight: 8      # default, max concurrent L2->L1 loads
+
+  # -- Connection-injection webhook defaults (optional) --
+  # The mutating webhook always wires opted-in vLLM pods to this engine
+  # (--kv-transfer-config, hostIPC, PYTHONHASHSEED). Set injection.payloadImage to
+  # ALSO stage an lmcache code tree into the vLLM container (emptyDir + init
+  # container + read-only mount + PYTHONPATH), pinning vLLM's lmcache to a
+  # specific build so client and server match. Leave unset for connection-only.
+  # injection:
+  #   payloadImage:                 # SEPARATE image: ships lmcache under /payload,
+  #     repository: registry.example.com/lmcache/lmcache-payload  # REQUIRED (no default)
+  #     tag: pinned                 # default: latest
+  #     pullPolicy: IfNotPresent    # Always | Never | IfNotPresent
+  #   imagePullSecrets:             # for a private payload image
+  #     - name: lmcache-payload-pull
+  #   targetContainer: vllm         # default: first container
+
+  # -- Resource overrides (auto-computed from l1.sizeGB if omitted) --
+  # resourceOverrides:
+  #   requests:
+  #     memory: 70Gi
+  #     cpu: "4"
+  #   limits:
+  #     memory: 100Gi
+
+  # -- Logging --
+  # logLevel: INFO                # DEBUG | INFO | WARNING | ERROR
+
+  # -- Scheduling --
+  # nodeSelector:                 # defaults to nvidia.com/gpu.present: "true"
+  #   nvidia.com/gpu.present: "true"
+  # affinity: {}
+  # tolerations: []
+
+  # -- Pod overrides --
+  # WARNING: Do NOT mount an emptyDir (or any volume) at /dev/shm. The operator
+  # sets hostIPC: true so the container shares the host's /dev/shm. Mounting an
+  # emptyDir would shadow the host's /dev/shm with a private tmpfs, breaking
+  # CUDA IPC between LMCache and vLLM pods (cudaIpcOpenMemHandle fails because
+  # IPC handles from one pod become invisible to the other). The same applies
+  # to vLLM pods that connect to this LMCache instance.
+  # env: []
+  # volumes: []
+  # volumeMounts: []
+  # podAnnotations: {}
+  # podLabels: {}
+  # serviceAccountName: ""
+  # priorityClassName: ""
+
+  # -- Security --
+  # Run the engine container in privileged mode. Defaults to false. On most
+  # clusters runtimeClassName: nvidia + NVIDIA_VISIBLE_DEVICES=all is enough for
+  # the engine to see all GPUs; set this to true only on clusters where it
+  # cannot see them otherwise. Requires the namespace to allow the privileged
+  # Pod Security Standard.
+  # privileged: false
+
+  # -- Extra CLI flags (appended last, can override any auto-generated flag) --
+  # extraArgs: []

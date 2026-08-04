@@ -1,0 +1,6 @@
+max_local_cpu_size: 60
+
+enable_blending: True
+blend_special_str: " # # "
+use_layerwise: True
+

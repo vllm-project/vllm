@@ -1,0 +1,6 @@
+chunk_size: 256
+gds_path: "/tmp/gds/test-cache"
+local_cpu: False
+save_decode_cache: True
+gds_buffer_size: 128
+gds_backend: "cufile"

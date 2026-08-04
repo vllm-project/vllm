@@ -1,0 +1,14 @@
+local_cpu: false
+chunk_size: 256
+
+nixl_buffer_size: 1073741824
+nixl_buffer_device: cpu
+extra_config:
+  enable_nixl_storage: true
+  nixl_backend: POSIX
+  nixl_pool_size: 2
+  nixl_path: 
+    - /tmp/nixl/cache0
+    - /tmp/nixl/cache1
+    - /tmp/nixl/cache2
+  nixl_path_sharding: by_gpu

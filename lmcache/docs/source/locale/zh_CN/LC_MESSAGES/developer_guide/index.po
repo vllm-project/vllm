@@ -1,0 +1,39 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/index.rst:2
+msgid "Developer Guide"
+msgstr "开发者指南"
+
+#: ../../source/developer_guide/index.rst:4
+msgid ""
+"How to contribute to LMCache and extend it with new storage backends, CLI"
+" commands, and HTTP endpoints."
+msgstr "如何为 LMCache 贡献代码，并通过新的存储后端、CLI 命令和 HTTP 端点对其进行扩展。"
+
+#: ../../source/developer_guide/index.rst:12
+msgid "extending_lmcache/adding_a_new_device_backend"
+msgstr "extending_lmcache/adding_a_new_device_backend"
+
+#: ../../source/developer_guide/index.rst:13
+msgid "cli extending_http_api"
+msgstr "cli extending_http_api"
+

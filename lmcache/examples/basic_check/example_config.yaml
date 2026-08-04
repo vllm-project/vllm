@@ -1,0 +1,13 @@
+# LMCache Basic Check Example Configuration
+# This configuration file provides settings optimized for basic check operations
+
+# Basic cache settings
+chunk_size: 256
+local_cpu: False
+max_local_cpu_size: 1
+save_unfull_chunk: False
+
+remote_url: "fs://host:0/tmp/lmcache_fs_test"
+
+extra_config:
+  save_chunk_meta: False

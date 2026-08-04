@@ -1,0 +1,126 @@
+# The LMCache ROCm Dockerfile builds an LMCache image integrated with
+# vLLM-ROCm for AMD Instinct GPUs (MI300X/MI325X, MI350X/MI355X).
+#
+# Please update any changes made here to:
+# docs/source/developer_guide/docker_file.rst
+# docs/source/getting_started/installation.rst
+# docs/source/production/docker_deployment.rst
+#
+# Key differences from the CUDA Dockerfile:
+# - Uses ROCm base image instead of CUDA
+# - Builds HIP extensions (BUILD_WITH_HIP=1, CXX=hipcc)
+# - Skips flashinfer (not available on ROCm)
+# - Skips NIXL (not yet available on ROCm)
+
+ARG ROCM_VERSION=7.0
+ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+
+#################### BASE BUILD IMAGE ####################
+
+FROM ${BASE_IMAGE} AS base
+
+ARG PYTHON_VERSION=3.12
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Install Python and other dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ccache software-properties-common git curl sudo \
+        python3 python3-dev python3-venv python3-pip tzdata \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv ~/.local/bin/uv /usr/local/bin/ \
+    && mv ~/.local/bin/uvx /usr/local/bin/ \
+    && uv venv /opt/venv \
+    && . /opt/venv/bin/activate \
+    && python3 --version
+
+WORKDIR /workspace
+
+# ROCm GPU architectures — use PYTORCH_ROCM_ARCH (comma-separated)
+# which is what PyTorch's extension builder reads for ROCm targets.
+ARG PYTORCH_ROCM_ARCH="gfx942,gfx950"
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+
+#################### vLLM-ROCm & LMCache (Build) ##########################
+
+FROM base AS image-build
+
+ARG ROCM_VERSION
+
+COPY ./requirements/build.txt build.txt
+
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+ARG VLLM_VERSION=nightly
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    . /opt/venv/bin/activate && \
+    uv pip install -r build.txt
+
+ARG LMCACHE_COMMIT_ID=1
+
+COPY . /workspace/LMCache
+WORKDIR /workspace/LMCache
+
+# Build LMCache with HIP extensions and install vLLM-ROCm.
+# - BUILD_WITH_HIP=1: compile HIP kernels instead of CUDA
+# - CXX=hipcc: required by setup.py for HIP compilation
+# - --no-build-isolation: use the ROCm torch installed by vLLM
+# - vLLM ROCm wheels from vllm.ai index (dynamic ROCM_TAG)
+# - Skip flashinfer (CUDA-only)
+RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
+    --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
+    . /opt/venv/bin/activate && \
+    ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \
+    if [ "$VLLM_VERSION" = "nightly" ]; then \
+        uv pip install --prerelease=allow \
+            'vllm[runai,tensorizer]' \
+            --extra-index-url https://wheels.vllm.ai/nightly/${ROCM_TAG} \
+            --index-strategy unsafe-best-match ; \
+    else \
+        uv pip install --prerelease=allow \
+            "vllm[runai,tensorizer]==${VLLM_VERSION}" \
+            --extra-index-url https://wheels.vllm.ai/${ROCM_TAG} \
+            --index-strategy unsafe-best-match ; \
+    fi && \
+    python3 -c 'import torch; print("TORCH=", torch.__version__, "HIP=", torch.version.hip)' && \
+    BUILD_WITH_HIP=1 CXX=hipcc python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose
+
+WORKDIR /workspace
+ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+
+#################### vLLM-ROCm & LMCache (Release) #######################
+
+FROM base AS image-release
+
+ARG ROCM_VERSION
+
+# Install vLLM-ROCm and build LMCache from source with HIP extensions.
+# PyPI lmcache>=0.4 ships only binary wheels (no sdist), so --no-binary
+# cannot force a source build.  Cloning from git ensures HIP extensions
+# are compiled against the ROCm torch installed by vLLM.
+# Build deps are installed from the cloned source's requirements/build.txt
+# to avoid version mismatches with a local COPY.
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+ARG LMCACHE_RELEASE_VERSION=dev
+RUN . /opt/venv/bin/activate && \
+    ROCM_TAG=rocm$(echo ${ROCM_VERSION} | tr -d '.') && \
+    uv pip install --prerelease=allow 'vllm[runai,tensorizer]' \
+        --extra-index-url https://wheels.vllm.ai/${ROCM_TAG} \
+        --index-strategy unsafe-best-match && \
+    git clone --depth 1 -b ${LMCACHE_RELEASE_VERSION} \
+        https://github.com/LMCache/LMCache.git /tmp/lmcache && \
+    cd /tmp/lmcache && \
+    uv pip install -r requirements/build.txt && \
+    BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation . --verbose && \
+    rm -rf /tmp/lmcache
+
+WORKDIR /workspace
+ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

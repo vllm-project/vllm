@@ -1,0 +1,16 @@
+chunk_size: 16 # the "golden spot" for high throughput transfers for redis is ~4 MB (any higher or lower will cause performance degradation, for a model like meta-llama/Llama-3.1-8B-Instruct, this is around 16 tokens)
+local_cpu: false
+max_local_cpu_size: 20.0
+remote_url: "resp://localhost:6379"
+async_loading: false # LMCache RESP also support async loading
+remote_serde: "naive"
+blocking_timeout_secs: 120
+extra_config:
+  resp_num_threads: 8 # default is 8 if not specified
+  save_chunk_meta: False # make sure we have fixed size payloads
+  # Authentication: prefer environment variables to keep secrets out of logs.
+  #   export LMCACHE_RESP_USERNAME="default"
+  #   export LMCACHE_RESP_PASSWORD="YOUR_REDIS_PASSWORD"
+  # Alternatively, set them here (they will appear in logged config):
+  # username: "default"
+  # password: "YOUR_REDIS_PASSWORD"

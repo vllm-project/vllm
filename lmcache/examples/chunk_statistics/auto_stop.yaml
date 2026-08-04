@@ -1,0 +1,20 @@
+# Enable internal API server for interacting with the chunk statistics API
+internal_api_server_enabled: True
+# Base port for the API server
+# actual_port = internal_api_server_port_start + index
+# Scheduler → 6999 + 0 = 6999
+# Worker 0 → 6999 + 1 = 7000
+internal_api_server_port_start: 6999
+
+# Enable chunk statistics with auto-stop configuration
+enable_chunk_statistics: true
+chunk_statistics_strategy: "file_hash"
+chunk_statistics_auto_start_statistics: true
+extra_config:
+  chunk_statistics_file_output_dir: "/tmp/lmcache_chunk_statistics"
+  chunk_statistics_file_max_count: 10
+  chunk_statistics_file_rotation_size: 10485760  # 10MB for testing
+
+# Auto-stop configuration (small values for testing)
+chunk_statistics_auto_exit_timeout_hours: 0.1  # Stop after 6 minutes
+chunk_statistics_auto_exit_target_unique_chunks: 10000  # Stop after 10K unique chunks

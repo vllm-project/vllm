@@ -1,0 +1,32 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/distributed_kv_cache.rst:2
+msgid "Distributed KV Cache"
+msgstr "分布式 KV Cache"
+
+#: ../../source/distributed_kv_cache.rst:4
+msgid ""
+"Sharing and coordinating KV cache across multiple LMCache servers and "
+"inference instances -- disaggregated prefill, peer-to-peer sharing, "
+"multi-server coordination, and cache management."
+msgstr "在多个 LMCache 服务器和推理实例之间共享和协调 KV Cache——分离式预填充、点对点共享、多服务器协调与缓存管理。"
+

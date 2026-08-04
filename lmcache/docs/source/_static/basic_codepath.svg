@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="800" height="600" fill="#f8f9fa"/>
+  
+  <!-- GPU Model Runner Box -->
+  <rect x="50" y="50" width="700" height="500" fill="#e3f2fd" stroke="#1976d2" stroke-width="3" rx="10"/>
+  <text x="400" y="40" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#1976d2">GPU Model Runner</text>
+  
+  <!-- start_load_kv() -->
+  <rect x="80" y="80" width="640" height="40" fill="#ffecb3" stroke="#f57f17" stroke-width="2" rx="5"/>
+  <text x="400" y="105" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#f57f17">start_load_kv()</text>
+  
+  <!-- Layer 1 -->
+  <g>
+    <rect x="100" y="140" width="600" height="80" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <!-- wait_for_layer_load() -->
+    <rect x="120" y="150" width="200" height="25" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="220" y="167" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#4a148c">wait_for_layer_load()</text>
+    
+    <!-- Attention 1 -->
+    <rect x="340" y="150" width="120" height="25" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="400" y="167" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#bf360c">Attention 1</text>
+    
+    <!-- save_kv_layer() -->
+    <rect x="480" y="150" width="200" height="25" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="580" y="167" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#1b5e20">save_kv_layer()</text>
+    
+    <!-- Arrow from wait_for_layer_load to Attention -->
+    <path d="M 320 162.5 L 340 162.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    
+    <!-- Arrow from Attention to save_kv_layer -->
+    <path d="M 460 162.5 L 480 162.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- Layer 2 -->
+  <g>
+    <rect x="100" y="240" width="600" height="80" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <!-- wait_for_layer_load() -->
+    <rect x="120" y="250" width="200" height="25" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="220" y="267" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#4a148c">wait_for_layer_load()</text>
+    
+    <!-- Attention 2 -->
+    <rect x="340" y="250" width="120" height="25" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="400" y="267" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#bf360c">Attention 2</text>
+    
+    <!-- save_kv_layer() -->
+    <rect x="480" y="250" width="200" height="25" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="580" y="267" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#1b5e20">save_kv_layer()</text>
+    
+    <!-- Arrow from wait_for_layer_load to Attention -->
+    <path d="M 320 262.5 L 340 262.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    
+    <!-- Arrow from Attention to save_kv_layer -->
+    <path d="M 460 262.5 L 480 262.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- Dots indicating more layers -->
+  <g>
+    <circle cx="400" y="350" r="3" fill="#666"/>
+    <circle cx="400" y="365" r="3" fill="#666"/>
+    <circle cx="400" y="380" r="3" fill="#666"/>
+  </g>
+  
+  <!-- Layer N -->
+  <g>
+    <rect x="100" y="400" width="600" height="80" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <!-- wait_for_layer_load() -->
+    <rect x="120" y="410" width="200" height="25" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="220" y="427" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#4a148c">wait_for_layer_load()</text>
+    
+    <!-- Attention N -->
+    <rect x="340" y="410" width="120" height="25" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="400" y="427" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#bf360c">Attention N</text>
+    
+    <!-- save_kv_layer() -->
+    <rect x="480" y="410" width="200" height="25" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="580" y="427" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#1b5e20">save_kv_layer()</text>
+    
+    <!-- Arrow from wait_for_layer_load to Attention -->
+    <path d="M 320 422.5 L 340 422.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    
+    <!-- Arrow from Attention to save_kv_layer -->
+    <path d="M 460 422.5 L 480 422.5" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- wait_for_save() -->
+  <rect x="150" y="500" width="500" height="40" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="5"/>
+  <text x="400" y="525" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#b71c1c">wait_for_save()</text>
+  
+  <!-- Arrow definitions -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" 
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+    </marker>
+  </defs>
+  
+  <!-- Vertical flow arrows -->
+  <path d="M 400 120 L 400 140" stroke="#333" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <path d="M 400 220 L 400 240" stroke="#333" stroke-width="3" marker-end="url(#arrowhead)"/>
+  <path d="M 400 480 L 400 500" stroke="#333" stroke-width="3" marker-end="url(#arrowhead)"/>
+  
+</svg> 

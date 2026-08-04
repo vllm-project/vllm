@@ -1,0 +1,49 @@
+# Integration tests — starts vLLM with LMCache directly (no Docker),
+# tests CPU and disk backends via the OpenAI API.
+
+steps:
+  - label: ":test_tube: Integration — CPU backend"
+    command: .buildkite/k3_tests/integration/run.sh cpu
+    timeout_in_minutes: 20
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "*.csv"
+      - "*.pdf"
+      - "*.log"
+
+  - label: ":test_tube: Integration — Disk backend"
+    command: .buildkite/k3_tests/integration/run.sh disk
+    timeout_in_minutes: 20
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "*.csv"
+      - "*.pdf"
+      - "*.log"

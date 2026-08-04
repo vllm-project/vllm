@@ -1,0 +1,435 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:3
+msgid "Nixl"
+msgstr "Nixl"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:7
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/nixl`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/nixl`。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:13
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:15
+msgid ""
+"NIXL (NVIDIA Inference Xfer Library) is a high-performance library "
+"designed for accelerating point to point communications in AI inference "
+"frameworks. It provides an abstraction over various types of memory (CPU "
+"and GPU) and storage through a modular plug-in architecture, enabling "
+"efficient data transfer and coordination between different components of "
+"the inference pipeline."
+msgstr ""
+"NIXL（NVIDIA 推理传输库）是一个高性能库，旨在加速 AI 推理框架中的点对点通信。它通过模块化插件架构提供对各种类型内存（CPU 和 "
+"GPU）和存储的抽象，使得推理管道中不同组件之间的数据传输和协调更加高效。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:17
+msgid ""
+"LMCache supports using NIXL as a storage backend, allowing using NIXL to "
+"save either GPU or CPU memory into storage."
+msgstr "LMCache 支持将 NIXL 用作存储后端，允许将显存或 CPU 内存保存到存储中。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:20
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:22
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr "**LMCache**: 使用 ``pip install lmcache`` 安装"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:23
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+"**NIXL**: 从 `NIXL GitHub repository <https://github.com/ai-dynamo/nixl>`_"
+" 安装"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:24
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr "**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:27
+msgid "Ways to configure LMCache NIXL Offloading"
+msgstr "配置 LMCache NIXL 卸载的方法"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:29
+msgid "**Configuration File**:"
+msgstr "**配置文件**\\ ："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:31
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:33
+msgid "Example ``lmcache-config.yaml`` for POSIX backend:"
+msgstr "示例 ``lmcache-config.yaml`` 用于 POSIX 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:47
+msgid "Key settings:"
+msgstr "关键设置："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:49
+msgid ""
+"``nixl_buffer_size``: buffer size for NIXL transfers. **GPU mode only** "
+"(``nixl_buffer_device: cuda``). Setting this with ``nixl_buffer_device: "
+"cpu`` is a configuration error and will be rejected — in CPU mode NIXL "
+"shares ``LocalCPUBackend``'s pinned pool, which is sized by "
+"``max_local_cpu_size``."
+msgstr ""
+"``nixl_buffer_size``\\ ：NIXL 传输的缓冲区大小。\\ **仅限 GPU 模式**\\ （\\ "
+"``nixl_buffer_device: cuda``\\ ）。将其设置为 ``nixl_buffer_device: cpu`` "
+"是配置错误，将被拒绝——在 CPU 模式下，NIXL 共享 ``LocalCPUBackend`` 的固定池，该池的大小由 "
+"``max_local_cpu_size`` 决定。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:51
+msgid ""
+"``max_local_cpu_size``: size of ``LocalCPUBackend``'s pinned pool in GiB."
+" In CPU mode, this pool is shared with NIXL and must accommodate both the"
+" hot cache and concurrent NIXL I/O in flight. Must be > 0 when "
+"``nixl_buffer_device: cpu``. Default: ``5.0``."
+msgstr ""
+"``max_local_cpu_size``: ``LocalCPUBackend`` 的固定池大小（以 GiB 为单位）。在 CPU "
+"模式下，该池与 NIXL 共享，必须能够容纳热缓存和并发的 NIXL I/O。设置为 ``nixl_buffer_device: cpu`` "
+"时必须大于 0。默认值：\\ ``5.0``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:53
+msgid ""
+"``nixl_pool_size``: number of descriptors opened at init time for nixl "
+"backend. Set to 0 for dynamic mode."
+msgstr "``nixl_pool_size``: 初始化时为 nixl 后端打开的描述符数量。设置为 0 以启用动态模式。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:55
+msgid ""
+"``nixl_path``: directory (or list of directories) under which the storage"
+" files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that "
+"store to file. When using a list of paths with ``path_sharding``, paths "
+"will be selected based on the sharding strategy."
+msgstr ""
+"``nixl_path``: 存储文件将保存的目录（或目录列表）（例如 /mnt/nixl/）。对于将数据存储到文件的 NIXL "
+"后端是必需的。当使用带有 ``path_sharding`` 的路径列表时，路径将根据分片策略进行选择。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:57
+msgid ""
+"``nixl_buffer_device``: dictates where the memory managed by NIXL should "
+"be on. \"cpu\" or \"cuda\" is supported for \"GDS\", \"GDS_MT\", and "
+"\"OBJ\" backends - for \"POSIX\", \"HF3FS\", \"AZURE_BLOB\" & "
+"\"DOCA_MEMOS\", must be \"cpu\". In CPU mode, NIXL shares "
+"``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always "
+"created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu``"
+" setting. ``local_cpu: false`` still suppresses hot-cache promotions — "
+"the backend acts as a staging buffer only, mirroring how ``local_disk`` "
+"already uses ``LocalCPUBackend``."
+msgstr ""
+"``nixl_buffer_device``: 指定 NIXL 管理的内存应位于何处。对于 ``GDS``\\ 、\\ ``GDS_MT`` 和 "
+"``OBJ`` 后端，支持 ``cpu`` 或 ``cuda``\\ ；对于 ``POSIX``\\ 、\\ ``HF3FS``\\ 、\\ "
+"``AZURE_BLOB`` 和 ``DOCA_MEMOS``\\ ，必须为 ``cpu``\\ 。在 CPU 模式下，NIXL 共享 "
+"``LocalCPUBackend`` 的固定缓冲区；当 ``nixl_buffer_device: cpu`` 时，\\ "
+"``LocalCPUBackend`` 始终会被创建，无论 ``local_cpu`` 设置如何。\\ ``local_cpu: false`` "
+"仍然会抑制热缓存提升——后端仅作为暂存缓冲区，镜像 ``local_disk`` 已经如何使用 ``LocalCPUBackend``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:59
+msgid "``nixl_backend``: configuration of which nixl backend to use for storage."
+msgstr "``nixl_backend``: 配置用于存储的 nixl 后端。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:61
+msgid ""
+"``nixl_path_sharding``: strategy for selecting path when multiple paths "
+"are provided. Currently only \"by_gpu\" is supported, which selects paths"
+" based on GPU device ID."
+msgstr ""
+"``nixl_path_sharding``: 当提供多个路径时选择路径的策略。目前仅支持“by_gpu”，该策略根据 GPU 设备 ID "
+"选择路径。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:62
+msgid ""
+"``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for "
+"``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). "
+"Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: "
+"``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — "
+"accepted with a warning and copied into this field; will be removed in a "
+"future release."
+msgstr ""
+"``local_cpu_use_hugepages``: 是否为 ``LocalCPUBackend`` 的固定池使用 Linux 大页（2 "
+"MiB）（NIXL 在 CPU 模式下共享）。需要预分配的大页（\\ ``sysctl vm.nr_hugepages``\\ ）。默认值：\\ "
+"``false``\\ 。\\ **已弃用的别名：** ``extra_config.nixl_use_hugepages`` — "
+"接受时会发出警告并复制到此字段；将在未来的版本中移除。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:66
+msgid ""
+"In CPU mode, the shared paged allocator consumes one full page per "
+"object. With ``save_unfull_chunk: true`` (only valid in static mode — "
+"dynamic mode rejects it; see \"Dynamic Mode\" → \"Restrictions\" below), "
+"partial chunks still occupy a full page each, so effective capacity "
+"degrades proportionally to the fraction of unfull last chunks across "
+"active sequences."
+msgstr ""
+"在 CPU 模式下，共享分页分配器每个对象消耗一个完整的页面。使用 ``save_unfull_chunk: true``\\ "
+"（仅在静态模式下有效——动态模式会拒绝它；请参见“动态模式”→“限制”），部分块仍然占用一个完整的页面，因此有效容量与活动序列中未满最后块的比例成正比地下降。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:70
+msgid ""
+"``enable_p2p: true`` is rejected together with ``nixl_buffer_device: "
+"cpu``. The combination is structurally supported — both backends share "
+"``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, "
+"and allocations route through ``LocalCPUBackend.allocate()`` — but it has"
+" not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: "
+"true`` with ``nixl_buffer_device: cuda`` instead, or disable "
+"``enable_p2p`` when running the NIXL CPU shared pool."
+msgstr ""
+"``enable_p2p: true`` 与 ``nixl_buffer_device: cpu`` "
+"一起被拒绝。这个组合在结构上是支持的——两个后端共享 ``LocalCPUBackend`` 的固定池，各自运行自己的 NIXL "
+"代理，并且分配通过 ``LocalCPUBackend.allocate()`` 路由——但尚未进行端到端的测试，也没有 CI 覆盖。在使用 "
+"NIXL CPU 共享池时，请改用 ``nixl_buffer_device: cuda`` 的 ``enable_p2p: true``\\ "
+"，或者在运行时禁用 ``enable_p2p``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:72
+msgid ""
+"``nixl_presence_cache``: whether to keep an in-DRAM presence cache of "
+"keys known to exist, so repeated existence checks for the same key are "
+"answered locally instead of via a NIXL ``query_memory`` call. Applies to "
+"the dynamic backend (``nixl_pool_size: 0``). Default: ``false``."
+msgstr ""
+"``nixl_presence_cache``：是否在 DRAM "
+"中保留已知存在的键的存在缓存，以便对同一键的重复存在检查可以在本地回答，而不是通过 NIXL ``query_memory`` "
+"调用。适用于动态后端（``nixl_pool_size: 0``）。默认值：``false``。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:74
+msgid ""
+"``nixl_presence_cache_only``: when ``true``, the dynamic NIXL backend "
+"treats the local presence cache (and in-progress put set) as "
+"authoritative for existence checks. If a key is not known locally, lookup"
+" reports a miss **without** issuing a NIXL ``query_memory`` check. This "
+"requires ``nixl_presence_cache: true`` and can intentionally produce "
+"**false negatives** for objects that exist in the underlying storage but "
+"are absent from local presence metadata — giving \"DRAM-only metadata\" "
+"semantics where a process restart always yields a logically empty cache. "
+"Default: ``false``."
+msgstr ""
+"``nixl_presence_cache_only``：当 ``true`` 时，动态 NIXL "
+"后端将本地存在缓存（和正在进行的放置集合）视为存在检查的权威。如果一个键在本地未知，查找将报告未命中 **而不** 发出 NIXL "
+"``query_memory`` 检查。这要求 ``nixl_presence_cache: true``，并且可能故意产生 "
+"**假阴性**，即在底层存储中存在但在本地存在元数据中缺失的对象——提供“仅 DRAM "
+"元数据”的语义，其中进程重启总是导致逻辑上空的缓存。默认值：``false``。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:78
+msgid ""
+"This is a **lookup/existence-check** mode, not a \"never touch the "
+"underlying storage\" policy. It gates ``contains`` / ``batched_contains``"
+" (and the async variant); direct retrieval still reads from the "
+"underlying storage. In normal operation a retrieval is only issued for a "
+"key that lookup already reported as present, so locally-unknown keys are "
+"not fetched. The option is only consulted by the dynamic backend "
+"(``nixl_pool_size: 0``); it is accepted but unused for static "
+"configurations."
+msgstr ""
+"这是一个 **查找/存在检查** 模式，而不是“永远不接触底层存储”的策略。它控制 ``contains`` / "
+"``batched_contains``\\ "
+"（以及异步变体）；直接检索仍然从底层存储读取。在正常操作中，仅对查找已报告为存在的键发出检索，因此本地未知的键不会被获取。该选项仅由动态后端（``nixl_pool_size:"
+" 0``）参考；对于静态配置，它被接受但未使用。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:82
+msgid ""
+"Supported backends are: [\"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\", "
+"\"OBJ\", \"AZURE_BLOB\", \"DOCA_MEMOS\"]."
+msgstr ""
+"支持的后端包括：[\\\"GDS\\\", \\\"GDS_MT\\\", \\\"POSIX\\\", \\\"HF3FS\\\", "
+"\\\"OBJ\\\", \\\"AZURE_BLOB\\\", \\\"DOCA_MEMOS\\\"]."
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:84
+msgid ""
+"Backend specific params should be provided via "
+"``extra_config.nixl_backend_params``. Please refer to NIXL documentation "
+"for specifics."
+msgstr "后端特定参数应通过 ``extra_config.nixl_backend_params`` 提供。有关具体信息，请参阅 NIXL 文档。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:86
+msgid "Example ``lmcache-config.yaml`` for POSIX backend with multipath support:"
+msgstr "示例 ``lmcache-config.yaml`` 用于支持多路径的 POSIX 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:104
+msgid "Example ``lmcache-config.yaml`` for OBJ backend using S3 API:"
+msgstr "示例 ``lmcache-config.yaml`` 用于使用 S3 API 的 OBJ 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:122
+msgid "Example ``lmcache-config.yaml`` for POSIX backend using liburing:"
+msgstr "示例 ``lmcache-config.yaml`` 用于使用 liburing 的 POSIX 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:126
+msgid ""
+"using POSIX backend with liburing requires NIXL to be built with liburing"
+" support."
+msgstr "使用带有 liburing 支持的 POSIX 后端需要将 NIXL 构建为支持 liburing。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:142
+msgid ""
+"Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using "
+"Azure Blob Storage API:"
+msgstr ""
+"示例 ``lmcache-config.yaml`` 用于 AZURE_BLOB 后端，通过 Azure Blob Storage API "
+"进行卸载："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:159
+msgid "Per-Worker Endpoint Distribution"
+msgstr "每个工作节点的端点分配"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:161
+msgid ""
+"When using the OBJ backend with multiple tensor-parallel (TP) workers, "
+"you can distribute workers across multiple object-storage endpoints by "
+"providing a list of endpoints via ``nixl_endpoint_list``. Each worker "
+"selects an endpoint in round-robin order based on its ``local_worker_id``"
+" (the worker ID within its host)."
+msgstr ""
+"当使用 OBJ 后端与多个张量并行 (TP) 工作节点时，您可以通过提供一个端点列表来在多个对象存储端点之间分配工作节点，方法是使用 "
+"``nixl_endpoint_list``\\ 。每个工作节点根据其 ``local_worker_id``\\ （其主机内的工作节点 "
+"ID）以轮询方式选择一个端点。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:185
+msgid ""
+"When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in "
+"``nixl_backend_params`` is ignored (a warning is logged)."
+msgstr ""
+"当设置 ``nixl_endpoint_list`` 时，\\ ``nixl_backend_params`` 中的任何 "
+"``endpoint_override`` 值将被忽略（会记录警告）。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:188
+msgid ""
+"``nixl_endpoint_list`` is only honored for the OBJ backend; it is ignored"
+" for all other backends (including DOCA_MEMOS, AZURE_BLOB, and the file "
+"backends)."
+msgstr ""
+"``nixl_endpoint_list`` 仅对 OBJ 后端有效；对于所有其他后端（包括 DOCA_MEMOS、AZURE_BLOB "
+"和文件后端）将被忽略。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:193
+msgid "Dynamic Mode"
+msgstr "动态模式"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:195
+msgid ""
+"Nixl Storage Backend also supports a dynamic mode, which creates nixl "
+"storage descriptors on demand instead of at init time."
+msgstr "Nixl 存储后端还支持动态模式，该模式按需创建 nixl 存储描述符，而不是在初始化时创建。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:197
+msgid ""
+"In order to use dynamic mode, extra_config.nixl_pool_size should be set "
+"to 0."
+msgstr "为了使用动态模式，extra_config.nixl_pool_size 应设置为 0。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:200
+msgid "Restrictions"
+msgstr "限制"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:202
+msgid ""
+"Dynamic mode is supported for object backends (\"OBJ\", \"AZURE_BLOB\", "
+"\"DOCA_MEMOS\") and file backends (\"POSIX\", \"GDS\", \"GDS_MT\", "
+"\"HF3FS\")."
+msgstr "动态模式支持对象后端（“OBJ”，“AZURE_BLOB”，“DOCA_MEMOS”）和文件后端（“POSIX”，“GDS”，“GDS_MT”，“HF3FS”）。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:203
+msgid "save_unfull_chunk must be set to False."
+msgstr "save_unfull_chunk 必须设置为 False。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:205
+msgid "Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:"
+msgstr "示例 ``lmcache-config.yaml`` 用于动态模式的 OBJ 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:230
+msgid "Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:"
+msgstr "示例 ``lmcache-config.yaml`` 用于动态模式的 AZURE_BLOB 后端："
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:251
+msgid "DOCA_MEMOS Backend (NVIDIA CMX)"
+msgstr "DOCA_MEMOS 后端 (NVIDIA CMX)"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:253
+msgid ""
+"``DOCA_MEMOS`` stores KV cache on NVIDIA CMX (Context Memory Storage), a "
+"BlueField-4 context-memory tier accessed through NIXL. It is an object-"
+"style backend (like ``OBJ``), supported in both static "
+"(``nixl_pool_size`` > 0) and dynamic (``nixl_pool_size`` = 0) mode. "
+"``nixl_buffer_device`` must be ``cpu``. ``nixl_endpoint_list`` is not "
+"supported for DOCA_MEMOS."
+msgstr ""
+"``DOCA_MEMOS`` 将 KV Cache 存储在 NVIDIA CMX（上下文内存存储）上，这是一个通过 NIXL 访问的 "
+"BlueField-4 上下文内存层。它是一种对象风格的后端（类似于 ``OBJ``\\ ），支持静态模式（\\ "
+"``nixl_pool_size`` > 0）和动态模式（\\ ``nixl_pool_size`` = 0）。\\ "
+"``nixl_buffer_device`` 必须为 ``cpu``\\ 。\\ ``nixl_endpoint_list`` 不支持 "
+"DOCA_MEMOS。"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:259
+msgid ""
+"Object names are 128-bit lowercase-hex strings: the NIXL DOCA_MEMOS "
+"plugin passes object names as strings and hex-decodes them on the device "
+"side, so each name is exactly 32 hex characters. In dynamic mode this "
+"name is a truncated SHA-256 of the cache key, so names are opaque (they "
+"carry no model/chunk debug information) and uniqueness is probabilistic "
+"at 128 bits."
+msgstr ""
+"对象名称是 128 位小写十六进制字符串：NIXL DOCA_MEMOS "
+"插件将对象名称作为字符串传递，并在设备端进行十六进制解码，因此每个名称恰好是 32 个十六进制字符。在动态模式下，此名称是缓存键的截断 "
+"SHA-256，因此名称是不透明的（它们不携带任何模型/块调试信息），并且唯一性在 128 位上是概率性的。"
+
+#~ msgid "``nixl_buffer_size``: buffer size for NIXL transfers."
+#~ msgstr "``nixl_buffer_size``: NIXL 传输的缓冲区大小。"
+
+#~ msgid ""
+#~ "``nixl_buffer_device``: dictates where the "
+#~ "memory managed by NIXL should be "
+#~ "on. \"cpu\" or \"cuda\" is supported "
+#~ "for \"GDS\", \"GDS_MT\", and \"OBJ\" "
+#~ "backends - for \"POSIX\", \"HF3FS\" &"
+#~ " \"AZURE_BLOB\", must be \"cpu\"."
+#~ msgstr ""
+#~ "``nixl_buffer_device``: 指定 NIXL 管理的内存应该位于何处。对于 "
+#~ "\\\"GDS\\\"、\\\"GDS_MT\\\" 和 \\\"OBJ\\\" 后端，支持 "
+#~ "\\\"cpu\\\" 或 \\\"cuda\\\"；对于 "
+#~ "\\\"POSIX\\\"、\\\"HF3FS\\\" 和 \\\"AZURE_BLOB\\\"，必须为 "
+#~ "\\\"cpu\\\"。"
+
+#~ msgid ""
+#~ "``nixl_use_hugepages``: whether to use Linux"
+#~ " hugepages (2 MiB) for the NIXL "
+#~ "CPU buffer. Not supported for GPU "
+#~ "buffers. Requires pre-allocated hugepages "
+#~ "(``sysctl vm.nr_hugepages``). Default: ``false``."
+#~ msgstr ""
+#~ "``nixl_use_hugepages``: 是否为 NIXL CPU 缓冲区使用 "
+#~ "Linux 大页（2 MiB）。不支持 GPU 缓冲区。需要预分配的大页（``sysctl"
+#~ " vm.nr_hugepages``）。默认值：``false``。"
+
+#~ msgid ""
+#~ "Dynamic mode is currently only supported"
+#~ " for nixl OBJ and AZURE_BLOB "
+#~ "backends."
+#~ msgstr "动态模式目前仅支持 nixl OBJ 和 AZURE_BLOB 后端。"
+

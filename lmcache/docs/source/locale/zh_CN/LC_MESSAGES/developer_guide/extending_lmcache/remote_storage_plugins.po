@@ -1,0 +1,291 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:2
+msgid "Remote Storage Plugins"
+msgstr "远程存储插件"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:9
+msgid ""
+"LMCache supports built-in remote storage connectors for Redis, "
+"InfiniStore, MooncakeStore, S3, Hugging Face Buckets, and more. The "
+"remote storage plugin system provides the ability to add custom storage "
+"connectors through dynamic loading. This enables extending remote storage"
+" capabilities without modifying core code."
+msgstr ""
+"LMCache 支持内置的远程存储连接器，包括 Redis、InfiniStore、MooncakeStore、S3、Hugging Face "
+"Buckets 等。远程存储插件系统提供了通过动态加载添加自定义存储连接器的能力。这使得在不修改核心代码的情况下扩展远程存储功能成为可能。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:15
+msgid ""
+"The ``remote_url`` configuration is **deprecated** and will be removed in"
+" a future release. Please use ``remote_storage_plugins`` instead."
+msgstr ""
+"``remote_url`` 配置已\\ **弃用**\\ ，并将在未来的版本中移除。请改用 "
+"``remote_storage_plugins``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:19
+msgid "Connector Definition Requirements"
+msgstr "连接器定义要求"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:20
+msgid "A custom remote storage connector requires two classes:"
+msgstr "自定义远程存储连接器需要两个类："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:22
+msgid ""
+"**ConnectorAdapter**: Handles URL scheme matching and connector "
+"instantiation"
+msgstr "**ConnectorAdapter**: 处理 URL 方案匹配和连接器实例化"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:24
+msgid "Inherit from ``ConnectorAdapter``"
+msgstr "从 ``ConnectorAdapter`` 继承"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:25
+msgid "Set the URL scheme in the constructor (e.g., ``mystore://``)"
+msgstr "在构造函数中设置 URL 方案（例如，\\ ``mystore://``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:26
+msgid "Implement the ``create_connector`` method"
+msgstr "实现 ``create_connector`` 方法"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:28
+msgid "**RemoteConnector**: Implements the actual storage operations"
+msgstr "**RemoteConnector**: 实现实际的存储操作"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:30
+msgid "Inherit from ``RemoteConnector``"
+msgstr "从 ``RemoteConnector`` 继承"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:31
+msgid ""
+"Implement all abstract methods: ``exists``, ``exists_sync``, ``get``, "
+"``put``, ``list``, ``close``"
+msgstr ""
+"实现所有抽象方法：\\ ``exists``\\ 、\\ ``exists_sync``\\ 、\\ ``get``\\ 、\\ "
+"``put``\\ 、\\ ``list``\\ 、\\ ``close``"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:35
+msgid ""
+"The ``ConnectorAdapter`` constructor receives no arguments from LMCache. "
+"The scheme should be set by calling the parent constructor with the "
+"scheme string."
+msgstr "``ConnectorAdapter`` 构造函数不接收来自 LMCache 的任何参数。应通过调用父构造函数并传入方案字符串来设置方案。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:37
+msgid ""
+"The ``create_connector`` method receives a ``ConnectorContext`` object "
+"containing the URL, event loop, local CPU backend, config, metadata, and "
+"``plugin_name``."
+msgstr ""
+"``create_connector`` 方法接收一个 ``ConnectorContext`` 对象，其中包含 URL、事件循环、本地 CPU "
+"后端、配置、元数据和 ``plugin_name``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:40
+msgid "Plugin Naming Convention"
+msgstr "插件命名约定"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:41
+#, python-brace-format
+msgid "Plugin names follow the format ``{type}`` or ``{type}.{instance}``:"
+msgstr "插件名称遵循格式 ``{type}`` 或 ``{type}.{instance}``\\ ："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:43
+#, python-brace-format
+msgid ""
+"``{type}`` — a single instance of that connector type (e.g. ``fs``, "
+"``mooncakestore``)"
+msgstr "``{type}`` — 该连接器类型的单个实例（例如 ``fs``, ``mooncakestore``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:44
+#, python-brace-format
+msgid ""
+"``{type}.{instance}`` — a named instance, allowing **multiple instances "
+"of the same type** (e.g. ``fs.primary``, ``fs.backup``)"
+msgstr ""
+"``{type}.{instance}`` — 一个命名实例，允许 **同类型的多个实例**\\ （例如 ``fs.primary``, "
+"``fs.backup``\\ ）"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:46
+msgid ""
+"The framework extracts the *type* portion (everything before the first "
+"``.``) to locate the matching ``ConnectorAdapter``. The full plugin name "
+"is used as the configuration key prefix."
+msgstr ""
+"框架提取 *type* 部分（在第一个 ``.`` 之前的所有内容）以定位匹配的 ``ConnectorAdapter``\\ "
+"。完整的插件名称用作配置键前缀。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:49
+msgid "Using Built-in Connectors via Plugins"
+msgstr "通过插件使用内置连接器"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:50
+msgid ""
+"Built-in connectors (``fs``, ``mooncakestore``, ``hfbucket``, etc.) can "
+"be used directly via ``remote_storage_plugins`` without specifying "
+"``module_path`` or ``class_name``. Their configuration is placed under "
+"``extra_config``:"
+msgstr ""
+"内置连接器（\\ ``fs``, ``mooncakestore``, ``hfbucket`` 等）可以通过 "
+"``remote_storage_plugins`` 直接使用，而无需指定 ``module_path`` 或 ``class_name``\\ "
+"。它们的配置放在 ``extra_config`` 下："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:63
+msgid "Multiple instances of the same connector type:"
+msgstr "同一连接器类型的多个实例："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:72
+msgid "Mixing different connector types:"
+msgstr "混合不同的连接器类型："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:81
+msgid "Built-in Hugging Face Buckets example:"
+msgstr "内置 Hugging Face Buckets 示例："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:91
+msgid "How to Integrate Custom Remote Storage with LMCache"
+msgstr "如何将自定义远程存储与 LMCache 集成"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:92
+msgid "Install your connector package in the LMCache environment"
+msgstr "在 LMCache 环境中安装您的连接器包"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:93
+msgid ""
+"Add ``remote_storage_plugins`` and its related ``module_path`` and "
+"``class_name`` to the ``extra_config`` section of LMCache configuration "
+"as follows:"
+msgstr ""
+"将 ``remote_storage_plugins`` 及其相关的 ``module_path`` 和 ``class_name`` 添加到 "
+"LMCache 配置的 ``extra_config`` 部分，如下所示："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:105
+msgid "An example configuration for a custom remote storage connector:"
+msgstr "自定义远程存储连接器的示例配置："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:117
+msgid "Multiple instances of a custom connector:"
+msgstr "多个自定义连接器的实例："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:130
+msgid "``remote_url`` is **deprecated**; use ``remote_storage_plugins`` instead"
+msgstr "``remote_url`` 已被 **弃用**\\ ；请改用 ``remote_storage_plugins``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:131
+msgid ""
+"``remote_storage_plugin.<plugin_name>`` uses the full plugin name "
+"(including instance suffix) as the key prefix"
+msgstr "``remote_storage_plugin.<plugin_name>`` 使用完整的插件名称（包括实例后缀）作为键前缀"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:132
+msgid "Multiple remote storage plugins can be loaded simultaneously"
+msgstr "可以同时加载多个远程存储插件"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:133
+msgid "Built-in connectors do not require ``module_path`` / ``class_name``"
+msgstr "内置连接器不需要 ``module_path`` / ``class_name``"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:136
+msgid "ConnectorAdapter Implementation"
+msgstr "连接器适配器实现"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:137
+msgid "The ``ConnectorAdapter`` class is responsible for:"
+msgstr "``ConnectorAdapter`` 类负责："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:139
+msgid "Defining the URL scheme it handles"
+msgstr "定义它处理的 URL 方案"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:140
+msgid "Creating the appropriate ``RemoteConnector`` instance"
+msgstr "创建适当的 ``RemoteConnector`` 实例"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:186
+msgid "RemoteConnector Implementation"
+msgstr "RemoteConnector 实现"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:187
+msgid ""
+"The ``RemoteConnector`` class defines the interface for remote storage "
+"operations. Your implementation must provide the following abstract "
+"methods:"
+msgstr "``RemoteConnector`` 类定义了远程存储操作的接口。您的实现必须提供以下抽象方法："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:234
+msgid "Optional Methods"
+msgstr "可选方法"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:235
+msgid ""
+"The ``RemoteConnector`` base class also provides optional methods that "
+"can be overridden for enhanced functionality:"
+msgstr "``RemoteConnector`` 基类还提供了可选的方法，可以被重写以增强功能："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:237
+msgid "``support_ping()`` / ``ping()``: Health check support"
+msgstr "``support_ping()`` / ``ping()``: 健康检查支持"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:238
+msgid "``support_batched_get()`` / ``batched_get()``: Batch retrieval operations"
+msgstr "``support_batched_get()`` / ``batched_get()``: 批量检索操作"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:239
+msgid "``support_batched_put()`` / ``batched_put()``: Batch storage operations"
+msgstr "``support_batched_put()`` / ``batched_put()``: 批量存储操作"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:240
+msgid ""
+"``support_batched_contains()`` / ``batched_contains()``: Batch existence "
+"checks"
+msgstr "``support_batched_contains()`` / ``batched_contains()``: 批量存在性检查"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:241
+msgid "``remove_sync()``: Synchronous key removal"
+msgstr "``remove_sync()``: 同步键移除"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:244
+msgid "Implementation Example"
+msgstr "实现示例"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:245
+msgid ""
+"A complete remote storage connector implementation would include both the"
+" adapter and connector classes in a single module or package. Here's a "
+"minimal working example structure:"
+msgstr "一个完整的远程存储连接器实现将包括适配器和连接器类在一个模块或包中。以下是一个最小的工作示例结构："
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:254
+msgid "The adapter module (``adapter.py``):"
+msgstr "适配器模块 (``adapter.py``):"
+
+#: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:287
+msgid "Configuration would then reference the adapter:"
+msgstr "配置将引用适配器："
+

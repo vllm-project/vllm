@@ -1,0 +1,424 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:2
+msgid "XpYd"
+msgstr "XpYd"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/disaggregated_prefill`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/disaggregated_prefill`。"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:10
+msgid "X Prefiller, Y Decoder (XpYd) Example"
+msgstr "X 预填充器，Y 解码器 (XpYd) 示例"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:12
+msgid ""
+"This example demonstrates how to run LMCache with disaggregated prefill "
+"using NIXL on a single node with multiple prefiller and decoder "
+"instances. This configuration allows for horizontal scaling of both the "
+"compute-intensive prefill operations and the decode operations, enabling "
+"better resource utilization and higher throughput."
+msgstr ""
+"此示例演示了如何在单个节点上使用 NIXL 运行带有分离式 Prefill 的 LMCache，使用多个 Prefiller 和 Decoder "
+"实例。此配置允许对计算密集型的 Prefill 操作和解码操作进行横向扩展，从而实现更好的资源利用和更高的吞吐量。"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:15
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:17
+msgid ""
+"The XpYd setup consists of multiple components that can be scaled "
+"independently:"
+msgstr "XpYd 设置由多个可以独立扩展的组件组成："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:19
+msgid ""
+"**Multiple Prefiller Servers** - Handle the prefill phase of inference "
+"(initial prompt processing)"
+msgstr "**多个 Prefiller 服务器** - 处理推理的预填充阶段（初始提示处理）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:20
+msgid ""
+"**Multiple Decoder Servers** - Handle the decode phase of inference "
+"(token generation)"
+msgstr "**多个解码器服务器** - 处理推理的解码阶段（令牌生成）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:21
+msgid ""
+"**Proxy Server** - Coordinates requests between prefillers and decoders "
+"using round-robin load balancing"
+msgstr "**代理服务器** - 使用轮询负载均衡协调预填充器和解码器之间的请求"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:23
+msgid "Example 2p2d Architecture:"
+msgstr "示例 2p2d 架构："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:54
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:56
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr "**LMCache**: 使用 ``pip install lmcache`` 安装"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:57
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+"**NIXL**: 从 `NIXL GitHub repository <https://github.com/ai-dynamo/nixl>`_"
+" 安装"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:58
+msgid ""
+"**Hardware**: At least 4 GPUs (2 for prefillers + 2 for decoders in 2p2d "
+"setup)"
+msgstr "**硬件**\\ ：至少需要 4 个 GPU（2 个用于 Prefillers + 2 个用于 2p2d 设置中的解码器）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:59
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr "**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:62
+msgid "Quick Start (2p2d Example)"
+msgstr "快速开始 (2p2d 示例)"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:64
+msgid "**Set your Hugging Face token**:"
+msgstr "**设置你的 Hugging Face 令牌**\\ ："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:70
+msgid "**Navigate to the example directory**:"
+msgstr "**导航到示例目录**\\ ："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:76
+msgid "**Run the example**:"
+msgstr "**运行示例**:"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:82
+msgid "The script will automatically:"
+msgstr "该脚本将自动："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:84
+msgid "Launch two decoder instances on port 8200 and 8201 (GPU 2 and GPU 3)"
+msgstr "在端口 8200 和 8201 启动两个解码器实例（GPU 2 和 GPU 3）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:85
+msgid "Launch two prefiller instances on ports 7100 and 7101 (GPU 0 and GPU 1)"
+msgstr "在端口 7100 和 7101 上启动两个 Prefill 实例（GPU 0 和 GPU 1）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:86
+msgid "Launch a proxy server on port 9100 with round-robin load balancing"
+msgstr "在9100端口启动一个代理服务器，并使用轮询负载均衡。"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:87
+msgid "Wait for all servers to be ready"
+msgstr "等待所有服务器准备就绪"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:89
+msgid "Press ``Ctrl+C`` to stop all servers."
+msgstr "按 ``Ctrl+C`` 停止所有服务器。"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:92
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:94
+msgid ""
+"**Important**: For correct KV cache transfer, ensure all processes use "
+"the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
+"across processes:"
+msgstr ""
+"**重要**\\ ：为了正确的 KV Cache 传输，确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache "
+"在进程间的一致性："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:101
+msgid "Prefiller Configuration"
+msgstr "分离式 Prefill 配置"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:103
+msgid ""
+"All prefillers share the same configuration via ``configs/lmcache-"
+"prefiller-config.yaml``:"
+msgstr "所有 Prefiller 通过 ``configs/lmcache-prefiller-config.yaml`` 共享相同的配置："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:119
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:145
+msgid "Key settings:"
+msgstr "关键设置："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:121
+msgid "``pd_role: \"sender\"`` - Configures these instances to send KV cache data"
+msgstr "``pd_role: \"sender\"`` - 配置这些实例以发送 KV Cache 数据"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:122
+msgid ""
+"``pd_buffer_size: 1073741824 # 1GB`` - Upper bound of PD transport buffer"
+" size (in bytes), aligned to chunk size"
+msgstr "``pd_buffer_size: 1073741824 # 1GB`` - PD 传输缓冲区大小的上限（以字节为单位），与块大小对齐"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:123
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:149
+msgid "``pd_buffer_device: \"cuda\"`` - Uses GPU memory for buffering"
+msgstr "``pd_buffer_device: \"cuda\"`` - 使用显存进行缓冲"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:126
+msgid "Decoder Configuration"
+msgstr "解码器配置"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:128
+msgid ""
+"The decoder(s) are configured via ``configs/lmcache-"
+"decoder-x-config.yaml``:"
+msgstr "解码器通过 ``configs/lmcache-decoder-x-config.yaml`` 进行配置："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:147
+msgid ""
+"``pd_role: \"receiver\"`` - Configures these instances to receive KV "
+"cache data"
+msgstr "``pd_role: \"receiver\"`` - 配置这些实例以接收 KV Cache 数据"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:148
+msgid ""
+"``pd_buffer_size: 2147483648 # 2GB`` - Upper bound of PD transport buffer"
+" size (in bytes), aligned to chunk size"
+msgstr "``pd_buffer_size: 2147483648 # 2GB`` - PD 传输缓冲区大小的上限（以字节为单位），与块大小对齐"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:152
+msgid "Components Deep Dive"
+msgstr "组件深入分析"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:155
+msgid "Proxy Server (disagg_proxy_server.py)"
+msgstr "代理服务器 (disagg_proxy_server.py)"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:157
+msgid "The proxy server coordinates the multi-prefiller disaggregated workflow:"
+msgstr "代理服务器协调多预填充器的分离式工作流程："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:159
+msgid "**Request Handling**: Receives client requests on port 9000"
+msgstr "**请求处理**\\ ：在 9000 端口接收客户端请求"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:160
+msgid ""
+"**Load Balancing**: Distributes requests across multiple prefillers using"
+" round-robin"
+msgstr "**负载均衡**\\ ：使用轮询将请求分配到多个预填充器"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:161
+msgid ""
+"**Prefill Coordination**: Sends requests to prefillers with "
+"``max_tokens=1``"
+msgstr "**Prefill Coordination**: 将请求发送到使用 ``max_tokens=1`` 的 Prefill 处理器"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:162
+msgid "**Prefill Response**: Receives prefiller that says nixl transfer is done"
+msgstr "**Prefill Response**: 接收预填充器，表示 nixl 转移已完成"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:163
+msgid "**Response Streaming**: Streams the full response from the decoder"
+msgstr "**响应流**\\ ：从解码器流式传输完整响应"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:164
+msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
+msgstr "**性能监控**: 跟踪首次令牌时间（TTFT）统计信息"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:166
+msgid ""
+"Key features: - **Round-robin distribution**: Balances load across "
+"``--num-prefillers`` instances - **Fault tolerance**: Handles prefiller "
+"failures gracefully - **Monitoring**: Provides detailed TTFT statistics "
+"for each prefiller"
+msgstr ""
+"主要特性：- **轮询分配**\\ ：在 ``--num-prefillers`` 实例之间平衡负载 - **容错**\\ "
+"：优雅地处理预填充器故障 - **监控**\\ ：为每个预填充器提供详细的 TTFT 统计信息"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:171
+msgid "Supported endpoints: - ``/v1/completions`` - ``/v1/chat/completions``"
+msgstr "支持的端点： - ``/v1/completions`` - ``/v1/chat/completions``"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:176
+msgid "vLLM Server Launcher (disagg_vllm_launcher.sh)"
+msgstr "vLLM 服务器启动器 (disagg_vllm_launcher.sh)"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:178
+msgid ""
+"This script launches individual vLLM servers with appropriate "
+"configurations:"
+msgstr "此脚本启动具有适当配置的单个 vLLM 服务器："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:180
+msgid "**Prefiller1 Launch Command**:"
+msgstr "**Prefiller1 启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:197
+msgid "**Prefiller2 Launch Command**:"
+msgstr "**Prefiller2 启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:214
+msgid "**Decoder1 Launch Command**:"
+msgstr "**解码器1 启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:231
+msgid "**Decoder2 Launch Command**:"
+msgstr "**Decoder2 启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:248
+msgid ""
+"Key differences from 1p1d: - Each prefiller gets a unique "
+"``lmcache_rpc_port`` (producer1, producer2, etc.) - Each prefiller runs "
+"on a different GPU (CUDA_VISIBLE_DEVICES) - Different ports for each "
+"prefiller (7100, 7101, etc.) - Different ports for each decoder (7200, "
+"7201, etc.)"
+msgstr ""
+"与 1p1d 的主要区别： - 每个 Prefiller 获取一个唯一的 ``lmcache_rpc_port``\\ "
+"（producer1、producer2 等） - 每个 Prefiller 在不同的 GPU 上运行（CUDA_VISIBLE_DEVICES）"
+" - 每个 Prefiller 使用不同的端口（7100、7101 等） - 每个解码器使用不同的端口（7200、7201 等）"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:255
+msgid "Basic Test"
+msgstr "基本测试"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:257
+msgid "Once all servers are running, you can test with a simple curl command:"
+msgstr "一旦所有服务器都在运行，您可以使用简单的 curl 命令进行测试："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:269
+msgid "Performance Benchmarking"
+msgstr "性能基准测试"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:271
+msgid "For comprehensive performance testing, use vLLM's benchmark tool:"
+msgstr "要进行全面的性能测试，请使用 vLLM 的基准测试工具："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:280
+msgid ""
+"Expected performance improvements with 2p2d: - **Higher throughput**: "
+"Multiple prefillers can handle more concurrent requests - **Better "
+"TTFT**: Load balancing reduces queuing delays - **Improved utilization**:"
+" Better GPU utilization across multiple devices"
+msgstr ""
+"预期的性能提升与 2p2d 相关：- **更高的吞吐量**\\ ：多个预填充器可以处理更多的并发请求 - **更好的 TTFT**\\ "
+"：负载均衡减少排队延迟 - **更好的利用率**\\ ：多个设备之间更好的 GPU 利用率"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:285
+msgid "Sample benchmark results:"
+msgstr "示例基准测试结果："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:312
+msgid "Log Files and Monitoring"
+msgstr "日志文件和监控"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:314
+msgid "The example generates multiple log files for comprehensive monitoring:"
+msgstr "该示例生成多个日志文件以进行全面监控："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:316
+msgid "``prefiller1.log`` - First prefiller server logs and errors"
+msgstr "``prefiller1.log`` - 第一个 Prefill 服务器的日志和错误"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:317
+msgid "``prefiller2.log`` - Second prefiller server logs and errors"
+msgstr "``prefiller2.log`` - 第二个 Prefill 服务器日志和错误"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:318
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:319
+msgid "``decoder1.log`` - First decoder server logs and errors"
+msgstr "``decoder1.log`` - 第一个解码器服务器日志和错误"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:320
+msgid "``proxy.log`` - Proxy server logs and TTFT statistics"
+msgstr "``proxy.log`` - 代理服务器日志和 TTFT 统计信息"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:322
+msgid "The proxy server provides detailed statistics for each prefiller:"
+msgstr "代理服务器为每个 Prefiller 提供详细的统计信息："
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:338
+msgid ""
+"This helps identify performance differences between prefiller instances "
+"and optimize load balancing."
+msgstr "这有助于识别不同 Prefill 实例之间的性能差异并优化负载均衡。"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:341
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:344
+msgid "Common Issues"
+msgstr "常见问题"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:346
+msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
+msgstr "**显存**\\ ：确保每个 GPU 具有足够的内存以支持模型"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:347
+msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
+msgstr "**NIXL 安装**: 验证 NIXL 是否正确安装并可访问"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:348
+msgid "**Port Conflicts**: Check that all required ports are available"
+msgstr "**端口冲突**\\ ：检查所有必需的端口是否可用"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:349
+msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"
+msgstr "**HF Token**: 确保您的 Hugging Face 令牌可以访问 Llama 模型"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:350
+msgid "**GPU Assignment**: Verify CUDA_VISIBLE_DEVICES assignments don't conflict"
+msgstr "**GPU 分配**: 验证 CUDA_VISIBLE_DEVICES 的分配是否存在冲突"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:353
+msgid "Multi-Instance Specific Issues"
+msgstr "多实例特定问题"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:355
+msgid ""
+"**Uneven Load**: Monitor prefiller statistics to ensure balanced "
+"distribution"
+msgstr "**不均匀负载**\\ ：监控 Prefill 统计数据以确保负载均衡分配"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:356
+msgid ""
+"**Resource Contention**: Watch for GPU memory pressure with multiple "
+"instances"
+msgstr "**资源争用**\\ ：监控多个实例的显存压力"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:357
+msgid ""
+"**Network Bottlenecks**: Monitor NIXL transfer performance between "
+"instances"
+msgstr "**网络瓶颈**\\ ：监控实例之间的 NIXL 传输性能"
+
+#: ../../source/disaggregated_prefill/nixl/xpyd.rst:358
+msgid "**Startup Timing**: Stagger prefiller launches to avoid resource conflicts"
+msgstr "**启动时机**\\ ：错开 Prefill 启动以避免资源冲突"
+

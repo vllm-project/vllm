@@ -1,0 +1,257 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/index.rst:4
+msgid "Recipes"
+msgstr "配置示例"
+
+#: ../../source/recipes/index.rst:6
+msgid ""
+"This section lists model architectures validated end-to-end with LMCache,"
+" with a recipe page per architecture covering only the LMCache-specific "
+"configuration that diverges from defaults. Engine-side documentation (how"
+" to serve the model itself) lives with the serving engine; recipe pages "
+"link out rather than duplicate."
+msgstr "本节列出了通过 LMCache 端到端验证的模型架构，每个架构均有一个对应的配置示例页面，仅涵盖与默认值不同的 LMCache 特定配置。引擎端文档（如何部署模型本身）随服务引擎维护；配置示例页面提供外部链接，不重复已有内容。"
+
+#: ../../source/recipes/index.rst:12
+msgid ""
+"For the generic LMCache + engine wiring (ports, remote hosts, sending a "
+"first request), see :doc:`../getting_started/quickstart` -- recipes "
+"assume that page as a prerequisite."
+msgstr "有关通用的 LMCache + 引擎连接配置（端口、远程主机、发送第一个请求），请参见 :doc:`../getting_started/quickstart` —— 各配置示例页面均以该文档为前提。"
+
+#: ../../source/recipes/index.rst:16
+msgid "Recipes are grouped by attention architecture:"
+msgstr "配置示例按注意力架构分组："
+
+#~ msgid ""
+#~ "Engine-side documentation (how to serve"
+#~ " the model itself) lives with the "
+#~ "serving engine. Recipe pages link out"
+#~ " rather than duplicate."
+#~ msgstr "引擎端文档（如何服务模型本身）随服务引擎一起维护。使用指南页面提供外部链接，不重复已有内容。"
+
+#~ msgid "Recipe page contents"
+#~ msgstr "使用指南页面内容"
+
+#~ msgid "Each recipe page is intentionally minimal:"
+#~ msgstr "每个使用指南页面都故意保持简约："
+
+#~ msgid "**Validated models** -- exact HF repo IDs that have been tested."
+#~ msgstr "**验证过的模型** -- 已测试的确切 HF 仓库 ID。"
+
+#~ msgid ""
+#~ "**Engine tabs** -- one tab per "
+#~ "serving engine (vLLM, SGLang, TRT-LLM)."
+#~ " Each tab links to the engine's "
+#~ "own documentation for the model and "
+#~ "shows the exact ``lmcache server`` and"
+#~ " engine launch commands. Tabs for "
+#~ "engines that are not yet validated "
+#~ "state so explicitly."
+#~ msgstr ""
+#~ "**引擎选项卡** -- 每个服务引擎 (vLLM, SGLang, "
+#~ "TRT-LLM) 一个选项卡。每个选项卡链接到该引擎的模型文档，并显示确切的 ``lmcache "
+#~ "server`` 和引擎启动命令。尚未验证的引擎的选项卡会明确说明。"
+
+#~ msgid "**CacheBlend support** -- validation status (may be empty)."
+#~ msgstr "**CacheBlend 支持** -- 验证状态（可能为空）。"
+
+#~ msgid ""
+#~ "**Compression support** -- table of "
+#~ "compression methods (CacheGen, etc.) with "
+#~ "per-method validation status. Extensible: "
+#~ "new methods get a row."
+#~ msgstr "**压缩支持** -- 压缩方法（CacheGen 等）的表格，包含每种方法的验证状态。可扩展：新方法将获得一行。"
+
+#~ msgid "**Caveats** -- known limitations, if any."
+#~ msgstr "**注意事项** -- 已知的限制（如果有的话）。"
+
+#~ msgid "Supported architectures"
+#~ msgstr "支持的架构"
+
+#~ msgid "Architecture"
+#~ msgstr "架构"
+
+#~ msgid "Example HF model"
+#~ msgstr "示例 HF 模型"
+
+#~ msgid "vLLM"
+#~ msgstr "vLLM"
+
+#~ msgid "SGLang"
+#~ msgstr "SGLang"
+
+#~ msgid "TRT-LLM"
+#~ msgstr "TRT-LLM"
+
+#~ msgid "Recipe"
+#~ msgstr "使用指南"
+
+#~ msgid "``DeepseekV4ForCausalLM``"
+#~ msgstr "``DeepseekV4ForCausalLM``"
+
+#~ msgid "``deepseek-ai/DeepSeek-V4-Flash``"
+#~ msgstr "``deepseek-ai/DeepSeek-V4-Flash``"
+
+#~ msgid "✓"
+#~ msgstr "✓"
+
+#~ msgid "—"
+#~ msgstr "—"
+
+#~ msgid ":doc:`deepseek_v4_flash`"
+#~ msgstr ":doc:`deepseek_v4_flash`"
+
+#~ msgid "``MiniMaxM2ForCausalLM``"
+#~ msgstr "``MiniMaxM2ForCausalLM``"
+
+#~ msgid "``MiniMaxAI/MiniMax-M2``"
+#~ msgstr "``MiniMaxAI/MiniMax-M2``"
+
+#~ msgid ":doc:`minimax_m2`"
+#~ msgstr ":doc:`minimax_m2`"
+
+#~ msgid "``Gemma4ForConditionalGeneration``"
+#~ msgstr "``Gemma4ForConditionalGeneration``"
+
+#~ msgid "``google/gemma-4-31B-it``"
+#~ msgstr "``google/gemma-4-31B-it``"
+
+#~ msgid "``google/gemma-4-E4B-it``"
+#~ msgstr "``google/gemma-4-E4B-it``"
+
+#~ msgid ":doc:`gemma4`"
+#~ msgstr ":doc:`gemma4`"
+
+#~ msgid "``Gemma4UnifiedForConditionalGeneration``"
+#~ msgstr "``Gemma4UnifiedForConditionalGeneration``"
+
+#~ msgid "``google/gemma-4-12B-it``"
+#~ msgstr "``google/gemma-4-12B-it``"
+
+#~ msgid "``Gemma3ForConditionalGeneration``"
+#~ msgstr "``Gemma3ForConditionalGeneration``"
+
+#~ msgid "``google/gemma-3-4b-it``"
+#~ msgstr "``google/gemma-3-4b-it``"
+
+#~ msgid ":doc:`gemma3`"
+#~ msgstr "`:doc:`gemma3``"
+
+#~ msgid "``MistralForCausalLM``"
+#~ msgstr "``MistralForCausalLM``"
+
+#~ msgid "``mistralai/Devstral-2-123B-Instruct-2512``"
+#~ msgstr "``mistralai/Devstral-2-123B-Instruct-2512``"
+
+#~ msgid ":doc:`devstral`"
+#~ msgstr ":doc:`devstral`"
+
+#~ msgid "``GptOssForCausalLM``"
+#~ msgstr "``GptOssForCausalLM``"
+
+#~ msgid "``openai/gpt-oss-120b``"
+#~ msgstr "``openai/gpt-oss-120b``"
+
+#~ msgid ":doc:`gpt_oss`"
+#~ msgstr ":gpt_oss:"
+
+#~ msgid "``Qwen3MoeForCausalLM``"
+#~ msgstr "``Qwen3MoeForCausalLM``"
+
+#~ msgid "``Qwen/Qwen3-235B-A22B``"
+#~ msgstr "``Qwen/Qwen3-235B-A22B``"
+
+#~ msgid ":doc:`qwen3`"
+#~ msgstr "：doc:`qwen3`"
+
+#~ msgid "``Qwen3_5ForConditionalGeneration``"
+#~ msgstr "``Qwen3_5ForConditionalGeneration``"
+
+#~ msgid "``Qwen/Qwen3.6-27B``"
+#~ msgstr "``Qwen/Qwen3.6-27B``"
+
+#~ msgid "``Qwen/Qwen3.5-0.8B``"
+#~ msgstr "``Qwen/Qwen3.5-0.8B``"
+
+#~ msgid ":doc:`qwen3_5`"
+#~ msgstr "`:doc:`qwen3_5``"
+
+#~ msgid "``LlamaForCausalLM``"
+#~ msgstr "``LlamaForCausalLM``"
+
+#~ msgid "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
+#~ msgstr "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
+
+#~ msgid ":doc:`llama`"
+#~ msgstr "`:doc:`llama`"
+
+#~ msgid "``Phi3ForCausalLM``"
+#~ msgstr "``Phi3ForCausalLM``"
+
+#~ msgid "``microsoft/Phi-4-mini-instruct``"
+#~ msgstr "``microsoft/Phi-4-mini-instruct``"
+
+#~ msgid ":doc:`phi3`"
+#~ msgstr ":doc:`phi3`"
+
+#~ msgid "``MixtralForCausalLM``"
+#~ msgstr "``MixtralForCausalLM``"
+
+#~ msgid "``mistralai/Mixtral-8x7B-Instruct-v0.1``"
+#~ msgstr "``mistralai/Mixtral-8x7B-Instruct-v0.1``"
+
+#~ msgid ":doc:`mixtral`"
+#~ msgstr ":doc:`mixtral`"
+
+#~ msgid "Legend: ``✓`` validated, ``—`` not validated."
+#~ msgstr "图例：``✓`` 已验证，``—`` 未验证。"
+
+#~ msgid "Contributing a recipe"
+#~ msgstr "贡献一个使用指南"
+
+#~ msgid "To add a new architecture:"
+#~ msgstr "要添加一个新架构："
+
+#~ msgid ""
+#~ "Copy an existing page (e.g. "
+#~ "``minimax_m2.rst``) to "
+#~ "``recipes/<architecture_snake_case>.rst``."
+#~ msgstr ""
+#~ "将现有页面（例如 ``minimax_m2.rst``）复制到 "
+#~ "``recipes/<architecture_snake_case>.rst``。"
+
+#~ msgid ""
+#~ "Fill in **Validated models**, **Engines**, "
+#~ "**LMCache configuration**, and **Caveats**. "
+#~ "Keep each section terse -- if a"
+#~ " field has nothing to say, say "
+#~ "so in one line rather than padding"
+#~ " it."
+#~ msgstr ""
+#~ "填写 **已验证模型**、**引擎**、**LMCache 配置** 和 "
+#~ "**注意事项**。保持每个部分简洁 -- 如果某个字段没有内容，请用一行说明，而不是填充内容。"
+
+#~ msgid "Add a row to the table above and an entry to the hidden toctree below."
+#~ msgstr "在上面的表格中添加一行，并在下面的隐藏 toctree 中添加一个条目。"
+

@@ -1,0 +1,193 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/api_reference/multimodality.rst:2
+msgid "KV Caching for Multimodal Models with vLLM"
+msgstr "多模态模型的 KV Cache 与 vLLM"
+
+#: ../../source/api_reference/multimodality.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/api_reference/multimodality.rst:10
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/api_reference/multimodality.rst:12
+msgid ""
+"vLLM is building on its multimodal capability and currently supports the "
+"following `List of Multimodal Language Models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-"
+"multimodal-language-models>`_."
+msgstr ""
+"vLLM 正在构建其多模态能力，目前支持以下 `多模态语言模型列表 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-"
+"multimodal-language-models>`_。"
+
+#: ../../source/api_reference/multimodality.rst:14
+msgid ""
+"LMCache can therefore be used to speed up inference time for all "
+"multimodal models supported by vLLM. This document shows the speedup "
+"improvements using LMCache for KV caching in vLLM for multimodal models."
+msgstr ""
+"因此，LMCache 可用于加速 vLLM 支持的所有多模态模型的推理时间。本文档展示了在 vLLM 中使用 LMCache 进行 KV "
+"缓存的加速改进。"
+
+#: ../../source/api_reference/multimodality.rst:17
+msgid "Examples of TTFT speed up for different multimodal types"
+msgstr "不同多模态类型的 TTFT 加速示例"
+
+#: ../../source/api_reference/multimodality.rst:20
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/api_reference/multimodality.rst:22
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vLLM instance depending on your GPU memory"
+msgstr "一台至少配备一块 GPU 的机器。您可以根据您的显存调整 vLLM 实例的最大模型长度。"
+
+#: ../../source/api_reference/multimodality.rst:23
+msgid ""
+"vLLM and LMCache installed (:doc:`Installation Guide "
+"<../getting_started/installation>`)"
+msgstr "vLLM 和 LMCache 已安装 (:doc:`安装指南 <../getting_started/installation>`)"
+
+#: ../../source/api_reference/multimodality.rst:24
+msgid "vLLM audio dependencies installed: ``pip install vllm[audio]``"
+msgstr "vLLM 音频依赖项已安装：``pip install vllm[audio]``"
+
+#: ../../source/api_reference/multimodality.rst:27
+msgid "Examples"
+msgstr "示例"
+
+#: ../../source/api_reference/multimodality.rst:31
+msgid ""
+"The examples below use a python script for inferencing multimodal models "
+"hosted by vLLM. The script is the "
+"`openai_chat_completion_client_for_multimodal python script in vLLM "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_."
+" You will need to download it locally for running the examples below. The"
+" script is printed in the `reference section <#reference-inferencing-"
+"multimodal-models-in-vllm-example-python-script>`_ that follows for you "
+"perusal. Go to the `Example output <#example-output>`_ section to see the"
+" output in the vLLM logs that demonstrate the speedup improvements."
+msgstr ""
+"下面的示例使用 Python 脚本对托管在 vLLM 上的多模态模型进行推理。该脚本是 `vLLM 中的 "
+"openai_chat_completion_client_for_multimodal python 脚本 "
+"<https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_。您需要将其下载到本地以运行下面的示例。该脚本在后面的"
+" `参考部分 <#reference-inferencing-multimodal-models-in-vllm-example-python-"
+"script>`_ 中打印供您查阅。请转到 `示例输出 <#example-output>`_ 部分查看 vLLM 日志中的输出，以展示加速改进。"
+
+#: ../../source/api_reference/multimodality.rst:39
+msgid "Audio Inference with Ultravox:"
+msgstr "使用 Ultravox 进行音频推理："
+
+#: ../../source/api_reference/multimodality.rst:41
+msgid ""
+"Start vLLM server with ``fixie-ai/ultravox-v0_5-llama-3_2-1b`` model and "
+"LMCache KV caching:"
+msgstr "使用 ``fixie-ai/ultravox-v0_5-llama-3_2-1b`` 模型和 LMCache KV 缓存启动 vLLM 服务器："
+
+#: ../../source/api_reference/multimodality.rst:49
+#: ../../source/api_reference/multimodality.rst:66
+#: ../../source/api_reference/multimodality.rst:84
+#: ../../source/api_reference/multimodality.rst:101
+msgid ""
+"Run the python script twice to demonstrate TTFT speedup on the second "
+"turn because of the caching:"
+msgstr "运行 Python 脚本两次，以演示由于缓存导致的第二次推理的 TTFT 加速："
+
+#: ../../source/api_reference/multimodality.rst:57
+msgid "Single Image Inference with Llava:"
+msgstr "使用 Llava 进行单图像推理："
+
+#: ../../source/api_reference/multimodality.rst:59
+msgid ""
+"Start vLLM server with ``llava-hf/llava-1.5-7b-hf`` model and LMCache KV "
+"caching:"
+msgstr "使用 ``llava-hf/llava-1.5-7b-hf`` 模型和 LMCache KV 缓存启动 vLLM 服务器："
+
+#: ../../source/api_reference/multimodality.rst:74
+msgid "Multi-image Inference with Phi-3.5-vision-instruct:"
+msgstr "使用 Phi-3.5-vision-instruct 进行多图像推理："
+
+#: ../../source/api_reference/multimodality.rst:76
+msgid ""
+"Start vLLM server with ``microsoft/Phi-3.5-vision-instruct`` model and "
+"LMCache KV caching:"
+msgstr "使用 ``microsoft/Phi-3.5-vision-instruct`` 模型和 LMCache KV 缓存启动 vLLM 服务器："
+
+#: ../../source/api_reference/multimodality.rst:92
+msgid "Video Inference with Llava-OneVision:"
+msgstr "使用 Llava-OneVision 进行视频推理："
+
+#: ../../source/api_reference/multimodality.rst:94
+msgid ""
+"Start vLLM server with ``llava-hf/llava-onevision-qwen2-7b-ov-hf`` model "
+"and LMCache KV caching:"
+msgstr ""
+"使用 ``llava-hf/llava-onevision-qwen2-7b-ov-hf`` 模型和 LMCache KV 缓存启动 vLLM "
+"服务器："
+
+#: ../../source/api_reference/multimodality.rst:110
+msgid "Example output"
+msgstr "示例输出"
+
+#: ../../source/api_reference/multimodality.rst:112
+msgid ""
+"When running the examples above you will notice output in the vLLM logs "
+"similar to below."
+msgstr "在运行上述示例时，您会注意到 vLLM 日志中类似于以下的输出。"
+
+#: ../../source/api_reference/multimodality.rst:114
+msgid "This first output demonstrates the tokens being cached and loaded."
+msgstr "该第一个输出演示了令牌被缓存和加载的过程。"
+
+#: ../../source/api_reference/multimodality.rst:120
+msgid "This then shows the speedup between the first and second runs."
+msgstr "这显示了第一次和第二次运行之间的加速。"
+
+#: ../../source/api_reference/multimodality.rst:122
+msgid "First request:"
+msgstr "第一次请求："
+
+#: ../../source/api_reference/multimodality.rst:133
+msgid "Second request:"
+msgstr "第二个请求："
+
+#: ../../source/api_reference/multimodality.rst:144
+msgid "Reference: Inferencing multimodal models in vLLM example Python script"
+msgstr "参考：在 vLLM 示例 Python 脚本中推理多模态模型"
+
+#: ../../source/api_reference/multimodality.rst:146
+msgid ""
+"Source: https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py"
+msgstr ""
+"源: https://github.com/vllm-"
+"project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py"
+

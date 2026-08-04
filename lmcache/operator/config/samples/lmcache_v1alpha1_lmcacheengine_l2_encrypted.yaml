@@ -1,0 +1,43 @@
+# LMCacheEngine with an encrypted L2 backend.
+#
+# The aesgcm serde encrypts KV bytes at rest in the L2 tier, keyed per
+# cache_salt (distinct ciphertext per tenant). L1 (host RAM) and L0 (GPU)
+# remain plaintext — this protects readers of the remote storage, not a
+# party with access to a running server. See
+# docs/design/v1/distributed/serde/aesgcm.md for the threat and key models.
+#
+# Create the master-key Secret first (the operator NEVER generates keys):
+#
+#   head -c 16 /dev/urandom > master.key   # 16 bytes for AES-128, 32 for AES-256
+#   kubectl create secret generic lmcache-l2-master-key \
+#       --from-file=master=master.key
+#
+# The Secret must live in the engine's namespace (the reference is
+# same-namespace only). It is mounted directly into the engine pods,
+# read-only at /etc/lmcache/keys/master; only the "master" data key is
+# projected. A missing Secret or missing key surfaces as a pod mount
+# event and self-heals once the Secret is fixed.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache-encrypted
+  namespace: default
+spec:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  l1:
+    sizeGB: 100
+
+  l2Backend:
+    # The serde applies to whichever adapter is configured (resp or raw).
+    raw:
+      type: fs
+      config:
+        base_path: /data/lmcache/l2
+    serde:
+      aesgcm:
+        masterKeySecretRef:
+          name: lmcache-l2-master-key   # must be in the engine's namespace
+        keyProvider: hkdf       # default; derives a per-cache_salt key via HKDF-SHA256
+        aesBits: 128            # default; 256 for compliance mandates

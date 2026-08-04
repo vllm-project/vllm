@@ -1,0 +1,157 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/kvcache.rst:2
+msgid "lmcache kvcache"
+msgstr "lmcache kvcache"
+
+#: ../../source/cli/kvcache.rst:4
+msgid ""
+"The ``lmcache kvcache`` command manages KV cache state on a running "
+"LMCache server."
+msgstr "``lmcache kvcache`` 命令管理正在运行的 LMCache 服务器上的 KV Cache 状态。"
+
+#: ../../source/cli/kvcache.rst:28
+msgid "clear"
+msgstr "清除"
+
+#: ../../source/cli/kvcache.rst:30
+msgid ""
+"Clear all cached KV data in **L1 (CPU memory)** on the target LMCache "
+"server."
+msgstr "清除目标 LMCache 服务器上 **L1 (CPU 内存)** 中所有缓存的 KV 数据。"
+
+#: ../../source/cli/kvcache.rst:36
+msgid "**Example:**"
+msgstr "**示例：**"
+
+#: ../../source/cli/kvcache.rst:46
+msgid "**JSON output** (for scripting with ``jq``):"
+msgstr "**JSON 输出** (用于与 ``jq`` 脚本交互):"
+
+#: ../../source/cli/kvcache.rst:58
+msgid "**Quiet mode** (exit code only, no output):"
+msgstr "**静默模式**\\ （仅退出代码，无输出）："
+
+#: ../../source/cli/kvcache.rst:67
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/kvcache.rst:73
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/kvcache.rst:74
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/cli/kvcache.rst:75
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/kvcache.rst:76
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/kvcache.rst:77
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/cli/kvcache.rst:78
+msgid "URL of the LMCache MP HTTP server (e.g. ``http://localhost:8000``)."
+msgstr "LMCache MP HTTP 服务器的 URL（例如 ``http://localhost:8000``\\ ）。"
+
+#: ../../source/cli/kvcache.rst:79
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/kvcache.rst:80 ../../source/cli/kvcache.rst:83
+#: ../../source/cli/kvcache.rst:86
+msgid "No"
+msgstr "不"
+
+#: ../../source/cli/kvcache.rst:81
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
+
+#: ../../source/cli/kvcache.rst:82
+msgid "``--output``"
+msgstr "``--output``"
+
+#: ../../source/cli/kvcache.rst:84
+msgid "Save output to a file (uses the format chosen by ``--format``)."
+msgstr "将输出保存到文件中（使用 ``--format`` 选择的格式）。"
+
+#: ../../source/cli/kvcache.rst:85
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/kvcache.rst:87
+msgid "Suppress stdout. Useful in scripts where you only need the exit code."
+msgstr "抑制标准输出。在只需要退出代码的脚本中很有用。"
+
+#: ../../source/cli/kvcache.rst:90
+msgid "Exit Codes"
+msgstr "退出代码"
+
+#: ../../source/cli/kvcache.rst:96
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/kvcache.rst:97
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/kvcache.rst:98
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/kvcache.rst:99
+msgid "Success."
+msgstr "成功。"
+
+#: ../../source/cli/kvcache.rst:100
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/kvcache.rst:101
+msgid "Error (connection failure, server error, bad arguments)."
+msgstr "错误（连接失败、服务器错误、参数错误）。"
+
+#: ../../source/cli/kvcache.rst:104
+msgid "Common Patterns"
+msgstr "常见模式"
+
+#: ../../source/cli/kvcache.rst:106
+msgid "**Handle temporary server unavailability:**"
+msgstr "**处理临时服务器不可用:**"
+
+#: ../../source/cli/kvcache.rst:108
+msgid ""
+"If the server is temporarily unreachable (e.g. due to network issue), the"
+" command fails with exit code 1. For persistent connectivity issues, use "
+"``lmcache ping`` to diagnose."
+msgstr "如果服务器暂时无法访问（例如，由于网络问题），命令将以退出代码 1 失败。对于持续的连接问题，请使用 ``lmcache ping`` 进行诊断。"
+
+#: ../../source/cli/kvcache.rst:120
+msgid "**Clear cache and capture JSON result:**"
+msgstr "**清除缓存并捕获 JSON 结果：**"
+

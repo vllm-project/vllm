@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: lmcache
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

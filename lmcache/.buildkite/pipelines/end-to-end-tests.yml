@@ -1,0 +1,51 @@
+steps:
+  - label: ":pip: E2E Tests"
+    key: "e2e"
+    command: |
+      echo $PWD # for debugging
+
+      uv venv --python 3.12 .venv-$BUILDKITE_BUILD_ID
+      source .venv-$BUILDKITE_BUILD_ID/bin/activate
+
+      uv pip install --upgrade pip setuptools wheel 
+      uv pip install -r requirements/common.txt
+      uv pip install -r requirements/test.txt
+      uv pip install -e . --no-build-isolation
+      uv pip install matplotlib
+      uv pip install pandas
+      # ">=0.0.0.dev0" explicitly limits vLLM to be the only pre-release package.
+      uv pip install -U "vllm>=0.0.0.dev0" --extra-index-url https://wheels.vllm.ai/nightly
+      uv pip freeze
+
+
+      source .buildkite/scripts/pick-free-gpu.sh 18000
+
+      bash .buildkite/scripts/end-to-end-test.sh
+    artifact_paths:
+      - "test_local_cpu_experimental.csv"
+      - "test_local_cpu_experimental.pdf"
+      - "test_local_disk_experimental.csv"
+      - "test_local_disk_experimental.pdf"
+      - "lmcache-cpu-stdout.log"
+      - "lmcache-cpu-stderr.log"
+      - "vllm-cpu-stdout.log"
+      - "vllm-cpu-stderr.log"
+      - "lmcache-disk-stdout.log"
+      - "lmcache-disk-stderr.log"
+      - "vllm-disk-stdout.log"
+      - "vllm-disk-stderr.log"
+
+  - label: ":wastebasket: Kill all"
+    key: "clean"
+    depends_on: "e2e"
+    allow_dependency_failure: true
+    command: bash .buildkite/scripts/bare-machine-cleanup.sh
+
+  - label: "Clean up"
+    depends_on:
+        - "clean"
+    command: |
+      export TARGET="$PWD"
+      echo "Deleting current workspace $TARGET"
+      cd /
+      sudo rm -rf "$TARGET"

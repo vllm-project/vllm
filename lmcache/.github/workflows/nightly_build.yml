@@ -1,0 +1,263 @@
+name: Build nightly container image of latest code
+
+on:
+  schedule:
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-wheels:
+    name: Build and publish nightly wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Remove non-release tags
+        run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Login to DockerHub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install cibuildwheel
+
+
+      - name: Build cu13.0 nightly wheel
+        env:
+          CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+        run: |
+          python -m cibuildwheel --output-dir dist/cu130
+
+      - name: Publish cu13.0 wheels to rolling nightly release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · CUDA 13.0" \
+            --notes "Nightly CUDA 13.0 wheels built from \`dev\` on $(date +'%Y-%m-%d').
+
+          \`\`\`
+          uv pip install lmcache --pre \\
+            --extra-index-url https://download.pytorch.org/whl/cu130 \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly \\
+            --index-strategy unsafe-best-match
+          \`\`\`" \
+            --prerelease \
+            dist/cu130/*.whl
+
+      - name: Build cu12.9 nightly wheel
+        env:
+          CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
+          CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129'
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair
+            --plat manylinux_2_28_x86_64
+            --exclude libtorch.so
+            --exclude libtorch_cuda.so
+            --exclude libtorch_python.so
+            --exclude libtorch_cpu.so
+            --exclude libc10.so
+            --exclude libc10_cuda.so
+            --exclude libcudart.so.12
+            -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+        run: |
+          python -m cibuildwheel --output-dir dist/cu129
+
+      - name: Publish cu12.9 wheels to rolling nightly-cu129 release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly-cu129 --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh release create nightly-cu129 \
+            --repo ${{ github.repository }} \
+            --title "Nightly $(date +'%Y-%m-%d') · CUDA 12.9" \
+            --notes "Nightly CUDA 12.9 wheels built from \`dev\` on $(date +'%Y-%m-%d').
+
+          \`\`\`
+          uv pip install lmcache --pre \\
+            --extra-index-url https://download.pytorch.org/whl/cu129 \\
+            --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/nightly-cu129 \\
+            --index-strategy unsafe-best-match
+          \`\`\`" \
+            --prerelease \
+            dist/cu129/*.whl
+
+  nightly-build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+            disable-sudo-and-containers: false
+            egress-policy: audit
+
+      - name: Login to DockerHub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # for setuptools-scm
+          fetch-depth: 0
+
+      - name: Remove non-release tags
+        run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Get the current date
+        run: |
+          echo "NOW=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
+
+      - name: Build lmcache/vllm-openai container image (cu13 nightly)
+        run: |
+          docker system prune -f --all
+          docker builder prune -af
+          docker build \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.0 \
+          --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+          --target image-build \
+          --tag lmcache/vllm-openai:latest-nightly --tag lmcache/vllm-openai:nightly-${{ env.NOW }} \
+          --file docker/Dockerfile .
+
+      - name: Push lmcache/vllm-openai container image to DockerHub
+        run: |
+          docker push lmcache/vllm-openai:latest-nightly
+          docker push lmcache/vllm-openai:nightly-${{ env.NOW }}
+
+      # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13 nightly
+      # image just pushed above — still local, and dropped by the standalone
+      # build's leading prune, so build here.
+      - name: Build lmcache/lmcache-payload image (nightly)
+        run: |
+          docker build \
+          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
+          --tag lmcache/lmcache-payload:latest-nightly --tag lmcache/lmcache-payload:nightly-${{ env.NOW }} \
+          --file docker/Dockerfile.payload .
+
+      # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+      - name: Smoke test lmcache/lmcache-payload (nightly)
+        run: |
+          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}
+          test -f payload-out/lmcache/__init__.py
+
+      - name: Push lmcache/lmcache-payload nightly image to DockerHub
+        run: |
+          docker push lmcache/lmcache-payload:latest-nightly
+          docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}
+
+      - name: Build lmcache/standalone container image (cu13 nightly)
+        run: |
+          docker system prune -f --all
+          docker builder prune -af
+          docker build \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.0 \
+          --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+          --target lmcache-final \
+          --tag lmcache/standalone:nightly --tag lmcache/standalone:nightly-${{ env.NOW }} \
+          --file docker/Dockerfile.standalone .
+
+      - name: Push lmcache/standalone container image to DockerHub
+        run: |
+          docker push lmcache/standalone:nightly
+          docker push lmcache/standalone:nightly-${{ env.NOW }}
+
+      - name: Build lmcache/vllm-openai container image (cu12.9 nightly)
+        run: |
+          docker system prune -f --all
+          docker builder prune -af
+          docker build \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
+          --target image-build \
+          --tag lmcache/vllm-openai:latest-nightly-cu129 --tag lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129 \
+          --file docker/Dockerfile .
+
+      - name: Push lmcache/vllm-openai cu12.9 nightly image to DockerHub
+        run: |
+          docker push lmcache/vllm-openai:latest-nightly-cu129
+          docker push lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129
+
+      # Payload extracts lmcache from the cu129 nightly image just pushed above —
+      # still local, and dropped by the standalone build's leading prune, so
+      # build here.
+      - name: Build lmcache/lmcache-payload image (cu129 nightly)
+        run: |
+          docker build \
+          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly-cu129 \
+          --tag lmcache/lmcache-payload:latest-nightly-cu129 --tag lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129 \
+          --file docker/Dockerfile.payload .
+
+      # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+      - name: Smoke test lmcache/lmcache-payload (cu129 nightly)
+        run: |
+          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
+          test -f payload-out-cu129/lmcache/__init__.py
+
+      - name: Push lmcache/lmcache-payload cu12.9 nightly image to DockerHub
+        run: |
+          docker push lmcache/lmcache-payload:latest-nightly-cu129
+          docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
+
+      - name: Build lmcache/standalone container image (cu12.9 nightly)
+        run: |
+          docker system prune -f --all
+          docker builder prune -af
+          docker build \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=12.9 --build-arg UBUNTU_VERSION=24.04 \
+          --target lmcache-final \
+          --tag lmcache/standalone:nightly-cu129 --tag lmcache/standalone:nightly-${{ env.NOW }}-cu129 \
+          --file docker/Dockerfile.standalone .
+
+      - name: Push lmcache/standalone cu12.9 nightly image to DockerHub
+        run: |
+          docker push lmcache/standalone:nightly-cu129
+          docker push lmcache/standalone:nightly-${{ env.NOW }}-cu129

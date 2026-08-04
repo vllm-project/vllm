@@ -1,0 +1,9 @@
+# Optional NIXL transport deps, exposed as the `pip install lmcache[nixl]`
+# extra.
+
+# Depend on the `nixl` meta-package: it is the only package that provides the
+# importable top-level `nixl` module, and since 1.3.0 it dispatches at runtime
+# to the backend (nixl_cu12 / nixl_cu13) matching torch's CUDA build. The
+# nixl-cu12 / nixl-cu13 backend wheels alone do NOT provide the `nixl` module.
+# Cost: the meta-package installs both CUDA backends (~105MB each).
+nixl>=1.3.0; python_version < "3.13"

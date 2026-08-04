@@ -1,0 +1,30 @@
+workload:
+  type: long_doc_qa
+  max-inflight-requests: 20
+
+docker:
+  env:
+    - "LMCACHE_CONFIG_FILE=/etc/lmcache/local_cpu_mla.yaml"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
+  gpu_count: 2
+
+vllm:
+  model: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+  args:
+    - "--load-format"
+    - "dummy"
+    - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - '{"kv_connector":"LMCacheConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache.integration.vllm.lmcache_connector_v1","kv_connector_extra_config":{"discard_partial_chunks":false}}'
+    - "--tensor-parallel-size"
+    - "2"
+    - "--block-size"
+    - "64"
+    - "--kv-cache-dtype"
+    - "fp8_e4m3"
+    - "--quantization"
+    - "fp8"
+
+checking-fields:
+  - query_round_time_per_prompt

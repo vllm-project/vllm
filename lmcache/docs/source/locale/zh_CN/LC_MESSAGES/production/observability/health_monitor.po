@@ -1,0 +1,495 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/health_monitor.rst:4
+msgid "Health Monitor"
+msgstr "健康监控器"
+
+#: ../../source/production/observability/health_monitor.rst:6
+msgid ""
+"LMCache includes a comprehensive health monitoring framework that "
+"continuously monitors the health of the cache engine and its components. "
+"This feature is essential for production deployments to detect and "
+"respond to failures in remote storage backends."
+msgstr "LMCache 包含一个全面的健康监测框架，持续监测缓存引擎及其组件的健康状况。此功能对于生产环境的部署至关重要，可以检测并响应远程存储后端的故障。"
+
+#: ../../source/production/observability/health_monitor.rst:9
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/production/observability/health_monitor.rst:11
+msgid "The Health Monitor provides:"
+msgstr "健康监控器提供："
+
+#: ../../source/production/observability/health_monitor.rst:13
+msgid ""
+"**Automatic health checks**: Periodically monitors the health of all "
+"registered components"
+msgstr "**自动健康检查**\\ ：定期监控所有注册组件的健康状况"
+
+#: ../../source/production/observability/health_monitor.rst:14
+msgid ""
+"**Extensible framework**: Easily add custom health checks for new "
+"components"
+msgstr "**可扩展框架**\\ ：轻松为新组件添加自定义健康检查"
+
+#: ../../source/production/observability/health_monitor.rst:15
+msgid ""
+"**Remote backend monitoring**: Built-in support for monitoring remote "
+"storage backends via ping"
+msgstr "**远程后端监控**\\ ：内置支持通过 ping 监控远程存储后端"
+
+#: ../../source/production/observability/health_monitor.rst:16
+msgid ""
+"**Degraded mode support**: Automatically blocks operations when the "
+"system is unhealthy"
+msgstr "**降级模式支持**\\ ：当系统不健康时自动阻止操作"
+
+#: ../../source/production/observability/health_monitor.rst:17
+msgid ""
+"**Prometheus metrics integration**: Health status exposed via metrics "
+"endpoint"
+msgstr "**Prometheus 指标集成**\\ ：通过指标端点暴露健康状态"
+
+#: ../../source/production/observability/health_monitor.rst:20
+msgid "Architecture"
+msgstr "架构"
+
+#: ../../source/production/observability/health_monitor.rst:22
+msgid "The health monitoring system consists of three main components:"
+msgstr "健康监测系统由三个主要组件组成："
+
+#: ../../source/production/observability/health_monitor.rst:24
+msgid "**HealthCheck (Abstract Base Class)**"
+msgstr "**健康检查（抽象基类）**"
+
+#: ../../source/production/observability/health_monitor.rst:26
+msgid ""
+"Base class for individual health checks. Each health check represents one"
+" aspect of system health."
+msgstr "单个健康检查的基类。每个健康检查代表系统健康的一个方面。"
+
+#: ../../source/production/observability/health_monitor.rst:28
+msgid "**HealthMonitor**"
+msgstr "**健康监控器**"
+
+#: ../../source/production/observability/health_monitor.rst:30
+msgid ""
+"The central monitor that orchestrates all health checks. It runs in a "
+"background thread and periodically executes all registered health checks."
+msgstr "中央监控器，负责协调所有健康检查。它在后台线程中运行，并定期执行所有注册的健康检查。"
+
+#: ../../source/production/observability/health_monitor.rst:32
+msgid "**RemoteBackendHealthCheck**"
+msgstr "**RemoteBackendHealthCheck**"
+
+#: ../../source/production/observability/health_monitor.rst:34
+msgid ""
+"Built-in health check for remote storage backends. It pings the remote "
+"connector to verify connectivity."
+msgstr "内置的远程存储后端健康检查。它会向远程连接器发送请求以验证连接性。"
+
+#: ../../source/production/observability/health_monitor.rst:37
+msgid "Auto-Discovery"
+msgstr "自动发现"
+
+#: ../../source/production/observability/health_monitor.rst:39
+msgid ""
+"The Health Monitor uses an auto-discovery mechanism to find and "
+"instantiate health checks:"
+msgstr "健康监控器使用自动发现机制来查找和实例化健康检查："
+
+#: ../../source/production/observability/health_monitor.rst:41
+msgid ""
+"At startup, the monitor scans the ``lmcache.v1.health_monitor.checks`` "
+"package"
+msgstr "在启动时，监视器扫描 ``lmcache.v1.health_monitor.checks`` 包"
+
+#: ../../source/production/observability/health_monitor.rst:42
+msgid "All classes that inherit from ``HealthCheck`` are discovered"
+msgstr "所有继承自 ``HealthCheck`` 的类都会被发现"
+
+#: ../../source/production/observability/health_monitor.rst:43
+msgid "Each check's ``create_from_engine()`` method is called to create instances"
+msgstr "每个检查的 ``create_from_engine()`` 方法被调用以创建实例"
+
+#: ../../source/production/observability/health_monitor.rst:44
+msgid "The instances are registered with the monitor"
+msgstr "这些实例会被注册到监视器中。"
+
+#: ../../source/production/observability/health_monitor.rst:46
+msgid ""
+"This design allows you to add new health checks by simply creating a new "
+"module in the checks package."
+msgstr "此设计允许您通过在检查包中简单地创建一个新模块来添加新的健康检查。"
+
+#: ../../source/production/observability/health_monitor.rst:49
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/production/observability/health_monitor.rst:51
+msgid ""
+"Health monitor configuration is done through the ``extra_config`` section"
+" of your LMCache configuration:"
+msgstr "健康监控配置通过您的 LMCache 配置的 ``extra_config`` 部分完成："
+
+#: ../../source/production/observability/health_monitor.rst:53
+msgid "Health Monitor Configuration Options"
+msgstr "健康监控配置选项"
+
+#: ../../source/production/observability/health_monitor.rst:57
+msgid "Configuration Key"
+msgstr "配置键"
+
+#: ../../source/production/observability/health_monitor.rst:58
+msgid "Default Value"
+msgstr "默认值"
+
+#: ../../source/production/observability/health_monitor.rst:59
+#: ../../source/production/observability/health_monitor.rst:148
+#: ../../source/production/observability/health_monitor.rst:175
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/health_monitor.rst:60
+msgid "``ping_interval``"
+msgstr "``ping_interval``"
+
+#: ../../source/production/observability/health_monitor.rst:61
+msgid "``30.0``"
+msgstr "``30.0``"
+
+#: ../../source/production/observability/health_monitor.rst:62
+msgid "Interval (in seconds) between health check cycles"
+msgstr "健康检查周期之间的间隔（以秒为单位）"
+
+#: ../../source/production/observability/health_monitor.rst:63
+msgid "``ping_timeout``"
+msgstr "``ping_timeout``"
+
+#: ../../source/production/observability/health_monitor.rst:64
+msgid "``5.0``"
+msgstr "``5.0``"
+
+#: ../../source/production/observability/health_monitor.rst:65
+msgid "Timeout (in seconds) for each ping operation"
+msgstr "每次 ping 操作的超时时间（以秒为单位）"
+
+#: ../../source/production/observability/health_monitor.rst:66
+msgid "``get_blocking_failed_threshold``"
+msgstr "``get_blocking_failed_threshold``"
+
+#: ../../source/production/observability/health_monitor.rst:67
+msgid "``10``"
+msgstr "``10``"
+
+#: ../../source/production/observability/health_monitor.rst:68
+msgid "Max number of get_blocking failed count in check interval"
+msgstr "检查时间间隔内获取阻塞失败的最大次数"
+
+#: ../../source/production/observability/health_monitor.rst:69
+msgid "``waiting_time_for_recovery``"
+msgstr "``waiting_time_for_recovery``"
+
+#: ../../source/production/observability/health_monitor.rst:70
+msgid "``300.0``"
+msgstr "``300.0``"
+
+#: ../../source/production/observability/health_monitor.rst:71
+msgid "Waiting time (in seconds) for recovery if get_blocking failed"
+msgstr "如果 get_blocking 失败，恢复的等待时间（以秒为单位）"
+
+#: ../../source/production/observability/health_monitor.rst:75
+msgid "How It Works"
+msgstr "它是如何工作的"
+
+#: ../../source/production/observability/health_monitor.rst:78
+msgid "Runtime Behavior"
+msgstr "运行时行为"
+
+#: ../../source/production/observability/health_monitor.rst:80
+msgid "The health monitor runs in a background thread:"
+msgstr "健康监控在后台线程中运行："
+
+#: ../../source/production/observability/health_monitor.rst:82
+msgid "Every ``ping_interval`` seconds, all health checks are executed"
+msgstr "每 ``ping_interval`` 秒，所有健康检查都会执行"
+
+#: ../../source/production/observability/health_monitor.rst:83
+msgid "If any check fails, the system is marked as unhealthy"
+msgstr "如果任何检查失败，系统将被标记为不健康。"
+
+#: ../../source/production/observability/health_monitor.rst:84
+msgid "When unhealthy, store/retrieve operations are blocked with a warning log"
+msgstr "当系统不健康时，存储/检索操作会被阻止，并记录警告日志。"
+
+#: ../../source/production/observability/health_monitor.rst:85
+msgid ""
+"Once all checks pass again, the system is marked as healthy and "
+"operations resume"
+msgstr "一旦所有检查再次通过，系统将被标记为健康，操作将恢复。"
+
+#: ../../source/production/observability/health_monitor.rst:88
+msgid "Initialization Failure Handling"
+msgstr "初始化失败处理"
+
+#: ../../source/production/observability/health_monitor.rst:90
+msgid "When initialization or post-initialization fails irrecoverably:"
+msgstr "当初始化或后初始化不可恢复地失败时："
+
+#: ../../source/production/observability/health_monitor.rst:92
+msgid "The system is marked with ``_init_failed = True``"
+msgstr "系统被标记为 ``_init_failed = True``"
+
+#: ../../source/production/observability/health_monitor.rst:93
+msgid "``is_healthy()`` method returns ``False`` permanently"
+msgstr "``is_healthy()`` 方法永久返回 ``False``"
+
+#: ../../source/production/observability/health_monitor.rst:94
+msgid ""
+"Health monitoring thread will not start (if initialization fails before "
+"it starts)"
+msgstr "健康监控线程将不会启动（如果初始化在启动之前失败）"
+
+#: ../../source/production/observability/health_monitor.rst:95
+msgid "The system operates in degraded mode (recompute-only)"
+msgstr "系统以降级模式运行（仅重计算）"
+
+#: ../../source/production/observability/health_monitor.rst:97
+msgid ""
+"This ensures that irrecoverable initialization errors don't cause "
+"cascading failures and the system can gracefully fall back to "
+"recomputation."
+msgstr "这确保不可恢复的初始化错误不会导致级联故障，并且系统可以优雅地回退到重计算。"
+
+#: ../../source/production/observability/health_monitor.rst:101
+msgid "Graceful Degradation"
+msgstr "优雅降级"
+
+#: ../../source/production/observability/health_monitor.rst:103
+msgid "When the health monitor detects an unhealthy state:"
+msgstr "当健康监测器检测到不健康状态时："
+
+#: ../../source/production/observability/health_monitor.rst:105
+msgid "**Store operations**: Skipped with a warning message"
+msgstr "**存储操作**\\ ：跳过并显示警告信息"
+
+#: ../../source/production/observability/health_monitor.rst:106
+msgid "**Retrieve operations**: Return empty results with a warning message"
+msgstr "**检索操作**\\ ：返回空结果并带有警告信息"
+
+#: ../../source/production/observability/health_monitor.rst:107
+msgid "**Lookup operations**: Return 0 (no cache hits) with a warning message"
+msgstr "**查找操作**\\ ：返回 0（没有缓存命中）并附带警告信息"
+
+#: ../../source/production/observability/health_monitor.rst:109
+msgid "This prevents cascading failures when remote backends are unavailable."
+msgstr "这可以防止在远程后端不可用时发生级联故障。"
+
+#: ../../source/production/observability/health_monitor.rst:112
+msgid "Built-in Health Checks"
+msgstr "内置健康检查"
+
+#: ../../source/production/observability/health_monitor.rst:115
+msgid "RemoteBackendHealthCheck"
+msgstr "RemoteBackendHealthCheck"
+
+#: ../../source/production/observability/health_monitor.rst:117
+msgid ""
+"This check monitors the connectivity to remote storage backends (e.g., "
+"Redis, Valkey)."
+msgstr "此检查监控与远程存储后端（例如，Redis、Valkey）的连接性。"
+
+#: ../../source/production/observability/health_monitor.rst:119
+msgid "**What it checks:**"
+msgstr "**检查内容：**"
+
+#: ../../source/production/observability/health_monitor.rst:121
+msgid "Pings the remote connector to verify it's reachable"
+msgstr "对远程连接器进行 ping 测试以验证其可达性"
+
+#: ../../source/production/observability/health_monitor.rst:122
+msgid "Measures ping latency"
+msgstr "测量 ping 延迟"
+
+#: ../../source/production/observability/health_monitor.rst:123
+msgid "Reports error codes for failures"
+msgstr "报告失败的错误代码"
+
+#: ../../source/production/observability/health_monitor.rst:125
+msgid "**When it's active:**"
+msgstr "**当它处于活动状态时：**"
+
+#: ../../source/production/observability/health_monitor.rst:127
+msgid "Only when a remote backend is configured (``remote_url`` is set)"
+msgstr "仅在配置了远程后端时（\\ ``remote_url`` 已设置）"
+
+#: ../../source/production/observability/health_monitor.rst:128
+msgid "Only if the connector supports the ``ping()`` operation"
+msgstr "仅当连接器支持 ``ping()`` 操作时"
+
+#: ../../source/production/observability/health_monitor.rst:130
+msgid "**Metrics reported:**"
+msgstr "**报告的指标：**"
+
+#: ../../source/production/observability/health_monitor.rst:132
+msgid "``lmcache:remote_ping_latency``: Latest ping latency (milliseconds)"
+msgstr "``lmcache:remote_ping_latency``: 最新的 ping 延迟（毫秒）"
+
+#: ../../source/production/observability/health_monitor.rst:133
+msgid "``lmcache:remote_ping_error_code``: Latest error code (0 = success)"
+msgstr "``lmcache:remote_ping_error_code``: 最新错误代码 (0 = 成功)"
+
+#: ../../source/production/observability/health_monitor.rst:134
+msgid "``lmcache:remote_ping_errors``: Total number of ping errors"
+msgstr "``lmcache:remote_ping_errors``: 总的 ping 错误数量"
+
+#: ../../source/production/observability/health_monitor.rst:135
+msgid "``lmcache:remote_ping_successes``: Total number of successful pings"
+msgstr "``lmcache:remote_ping_successes``: 成功 ping 的总次数"
+
+#: ../../source/production/observability/health_monitor.rst:138
+msgid "Prometheus Metrics"
+msgstr "Prometheus 指标"
+
+#: ../../source/production/observability/health_monitor.rst:140
+msgid "The health monitor exposes metrics through the Prometheus endpoint:"
+msgstr "健康监控器通过 Prometheus 端点公开指标："
+
+#: ../../source/production/observability/health_monitor.rst:142
+msgid "Health Monitor Metrics"
+msgstr "健康监控指标"
+
+#: ../../source/production/observability/health_monitor.rst:146
+msgid "Metric Name"
+msgstr "指标名称"
+
+#: ../../source/production/observability/health_monitor.rst:147
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/production/observability/health_monitor.rst:149
+msgid "``lmcache:is_healthy``"
+msgstr "``lmcache:is_healthy``"
+
+#: ../../source/production/observability/health_monitor.rst:150
+#: ../../source/production/observability/health_monitor.rst:153
+#: ../../source/production/observability/health_monitor.rst:156
+msgid "Gauge"
+msgstr "仪表"
+
+#: ../../source/production/observability/health_monitor.rst:151
+msgid "Overall system health status (1 = healthy, 0 = unhealthy)"
+msgstr "整体系统健康状态（1 = 健康，0 = 不健康）"
+
+#: ../../source/production/observability/health_monitor.rst:152
+msgid "``lmcache:remote_ping_latency``"
+msgstr "``lmcache:remote_ping_latency``"
+
+#: ../../source/production/observability/health_monitor.rst:154
+msgid "Latest ping latency to remote backends (milliseconds)"
+msgstr "最新的远程后端 ping 延迟（毫秒）"
+
+#: ../../source/production/observability/health_monitor.rst:155
+msgid "``lmcache:remote_ping_error_code``"
+msgstr "``lmcache:remote_ping_error_code``"
+
+#: ../../source/production/observability/health_monitor.rst:157
+msgid "Latest ping error code (0 = success, -1 = timeout, -2 = generic error)"
+msgstr "最新的 ping 错误代码（0 = 成功，-1 = 超时，-2 = 通用错误）"
+
+#: ../../source/production/observability/health_monitor.rst:158
+msgid "``lmcache:remote_ping_errors``"
+msgstr "``lmcache:remote_ping_errors``"
+
+#: ../../source/production/observability/health_monitor.rst:159
+#: ../../source/production/observability/health_monitor.rst:162
+msgid "Counter"
+msgstr "计数器"
+
+#: ../../source/production/observability/health_monitor.rst:160
+msgid "Total number of ping errors to remote backends"
+msgstr "远程后端的总 ping 错误数量"
+
+#: ../../source/production/observability/health_monitor.rst:161
+msgid "``lmcache:remote_ping_successes``"
+msgstr "``lmcache:remote_ping_successes``"
+
+#: ../../source/production/observability/health_monitor.rst:163
+msgid "Total number of successful pings to remote backends"
+msgstr "成功 ping 远程后端的总次数"
+
+#: ../../source/production/observability/health_monitor.rst:166
+msgid "Error Codes"
+msgstr "错误代码"
+
+#: ../../source/production/observability/health_monitor.rst:168
+msgid "The health check system uses the following error codes:"
+msgstr "健康检查系统使用以下错误代码："
+
+#: ../../source/production/observability/health_monitor.rst:170
+msgid "Health Check Error Codes"
+msgstr "健康检查错误代码"
+
+#: ../../source/production/observability/health_monitor.rst:174
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/production/observability/health_monitor.rst:176
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/production/observability/health_monitor.rst:177
+msgid "Success - the health check passed"
+msgstr "成功 - 健康检查通过"
+
+#: ../../source/production/observability/health_monitor.rst:178
+msgid "``-1``"
+msgstr "``-1``"
+
+#: ../../source/production/observability/health_monitor.rst:179
+msgid "Timeout - the ping operation exceeded the configured timeout"
+msgstr "超时 - ping 操作超过了配置的超时时间"
+
+#: ../../source/production/observability/health_monitor.rst:180
+msgid "``-2``"
+msgstr "``-2``"
+
+#: ../../source/production/observability/health_monitor.rst:181
+msgid "Generic error - an unexpected error occurred during the health check"
+msgstr "通用错误 - 在健康检查期间发生了意外错误"
+
+#: ../../source/production/observability/health_monitor.rst:184
+msgid "Extending the Health Monitor"
+msgstr "扩展健康监控器"
+
+#: ../../source/production/observability/health_monitor.rst:186
+msgid ""
+"You can add custom health checks by creating a new module in the "
+"``lmcache/v1/health_monitor/checks/`` directory."
+msgstr "您可以通过在 ``lmcache/v1/health_monitor/checks/`` 目录中创建新模块来添加自定义健康检查。"
+
+#: ../../source/production/observability/health_monitor.rst:188
+msgid ""
+"The custom check will be automatically discovered and registered when "
+"LMCache starts."
+msgstr "当 LMCache 启动时，自定义检查将被自动发现并注册。"
+

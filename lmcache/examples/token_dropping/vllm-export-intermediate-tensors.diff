@@ -1,0 +1,32 @@
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+index 954fedafe..fc8ae575c 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+@@ -181,6 +181,10 @@ class KVConnectorBase_V1(ABC):
+         """
+         return False
+ 
++    @property
++    def transfer_intermediate_tensors(self) -> bool:
++        return False
++
+     def __init__(
+         self,
+         vllm_config: "VllmConfig",
+diff --git a/vllm/model_executor/layers/attention/kv_transfer_utils.py b/vllm/model_executor/layers/attention/kv_transfer_utils.py
+index 1dcd445b5..686c6b2ae 100644
+--- a/vllm/model_executor/layers/attention/kv_transfer_utils.py
++++ b/vllm/model_executor/layers/attention/kv_transfer_utils.py
+@@ -54,7 +54,11 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
+         result = func(*args, **kwargs)
+ 
+         # Save KV cache layer on exit
+-        connector.save_kv_layer(layer_name, kv_cache, attn_metadata)
++        kwargs = {}
++        if connector.transfer_intermediate_tensors:
++            bound_args = sig.bind_partial(*args, **kwargs)
++            kwargs = {"intermediate_tensors": bound_args.arguments}
++        connector.save_kv_layer(layer_name, kv_cache, attn_metadata, **kwargs)
+ 
+         return result
+ 

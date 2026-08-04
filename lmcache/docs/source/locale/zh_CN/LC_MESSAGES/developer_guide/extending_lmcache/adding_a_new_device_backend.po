@@ -1,0 +1,518 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:4
+msgid "Adding a New Device Backend"
+msgstr "添加新的设备后端"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:6
+msgid ""
+"This guide explains how to add a **new accelerator** to LMCache in "
+"**Multiprocess (MP) mode**."
+msgstr "本指南解释了如何在 **多进程 (MP) 模式** 下向 LMCache 添加一个 **新加速器**。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:9
+msgid ""
+"**For basic users:** read :ref:`Part 1 <part-1-basic>` only — adding a "
+"``DeviceSpec`` is all you need to get your device working with the built-"
+"in Python fallback ops."
+msgstr "**对于基础用户：** 只需阅读 :ref:`Part 1 <part-1-basic>` — 添加一个 ``DeviceSpec`` 就足以让您的设备与内置的 Python 后备操作一起工作。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:13
+msgid ""
+"**For advanced users:** continue to :ref:`Part 2 <part-2-performance>` "
+"for native ops and advanced transfer modes."
+msgstr "**对于高级用户：** 继续阅读 :ref:`Part 2 <part-2-performance>` 以了解原生操作和高级传输模式。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:19
+msgid "Part 1 — Basic Function Enabling"
+msgstr "第 1 部分 — 基本功能启用"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:21
+msgid ""
+"For the majority of devices, a single ``DeviceSpec`` class is sufficient."
+"  LMCache ships with a complete Python fallback ops "
+"(``lmcache/python_ops_fallback.py``) that works on any device supporting "
+"standard PyTorch tensor operations — **no custom kernels required**."
+msgstr "对于大多数设备，一个 ``DeviceSpec`` 类就足够了。 LMCache 附带一个完整的 Python 回退操作（``lmcache/python_ops_fallback.py``），可以在支持标准 PyTorch 张量操作的任何设备上工作——**无需自定义内核**。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:28
+msgid "Prerequisites"
+msgstr "前提条件"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:30
+msgid "Your PyTorch backend should support:"
+msgstr "您的 PyTorch 后端应支持："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:32
+msgid "**Device Discovery & Status:**"
+msgstr "**设备发现与状态：**"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:34
+msgid "``torch.<device>.is_available()`` → ``bool``"
+msgstr "``torch.<device>.is_available()`` → ``bool``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:35
+msgid "``torch.<device>.device_count()`` → ``int``"
+msgstr "``torch.<device>.device_count()`` → ``int``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:37
+msgid "**Device Context & Synchronization:**"
+msgstr "**设备上下文与同步：**"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:39
+msgid "``torch.<device>.set_device(device)`` → ``None``"
+msgstr "``torch.<device>.set_device(device)`` → ``None``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:40
+msgid "``torch.<device>.current_device()`` → ``int``"
+msgstr "``torch.<device>.current_device()`` → ``int``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:41
+msgid "``torch.<device>.synchronize()`` → ``None``"
+msgstr "``torch.<device>.synchronize()`` → ``None``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:43
+msgid "**Data Movement:**"
+msgstr "**数据移动:**"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:45
+msgid "``tensor.to(device)`` / ``tensor.cpu()`` (host↔device transfers)"
+msgstr "``tensor.to(device)`` / ``tensor.cpu()`` （主机↔设备传输）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:48
+msgid "Add a ``FooDeviceSpec``"
+msgstr "添加一个 ``FooDeviceSpec``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:50
+msgid "Create ``lmcache/v1/platform/foo/__init__.py``:"
+msgstr "创建 ``lmcache/v1/platform/foo/__init__.py``："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:84
+msgid "Key properties:"
+msgstr "关键属性："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:89
+msgid "Property"
+msgstr "属性"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:90
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:91
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:92
+msgid "``device_type``"
+msgstr "``device_type``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:93
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:96
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:104
+msgid "yes"
+msgstr "是"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:94
+msgid "Device type string (e.g. ``\"cuda\"``, ``\"musa\"``)"
+msgstr "设备类型字符串（例如 ``\"cuda\"``, ``\"musa\"``）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:95
+msgid "``torch_module_name``"
+msgstr "``torch_module_name``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:97
+msgid "Attribute on the ``torch`` package (e.g. ``\"cuda\"`` → ``torch.cuda``)"
+msgstr "``torch`` 包上的属性（例如 ``\"cuda\"`` → ``torch.cuda``）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:99
+msgid "``ops_module``"
+msgstr "``ops_module``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:100
+msgid "no"
+msgstr "不"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:101
+msgid ""
+"Ops module path; leave the base-class default (``None``) for pure "
+"fallback, or override in :ref:`Part 2 <part-2-performance>`"
+msgstr "操作模块路径；保留基类默认值（``None``）以实现纯回退，或在 :ref:`Part 2 <part-2-performance>` 中覆盖。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:103
+msgid "``is_available()``"
+msgstr "``is_available()``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:105
+msgid "Returns ``True`` when the device is usable"
+msgstr "当设备可用时返回 ``True``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:109
+msgid ""
+"The ``hasattr(torch, \"foo\")`` guard shown above is only needed for out-"
+"of-tree PyTorch extensions (e.g. ``torch.musa``, ``torch.xpu`` when "
+"installed as a plug-in).  For accelerators shipped inside PyTorch itself "
+"(like ``torch.cuda``) a plain ``torch.foo.is_available()`` is enough."
+msgstr "上面显示的 ``hasattr(torch, \"foo\")`` 保护仅在使用树外 PyTorch 扩展时需要（例如，当作为插件安装的 ``torch.musa``、``torch.xpu``）。对于 PyTorch 本身提供的加速器（如 ``torch.cuda``），只需使用简单的 ``torch.foo.is_available()`` 即可。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:115
+msgid ""
+"That's it.  Defining this class is enough for auto-discovery — no global "
+"list or manual registration call is required.  All ops automatically "
+"route through ``lmcache.python_ops_fallback``, which is not performant "
+"but is functionally applicable to any device that supports the standard "
+"PyTorch tensor surface.  Later, each device can provide its own ops "
+"(Python, C, CUDA, Rust, or any language exposing Python bindings) to "
+"override the fallback function-by-function."
+msgstr "就这样。定义这个类就足够实现自动发现——不需要全局列表或手动注册调用。所有操作自动通过 ``lmcache.python_ops_fallback`` 路由，这虽然性能不佳，但在功能上适用于任何支持标准 PyTorch 张量表面的设备。之后，每个设备可以提供自己的操作（Python、C、CUDA、Rust 或任何暴露 Python 绑定的语言）来逐个覆盖回退功能。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:124
+msgid "Verification"
+msgstr "验证"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:126
+msgid "Start LMCache server:"
+msgstr "启动 LMCache 服务器："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:132
+msgid ""
+"Run vLLM with MP connector.  If multiple accelerators are visible on the "
+"host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend "
+"instead of auto-detecting:"
+msgstr "使用 MP 连接器运行 vLLM。如果主机上可见多个加速器，请设置 ``DEVICE_TYPE`` 强制 LMCache 选择新的后端，而不是自动检测："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:156
+msgid ""
+"The default transfer mode is ``auto`` (CUDA → LMCache-driven, other "
+"devices → engine-driven).  The example above explicitly sets "
+"``engine_driven`` so that a new non-CUDA device works without additional "
+"capability checks.  For the ``lmcache_driven`` mode (IPC zero-copy), see "
+":ref:`Advanced transfer mode <part-2-performance>`."
+msgstr "默认传输模式为 ``auto``（CUDA → LMCache 驱动，其他设备 → 引擎驱动）。上述示例明确设置为 ``engine_driven``，以便新的非 CUDA 设备在没有额外能力检查的情况下正常工作。有关 ``lmcache_driven`` 模式（IPC 零拷贝），请参见 :ref:`Advanced transfer mode <part-2-performance>`。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:162
+msgid "Check the LMCache logs — with ``ops_module = None`` you should see::"
+msgstr "检查 LMCache 日志 — 使用 ``ops_module = None`` 你应该看到::"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:167
+msgid ""
+"This confirms your ``DeviceSpec`` was discovered and the Python fallback "
+"is active.  (Once you set ``ops_module`` in :ref:`Part 2 "
+"<part-2-performance>`, the second line becomes ``Using backend: "
+"foo_device.ops`` instead.)"
+msgstr "这确认了您的 ``DeviceSpec`` 已被发现，并且 Python 回退处于活动状态。 （一旦您在 :ref:`Part 2 <part-2-performance>` 中设置了 ``ops_module``，第二行将变为 ``Using backend: foo_device.ops``。）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:172
+msgid "Debugging checklist:"
+msgstr "调试检查清单："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:174
+msgid "[ ] ``torch.foo.is_available()`` returns ``True``."
+msgstr "[ ] ``torch.foo.is_available()`` 返回 ``True``。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:175
+msgid ""
+"[ ] Set ``DEVICE_TYPE=foo`` to force selection if not picked up "
+"automatically."
+msgstr "[ ] 设置 ``DEVICE_TYPE=foo`` 以强制选择，如果未自动选择。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:177
+msgid ""
+"[ ] Log shows either ``Custom ops not supported for device: foo, using "
+"fallback ops.`` (pure fallback) or ``Using backend: foo_device.ops`` "
+"(custom ops loaded)."
+msgstr "[ ] 日志显示 ``Custom ops not supported for device: foo, using fallback ops.`` （纯回退）或 ``Using backend: foo_device.ops`` （加载自定义操作）。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:180
+msgid ""
+"[ ] Engine-driven transfer works end-to-end (check the LMCache logs to "
+"confirm whether the SHM or Pickle sub-path is chosen — both should "
+"succeed)."
+msgstr "[ ] 引擎驱动的传输端到端工作正常（检查 LMCache 日志以确认选择了 SHM 还是 Pickle 子路径 — 两者都应该成功）。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:183
+msgid "[ ] Store/retrieve correctness is verified."
+msgstr "[ ] 存储/检索的正确性已验证。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:184
+msgid "[ ] TP>1 / multi-worker behavior is verified."
+msgstr "[ ] TP>1 / 多工作进程行为已验证。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:189
+msgid "Part 2 — Performance Optimization"
+msgstr "第二部分 — 性能优化"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:191
+msgid "Once basic functionality is verified, add device-specific optimizations."
+msgstr "一旦基本功能得到验证，添加设备特定的优化。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:195
+msgid "Device-specific ops"
+msgstr "设备特定操作"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:197
+msgid ""
+"The generic ops interface is defined in "
+"``lmcache/python_ops_fallback.py``.  Each vendor may replace any subset "
+"of these functions with a device-specific implementation; the choice of "
+"language (C, CUDA, SYCL, Python, Rust, …) and packaging is entirely up to"
+" the vendor.  LMCache only cares that the resulting symbols are "
+"importable from Python."
+msgstr "通用操作接口在 ``lmcache/python_ops_fallback.py`` 中定义。每个供应商可以用设备特定的实现替换这些函数的任何子集；语言的选择（C、CUDA、SYCL、Python、Rust 等）和打包完全由供应商决定。LMCache 只关心结果符号是否可以从 Python 导入。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:204
+msgid ""
+"**How it works.** At import time, ``get_backend(device_type)`` imports "
+"the module named by your ``DeviceSpec.ops_module`` and merges its symbols"
+" over ``python_ops_fallback``:"
+msgstr "**工作原理。** 在导入时，``get_backend(device_type)`` 导入由您的 ``DeviceSpec.ops_module`` 指定的模块，并将其符号合并到 ``python_ops_fallback`` 中："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:214
+msgid "Integration contract"
+msgstr "集成合同"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:216
+msgid ""
+"Regardless of how you build your ops module, the following contract must "
+"hold:"
+msgstr "无论您如何构建操作模块，以下契约必须成立："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:219
+msgid ""
+"**Same symbol names.** Every function you override must be exposed under "
+"the exact name used in ``python_ops_fallback`` (e.g. "
+"``multi_layer_block_kv_transfer``)."
+msgstr "**相同的符号名称。** 你重写的每个函数必须以 ``python_ops_fallback`` 中使用的确切名称公开（例如 ``multi_layer_block_kv_transfer``）。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:222
+msgid ""
+"**Same call signature.** Positional/keyword arguments, argument order and"
+" semantics must match the fallback; callers invoke the merged module "
+"without knowing which backend answered."
+msgstr "**相同的调用签名。** 位置参数/关键字参数、参数顺序和语义必须与回退匹配；调用者在调用合并模块时并不知道是哪个后端响应。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:225
+msgid ""
+"**Importable Python module.** ``ops_module`` is a fully-qualified Python "
+"module path (``importlib.import_module`` must succeed).  How the module "
+"gets there — a pure-Python file, a pybind11 extension, a ctypes wrapper, "
+"a Rust ``PyO3`` module, etc. — is your choice."
+msgstr "**可导入的 Python 模块。** ``ops_module`` 是一个完全合格的 Python 模块路径（``importlib.import_module`` 必须成功）。模块如何到达那里——一个纯 Python 文件、一个 pybind11 扩展、一个 ctypes 包装器、一个 Rust ``PyO3`` 模块等——由你选择。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:229
+msgid ""
+"**Partial override is allowed.** You do not have to reimplement every "
+"function.  Anything you leave out keeps using the Python fallback, so "
+"incremental optimization is supported."
+msgstr "**允许部分重写。** 您不必重新实现每个函数。您省略的任何内容将继续使用 Python 回退，因此支持增量优化。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:232
+msgid ""
+"**Point ``DeviceSpec.ops_module`` at the module** once it is reachable on"
+" ``sys.path``:"
+msgstr "**将 ``DeviceSpec.ops_module`` 指向模块** 一旦它可以在 ``sys.path`` 上访问："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:243
+msgid "Implementation notes"
+msgstr "实现说明"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:245
+msgid ""
+"``multi_layer_block_kv_transfer`` and ``lmcache_memcpy_async`` are the "
+"hot entry points for both engine-driven and LMCache-driven transfer; "
+"other functions in ``python_ops_fallback`` can be overridden as needed."
+msgstr "``multi_layer_block_kv_transfer`` 和 ``lmcache_memcpy_async`` 是引擎驱动和 LMCache 驱动传输的主要入口点；``python_ops_fallback`` 中的其他函数可以根据需要被重写。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:249
+msgid ""
+"If you fall back to the generic path from inside a device-specific "
+"wrapper (e.g. when inputs are unsupported), call the corresponding "
+"``lmcache.python_ops_fallback`` function directly to preserve semantics."
+msgstr "如果您在设备特定的包装器内部回退到通用路径（例如，当输入不受支持时），请直接调用相应的 ``lmcache.python_ops_fallback`` 函数以保持语义。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:253
+msgid ""
+"Keep your ops module free of side effects at import time — it is imported"
+" eagerly during ``get_backend()``."
+msgstr "在导入时保持你的 ops 模块没有副作用——它在 ``get_backend()`` 中被急切导入。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:256
+msgid ""
+"For concrete reference implementations, see ``lmcache/v1/platform/cuda/``"
+" and ``lmcache/v1/platform/musa/``. Both are examples of what a vendor "
+"*may* do, not templates every new backend has to follow."
+msgstr "有关具体的参考实现，请参见 ``lmcache/v1/platform/cuda/`` 和 ``lmcache/v1/platform/musa/``。这两者都是供应商 *可能* 采取的示例，而不是每个新后端必须遵循的模板。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:262
+msgid "Advanced transfer mode"
+msgstr "高级传输模式"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:264
+msgid ""
+"By default, the transfer mode is **AUTO**: the router dispatches strictly"
+" by ``device_type`` — ``device_type == \"cuda\"`` goes to "
+"``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else to "
+"``EngineDrivenTransferContext``.  A non-CUDA device that supports IPC "
+"handle transfer can still opt into LMCache-driven explicitly (below)."
+msgstr "默认情况下，传输模式为 **AUTO**：路由器严格按照 ``device_type`` 分发 — ``device_type == \\\"cuda\\\"`` 的设备使用 ``LMCacheDrivenTransferContext``（IPC 零拷贝），其他设备则使用 ``EngineDrivenTransferContext``。支持 IPC 句柄传输的非 CUDA 设备仍然可以显式选择 LMCache 驱动（如下所述）。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:272
+msgid ""
+"ROCm is not a separate backend: under PyTorch a ROCm GPU reports "
+"``device_type == \"cuda\"`` and reuses ``CudaIPCWrapper`` (CUDA IPC) for "
+"the LMCache-driven path, so it works in AUTO mode with no extra setup.  "
+"There is currently no dedicated ``platform/rocm`` package."
+msgstr "ROCm 不是一个单独的后端：在 PyTorch 下，ROCm GPU 报告 ``device_type == \\\"cuda\\\"`` 并重用 ``CudaIPCWrapper``（CUDA IPC）用于 LMCache 驱动的路径，因此它在 AUTO 模式下工作，无需额外设置。目前没有专门的 ``platform/rocm`` 包。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:277
+msgid ""
+"When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests "
+"``lmcache_driven``, ``_build_lmcache_driven_context`` performs two hard "
+"checks — both must succeed, otherwise the factory raises ``ValueError`` "
+"(no silent fallback):"
+msgstr "当调用者（或 ``LMCACHE_MP_TRANSFER_MODE``）明确请求 ``lmcache_driven`` 时，``_build_lmcache_driven_context`` 会执行两个严格检查 — 两者必须成功，否则工厂会引发 ``ValueError``（没有静默回退）："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:282
+msgid ""
+"Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper`` subclass "
+"(exposing a ``wrap`` classmethod) via "
+":attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`."
+" :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that "
+"binding off the registered spec — no separate registry / auto-scan."
+msgstr "您的 ``DeviceSpec`` 子类必须通过 :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls` 绑定一个 ``DeviceIPCWrapper`` 子类（暴露一个 ``wrap`` 类方法）。 :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` 从注册的规范中读取该绑定 — 无需单独的注册表 / 自动扫描。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:287
+msgid ""
+"``DeviceSpec.is_handle_transfer_available()`` must return ``True`` (the "
+"base-class default; override to ``False`` only if your device lacks IPC "
+"handle transfer)."
+msgstr "``DeviceSpec.is_handle_transfer_available()`` 必须返回 ``True``（基类默认值；仅当您的设备缺少 IPC 句柄传输时才重写为 ``False``）。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:291
+msgid ""
+"Separately, the LMCache-driven server module also requires a "
+"``BaseCacheContext`` subclass under "
+"``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context`` "
+"discovers it lazily at runtime and raises ``ValueError`` if no backend "
+"matches the device type; it manages the KV cache layout and pointers used"
+" for IPC transfer."
+msgstr "另外，基于 LMCache 的服务器模块还需要一个位于 ``lmcache/v1/platform/foo/cache_context.py`` 的 ``BaseCacheContext`` 子类。``create_cache_context`` 在运行时懒惰地发现它，并在没有后端与设备类型匹配时引发 ``ValueError``；它管理用于 IPC 传输的 KV Cache 布局和指针。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:298
+msgid ""
+"Host-side pinning via ``pin_memory_backend`` is *optional* and only "
+"affects staging-buffer performance; it is not required to enable LMCache-"
+"driven mode."
+msgstr "通过 ``pin_memory_backend`` 在主机端固定是 *可选* 的，仅影响暂存缓冲区的性能；启用 LMCache 驱动模式并不需要它。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:302
+msgid "Override these methods in your ``DeviceSpec``:"
+msgstr "在你的 ``DeviceSpec`` 中重写这些方法："
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:330
+msgid ""
+"Opt into LMCache-driven mode by setting ``lmcache.mp.mp_transfer_mode`` "
+"to ``lmcache_driven`` in the vLLM ``kv_connector_extra_config`` shown in "
+":ref:`Part 1 <part-1-basic>`, or by exporting "
+"``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.  If either hard check fails,"
+" the factory raises ``ValueError`` and refuses to construct the context —"
+" switch back to ``engine_driven`` or ``auto``."
+msgstr "通过在 :ref:`Part 1 <part-1-basic>` 中显示的 vLLM ``kv_connector_extra_config`` 中将 ``lmcache.mp.mp_transfer_mode`` 设置为 ``lmcache_driven``，或通过导出 ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` 来选择 LMCache 驱动模式。如果任何硬检查失败，工厂将引发 ``ValueError`` 并拒绝构造上下文——请切换回 ``engine_driven`` 或 ``auto``。"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:338
+msgid "References"
+msgstr "参考文献"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:343
+msgid "Topic"
+msgstr "主题"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:344
+msgid "Path"
+msgstr "路径"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:345
+msgid "Device spec base"
+msgstr "设备规格基础"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:346
+msgid "``lmcache/v1/platform/base_device_spec.py``"
+msgstr "``lmcache/v1/platform/base_device_spec.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:347
+msgid "Backend loading"
+msgstr "后端加载"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:348
+msgid "``lmcache/v1/platform/__init__.py``"
+msgstr "``lmcache/v1/platform/__init__.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:349
+msgid "Python fallback"
+msgstr "Python 回退"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:350
+msgid "``lmcache/python_ops_fallback.py``"
+msgstr "``lmcache/python_ops_fallback.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:351
+msgid "Cache context base"
+msgstr "缓存上下文基类"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:352
+msgid "``lmcache/v1/platform/base_cache_context.py``"
+msgstr "``lmcache/v1/platform/base_cache_context.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:353
+msgid "Cache context factory"
+msgstr "缓存上下文工厂"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:354
+msgid "``lmcache/v1/platform/cache_context.py``"
+msgstr "``lmcache/v1/platform/cache_context.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:355
+msgid "Reference ``DeviceSpec`` (engine-driven baseline)"
+msgstr "参考 ``DeviceSpec`` （引擎驱动的基线）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:356
+msgid "``lmcache/v1/platform/cuda/__init__.py``"
+msgstr "``lmcache/v1/platform/cuda/__init__.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:357
+msgid "Reference ``DeviceSpec`` (LMCache-driven capable)"
+msgstr "参考 ``DeviceSpec``（支持 LMCache 的能力）"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:358
+msgid "``lmcache/v1/platform/musa/__init__.py``"
+msgstr "``lmcache/v1/platform/musa/__init__.py``"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:359
+msgid "Engine-driven call site"
+msgstr "引擎驱动的调用站点"
+
+#: ../../source/developer_guide/extending_lmcache/adding_a_new_device_backend.rst:360
+msgid ""
+"``lmcache/v1/multiprocess/transfer_context/worker_transfer.py`` "
+"(``EngineDrivenTransferContext``, ``create_transfer_context``)"
+msgstr "``lmcache/v1/multiprocess/transfer_context/worker_transfer.py`` (``EngineDrivenTransferContext``, ``create_transfer_context``)"
+

@@ -1,0 +1,469 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/vllm_endpoint.rst:4
+msgid "Metrics by vLLM API"
+msgstr "通过 vLLM API 的指标"
+
+#: ../../source/production/observability/vllm_endpoint.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:11
+msgid ""
+"LMCache provides detailed metrics via a Prometheus endpoint, allowing for"
+" in-depth monitoring of cache performance and behavior. This section "
+"outlines how to enable and configure observability from embedded vLLM "
+"``/metrics`` API endpoint."
+msgstr ""
+"LMCache 通过 Prometheus 端点提供详细的指标，允许对缓存性能和行为进行深入监控。本节概述了如何启用和配置来自嵌入式 vLLM "
+"``/metrics`` API 端点的可观察性。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:16
+msgid "Quick Start Guide"
+msgstr "快速入门指南"
+
+#: ../../source/production/observability/vllm_endpoint.rst:19
+msgid "1) On vLLM/LMCache side"
+msgstr "1) 在 vLLM/LMCache 端"
+
+#: ../../source/production/observability/vllm_endpoint.rst:21
+msgid ""
+"In v1, vLLM and LMCache run in separate processes, so you have to use "
+"multi‑process Prometheus."
+msgstr "在 v1 中，vLLM 和 LMCache 运行在不同的进程中，因此您必须使用多进程 Prometheus。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:23
+msgid ""
+"The ``PROMETHEUS_MULTIPROC_DIR`` environment variable must be the same in"
+" both processes, as a IPC directory."
+msgstr "``PROMETHEUS_MULTIPROC_DIR`` 环境变量在两个进程中必须相同，作为 IPC 目录。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:31
+msgid ""
+"Once the HTTP server is running, you can access the LMCache metrics at "
+"the ``/metrics`` endpoint."
+msgstr "一旦 HTTP 服务器运行，您可以在 ``/metrics`` 端点访问 LMCache 指标。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:40
+msgid ""
+"And you will also find some ``.db`` files in the "
+"``$PROMETHEUS_MULTIPROC_DIR`` directory."
+msgstr "您还会在 ``$PROMETHEUS_MULTIPROC_DIR`` 目录中找到一些 ``.db`` 文件。"
+
+#: ../../source/production/observability/vllm_endpoint.rst:44
+msgid "2) Prometheus Configuration"
+msgstr "2) Prometheus 配置"
+
+#: ../../source/production/observability/vllm_endpoint.rst:46
+msgid ""
+"To scrape the LMCache metrics with a Prometheus server, add the following"
+" job to your ``prometheus.yml`` configuration, or equivalent "
+"configuration to scrape the metrics endpoint:"
+msgstr ""
+"要使用 Prometheus 服务器抓取 LMCache 指标，请将以下作业添加到您的 ``prometheus.yml`` "
+"配置中，或等效配置以抓取指标端点："
+
+#: ../../source/production/observability/vllm_endpoint.rst:58
+msgid "Available Metrics"
+msgstr "可用指标"
+
+#: ../../source/production/observability/vllm_endpoint.rst:60
+msgid ""
+"LMCache exposes a variety of metrics to monitor its performance. The "
+"following table lists all available metrics organized by category:"
+msgstr "LMCache 提供多种指标以监控其性能。下表列出了按类别组织的所有可用指标："
+
+#: ../../source/production/observability/vllm_endpoint.rst:62
+msgid "LMCache Metrics"
+msgstr "LMCache 指标"
+
+#: ../../source/production/observability/vllm_endpoint.rst:66
+msgid "Metric Name"
+msgstr "指标名称"
+
+#: ../../source/production/observability/vllm_endpoint.rst:67
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/production/observability/vllm_endpoint.rst:68
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/vllm_endpoint.rst:69
+msgid "**Core Request Metrics**"
+msgstr "**核心请求指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:72
+msgid "``lmcache:num_retrieve_requests``"
+msgstr "``lmcache:num_retrieve_requests``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:73
+#: ../../source/production/observability/vllm_endpoint.rst:76
+#: ../../source/production/observability/vllm_endpoint.rst:79
+#: ../../source/production/observability/vllm_endpoint.rst:82
+#: ../../source/production/observability/vllm_endpoint.rst:85
+#: ../../source/production/observability/vllm_endpoint.rst:88
+#: ../../source/production/observability/vllm_endpoint.rst:91
+#: ../../source/production/observability/vllm_endpoint.rst:94
+#: ../../source/production/observability/vllm_endpoint.rst:136
+#: ../../source/production/observability/vllm_endpoint.rst:139
+#: ../../source/production/observability/vllm_endpoint.rst:142
+#: ../../source/production/observability/vllm_endpoint.rst:145
+#: ../../source/production/observability/vllm_endpoint.rst:163
+#: ../../source/production/observability/vllm_endpoint.rst:166
+#: ../../source/production/observability/vllm_endpoint.rst:175
+#: ../../source/production/observability/vllm_endpoint.rst:178
+#: ../../source/production/observability/vllm_endpoint.rst:181
+msgid "Counter"
+msgstr "计数器"
+
+#: ../../source/production/observability/vllm_endpoint.rst:74
+msgid "Total number of retrieve requests"
+msgstr "检索请求的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:75
+msgid "``lmcache:num_store_requests``"
+msgstr "``lmcache:num_store_requests``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:77
+msgid "Total number of store requests"
+msgstr "存储请求的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:78
+msgid "``lmcache:num_lookup_requests``"
+msgstr "``lmcache:num_lookup_requests``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:80
+msgid "Total number of lookup requests"
+msgstr "查找请求的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:81
+msgid "``lmcache:num_requested_tokens``"
+msgstr "``lmcache:num_requested_tokens``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:83
+msgid "Total number of tokens requested for retrieval"
+msgstr "检索请求的总令牌数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:84
+msgid "``lmcache:num_hit_tokens``"
+msgstr "``lmcache:num_hit_tokens``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:86
+msgid "Total number of cache hit tokens from retrieval"
+msgstr "从检索中获得的缓存命中令牌的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:87
+msgid "``lmcache:num_lookup_tokens``"
+msgstr "``lmcache:num_lookup_tokens``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:89
+msgid "Total number of tokens requested in lookup operations"
+msgstr "查找操作中请求的令牌总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:90
+msgid "``lmcache:num_lookup_hits``"
+msgstr "``lmcache:num_lookup_hits``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:92
+msgid "Total number of tokens hit in lookup operations"
+msgstr "查找操作中命中的总令牌数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:93
+msgid "``lmcache:num_vllm_hit_tokens``"
+msgstr "``lmcache:num_vllm_hit_tokens``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:95
+msgid "Number of hit tokens in vLLM"
+msgstr "vLLM 中的命中令牌数量"
+
+#: ../../source/production/observability/vllm_endpoint.rst:96
+msgid "**Hit Rate Metrics**"
+msgstr "**命中率指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:99
+msgid "``lmcache:retrieve_hit_rate``"
+msgstr "``lmcache:retrieve_hit_rate``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:100
+#: ../../source/production/observability/vllm_endpoint.rst:103
+#: ../../source/production/observability/vllm_endpoint.rst:109
+#: ../../source/production/observability/vllm_endpoint.rst:112
+#: ../../source/production/observability/vllm_endpoint.rst:115
+#: ../../source/production/observability/vllm_endpoint.rst:160
+#: ../../source/production/observability/vllm_endpoint.rst:169
+#: ../../source/production/observability/vllm_endpoint.rst:184
+#: ../../source/production/observability/vllm_endpoint.rst:187
+#: ../../source/production/observability/vllm_endpoint.rst:193
+#: ../../source/production/observability/vllm_endpoint.rst:196
+msgid "Gauge"
+msgstr "仪表"
+
+#: ../../source/production/observability/vllm_endpoint.rst:101
+msgid "The hit rate for retrieve requests"
+msgstr "检索请求的命中率"
+
+#: ../../source/production/observability/vllm_endpoint.rst:102
+msgid "``lmcache:lookup_hit_rate``"
+msgstr "``lmcache:lookup_hit_rate``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:104
+msgid "The hit rate for lookup requests"
+msgstr "查找请求的命中率"
+
+#: ../../source/production/observability/vllm_endpoint.rst:105
+msgid "**Cache Usage Metrics**"
+msgstr "**缓存使用指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:108
+msgid "``lmcache:local_cache_usage``"
+msgstr "``lmcache:local_cache_usage``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:110
+msgid "Local cache usage in bytes"
+msgstr "本地缓存使用量（字节）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:111
+msgid "``lmcache:remote_cache_usage``"
+msgstr "``lmcache:remote_cache_usage``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:113
+msgid "Remote cache usage in bytes"
+msgstr "远程缓存使用量（字节）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:114
+msgid "``lmcache:local_storage_usage``"
+msgstr "``lmcache:local_storage_usage``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:116
+msgid "Local storage usage in bytes"
+msgstr "本地存储使用量（字节）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:117
+msgid "**Performance Metrics**"
+msgstr "**性能指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:120
+msgid "``lmcache:time_to_retrieve``"
+msgstr "``lmcache:time_to_retrieve``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:121
+#: ../../source/production/observability/vllm_endpoint.rst:124
+#: ../../source/production/observability/vllm_endpoint.rst:127
+#: ../../source/production/observability/vllm_endpoint.rst:130
+#: ../../source/production/observability/vllm_endpoint.rst:148
+#: ../../source/production/observability/vllm_endpoint.rst:151
+#: ../../source/production/observability/vllm_endpoint.rst:154
+msgid "Histogram"
+msgstr "直方图"
+
+#: ../../source/production/observability/vllm_endpoint.rst:122
+msgid "Time taken to retrieve from the cache (seconds)"
+msgstr "从缓存中检索所需的时间（秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:123
+msgid "``lmcache:time_to_store``"
+msgstr "``lmcache:time_to_store``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:125
+msgid "Time taken to store to the cache (seconds)"
+msgstr "存储到缓存所需的时间（秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:126
+msgid "``lmcache:retrieve_speed``"
+msgstr "``lmcache:retrieve_speed``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:128
+msgid "Retrieval speed (tokens per second)"
+msgstr "检索速度（每秒令牌数）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:129
+msgid "``lmcache:store_speed``"
+msgstr "``lmcache:store_speed``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:131
+msgid "Storage speed (tokens per second)"
+msgstr "存储速度（每秒令牌数）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:132
+msgid "**Remote Backend Metrics**"
+msgstr "**远程后端指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:135
+msgid "``lmcache:num_remote_read_requests``"
+msgstr "``lmcache:num_remote_read_requests``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:137
+msgid "Total number of read requests to remote backends"
+msgstr "对远程后端的读取请求总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:138
+msgid "``lmcache:num_remote_read_bytes``"
+msgstr "``lmcache:num_remote_read_bytes``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:140
+msgid "Total number of bytes read from remote backends"
+msgstr "从远程后端读取的字节总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:141
+msgid "``lmcache:num_remote_write_requests``"
+msgstr "``lmcache:num_remote_write_requests``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:143
+msgid "Total number of write requests to remote backends"
+msgstr "远程后端写请求的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:144
+msgid "``lmcache:num_remote_write_bytes``"
+msgstr "``lmcache:num_remote_write_bytes``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:146
+msgid "Total number of bytes written to remote backends"
+msgstr "写入远程后端的字节总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:147
+msgid "``lmcache:remote_time_to_get``"
+msgstr "``lmcache:remote_time_to_get``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:149
+msgid "Time taken to get data from remote backends (milliseconds)"
+msgstr "从远程后端获取数据所花费的时间（毫秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:150
+msgid "``lmcache:remote_time_to_put``"
+msgstr "``lmcache:remote_time_to_put``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:152
+msgid "Time taken to put data to remote backends (milliseconds)"
+msgstr "将数据放入远程后端所需的时间（毫秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:153
+msgid "``lmcache:remote_time_to_get_sync``"
+msgstr "``lmcache:remote_time_to_get_sync``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:155
+msgid "Time taken to get data from remote backends synchronously (milliseconds)"
+msgstr "从远程后端同步获取数据所需的时间（毫秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:156
+msgid "**Network Monitoring Metrics**"
+msgstr "**网络监控指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:159
+msgid "``lmcache:remote_ping_latency``"
+msgstr "``lmcache:remote_ping_latency``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:161
+msgid "Latest ping latency to remote backends (milliseconds)"
+msgstr "最新的远程后端 ping 延迟（毫秒）"
+
+#: ../../source/production/observability/vllm_endpoint.rst:162
+msgid "``lmcache:remote_ping_errors``"
+msgstr "``lmcache:remote_ping_errors``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:164
+msgid "Number of ping errors to remote backends"
+msgstr "远程后端的 ping 错误数量"
+
+#: ../../source/production/observability/vllm_endpoint.rst:165
+msgid "``lmcache:remote_ping_successes``"
+msgstr "``lmcache:remote_ping_successes``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:167
+msgid "Number of ping successes to remote backends"
+msgstr "远程后端的 ping 成功次数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:168
+msgid "``lmcache:remote_ping_error_code``"
+msgstr "``lmcache:remote_ping_error_code``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:170
+msgid "Latest ping error code to remote backends"
+msgstr "最新的远程后端 ping 错误代码"
+
+#: ../../source/production/observability/vllm_endpoint.rst:171
+msgid "**Local CPU Backend Metrics**"
+msgstr "**本地 CPU 后端指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:174
+msgid "``lmcache:local_cpu_evict_count``"
+msgstr "``lmcache:local_cpu_evict_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:176
+msgid "Total number of evictions in local CPU backend"
+msgstr "本地 CPU 后端的总逐出次数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:177
+msgid "``lmcache:local_cpu_evict_keys_count``"
+msgstr "``lmcache:local_cpu_evict_keys_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:179
+msgid "Total number of evicted keys in local CPU backend"
+msgstr "本地 CPU 后端中被逐出的键的总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:180
+msgid "``lmcache:local_cpu_evict_failed_count``"
+msgstr "``lmcache:local_cpu_evict_failed_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:182
+msgid "Total number of failed evictions in local CPU backend"
+msgstr "本地 CPU 后端中失败的逐出总数"
+
+#: ../../source/production/observability/vllm_endpoint.rst:183
+msgid "``lmcache:local_cpu_hot_cache_count``"
+msgstr "``lmcache:local_cpu_hot_cache_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:185
+msgid "The size of the hot cache"
+msgstr "热缓存的大小"
+
+#: ../../source/production/observability/vllm_endpoint.rst:186
+msgid "``lmcache:local_cpu_keys_in_request_count``"
+msgstr "``lmcache:local_cpu_keys_in_request_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:188
+msgid "The size of the keys in request"
+msgstr "请求中键的大小"
+
+#: ../../source/production/observability/vllm_endpoint.rst:189
+msgid "**Memory Management Metrics**"
+msgstr "**内存管理指标**"
+
+#: ../../source/production/observability/vllm_endpoint.rst:192
+msgid "``lmcache:active_memory_objs_count``"
+msgstr "``lmcache:active_memory_objs_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:194
+msgid "The number of active memory objects"
+msgstr "活动内存对象的数量"
+
+#: ../../source/production/observability/vllm_endpoint.rst:195
+msgid "``lmcache:pinned_memory_objs_count``"
+msgstr "``lmcache:pinned_memory_objs_count``"
+
+#: ../../source/production/observability/vllm_endpoint.rst:197
+msgid "The number of pinned memory objects"
+msgstr "固定内存对象的数量"
+

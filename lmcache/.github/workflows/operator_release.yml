@@ -1,0 +1,100 @@
+name: "Operator: Release"
+
+on:
+  release:
+    types: [published]
+
+env:
+  IMAGE_NAME: lmcache/lmcache-operator
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+    working-directory: operator
+
+jobs:
+  release:
+    name: Build, push, and release
+    # Filter out main lmcache `v*` releases — only fire for operator-prefixed tags.
+    if: startsWith(github.ref_name, 'operator-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Strip "operator-" prefix from tag to get version (e.g. operator-v0.4.8rc1 -> v0.4.8rc1).
+          VERSION="${GITHUB_REF_NAME#operator-}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Pre-releases (rc/alpha/beta) get the floating ":latest-rc" tag and must
+          # never move the stable ":latest" image tag or the "operator-latest" alias.
+          # Detect from the version string rather than the GitHub "pre-release" flag
+          # so behavior is robust whether or not that box is ticked in the UI.
+          if [[ "${VERSION}" =~ (rc|alpha|beta) ]]; then
+            echo "FLOATING_TAG=latest-rc" >> "$GITHUB_OUTPUT"
+            echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "FLOATING_TAG=latest" >> "$GITHUB_OUTPUT"
+            echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+
+      - name: Build installer manifest
+        run: make build-installer IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+
+      - name: Attach installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: operator/dist/install.yaml
+
+      - name: Update latest release alias
+        # Skip for pre-releases: an rc/alpha/beta must not repoint the stable
+        # "operator-latest" alias (or its install.yaml) at a pre-release build.
+        if: steps.version.outputs.IS_PRERELEASE == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: operator-latest
+          name: "Operator Latest (${{ steps.version.outputs.VERSION }})"
+          make_latest: false
+          body: |
+            Points to the latest stable operator release: `${{ steps.version.outputs.VERSION }}`
+
+            **Image:** `${{ env.IMAGE_NAME }}:latest`
+
+            ```bash
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/operator-latest/install.yaml
+            ```
+          files: operator/dist/install.yaml

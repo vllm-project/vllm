@@ -1,0 +1,174 @@
+name: Test
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+
+env:
+  LC_ALL: en_US.UTF-8
+  PYTHONHASHSEED: 0
+
+defaults:
+  run:
+    shell: bash
+
+# Cancel older in-flight runs on the same PR / branch.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
+      raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            lmcache:
+              - '**.py'
+              - 'pyproject.toml'
+              - 'requirements/**.txt'
+              - '.github/workflows/test.yml'
+              - '!operator/**'
+            raw_block:
+              - 'rust/raw_block/**'
+              - 'lmcache/v1/storage_backend/raw_block/**'
+              - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
+              - 'lmcache/v1/multiprocess/**'
+              - 'tests/v1/storage_backend/test_raw_block*.py'
+              - 'tests/v1/storage_backend/raw_block_test_utils.py'
+              - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
+              - '.github/workflows/test.yml'
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: "test: ${{ matrix.python }} on ${{ matrix.platform }}"
+    runs-on: "${{ matrix.platform }}"
+    strategy:
+      matrix:
+        python:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+        platform:
+          - "ubuntu-latest"
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # https://github.com/actions/checkout/issues/249
+          fetch-depth: 0
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+  
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install vllm
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+
+      - name: "Run non-CUDA unit tests"
+        run: |
+          pytest --ignore=tests/disagg \
+            --ignore=tests/v1/multiprocess/ \
+            --ignore=tests/v1/distributed/ \
+            --ignore=tests/v1/mp_observability/ \
+            --ignore=tests/skipped \
+            --ignore=tests/cli/commands/trace \
+            --ignore=tests/v1/storage_backend/test_eic.py \
+            --ignore=tests/v1/storage_backend/test_p2p_backend_with_controller.py
+
+  raw-block-tests:
+    needs: changes
+    if: needs.changes.outputs.raw_block == 'true'
+    name: raw-block temp-file tests
+    runs-on: ubuntu-latest
+    env:
+      LMCACHE_LOG_LEVEL: CRITICAL
+
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin
+          python -m pip install -r requirements/test.txt
+          python -m pip install -r requirements/common.txt
+
+      - name: Build raw-block Rust extension
+        run: |
+          python -m maturin build --release \
+            --manifest-path rust/raw_block/Cargo.toml \
+            --out .pytest-tmp/raw-block-dist
+          python -m pip install .pytest-tmp/raw-block-dist/*.whl
+
+      - name: Run raw-block tests
+        run: |
+          pytest -q --basetemp=.pytest-tmp/raw-block \
+            tests/v1/storage_backend/test_raw_block_device.py \
+            tests/v1/storage_backend/test_raw_block_core.py \
+            tests/v1/multiprocess/test_raw_block_l2_adapter.py

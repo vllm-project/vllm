@@ -1,0 +1,489 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/tracing_and_debugging.rst:2
+msgid "Tracing and Debugging"
+msgstr "追踪和调试"
+
+#: ../../source/mp/tracing_and_debugging.rst:4
+msgid ""
+"LMCache MP mode can record every ``StorageManager`` public-API call to a "
+"binary **trace file** and reissue those calls later against a fresh "
+"server via ``lmcache trace replay``. The feature is designed for:"
+msgstr ""
+"LMCache MP 模式可以将每个 ``StorageManager`` 公共 API 调用记录到一个二进制 **跟踪文件** 中，并通过 "
+"``lmcache trace replay`` 在新服务器上重新发出这些调用。该功能旨在用于："
+
+#: ../../source/mp/tracing_and_debugging.rst:8
+msgid ""
+"**Regression hunting** — capture a production workload, then replay it "
+"against a build under investigation to reproduce a bug offline."
+msgstr "**回归排查** — 捕获生产工作负载，然后在调查中的构建上重放，以离线重现错误。"
+
+#: ../../source/mp/tracing_and_debugging.rst:10
+msgid ""
+"**Performance characterization** — measure L1/L2 latency distributions "
+"under a realistic storage-level access pattern, without needing vLLM or a"
+" GPU."
+msgstr "**性能特征化** — 在真实的存储级访问模式下测量 L1/L2 延迟分布，无需 vLLM 或 GPU。"
+
+#: ../../source/mp/tracing_and_debugging.rst:13
+msgid ""
+"**Configuration tuning** — replay the same trace against different L1 "
+"sizes, eviction policies, and L2 adapters to compare their behavior on "
+"identical input."
+msgstr "**配置调整** — 针对不同的 L1 大小、逐出策略和 L2 适配器重放相同的跟踪，以比较它们在相同输入下的行为。"
+
+#: ../../source/mp/tracing_and_debugging.rst:19
+msgid ""
+"Trace recording is **independent** from ``--enable-tracing`` (OTel "
+"spans). OTel tracing exports *live* spans to an OTLP endpoint for online "
+"observability; trace recording persists a replayable binary file for "
+"offline analysis. Both can be enabled simultaneously."
+msgstr "跟踪记录与 ``--enable-tracing``\\ （OTel spans）是 **独立** 的。OTel 跟踪将实时 spans 导出到 OTLP 端点以进行在线可观察性；跟踪记录则持久化一个可重放的二进制文件以供离线分析。两者可以同时启用。"
+
+#: ../../source/mp/tracing_and_debugging.rst:28
+msgid "Recording a Trace"
+msgstr "记录跟踪"
+
+#: ../../source/mp/tracing_and_debugging.rst:30
+msgid ""
+"Recording is **off by default**. Enable it by adding ``--trace-level "
+"storage`` to ``lmcache server``:"
+msgstr "记录默认是\\ **关闭的**\\ 。通过将\\ ``--trace-level storage``\\ 添加到\\ ``lmcache server``\\ 来启用它："
+
+#: ../../source/mp/tracing_and_debugging.rst:48
+msgid ""
+"Drive traffic through the server as usual (vLLM requests, benchmark "
+"scripts, etc.). The trace file is closed cleanly on ``SIGTERM`` via the "
+"EventBus stop path — no ``--stop-tracing`` command needed."
+msgstr ""
+"通过服务器正常驱动流量（vLLM 请求、基准测试脚本等）。在通过 EventBus 停止路径接收到 ``SIGTERM`` "
+"时，跟踪文件会被干净地关闭 — 不需要 ``--stop-tracing`` 命令。"
+
+#: ../../source/mp/tracing_and_debugging.rst:52
+msgid "**What is captured:**"
+msgstr "**捕获的内容：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:54
+msgid ""
+"The fully-qualified name of every decorated ``StorageManager`` call (e.g."
+" ``StorageManager.reserve_write``, "
+"``StorageManager.submit_prefetch_task``)."
+msgstr "每个被装饰的 ``StorageManager`` 调用的完全限定名称（例如 ``StorageManager.reserve_write``\\ 、\\ ``StorageManager.submit_prefetch_task``\\ ）。"
+
+#: ../../source/mp/tracing_and_debugging.rst:57
+msgid ""
+"Each call's input arguments (``keys``, ``layout_desc``, ``mode``, "
+"``extra_count``, ``external_request_id``, …)."
+msgstr "每个调用的输入参数（\\ ``keys``, ``layout_desc``, ``mode``, ``extra_count``, ``external_request_id``, …）。"
+
+#: ../../source/mp/tracing_and_debugging.rst:59
+msgid "Wall-clock and monotonic timestamps per call."
+msgstr "每次调用的墙钟时间和单调时间戳。"
+
+#: ../../source/mp/tracing_and_debugging.rst:60
+msgid ""
+"A header with the file format version, trace schema version, start "
+"timestamps, and a SHA-256 digest of the active ``StorageManagerConfig`` "
+"so replay can flag mismatched configurations."
+msgstr ""
+"一个包含文件格式版本、跟踪模式版本、开始时间戳以及活动的 ``StorageManagerConfig`` 的 SHA-256 "
+"摘要的头部，以便重放可以标记不匹配的配置。"
+
+#: ../../source/mp/tracing_and_debugging.rst:65
+msgid "**What is not captured:**"
+msgstr "**未捕获的内容：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:67
+msgid ""
+"**KV tensor bytes.** Replay exercises bookkeeping and controller logic; "
+"payloads at replay time are zeros. The trace file stays bounded even for "
+"long runs."
+msgstr "**KV 张量字节。** 重放练习的记账和控制逻辑；重放时的有效载荷为零。即使在长时间运行的情况下，跟踪文件也保持有限。"
+
+#: ../../source/mp/tracing_and_debugging.rst:70
+msgid ""
+"Calls inside ``MPCacheServer``, the message queue, or GPU-copy code. "
+"Those layers are out of scope for the ``storage`` trace level."
+msgstr "``MPCacheServer``\\ 、消息队列或显存复制代码中的调用。这些层超出了 ``storage`` 跟踪级别的范围。"
+
+#: ../../source/mp/tracing_and_debugging.rst:73
+msgid "**Overhead:**"
+msgstr "**开销：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:75
+msgid "Off: a single boolean check per ``StorageManager`` call. Effectively free."
+msgstr "关闭：每次 ``StorageManager`` 调用进行一次布尔检查。实际上是免费的。"
+
+#: ../../source/mp/tracing_and_debugging.rst:76
+msgid ""
+"On: encoding and file I/O happen on the EventBus drain thread, off the "
+"request path. In practice this has no visible impact on request latency."
+msgstr "开启：编码和文件 I/O 在 EventBus 排水线程上进行，不在请求路径上。实际上，这对请求延迟没有明显影响。"
+
+#: ../../source/mp/tracing_and_debugging.rst:81
+msgid "Inspecting a Trace"
+msgstr "检查追踪"
+
+#: ../../source/mp/tracing_and_debugging.rst:83
+msgid "Before replaying, ``lmcache trace info`` prints a one-screen summary:"
+msgstr "在重放之前，\\ ``lmcache trace info`` 打印一个一屏的摘要："
+
+#: ../../source/mp/tracing_and_debugging.rst:106
+msgid ""
+"Use this to sanity-check that the trace you intend to replay covers the "
+"expected operation mix and duration."
+msgstr "使用此功能来检查您打算重放的跟踪是否涵盖了预期的操作组合和持续时间。"
+
+#: ../../source/mp/tracing_and_debugging.rst:110
+msgid "Replaying a Trace"
+msgstr "重放跟踪"
+
+#: ../../source/mp/tracing_and_debugging.rst:112
+msgid ""
+"``lmcache trace replay FILE`` reissues every recorded call against a "
+"**fresh** ``StorageManager`` built from CLI flags you supply. The replay-"
+"side config is **chosen by you**, not copied from the recording. This is "
+"the feature's main value — you can compare different L1/L2 setups on "
+"identical input."
+msgstr "``lmcache trace replay FILE`` 重新发出每个记录的调用，使用您提供的 CLI 标志构建的 **全新** ``StorageManager``\\ 。重放端的配置由 **您选择**\\ ，而不是从录音中复制。这是该功能的主要价值——您可以在相同的输入上比较不同的 L1/L2 设置。"
+
+#: ../../source/mp/tracing_and_debugging.rst:118
+msgid "Minimal invocation:"
+msgstr "最小调用："
+
+#: ../../source/mp/tracing_and_debugging.rst:125
+msgid ""
+"``--l1-size-gb`` and ``--eviction-policy`` are required, just like on "
+"``lmcache server``. Any storage-manager flag accepted by the server also "
+"works here (``--l2-adapter``, ``--l1-use-lazy``, ``--l2-store-policy``, "
+"…); run ``lmcache trace replay --help`` for the full list."
+msgstr "``--l1-size-gb`` 和 ``--eviction-policy`` 是必需的，就像在 ``lmcache server`` 上一样。服务器接受的任何存储管理器标志在这里也有效（\\ ``--l2-adapter``\\ 、\\ ``--l1-use-lazy``\\ 、\\ ``--l2-store-policy`` 等）；运行 ``lmcache trace replay --help`` 获取完整列表。"
+
+#: ../../source/mp/tracing_and_debugging.rst:131
+msgid ""
+"**Pacing.** The driver always honors the recorded inter-call timings by "
+"sleeping to align each dispatch with its recorded ``t_mono`` offset. "
+"There is **no** as-fast-as-possible mode: ``StorageManager`` reads and "
+"writes are asynchronous and carry cross-call dependencies (for example, a"
+" retrieve may depend on an earlier L2 load completing), so collapsing the"
+" recorded gaps races the internal queues and causes non-deterministic "
+"retrieve misses. If the replay host is slower than the recording host, "
+"the loop simply lags the recorded schedule."
+msgstr "**节奏控制。** 驱动程序始终遵循记录的调用间隔时间，通过休眠来使每次调度与其记录的 ``t_mono`` 偏移对齐。没有“尽可能快”的模式：\\ ``StorageManager`` 的读写是异步的，并且存在跨调用依赖关系（例如，检索可能依赖于先前的 L2 加载完成），因此压缩记录的间隔会导致内部队列竞争，从而导致非确定性的检索未命中。如果重放主机比记录主机慢，循环会简单地滞后于记录的时间表。"
+
+#: ../../source/mp/tracing_and_debugging.rst:140
+msgid ""
+"**Output.** Every replay prints a terminal metrics table and writes a "
+"per-qualname CSV by default:"
+msgstr "**输出。** 每次重放默认都会打印一个终端指标表，并写入每个 qualname 的 CSV："
+
+#: ../../source/mp/tracing_and_debugging.rst:160
+msgid "Additional per-record output is controlled by:"
+msgstr "每条记录的附加输出由以下内容控制："
+
+#: ../../source/mp/tracing_and_debugging.rst:166
+#: ../../source/mp/tracing_and_debugging.rst:215
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/mp/tracing_and_debugging.rst:167
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/mp/tracing_and_debugging.rst:168
+msgid "``--output-dir DIR``"
+msgstr "``--output-dir DIR``"
+
+#: ../../source/mp/tracing_and_debugging.rst:169
+msgid "Directory for aggregated summary files. Default: current dir."
+msgstr "聚合摘要文件的目录。默认：当前目录。"
+
+#: ../../source/mp/tracing_and_debugging.rst:170
+msgid "``--no-csv``"
+msgstr "``--no-csv``"
+
+#: ../../source/mp/tracing_and_debugging.rst:171
+msgid "Skip the ``trace_replay_ops.csv`` export."
+msgstr "跳过 ``trace_replay_ops.csv`` 导出。"
+
+#: ../../source/mp/tracing_and_debugging.rst:172
+msgid "``--json``"
+msgstr "``--json``"
+
+#: ../../source/mp/tracing_and_debugging.rst:173
+msgid ""
+"Also write ``trace_replay_summary.json`` (per-qualname count / mean / p50"
+" / p90 / p99 / min / max, plus total duration)."
+msgstr "还会写入 ``trace_replay_summary.json``\\ （按资格名称的计数 / 平均值 / p50 / p90 / p99 / 最小值 / 最大值，以及总持续时间）。"
+
+#: ../../source/mp/tracing_and_debugging.rst:176
+msgid "``--verbose``"
+msgstr "``--verbose``"
+
+#: ../../source/mp/tracing_and_debugging.rst:177
+msgid ""
+"Print one ``[N/total] OK|FAIL <qualname> (Xms)`` line per record to "
+"stdout in addition to the INFO log."
+msgstr "除了 INFO 日志外，还将每条记录打印一行 ``[N/total] OK|FAIL <qualname> (Xms)`` 到 stdout。"
+
+#: ../../source/mp/tracing_and_debugging.rst:179
+msgid "``--jsonl-out PATH``"
+msgstr "``--jsonl-out PATH``"
+
+#: ../../source/mp/tracing_and_debugging.rst:180
+#, python-brace-format
+msgid ""
+"Write one JSON object per replayed record to ``PATH`` (``{qualname, "
+"latency_ms, failed}``) for post-hoc analysis."
+msgstr ""
+"将每个重放记录写入一个 JSON 对象到 ``PATH`` (``{qualname, latency_ms, "
+"failed}``)，以便进行事后分析。"
+
+#: ../../source/mp/tracing_and_debugging.rst:183
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/mp/tracing_and_debugging.rst:184
+msgid ""
+"Suppress the terminal metrics table. The aggregated files are still "
+"written."
+msgstr "抑制终端指标表。聚合文件仍然会被写入。"
+
+#: ../../source/mp/tracing_and_debugging.rst:187
+msgid "Even without ``--verbose``, the driver logs each dispatch at INFO:"
+msgstr "即使没有 ``--verbose``\\ ，驱动程序也会在 INFO 级别记录每个调度。"
+
+#: ../../source/mp/tracing_and_debugging.rst:195
+msgid ""
+"Progress numbers come from a cheap pre-scan of the trace file, so you "
+"always see ``[N/total]`` rather than just a running counter."
+msgstr "进度数字来自对跟踪文件的廉价预扫描，因此您总是看到 ``[N/total]`` 而不仅仅是一个运行计数器。"
+
+#: ../../source/mp/tracing_and_debugging.rst:199
+msgid "Monitoring During Replay"
+msgstr "重放期间的监控"
+
+#: ../../source/mp/tracing_and_debugging.rst:201
+msgid ""
+"The replay driver initializes the full observability EventBus **before** "
+"constructing the replay-side ``StorageManager``. Internal events (L1/L2 "
+"lifecycle, eviction ticks, store/retrieve publishes, etc.) therefore flow"
+" through a live bus during replay and the standard subscribers — logging,"
+" metrics, OTel tracing — can attach to them."
+msgstr ""
+"重放驱动程序在构造重放端 ``StorageManager`` 之前初始化了完整可观察性 EventBus。因此，内部事件（L1/L2 "
+"生命周期、逐出时钟、存储/检索发布等）在重放期间通过一个实时总线流动，标准订阅者——日志记录、指标、OTel 跟踪——可以附加到这些事件上。"
+
+#: ../../source/mp/tracing_and_debugging.rst:208
+msgid ""
+"The same observability CLI flags that the server accepts are available on"
+" ``lmcache trace replay``:"
+msgstr "在 ``lmcache trace replay`` 上可用的与服务器接受的相同可观察性 CLI 标志："
+
+#: ../../source/mp/tracing_and_debugging.rst:216
+msgid "Effect"
+msgstr "效果"
+
+#: ../../source/mp/tracing_and_debugging.rst:217
+msgid "``--disable-observability``"
+msgstr "``--disable-observability``"
+
+#: ../../source/mp/tracing_and_debugging.rst:218
+msgid "Turn the EventBus off entirely. No subscribers fire."
+msgstr "完全关闭 EventBus。没有订阅者会触发。"
+
+#: ../../source/mp/tracing_and_debugging.rst:219
+msgid "``--disable-metrics``"
+msgstr "``--disable-metrics``"
+
+#: ../../source/mp/tracing_and_debugging.rst:220
+msgid ""
+"Skip OTel metrics init and metrics subscribers. Useful to avoid binding "
+"the Prometheus port when you only want logs."
+msgstr "跳过 OTel 指标初始化和指标订阅者。对于仅想要日志时，避免绑定 Prometheus 端口非常有用。"
+
+#: ../../source/mp/tracing_and_debugging.rst:222
+msgid "``--disable-logging``"
+msgstr "``--disable-logging``"
+
+#: ../../source/mp/tracing_and_debugging.rst:223
+msgid "Skip logging subscribers."
+msgstr "跳过日志订阅者。"
+
+#: ../../source/mp/tracing_and_debugging.rst:224
+msgid "``--enable-tracing``"
+msgstr "``--enable-tracing``"
+
+#: ../../source/mp/tracing_and_debugging.rst:225
+msgid "Enable OTel span subscribers. Requires ``--otlp-endpoint``."
+msgstr "启用 OTel span 订阅者。需要 ``--otlp-endpoint``\\ 。"
+
+#: ../../source/mp/tracing_and_debugging.rst:226
+msgid "``--otlp-endpoint URL``"
+msgstr "``--otlp-endpoint URL``"
+
+#: ../../source/mp/tracing_and_debugging.rst:227
+msgid ""
+"Export metrics/traces to an OTLP gRPC collector (e.g. "
+"``http://localhost:4317``). When unset, metrics fall back to the in-"
+"process Prometheus pull endpoint."
+msgstr "将指标/追踪导出到 OTLP gRPC 收集器（例如 ``http://localhost:4317``\\ ）。如果未设置，指标将回退到进程内的 Prometheus 拉取端点。"
+
+#: ../../source/mp/tracing_and_debugging.rst:230
+msgid "``--prometheus-port PORT``"
+msgstr "``--prometheus-port PORT``"
+
+#: ../../source/mp/tracing_and_debugging.rst:231
+msgid ""
+"Port for the Prometheus ``/metrics`` endpoint in pull mode. Default "
+"``9090``."
+msgstr "用于拉取模式下 Prometheus ``/metrics`` 端点的端口。默认值为 ``9090``\\ 。"
+
+#: ../../source/mp/tracing_and_debugging.rst:233
+msgid "``--metrics-sample-rate FLOAT``"
+msgstr "``--metrics-sample-rate FLOAT``"
+
+#: ../../source/mp/tracing_and_debugging.rst:234
+msgid "Sampling rate for lifecycle histograms. Counters always count all events."
+msgstr "生命周期直方图的采样率。计数器始终计算所有事件。"
+
+#: ../../source/mp/tracing_and_debugging.rst:237
+msgid "Typical monitoring setups:"
+msgstr "典型的监控设置："
+
+#: ../../source/mp/tracing_and_debugging.rst:239
+msgid "**Raw log trail (SM/L1/L2 events to stdout):**"
+msgstr "**原始日志轨迹（SM/L1/L2 事件到 stdout）：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:247
+msgid "**Prometheus metrics in pull mode:**"
+msgstr "**以拉取模式的 Prometheus 指标：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:256
+msgid "**OTel metrics + traces to a collector:**"
+msgstr "**OTel 指标 + 跟踪到收集器：**"
+
+#: ../../source/mp/tracing_and_debugging.rst:267
+msgid ""
+"The ``--trace-level`` and ``--trace-output`` flags are **recording-only**"
+" and are not accepted by ``lmcache trace replay``. A replay never writes "
+"a new trace file."
+msgstr ""
+"``--trace-level`` 和 ``--trace-output`` 标志是 **仅记录** 的，不被 ``lmcache trace "
+"replay`` 接受。重放不会写入新的追踪文件。"
+
+#: ../../source/mp/tracing_and_debugging.rst:272
+msgid "Notes, Hints, and Caveats"
+msgstr "注意、提示和注意事项"
+
+#: ../../source/mp/tracing_and_debugging.rst:274
+msgid ""
+"**Retrieve misses are expected when the replay environment differs.** At "
+"replay start, the CLI prints a visible warning banner:"
+msgstr "**当重放环境不同时，预期会出现未命中的情况。** 在重放开始时，CLI 会打印一个可见的警告横幅："
+
+#: ../../source/mp/tracing_and_debugging.rst:283
+msgid ""
+"Because KV payloads are not captured and the replay-side config and host "
+"speed may differ from recording, retrieve calls that hit at record time "
+"can miss at replay time — for instance, an async L2 load that had "
+"finished by the time the recorded retrieve was issued may still be in "
+"flight when the replayed retrieve fires. Treat retrieve-miss counts as a "
+"signal about the replay environment, **not** as a defect in the trace."
+msgstr "由于 KV 负载未被捕获，并且重放端的配置和主机速度可能与录制时不同，因此在录制时命中的检索调用在重放时可能会未命中——例如，在录制的检索发出时已完成的异步 L2 加载在重放的检索触发时可能仍在进行中。将未命中的检索计数视为重放环境的信号，\\ **而不是**\\ 跟踪中的缺陷。"
+
+#: ../../source/mp/tracing_and_debugging.rst:291
+msgid ""
+"**Config-digest mismatch is informational, not fatal.** The replay always"
+" runs whether the digests match or not. A mismatch simply tells you the "
+"replay-side ``StorageManagerConfig`` differs from what was recorded — "
+"often exactly what you intended (comparing two configs on the same "
+"trace)."
+msgstr ""
+"**配置摘要不匹配是信息性的，而不是致命的。** 无论摘要是否匹配，重放始终会运行。 不匹配仅告诉您重放端的 "
+"``StorageManagerConfig`` 与记录时不同——这通常正是您所期望的（在同一跟踪上比较两个配置）。"
+
+#: ../../source/mp/tracing_and_debugging.rst:297
+msgid ""
+"**Prometheus port binding.** The server's ``--prometheus-port`` defaults "
+"to ``9090``. Running ``lmcache trace replay`` concurrently with the "
+"server — or running two replays at once — on the same port will fail. "
+"Either pass a different ``--prometheus-port`` or ``--disable-metrics`` on"
+" the secondary runs."
+msgstr "**Prometheus 端口绑定。** 服务器的 ``--prometheus-port`` 默认值为 ``9090``\\ 。在同一端口上与服务器并发运行 ``lmcache trace replay`` 或同时运行两个重放将会失败。请在第二次运行时传递不同的 ``--prometheus-port`` 或 ``--disable-metrics``\\ 。"
+
+#: ../../source/mp/tracing_and_debugging.rst:303
+msgid ""
+"**Trace-recording overhead.** Recording happens on the EventBus drain "
+"thread, not the request-handling threads. The gate is a single boolean "
+"check when disabled (default), so production builds with recording off "
+"pay no measurable cost."
+msgstr ""
+"**跟踪记录开销。** 记录发生在 EventBus "
+"排出线程上，而不是请求处理线程上。当禁用时（默认），门控是一个单一的布尔检查，因此关闭记录的生产构建不会产生可测量的成本。"
+
+#: ../../source/mp/tracing_and_debugging.rst:308
+msgid ""
+"**Trace files are not encrypted.** Arguments such as ``ObjectKey`` chunk "
+"hashes are written in plaintext. Treat trace files with the same care as "
+"cache hash logs."
+msgstr "**跟踪文件未加密。** 参数如 ``ObjectKey`` 块哈希以明文形式写入。请像对待缓存哈希日志一样小心处理跟踪文件。"
+
+#: ../../source/mp/tracing_and_debugging.rst:312
+msgid ""
+"**Forward compatibility.** The header carries a format version and a "
+"trace schema version. Readers reject files with unknown versions rather "
+"than silently producing garbage. Captured API surface changes (new "
+"arguments on a traced method, new codec tags) bump the schema version; "
+"framing changes bump the format version."
+msgstr ""
+"**向前兼容性。** 头部携带格式版本和追踪模式版本。读取器会拒绝未知版本的文件，而不是默默地产生垃圾。捕获的 API "
+"表面变化（追踪方法上的新参数、新的编解码器标签）会提升模式版本；框架变化会提升格式版本。"
+
+#: ../../source/mp/tracing_and_debugging.rst:318
+msgid ""
+"**Extensibility.** The format is designed to accommodate future trace "
+"**levels** (``mq``, ``gpu``). Adding a new traced method in an existing "
+"level requires only decorating it on the recording side and registering a"
+" handler on the replay side — no format changes."
+msgstr "**可扩展性。** 该格式旨在适应未来的追踪 **级别**\\ （\\ ``mq``\\ 、\\ ``gpu``\\ ）。在现有级别中添加一个新的追踪方法只需在记录端进行装饰，并在重放端注册一个处理程序 — 无需格式更改。"
+
+#: ../../source/mp/tracing_and_debugging.rst:324
+msgid "See Also"
+msgstr "另请参阅"
+
+#: ../../source/mp/tracing_and_debugging.rst:326
+msgid ""
+":ref:`trace-recording` — the short ``Trace Recording`` section in the "
+"Observability page focuses on the recording-side flags."
+msgstr ":ref:`trace-recording` — 可观察性页面中的短小 ``Trace Recording`` 部分专注于记录端标志。"
+
+#: ../../source/mp/tracing_and_debugging.rst:328
+msgid ""
+"``docs/design/v1/mp_observability/trace.md`` in the source tree — full "
+"design doc: architecture, replay dispatcher, context-manager pairing, "
+"stats collector, and test matrix."
+msgstr ""
+"``docs/design/v1/mp_observability/trace.md`` 在源代码树中 — "
+"完整设计文档：架构、重放调度器、上下文管理器配对、统计收集器和测试矩阵。"
+

@@ -1,0 +1,142 @@
+# Optional Aerospike native L2 integration (BUILD_AEROSPIKE=1 + CE Docker).
+name: Aerospike integration
+
+on:
+  push:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "csrc/storage_backends/aerospike/**"
+      - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
+      - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
+      - "setup.py"
+      - "tests/aerospike_ce.conf.template"
+      - "tests/v1/distributed/test_aerospike_*"
+      - ".github/workflows/aerospike_integration.yml"
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "csrc/storage_backends/aerospike/**"
+      - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
+      - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
+      - "setup.py"
+      - "tests/aerospike_ce.conf.template"
+      - "tests/v1/distributed/test_aerospike_*"
+      - ".github/workflows/aerospike_integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AEROSPIKE_CLIENT_C_VERSION: "7.3.0"
+  AEROSPIKE_CLIENT_C_UBUNTU: "ubuntu22.04"
+  AEROSPIKE_CONTAINER_NAME: lmcache-aerospike-ci
+
+jobs:
+  aerospike-native-l2:
+    name: Aerospike native L2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Aerospike C client (prebuilt)
+        run: |
+          set -euo pipefail
+          DEPS="${GITHUB_WORKSPACE}/.deps"
+          INSTALL="${DEPS}/aerospike-install"
+          VERSION="${AEROSPIKE_CLIENT_C_VERSION}"
+          UBUNTU="${AEROSPIKE_CLIENT_C_UBUNTU}"
+          BASE="aerospike-client-c-libuv_${VERSION}_${UBUNTU}_x86_64"
+          URL="https://download.aerospike.com/artifacts/aerospike-client-c/${VERSION}/${BASE}.tgz"
+          mkdir -p "${DEPS}"
+          curl -fsSL -o "${DEPS}/${BASE}.tgz" "${URL}"
+          tar xzf "${DEPS}/${BASE}.tgz" -C "${DEPS}"
+          rm -rf "${INSTALL}"
+          mkdir -p "${INSTALL}"
+          dpkg-deb -x "${DEPS}/${BASE}/aerospike-client-c-libuv-devel_${VERSION}-${UBUNTU}_amd64.deb" "${INSTALL}"
+          dpkg-deb -x "${DEPS}/${BASE}/aerospike-client-c-libuv_${VERSION}-${UBUNTU}_amd64.deb" "${INSTALL}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libyaml-0-2 libuv1-dev
+          (cd "${DEPS}" && apt download libyaml-dev && \
+            rm -rf libyaml-install && mkdir -p libyaml-install && \
+            dpkg-deb -x libyaml-dev_*.deb libyaml-install)
+          {
+            echo "AEROSPIKE_INCLUDE_DIR=${INSTALL}/usr/include"
+            echo "AEROSPIKE_LIBRARY_DIR=${INSTALL}/usr/lib"
+            echo "LD_LIBRARY_PATH=${INSTALL}/usr/lib:${DEPS}/libyaml-install/usr/lib/x86_64-linux-gnu"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build LMCache with Aerospike extension
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel
+          python -m pip install 'setuptools>=77.0.3,<81.0.0' 'pybind11>=2.12'
+          python -m pip install numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          export BUILD_AEROSPIKE=1
+          export NO_GPU_EXT=1
+          python -m pip install -e . --no-build-isolation
+          python -m pip install 'aerospike>=14.0.0,<19.0.0' pytest
+          python -c "from lmcache.lmcache_aerospike import LMCacheAerospikeClient; print('OK:', LMCacheAerospikeClient)"
+
+      - name: Start Aerospike CE
+        id: aerospike
+        run: |
+          set -euo pipefail
+          HOST_PORT=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+          CONF_DIR=$(mktemp -d)
+          sed "s/__ACCESS_PORT__/${HOST_PORT}/g" tests/aerospike_ce.conf.template > "${CONF_DIR}/aerospike.conf"
+          docker rm -f "${AEROSPIKE_CONTAINER_NAME}" 2>/dev/null || true
+          docker run -d \
+            --name "${AEROSPIKE_CONTAINER_NAME}" \
+            -p "${HOST_PORT}:3000" \
+            -v "${CONF_DIR}/aerospike.conf:/etc/aerospike/aerospike.template.conf:ro" \
+            aerospike/aerospike-server:latest
+          deadline=$((SECONDS + 90))
+          until docker exec "${AEROSPIKE_CONTAINER_NAME}" asinfo -v status 2>/dev/null | grep -qE 'ok|normal'; do
+            if (( SECONDS >= deadline )); then
+              docker logs "${AEROSPIKE_CONTAINER_NAME}" 2>&1 | tail -80
+              exit 1
+            fi
+            sleep 1
+          done
+          host_deadline=$((SECONDS + 90))
+          until python -c "
+          import aerospike
+          c = aerospike.client({'hosts': [('127.0.0.1', ${HOST_PORT})]})
+          c.connect()
+          info = c.info_random_node('namespace/lmcache')
+          c.close()
+          assert 'nsup-period=120' in info
+          "; do
+            if (( SECONDS >= host_deadline )); then
+              docker logs "${AEROSPIKE_CONTAINER_NAME}" 2>&1 | tail -80
+              exit 1
+            fi
+            sleep 1
+          done
+          {
+            echo "AEROSPIKE_TEST_HOST=127.0.0.1"
+            echo "AEROSPIKE_TEST_PORT=${HOST_PORT}"
+            echo "AEROSPIKE_TEST_NAMESPACE=lmcache"
+            echo "RUN_AEROSPIKE_INTEGRATION=1"
+          } >> "${GITHUB_ENV}"
+
+      - name: Integration tests
+        run: |
+          pytest tests/v1/distributed/test_aerospike_l2_integration.py -v --tb=short
+
+      - name: Stop Aerospike CE
+        if: always()
+        run: docker rm -f "${AEROSPIKE_CONTAINER_NAME}" 2>/dev/null || true

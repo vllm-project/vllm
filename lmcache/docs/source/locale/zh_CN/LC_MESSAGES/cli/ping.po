@@ -1,0 +1,123 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/ping.rst:2
+msgid "lmcache ping"
+msgstr "lmcache ping"
+
+#: ../../source/cli/ping.rst:4
+msgid ""
+"The ``lmcache ping`` command is a liveness check for an LMCache KV cache "
+"server or a vLLM serving engine."
+msgstr "``lmcache ping`` 命令用于检查 LMCache KV Cache 服务器或 vLLM 服务引擎的存活状态。"
+
+#: ../../source/cli/ping.rst:22
+msgid ""
+"``ping kvcache`` checks the ``/healthcheck`` endpoint; ``ping engine`` "
+"checks ``/health``."
+msgstr "``ping kvcache`` 检查 ``/healthcheck`` 端点； ``ping engine`` 检查 ``/health``\\ 。"
+
+#: ../../source/cli/ping.rst:26
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/ping.rst:32
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/ping.rst:33
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/ping.rst:34
+msgid "``kvcache`` | ``engine``"
+msgstr "``kvcache`` | ``engine``"
+
+#: ../../source/cli/ping.rst:35
+msgid "Target to ping (positional, required)."
+msgstr "要 ping 的目标（位置参数，必填）。"
+
+#: ../../source/cli/ping.rst:36
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/ping.rst:37
+msgid ""
+"Server URL. Defaults to ``http://localhost:8080`` for ``kvcache``, "
+"``http://localhost:8000`` for ``engine``."
+msgstr "服务器 URL。对于 ``kvcache`` 默认为 ``http://localhost:8080``\\ ，对于 ``engine`` 默认为 ``http://localhost:8000``\\ 。"
+
+#: ../../source/cli/ping.rst:39
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/ping.rst:40
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
+
+#: ../../source/cli/ping.rst:41
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/cli/ping.rst:42
+msgid "Save metrics to a file (format follows ``--format``)."
+msgstr "将指标保存到文件中（格式遵循 ``--format``\\ ）。"
+
+#: ../../source/cli/ping.rst:43
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/ping.rst:44
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/cli/ping.rst:47
+msgid "JSON Output"
+msgstr "JSON 输出"
+
+#: ../../source/cli/ping.rst:64
+msgid "Exit Codes"
+msgstr "退出代码"
+
+#: ../../source/cli/ping.rst:70
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/ping.rst:71
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/ping.rst:72
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/ping.rst:73
+msgid "Server is reachable (HTTP 200)."
+msgstr "服务器可达（HTTP 200）。"
+
+#: ../../source/cli/ping.rst:74
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/ping.rst:75
+msgid "Connection failure or non-200 response."
+msgstr "连接失败或非 200 响应。"
+

@@ -1,0 +1,38 @@
+# The CacheBlend integration spec (cacheblend_integration_smoke_test.go) pulls a
+# PRIVATE payload image. Set these as pipeline secrets in the Buildkite UI (same
+# mechanism as HF_TOKEN); they propagate through `make test-e2e-gpu-kind` ->
+# `go test` -> the spec via os.Getenv. Do NOT hardcode the token here.
+#   CACHEBLEND_REGISTRY_USER   docker registry username (e.g. Docker Hub user)
+#   CACHEBLEND_REGISTRY_TOKEN  docker registry read-only PAT
+#   CACHEBLEND_REGISTRY_SERVER optional, default https://index.docker.io/v1/
+# When USER/TOKEN are unset the spec Skips, so this build stays green without them.
+env:
+  GPU_KIND_CLUSTER: "operator-test-e2e-gpu-${BUILDKITE_BUILD_NUMBER}"
+
+steps:
+  - label: "Operator Integration: test-e2e-gpu-kind"
+    key: "operator_test_e2e_gpu_kind"
+    timeout_in_minutes: 90
+    command: |
+      echo $$PWD # for debugging
+
+      cd operator
+      make test-e2e-gpu-kind
+
+  - label: "Cleanup Kind cluster"
+    key: "operator_cleanup_kind"
+    depends_on: "operator_test_e2e_gpu_kind"
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    command: |
+      cd operator
+      make cleanup-test-e2e-gpu-kind
+
+  - label: "Cleanup workspace"
+    depends_on: "operator_cleanup_kind"
+    allow_dependency_failure: true
+    command: |
+      export TARGET="$$PWD"
+      echo "Deleting current workspace $$TARGET"
+      cd /
+      rm -rf "$$TARGET" || true

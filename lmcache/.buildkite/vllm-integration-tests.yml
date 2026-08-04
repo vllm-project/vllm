@@ -1,0 +1,30 @@
+env:
+  DOCKER_BUILDKIT: 1
+
+steps:
+  - label: ":rocket: vLLM Integration Tests"
+    key: "test"
+    timeout_in_minutes: 60
+    commands:
+      - chmod +x .buildkite/scripts/vllm-integration-tests.sh
+      - |
+        # Ensure artifact is created even if test crashes
+        create_artifact() {
+          if ls /tmp/build_${BUILDKITE_BUILD_ID}_*.log 1>/dev/null 2>&1; then
+            cat /tmp/build_${BUILDKITE_BUILD_ID}_*.log > build_${BUILDKITE_BUILD_ID}.log 2>/dev/null || true
+          else
+            echo "No log files found for build ${BUILDKITE_BUILD_ID}" > build_${BUILDKITE_BUILD_ID}.log
+          fi
+        }
+        trap 'test_exit_code=$?; create_artifact; exit $test_exit_code' EXIT INT TERM
+        BUILD_ID=${BUILDKITE_BUILD_ID} .buildkite/scripts/vllm-integration-tests.sh --hf-token=$HF_TOKEN --server-wait-timeout=240 --configs=.buildkite/cases/integration-cases.txt
+        test_exit_code=$?
+        create_artifact
+        exit $test_exit_code
+        export TARGET="$PWD"
+        echo "Deleting current workspace $TARGET"
+        cd /
+        sudo rm -rf "$TARGET"
+
+    artifact_paths:
+      - "build_${BUILDKITE_BUILD_ID}.log"

@@ -1,0 +1,106 @@
+name: Build CLI Artifacts
+
+# Reusable workflow that builds the pure-Python lmcache-cli wheel (no CUDA).
+# Uploaded as the `release-cli-artifacts` GHA artifact.
+
+on:
+    workflow_call:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'lmcache/cli/**.py'
+            - 'pyproject_cli.toml'
+            - 'requirements/cli.txt'
+            - '.github/workflows/build_cli_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+# Cancel older in-flight runs on the same PR / branch.
+concurrency:
+    group: build-cli-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-cli-artifacts:
+        name: Build CLI artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling
+              run: |
+                python -m pip install --upgrade pip
+                pip install build
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Build lmcache-cli wheel (pure Python, no native extensions)
+              run: |
+                cp pyproject_cli.toml pyproject.toml
+                NO_NATIVE_EXT=1 python -m build --wheel
+
+            - name: Smoke-test CLI wheel (no torch)
+              run: |
+                pip install dist/lmcache_cli-*.whl
+
+                # CLI wheel must be pure-Python: no compiled extension bundled.
+                if unzip -l dist/lmcache_cli-*.whl | grep -E '\.(so|pyd)$'; then
+                  echo "::error::CLI wheel contains compiled extensions; should be pure-Python"
+                  exit 1
+                fi
+
+                # Pure-Python surface must import without torch / native ops.
+                python -c "import lmcache"
+
+                # Native CUDA ops must be unreachable from the slim wheel.
+                if python -c "import lmcache.c_ops" 2>/dev/null; then
+                  echo "::error::CLI wheel can import lmcache.c_ops; native ops must be absent from the pure-Python wheel"
+                  exit 1
+                fi
+                echo "OK: lmcache.c_ops is not importable from the CLI wheel"
+
+                lmcache --help
+
+                # Slim-supported subcommands only (server is full-only).
+                for cmd in mock kvcache describe ping query bench tool trace; do
+                  echo "::group::lmcache $cmd --help"
+                  lmcache "$cmd" --help
+                  echo "::endgroup::"
+                done
+
+            - name: Upload CLI release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-cli-artifacts
+                path: dist/

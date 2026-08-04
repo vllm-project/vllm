@@ -1,0 +1,25 @@
+# Reference Helm values for agent-stack-k8s.
+# install-agent-stack.sh sets these automatically.
+# This file is for documentation only.
+# Docs: https://github.com/buildkite/agent-stack-k8s
+
+agentToken: "<from install-agent-stack.sh>"
+
+config:
+  queue: "k8s"                              # override with BUILDKITE_QUEUE env var
+
+  # HTTPS checkout using GitHub token (replaces SSH key)
+  git-credentials-secret:
+    name: buildkite-git-creds               # created by install-agent-stack.sh
+    key: git-credentials                    # contains https://x-access-token:<token>@github.com
+
+  # Inject GITHUB_TOKEN into job containers for git push operations
+  pod-spec-patch:
+    containers:
+      - name: container-0
+        env:
+          - name: GITHUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: buildkite-git-creds
+                key: GITHUB_TOKEN

@@ -1,0 +1,92 @@
+# vLLM Deployment used by the e2e_gpu CacheBlend integration spec.
+#
+# Unlike vllm_deployment.yaml (the LMCacheEngine round-trip), this pod OPTS IN
+# to CacheBlend dependency injection via the mutating webhook. The webhook
+# appends the CacheBlend vLLM flags (--attention-backend CUSTOM,
+# --kv-transfer-config <engine>, --block-size 64, --pipeline-parallel-size 1,
+# --no-enable-chunked-prefill, --no-async-scheduling, --enforce-eager), the
+# cb-plugin init container + emptyDir + PYTHONPATH, hostIPC=true, and the
+# engine's payload imagePullSecrets.
+#
+# Placeholders substituted by the spec (substituteVLLMPlaceholders):
+#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects hostIPC)
+#   __ENGINE_NAME__  — CacheBlendEngine metadata.name (bound via annotation)
+#   __MODEL__        — Hugging Face model id
+#   __VLLM_IMAGE__   — container image (default lmcache/vllm-openai:latest)
+#
+# CRITICAL: the vLLM container MUST launch via the image ENTRYPOINT
+# (["vllm","serve"]) with args ONLY. A `command:` override makes the webhook
+# SKIP injection (it stamps lmcache.ai/cacheblend-skip-reason=command-override)
+# because appended args can't reach `vllm serve`. Do NOT add --attention-backend
+# or --kv-transfer-config here — the webhook injects both.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cacheblend
+  namespace: __NAMESPACE__
+  labels:
+    app: vllm-cacheblend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-cacheblend
+  template:
+    metadata:
+      labels:
+        app: vllm-cacheblend
+        # OPT-IN: the webhook's objectSelector matches this label.
+        lmcache.ai/cacheblend-inject: "true"
+      annotations:
+        # BIND: names the CacheBlendEngine (same namespace) to inject for.
+        lmcache.ai/cacheblend-engine: "__ENGINE_NAME__"
+    spec:
+      # Needed for GPU access; the blend engine shares THIS pod's GPU via CUDA
+      # IPC, so engine + pod must land on the same GPU node.
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
+      # webhook injects hostIPC=true (shared host /dev/shm for CUDA IPC); an
+      # emptyDir would shadow it and break cudaIpcOpenMemHandle.
+      containers:
+        - name: vllm
+          image: __VLLM_IMAGE__
+          imagePullPolicy: IfNotPresent
+          # Args-only launch (image ENTRYPOINT is ["vllm","serve"]). --load-format
+          # dummy skips weight download (the smoke asserts startup + rope
+          # registration + HTTP 200, not generation quality). gpu-memory low so
+          # the node-local blend engine has headroom on the shared GPU.
+          args:
+            - "__MODEL__"
+            - "--port"
+            - "8000"
+            - "--gpu-memory-utilization"
+            - "0.5"
+            - "--load-format"
+            - "dummy"
+          env:
+            # Deterministic prefix hashing across processes — required by LMCache.
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "all"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            # /v1/models is ready only after the model is loaded onto the GPU
+            # — a strong signal vLLM started AND the CacheBlend connector
+            # negotiated with the engine (otherwise vllm crashes during init).
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60

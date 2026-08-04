@@ -1,0 +1,89 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_optimizations/blending.rst:2
+msgid "Blending"
+msgstr "混合"
+
+#: ../../source/kv_cache_optimizations/blending.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_optimizations/blending.rst:9
+msgid ""
+"CacheBlend enables KV cache reuse for non-prefix positions by recomputing"
+" a subset of tokens at non-prefix positions. For example, CacheBlend can "
+"combine multiple (pre-)computed KV caches, when their corresponding texts"
+" are concatenated in the LLM input"
+msgstr ""
+"CacheBlend 通过在非前缀位置重计算一部分令牌来实现 KV Cache 的重用。例如，当相应的文本在 LLM "
+"输入中连接时，CacheBlend 可以组合多个（预）计算的 KV Cache。"
+
+#: ../../source/kv_cache_optimizations/blending.rst:13
+msgid "Configuring CacheBlend in RAG scenarios"
+msgstr "在 RAG 场景中配置 CacheBlend"
+
+#: ../../source/kv_cache_optimizations/blending.rst:15
+msgid ""
+"Here, we will explain the code in our end-to-end `example "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>."
+msgstr ""
+"在这里，我们将解释我们端到端的 `example "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_"
+" 中的代码。"
+
+#: ../../source/kv_cache_optimizations/blending.rst:17
+msgid "Below are some blending-related configurations (and explanations):"
+msgstr "以下是一些与混合相关的配置（及其解释）："
+
+#: ../../source/kv_cache_optimizations/blending.rst:42
+msgid ""
+"Firstly, we preprocess texts into tokens, as tokenizing a concatenated "
+"string may produce different tokens than concatenating the results of "
+"tokenizing each string individually. For example, assume we have a system"
+" prompt and three text chunks. We need to preprocess them into tokens "
+"before sending to the LLM:"
+msgstr ""
+"首先，我们将文本预处理为标记，因为将连接的字符串进行标记化可能会产生与分别对每个字符串进行标记化后再连接的结果不同的标记。例如，假设我们有一个系统提示和三个文本块。在将它们发送到"
+" LLM 之前，我们需要将它们预处理为标记："
+
+#: ../../source/kv_cache_optimizations/blending.rst:64
+msgid ""
+"Then, we can send the tokenized prompt to vLLM. Meanwhile, LMCache will "
+"store the KV caches of different chunks according to the "
+"``BLEND_SPECIAL_STR``."
+msgstr "然后，我们可以将标记化的提示发送到 vLLM。同时，LMCache 将根据 ``BLEND_SPECIAL_STR`` 存储不同块的 KV 缓存。"
+
+#: ../../source/kv_cache_optimizations/blending.rst:70
+msgid ""
+"Similarly, we build another prompt using the same chunks but with "
+"different orders."
+msgstr "同样，我们使用相同的块但以不同的顺序构建另一个提示。"
+
+#: ../../source/kv_cache_optimizations/blending.rst:87
+msgid ""
+"Even though the second prompt has a different order of chunks, LMCache "
+"can still reuse the KV caches of chunk1, chunk2, and chunk3."
+msgstr "尽管第二个提示的块顺序不同，LMCache 仍然可以重用 chunk1、chunk2 和 chunk3 的 KV 缓存。"
+

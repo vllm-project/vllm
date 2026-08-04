@@ -1,0 +1,140 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/performance_tuning.rst:4
+msgid "Performance Tuning"
+msgstr "性能调优"
+
+#: ../../source/production/performance_tuning.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/production/performance_tuning.rst:11
+msgid ""
+"This guide covers key LMCache configuration options that can help you "
+"optimize performance in production deployments."
+msgstr "本指南涵盖了关键的 LMCache 配置选项，这些选项可以帮助您优化生产环境中的性能。"
+
+#: ../../source/production/performance_tuning.rst:15
+msgid "Minimum Retrieve Tokens"
+msgstr "最小检索令牌"
+
+#: ../../source/production/performance_tuning.rst:17
+msgid ""
+"When LMCache finds a partial KV cache hit, it loads the cached tokens "
+"into GPU memory to avoid recomputation. However, if only a small number "
+"of tokens are hit, the overhead of loading them from the cache may "
+"outweigh the benefit of skipping recomputation."
+msgstr ""
+"当 LMCache 找到部分 KV Cache "
+"命中时，它会将缓存的令牌加载到显存中，以避免重计算。然而，如果命中的令牌数量很少，从缓存中加载它们的开销可能会超过跳过重计算的好处。"
+
+#: ../../source/production/performance_tuning.rst:22
+msgid ""
+"The ``min_retrieve_tokens`` setting lets you set a threshold: if the "
+"number of tokens that need to be loaded is below this value, LMCache will"
+" skip the retrieve and let the inference engine recompute them instead."
+msgstr ""
+"``min_retrieve_tokens`` 设置允许您设置一个阈值：如果需要加载的令牌数量低于此值，LMCache "
+"将跳过检索，并让推理引擎重新计算它们。"
+
+#: ../../source/production/performance_tuning.rst:29
+msgid ""
+"Even when retrieve is skipped, LMCache still records the hit tokens "
+"internally so that it does **not** re-store chunks that already exist in "
+"the cache."
+msgstr "即使跳过了查找，LMCache 仍然在内部记录命中的令牌，以便它\\ **不**\\ 会重新存储已经存在于缓存中的块。"
+
+#: ../../source/production/performance_tuning.rst:34
+msgid "When to Use"
+msgstr "何时使用"
+
+#: ../../source/production/performance_tuning.rst:36
+msgid "Consider setting ``min_retrieve_tokens`` when:"
+msgstr "考虑在以下情况下设置 ``min_retrieve_tokens``\\ ："
+
+#: ../../source/production/performance_tuning.rst:38
+msgid ""
+"For the backend you are using, the transfer latency is noticeable for "
+"small payloads."
+msgstr "对于您使用的后端，小负载的传输延迟是显著的。"
+
+#: ../../source/production/performance_tuning.rst:40
+msgid ""
+"Your workload has many requests with **low cache hit ratios**, where "
+"recomputation is faster than cache loading."
+msgstr "您的工作负载有许多请求，\\ **缓存命中率低**\\ ，在这种情况下，重计算比缓存加载更快。"
+
+#: ../../source/production/performance_tuning.rst:42
+msgid "You want to reduce unnecessary I/O for marginal cache hits."
+msgstr "您希望减少边际缓存命中的不必要 I/O。"
+
+#: ../../source/production/performance_tuning.rst:44
+msgid "You can increase or decrease based on your latency observations."
+msgstr "您可以根据您的延迟观察来增加或减少。"
+
+#: ../../source/production/performance_tuning.rst:47
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/production/performance_tuning.rst:49
+msgid "**YAML configuration file:**"
+msgstr "**YAML 配置文件：**"
+
+#: ../../source/production/performance_tuning.rst:57
+msgid "**Environment variable:**"
+msgstr "**环境变量：**"
+
+#: ../../source/production/performance_tuning.rst:64
+msgid "Working Example"
+msgstr "工作示例"
+
+#: ../../source/production/performance_tuning.rst:66
+msgid "Create an LMCache configuration file ``lmcache_config.yaml``:"
+msgstr "创建一个 LMCache 配置文件 ``lmcache_config.yaml``\\ ："
+
+#: ../../source/production/performance_tuning.rst:75
+msgid "Start vLLM with LMCache:"
+msgstr "使用 LMCache 启动 vLLM："
+
+#: ../../source/production/performance_tuning.rst:86
+msgid "Send a request to populate the cache:"
+msgstr "发送请求以填充缓存："
+
+#: ../../source/production/performance_tuning.rst:99
+msgid "Send a similar request that partially reuses the cached prefix:"
+msgstr "发送一个类似的请求，部分重用缓存的前缀："
+
+#: ../../source/production/performance_tuning.rst:112
+msgid ""
+"Check the server logs. If the number of loadable hit tokens is below "
+"1024, you will see a log message like:"
+msgstr "检查服务器日志。如果可加载的命中令牌数量低于 1024，您将看到类似于以下的日志消息："
+
+#: ../../source/production/performance_tuning.rst:120
+msgid ""
+"This confirms that the small cache hit was skipped in favor of "
+"recomputation, avoiding unnecessary transfer overhead."
+msgstr "这确认了小缓存命中被跳过，以便进行重计算，从而避免不必要的传输开销。"
+

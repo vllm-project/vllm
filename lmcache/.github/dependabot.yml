@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    reviewers: ["ApostaC", "YaoJiayi", "hickeyma"]
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+      - dependency-name: "torch"
+      - dependency-name: "torchvision"
+      - dependency-name: "xformers"
+    groups:
+      minor-update:
+        applies-to: version-updates
+        update-types: ["minor"]

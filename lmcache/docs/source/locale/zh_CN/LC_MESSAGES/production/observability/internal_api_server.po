@@ -1,0 +1,145 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/internal_api_server.rst:4
+msgid "Internal API Server Metrics"
+msgstr "内部 API 服务器指标"
+
+#: ../../source/production/observability/internal_api_server.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/production/observability/internal_api_server.rst:11
+msgid ""
+"Another approach to retrieve LMCache metrics is to use the internal API "
+"server."
+msgstr "另一种获取 LMCache 指标的方法是使用内部 API 服务器。"
+
+#: ../../source/production/observability/internal_api_server.rst:14
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/production/observability/internal_api_server.rst:16
+msgid ""
+"The internal API server exposes Prometheus-compatible metrics endpoints "
+"in your LMCache deployment."
+msgstr "内部 API 服务器在您的 LMCache 部署中公开与 Prometheus 兼容的指标端点。"
+
+#: ../../source/production/observability/internal_api_server.rst:19
+msgid "Quick Start Guide"
+msgstr "快速入门指南"
+
+#: ../../source/production/observability/internal_api_server.rst:22
+msgid "Step 1: Enable Internal API Server"
+msgstr "步骤 1：启用内部 API 服务器"
+
+#: ../../source/production/observability/internal_api_server.rst:24
+msgid "Configure your vLLM instance to enable the internal API server:"
+msgstr "配置您的 vLLM 实例以启用内部 API 服务器："
+
+#: ../../source/production/observability/internal_api_server.rst:33
+msgid "Step 2: Access Metrics Endpoint"
+msgstr "步骤 2：访问指标端点"
+
+#: ../../source/production/observability/internal_api_server.rst:35
+msgid "Retrieve metrics from the worker's endpoint:"
+msgstr "从工作节点的端点检索指标："
+
+#: ../../source/production/observability/internal_api_server.rst:42
+msgid "Port Configuration"
+msgstr "端口配置"
+
+#: ../../source/production/observability/internal_api_server.rst:44
+msgid ""
+"The following environment variables are used implicitly with their "
+"default values:"
+msgstr "以下环境变量隐式使用其默认值："
+
+#: ../../source/production/observability/internal_api_server.rst:46
+msgid "Default Port Configuration"
+msgstr "默认端口配置"
+
+#: ../../source/production/observability/internal_api_server.rst:50
+msgid "Environment Variable"
+msgstr "环境变量"
+
+#: ../../source/production/observability/internal_api_server.rst:51
+msgid "Default Value"
+msgstr "默认值"
+
+#: ../../source/production/observability/internal_api_server.rst:52
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/production/observability/internal_api_server.rst:53
+msgid "``LMCACHE_INTERNAL_API_SERVER_HOST``"
+msgstr "``LMCACHE_INTERNAL_API_SERVER_HOST``"
+
+#: ../../source/production/observability/internal_api_server.rst:54
+msgid "``0.0.0.0``"
+msgstr "``0.0.0.0``"
+
+#: ../../source/production/observability/internal_api_server.rst:55
+msgid "Host address for the internal API server to bind to."
+msgstr "内部 API 服务器绑定的主机地址。"
+
+#: ../../source/production/observability/internal_api_server.rst:56
+msgid "``LMCACHE_INTERNAL_API_SERVER_PORT_START``"
+msgstr "``LMCACHE_INTERNAL_API_SERVER_PORT_START``"
+
+#: ../../source/production/observability/internal_api_server.rst:57
+msgid "``6999``"
+msgstr "``6999``"
+
+#: ../../source/production/observability/internal_api_server.rst:58
+msgid "Starting port number, e.g.:"
+msgstr "起始端口号，例如："
+
+#: ../../source/production/observability/internal_api_server.rst:60
+msgid "Scheduler: port_start + 0 (6999)"
+msgstr "调度程序：port_start + 0 (6999)"
+
+#: ../../source/production/observability/internal_api_server.rst:61
+msgid "Worker 0: port_start + 1 (7000)"
+msgstr "工作线程 0: port_start + 1 (7000)"
+
+#: ../../source/production/observability/internal_api_server.rst:62
+msgid "Worker 1: port_start + 2 (7001)"
+msgstr "Worker 1: port_start + 2 (7001)"
+
+#: ../../source/production/observability/internal_api_server.rst:65
+msgid "Therefore, the metrics endpoint curl command above uses port 7000."
+msgstr "因此，上述指标端点的 curl 命令使用端口 7000。"
+
+#: ../../source/production/observability/internal_api_server.rst:68
+msgid "Advanced Usage"
+msgstr "高级用法"
+
+#: ../../source/production/observability/internal_api_server.rst:70
+msgid ""
+"For comprehensive testing and configuration options, refer to "
+":ref:`testing_internal_api_server` for detailed examples and best "
+"practices."
+msgstr "有关全面的测试和配置选项，请参阅 :ref:`testing_internal_api_server` 以获取详细示例和最佳实践。"
+

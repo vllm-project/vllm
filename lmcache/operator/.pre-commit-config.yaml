@@ -1,0 +1,32 @@
+# Pre-commit hooks for the operator (Go).
+# These are NOT part of the repo-root pre-commit config so that
+# non-operator contributors don't need Go installed.
+#
+# Operator devs: install with "cd operator && make install-hooks"
+# Run manually: pre-commit run --all-files -c operator/.pre-commit-config.yaml
+
+repos:
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -d
+        language: system
+        types: [go]
+        files: ^operator/
+
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd operator && go vet ./...'
+        language: system
+        types: [go]
+        files: ^operator/
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'cd operator && "$(git rev-parse --show-toplevel)/operator/bin/golangci-lint" run --timeout 5m'
+        language: system
+        types: [go]
+        files: ^operator/
+        pass_filenames: false

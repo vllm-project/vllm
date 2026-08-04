@@ -1,0 +1,375 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:2
+msgid "Redis"
+msgstr "Redis"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/resp`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/resp`。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:14
+msgid ""
+"Redis is an in-memory key-value store and is a supported option for "
+"remote KV Cache offloading in LMCache. Some other remote backends are "
+":doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, and "
+":doc:`InfiniStore <./infinistore>`. This guide will mainly focus on "
+"single-node Redis but also shows you how to set up Redis Sentinels and an"
+" LMCache Server."
+msgstr ""
+"Redis 是一个内存中的键值存储，是 LMCache 中支持的远程 KV Cache 卸载选项之一。其他一些远程后端包括 "
+":doc:`Mooncake <./mooncake>`、:doc:`Valkey <./valkey>` 和 :doc:`InfiniStore"
+" <./infinistore>`。本指南将主要集中于单节点 Redis，但也会向您展示如何设置 Redis Sentinel 和 LMCache"
+" 服务器。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:19
+msgid "Two ways to configure LMCache Redis Offloading:"
+msgstr "配置 LMCache Redis 卸载的两种方式："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:21
+msgid "**1. Environment Variables:**"
+msgstr "**1. 环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:37
+msgid "**2. Configuration File**:"
+msgstr "**2. 配置文件**:"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:39
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:41
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:58
+msgid "Dynamic Plugin Configuration"
+msgstr "动态插件配置"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:73
+msgid "Remote Storage Explanation:"
+msgstr "远程存储说明："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:75
+msgid ""
+"LMCache's backend is obeys the natural memory hierarchy of prioritizing "
+"CPU RAM offloading, then Local Storage offloading, and finally remote "
+"offloading."
+msgstr "LMCache 的后端遵循自然内存层次结构，优先考虑 CPU RAM 卸载，然后是本地存储卸载，最后是远程卸载。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:78
+msgid ""
+"For LMCache to know how to create a connector to a remote backend, you "
+"must specify in ``remote_url`` a connector type followed by one or most "
+"host:port pairs (depending on what connector type is used). If "
+"``remote_url`` is set to ``None``, LMCache will not use any remote "
+"storage."
+msgstr ""
+"为了让 LMCache 知道如何创建连接器以连接远程后端，您必须在 ``remote_url`` "
+"中指定一个连接器类型，后面跟着一个或多个主机:端口对（具体取决于使用的连接器类型）。如果 ``remote_url`` 设置为 "
+"``None``，LMCache 将不会使用任何远程存储。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:82
+msgid "Examples of ``remote_url``'s:"
+msgstr "``remote_url`` 的示例："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:93
+msgid "Remote Storage Example"
+msgstr "远程存储示例"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:97
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:99
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:101
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr "vllm 和 lmcache 已安装 (:doc:`安装指南 <../../getting_started/installation>`)"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:103
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr "Hugging Face 访问 ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:109
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr "**第 0 步. 为此示例设置一个目录:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:116
+msgid "**Step 1. Start a Redis server:**"
+msgstr "**步骤 1. 启动 Redis 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:124
+msgid "Check if Redis is running:"
+msgstr "检查 Redis 是否正在运行："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:130
+msgid "Expected Response:"
+msgstr "预期响应："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:136
+msgid "**Optional: Setting up Sentinels:**"
+msgstr "**可选：设置哨兵：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:138
+msgid ""
+"To enable high availability with Redis, you can configure Redis sentinels"
+" to monitor the master and automatically fail over to a replica if "
+"needed."
+msgstr "要通过 Redis 实现高可用性，您可以配置 Redis 哨兵来监控主节点，并在需要时自动切换到副本。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:141
+msgid "**Step 1a. Start a Redis replica:**"
+msgstr "**步骤 1a. 启动 Redis 副本：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:147
+msgid "**Step 1b. Create Sentinel configuration files:**"
+msgstr "**步骤 1b. 创建 Sentinel 配置文件：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:149
+msgid ""
+"Create three files: ``sentinel-26379.conf``, ``sentinel-26380.conf``, and"
+" ``sentinel-26381.conf``, with contents like this:"
+msgstr ""
+"创建三个文件：``sentinel-26379.conf``、``sentinel-26380.conf`` 和 "
+"``sentinel-26381.conf``，内容如下："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:159
+msgid "**Step 1c. Start each Sentinel:**"
+msgstr "**步骤 1c. 启动每个 Sentinel:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:167
+msgid "**Step 1d. Make sure the Sentinels are tracking the master:**"
+msgstr "**步骤 1d. 确保哨兵正在跟踪主节点：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:175
+msgid "**Step 1e. Verify everything is running:**"
+msgstr "**步骤 1e. 验证一切是否正常运行:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:181
+msgid "You should see something like this (without the comments):"
+msgstr "您应该看到类似这样的内容（不包括注释）："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:195
+msgid "**Alternative: Starting an LMCache Server:**"
+msgstr "**替代方案：启动 LMCache 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:197
+msgid ""
+"The ``lmcache_server`` CLI entrypoint starts a remote LMCache server and "
+"comes with the ``lmcache`` package."
+msgstr "``lmcache_server`` CLI 入口点启动一个远程 LMCache 服务器，并附带 ``lmcache`` 包。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:206
+msgid ""
+"Currently, the only supported device is \"cpu\" (which is the default, so"
+" you don't need to specify it)."
+msgstr "目前，唯一支持的设备是“cpu”（这是默认值，因此您无需指定它）。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:209
+msgid "**Step 2. Start a vLLM server with remote offloading enabled:**"
+msgstr "**步骤 2. 启动一个启用远程卸载的 vLLM 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:211
+msgid "Create a an lmcache configuration file called: ``redis-offload.yaml``"
+msgstr "创建一个名为 ``redis-offload.yaml`` 的 lmcache 配置文件。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:222
+#: ../../source/kv_cache/storage_backends/redis.rst:250
+#: ../../source/kv_cache/storage_backends/redis.rst:275
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr "如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:240
+msgid "**Optional: Sentinels**"
+msgstr "**可选：哨兵**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:242
+msgid ""
+"Create a an lmcache configuration file called: ``redis-sentinel-"
+"offload.yaml``"
+msgstr "创建一个名为 ``redis-sentinel-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:265
+msgid "**Alternative: LMCache Server**"
+msgstr "**替代方案：LMCache 服务器**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:267
+msgid ""
+"Create a an lmcache configuration file called: ``lmcache-server-"
+"offload.yaml``"
+msgstr "创建一个名为 ``lmcache-server-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:290
+msgid "**Step 3. Viewing and Managing LMCache Entries in Redis:**"
+msgstr "**步骤 3. 在 Redis 中查看和管理 LMCache 条目:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:292
+msgid ""
+"If you would like to feel the TTFT speed up with offloading and KV Cache "
+"reuse, feel free to use the same ``query-twice.py`` script and ``man-"
+"bash.txt`` long context as in :doc:`CPU RAM <./cpu_ram>` and :doc:`Local "
+"Storage <./local_storage>`."
+msgstr ""
+"如果您想体验通过卸载和 KV Cache 重用来加速 TTFT 的速度，可以随意使用与 :doc:`CPU RAM <./cpu_ram>` 和 "
+":doc:`Local Storage <./local_storage>` 中相同的 ``query-twice.py`` 脚本和 ``man-"
+"bash.txt`` 长上下文。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:295
+msgid ""
+"Here, we are instead going to demonstrate how to search for and modify "
+"LMCache KV Chunk entries in Redis."
+msgstr "在这里，我们将演示如何在 Redis 中查找和修改 LMCache KV 块条目。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:297
+msgid ""
+"Please note that the official LMCache way to achieve this redis-specific "
+"functionality of viewing and modifying LMCache KV Chunks is available in "
+":doc:`LMCache Controller <../../kv_cache_management/index>`."
+msgstr ""
+"请注意，官方的 LMCache 方法来实现此 Redis 特定功能以查看和修改 LMCache KV 块可在 :doc:`LMCache "
+"Controller <../../kv_cache_management/index>` 中找到。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:299
+msgid "Let's warm/populate LMCache first with ``curl`` this time:"
+msgstr "这次让我们先用 ``curl`` 预热/填充 LMCache："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:316
+msgid ""
+"LMCache stores data in Redis using a structured key format. Each key "
+"contains the following information in a delimited format:"
+msgstr "LMCache 使用结构化键格式在 Redis 中存储数据。每个键包含以下以分隔格式的信息："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:322
+msgid "`model_name`: Name of the language model"
+msgstr "`model_name`: 语言模型的名称"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:323
+msgid "`world_size`: Total number of workers in distributed deployment"
+msgstr "`world_size`: 分布式部署中工作节点的总数"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:324
+msgid ""
+"`worker_id`: ID of the worker that created this cache entry, in the range"
+" of [0, world_size - 1]"
+msgstr "`worker_id`: 创建此缓存条目的工作线程 ID，范围为 [0, world_size - 1]"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:325
+msgid "`chunk_hash`: Hash of the token chunk (SHA-256 based)"
+msgstr "`chunk_hash`: 令牌块的哈希值（基于 SHA-256）"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:327
+msgid "For example, a typical key might look like:"
+msgstr "例如，一个典型的键可能看起来像："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:333
+msgid "**Using redis-cli to View LMCache Data**"
+msgstr "**使用 redis-cli 查看 LMCache 数据**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:335
+msgid "To inspect and manage LMCache entries in Redis:"
+msgstr "要检查和管理 Redis 中的 LMCache 条目："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:341
+msgid "**Optional: If you are using sentinels, first find the master port:**"
+msgstr "**可选：如果您使用的是哨兵，首先找到主端口：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:349
+msgid "**List LMCache keys:**"
+msgstr "**列出 LMCache 键：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:351
+msgid ""
+"Notice (from the suffixes of the keys) that each LMCache KV Chunk has two"
+" entries: ``kv_bytes`` and ``metadata``"
+msgstr "注意（从键的后缀中）每个 LMCache KV 块有两个条目：``kv_bytes`` 和 ``metadata``"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:364
+msgid "**Delete LMCache entries:**"
+msgstr "**删除 LMCache 条目：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:370
+msgid "Delete a specific LMCache entry:"
+msgstr "删除特定的 LMCache 条目："
+
+#: ../../source/kv_cache/storage_backends/redis.rst:379
+msgid "**Check if a key exists:**"
+msgstr "**检查键是否存在：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:385
+msgid "**View memory usage for a key:**"
+msgstr "**查看键的内存使用情况：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:387
+msgid ""
+"Notice that the ``kv_bytes`` entry is what is exactly holding the KV "
+"Chunk and is much larger than the ``metadata`` entry."
+msgstr "请注意，``kv_bytes`` 条目正是持有 KV 块的内容，并且比 ``metadata`` 条目大得多。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:397
+msgid "**Delete specific keys:**"
+msgstr "**删除特定键:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:411
+msgid "**Monitor Redis in real-time:**"
+msgstr "**实时监控 Redis:**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:417
+msgid "**Get Redis stats for LMCache:**"
+msgstr "**获取 LMCache 的 Redis 统计信息：**"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:427
+msgid ""
+"This tutorial utilized the ``redis-cli`` to directly peak into a remote "
+"backend and manipualte KV Chunks."
+msgstr "本教程使用 ``redis-cli`` 直接查看远程后端并操作 KV 块。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:430
+msgid ""
+"Once again, please refer to the :doc:`LMCache Controller "
+"<../../kv_cache_management/index>` for the official LMCache way of "
+"controlling and routing your KV Caches in your LMCache instances."
+msgstr ""
+"请再次参考 :doc:`LMCache Controller <../../kv_cache_management/index>` 以获取在您的 "
+"LMCache 实例中控制和路由 KV Cache 的官方 LMCache 方法。"
+
+#: ../../source/kv_cache/storage_backends/redis.rst:433
+msgid "**Step 4. Clean up:**"
+msgstr "**步骤 4. 清理：**"
+

@@ -1,0 +1,110 @@
+# LMCache CODEOWNERS
+
+# Core engine
+/lmcache/v1/cache_engine.py            @ApostaC @YaoJiayi @sammshen
+/lmcache/v1/cache_controller/          @maobaolong @YaoJiayi @chunxiaozheng
+/lmcache/v1/offload_server/            @maobaolong @YaoJiayi
+
+# Memory management
+/lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
+
+# Multiprocess
+/lmcache/v1/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
+/lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
+/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen
+
+# Distributed / L2
+/lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu
+/lmcache/v1/distributed/eviction.py                              @YaoJiayi @hlin99 @zhengfeihe
+/lmcache/v1/distributed/eviction_policy/                         @YaoJiayi @hlin99 @zhengfeihe
+/lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi @hlin99 @zhengfeihe
+/lmcache/v1/distributed/l2_adapters/    @ApostaC @maobaolong @chunxiaozheng @DongDongJu @zhengfeihe
+/lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py  @maobaolong
+/lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py           @sammshen
+
+# GPU connector
+/lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
+
+# Platform
+/lmcache/v1/platform/                  @maobaolong @hlin99
+
+# Lookup client
+/lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
+/lmcache/v1/lookup_client/mooncake_lookup_client.py  @maobaolong
+
+# Storage backends
+/lmcache/v1/storage_backend/           @maobaolong @sammshen @chunxiaozheng @DongDongJu @zhengfeihe
+/lmcache/v1/storage_backend/connector/base_connector.py        @sammshen @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/instrumented_connector.py @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/s3_connector.py          @sammshen @YaoJiayi
+/lmcache/v1/storage_backend/connector/s3_adapter.py            @sammshen @YaoJiayi
+/lmcache/v1/storage_backend/connector/mooncakestore_connector.py @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/mooncakestore_adapter.py  @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/fs_connector.py          @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/fs_adapter.py            @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/audit_connector.py       @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/audit_adapter.py         @maobaolong @chunxiaozheng
+/lmcache/v1/storage_backend/connector/redis_connector.py      @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/redis_adapter.py        @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/lm_connector.py         @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/lm_adapter.py           @sammshen @hlin99
+
+# Integration
+/lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
+/lmcache/integration/sglang/           @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
+/lmcache/integration/tensorrt_llm/     @sammshen
+
+# Non-CUDA equivalents
+/lmcache/non_cuda_equivalents.py       @hlin99 @hickeyma
+
+# C extensions
+/csrc/                                 @ApostaC @YaoJiayi @sammshen @DongDongJu
+/csrc/storage_backends/                @sammshen @hlin99 @DongDongJu
+
+# Native connector L2 adapters
+/lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen @hlin99
+/lmcache/v1/distributed/l2_adapters/native_plugin_l2_adapter.py     @sammshen @hlin99
+/lmcache/v1/distributed/l2_adapters/fs_native_l2_adapter.py         @sammshen @hlin99
+
+# Offline analysis tools
+/lmcache/tools/                        @yoo-kumaneko
+
+# Tests
+/tests/                                @hickeyma @sammshen @ApostaC @deng451e
+
+# CLI
+/lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe
+
+# Documentation
+/docs/source/mp/                       @ApostaC @YaoJiayi @KuntaiDu @royyhuang
+/docs/source/kv_cache/                 @sammshen @ApostaC
+/docs/source/kv_cache_optimizations/   @ApostaC @YaoJiayi
+/docs/source/getting_started/          @sammshen @deng451e
+/docs/source/developer_guide/          @sammshen @deng451e
+/docs/source/production/               @maobaolong @chunxiaozheng
+/docs/source/production/kv_cache_events.rst  @hickeyma
+/docs/                                 @sammshen @ApostaC @deng451e @zhengfeihe
+
+# Examples
+/examples/                             @sammshen @deng451e
+
+# CI / Infrastructure
+/.github/                              @hickeyma @sammshen @ApostaC @deng451e
+/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
+
+# Operator
+/operator/                             @royyhuang @DongDongJu
+
+# Rust
+/rust/                                 @DongDongJu @zhengfeihe
+
+# CXL / Maru / DAX
+/lmcache/v1/storage_backend/maru_backend.py            @DongDongJu
+/lmcache/v1/storage_backend/plugins/dax_backend.py     @DongDongJu
+/docs/source/kv_cache/storage_backends/maru.rst        @DongDongJu
+/docs/source/kv_cache/storage_backends/dax.rst         @DongDongJu
+
+# Packaging
+pyproject.toml                         @sammshen @ApostaC @deng451e @hickeyma
+setup.py                               @sammshen @ApostaC @deng451e @hickeyma

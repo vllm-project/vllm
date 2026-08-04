@@ -1,0 +1,80 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:2
+msgid "Example: Multimodal KV Cache Support"
+msgstr "示例：多模态 KV Cache 支持"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:10
+msgid "Quick Start Example (Audio Model):"
+msgstr "快速入门示例（音频模型）："
+
+#: ../../source/getting_started/quickstart/multimodality.rst:12
+msgid ""
+"We  going to be running audio inference with "
+"``ultravox-v0_5-llama-3_2-1b`` and using LMCache to speed up the TTFT "
+"after the first request."
+msgstr "我们将使用 ``ultravox-v0_5-llama-3_2-1b`` 进行音频推理，并使用 LMCache 加速第一次请求后的 TTFT。"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:14
+msgid "**Install and Serve:**"
+msgstr "**安装和服务：**"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:16
+msgid "``pip install lmcache vllm[audio] openai``"
+msgstr "``pip install lmcache vllm[audio] openai``"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:25
+msgid "**Benchmark:**"
+msgstr "**基准测试：**"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:27
+msgid "Save as ``audio_query.py``"
+msgstr "保存为 ``audio_query.py``"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:174
+msgid "**Run and see TTFT speedup:**"
+msgstr "**运行并查看 TTFT 加速：**"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:185
+msgid "**Retrieval and speed up in logs:**"
+msgstr "**检索和日志中的加速：**"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:187
+msgid "After First Request:"
+msgstr "首次请求后："
+
+#: ../../source/getting_started/quickstart/multimodality.rst:196
+#: ../../source/getting_started/quickstart/multimodality.rst:218
+msgid "*Example Output:*"
+msgstr "示例输出:"
+
+#: ../../source/getting_started/quickstart/multimodality.rst:209
+msgid "After Second Request:"
+msgstr "第二次请求后："
+

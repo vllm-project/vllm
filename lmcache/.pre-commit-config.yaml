@@ -1,0 +1,133 @@
+exclude: 'lmcache/integration/vllm/lmcache_mp_connector_.*\.py'
+repos:
+- repo: local
+  hooks:
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
+  - id: ban-direct-torch-device
+    name: Ban direct torch device usage
+    entry: >-
+      bash -c '
+      pattern=$(find lmcache/v1/platform -mindepth 1 -maxdepth 1 -type d \
+        -exec basename {} \; | grep -v "^__" | grep -v "^base$" | sort | paste -sd "|");
+      if [ -z "$pattern" ]; then
+        echo "WARNING: no platform dirs found, skipping check";
+        exit 0;
+      fi;
+      echo "Detected platforms: ${pattern//|/, }";
+      echo "Ban pattern: torch.($pattern)";
+      matches=$(grep -rHnE "torch\.($pattern)" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "========================================";
+        echo "  BANNED: Direct torch device API usage";
+        echo "  Use lmcache.v1.platform abstractions instead";
+        echo "========================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+    exclude: |
+      (?x)^(
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
+      )$
+  - id: ban-cuda-host-register
+    name: Ban cudaHostRegister/Unregister outside platform
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "\.cudaHost(Register|Unregister)" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "=======================================================================";
+        echo "  BANNED: .cudaHostRegister/Unregister usage found outside platform dir";
+        echo "  Fix 1: They are only allowed in the platform directory";
+        echo "  Fix 2: use current_device_spec.pin_memory/unpin_memory instead";
+        echo "=======================================================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+    exclude: |
+      (?x)^(
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
+      )$
+  - id: ban-raw-timeout-error
+    name: Ban raw raise of builtin TimeoutError
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "raise[[:space:]]+(asyncio\.)?TimeoutError\b" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "========================================";
+        echo "  BANNED: raw raise of builtin TimeoutError";
+        echo "  Fix: raise LMCacheTimeoutError from";
+        echo "       lmcache.v1.mp_observability.errors so the timeout";
+        echo "       is reported to MP observability (OTel).";
+        echo "========================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+- repo: https://github.com/PyCQA/isort
+  rev: 6.0.1
+  hooks:
+  - id: isort
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.7
+  hooks:
+  - id: ruff
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+  - id: codespell
+    additional_dependencies: ['tomli']
+    args: ['--toml', 'pyproject.toml']
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v20.1.3
+  hooks:
+  - id: clang-format
+    types_or: [c++, cuda]
+    args: [--style=file, --verbose]
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: 'v1.17.1'
+  hooks:
+  - id: mypy
+    language_version: python3.12 
+    args: [--config-file=pyproject.toml]
+    #args: [--ignore-missing-imports]
+    additional_dependencies:
+      - tokenize-rt==6.1.0 # For better dynamic analysis performance
+      - msgspec[mypy]
+      - types-requests
+      - types-PyYAML
+      - types-aiofiles
+- repo: local
+  hooks:
+  - id: rust-fmt
+    name: Rust Format Check
+    entry: bash -c 'cd rust/raw_block && cargo fmt --check'
+    language: system
+    types: [text]
+    files: ^rust/raw_block/.*\.rs$
+  - id: rust-clippy
+    name: Rust Clippy Check
+    entry: bash -c 'cd rust/raw_block && cargo clippy -- -D warnings'
+    language: system
+    types: [text]
+    files: ^rust/raw_block/.*\.rs$

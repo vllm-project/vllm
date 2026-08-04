@@ -1,0 +1,40 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: production-cache
+  namespace: llm-serving
+spec:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  image:
+    repository: lmcache/standalone
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+
+  server:
+    port: 6555
+    chunkSize: 256
+    maxWorkers: 4
+    hashAlgorithm: blake3
+
+  l1:
+    sizeGB: 60
+
+  eviction:
+    triggerWatermark: 0.8
+    evictionRatio: 0.2
+
+  prometheus:
+    enabled: true
+    port: 9090
+    serviceMonitor:
+      enabled: true
+      labels:
+        release: kube-prometheus-stack
+
+  logLevel: INFO
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+  priorityClassName: system-node-critical

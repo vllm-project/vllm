@@ -1,0 +1,25 @@
+# the following config is for teaching kustomize where to look at when substituting nameReference.
+# It requires kustomize v2.1.0 or newer to work properly.
+nameReference:
+- kind: Service
+  version: v1
+  fieldSpecs:
+  - kind: MutatingWebhookConfiguration
+    group: admissionregistration.k8s.io
+    path: webhooks/clientConfig/service/name
+  - kind: ValidatingWebhookConfiguration
+    group: admissionregistration.k8s.io
+    path: webhooks/clientConfig/service/name
+
+namespace:
+- kind: MutatingWebhookConfiguration
+  group: admissionregistration.k8s.io
+  path: webhooks/clientConfig/service/namespace
+  create: true
+- kind: ValidatingWebhookConfiguration
+  group: admissionregistration.k8s.io
+  path: webhooks/clientConfig/service/namespace
+  create: true
+
+varReference:
+- path: metadata/annotations

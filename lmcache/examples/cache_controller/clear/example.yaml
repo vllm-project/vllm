@@ -1,0 +1,13 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 5
+
+# cache controller configurations
+enable_controller: True
+lmcache_instance_id: "lmcache_default_instance"
+controller_pull_url: "localhost:9001"
+lmcache_worker_ports: 8001
+
+# Peer identifiers
+p2p_host: "localhost"
+p2p_init_ports: 8200

@@ -1,0 +1,213 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:2
+msgid "Maru"
+msgstr "Maru"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:14
+msgid ""
+"`Maru <https://github.com/xcena-dev/maru>`_ is a high-performance KV "
+"cache storage engine built on CXL shared memory, designed for LLM "
+"inference scenarios where multiple instances need to share a KV cache "
+"with minimal latency."
+msgstr ""
+"`Maru <https://github.com/xcena-dev/maru>`_ 是一个高性能的 KV Cache 存储引擎，基于 CXL "
+"共享内存构建，旨在用于 LLM 推理场景，在这些场景中，多个实例需要以最小延迟共享 KV Cache。"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:17
+msgid "KV Cache Sharing: Without vs With Maru"
+msgstr "KV Cache 共享：没有 Maru 与有 Maru"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:20
+msgid ""
+"For architecture details, see the `Maru documentation <https://xcena-"
+"dev.github.io/maru/>`_."
+msgstr "有关架构的详细信息，请参阅 `Maru 文档 <https://xcena-dev.github.io/maru/>`_。"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:23
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:25
+msgid "Install Maru:"
+msgstr "安装 Maru："
+
+#: ../../source/kv_cache/storage_backends/maru.rst:33
+msgid ""
+"This installs ``maru-server``, ``maru-resourced``, and the ``maru`` "
+"Python package."
+msgstr "这将安装 ``maru-server``、``maru-resourced`` 和 ``maru`` Python 包。"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:36
+msgid "Deploy Model With Maru"
+msgstr "使用 Maru 部署模型"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:38
+msgid ""
+"**Prerequisites:** CXL device (``/dev/dax*``), Python 3.12+, vLLM and "
+"LMCache installed."
+msgstr "**前提条件：** CXL 设备（``/dev/dax*``），安装 Python 3.12+、vLLM 和 LMCache。"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:40
+msgid "**1. Start the Maru Server**"
+msgstr "**1. 启动 Maru 服务器**"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:46
+msgid "**2. Create configuration file** (``maru-config.yaml``):"
+msgstr "**2. 创建配置文件** (``maru-config.yaml``):"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:59
+msgid "**3. Start vLLM with Maru**"
+msgstr "**3. 使用 Maru 启动 vLLM**"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:71
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:73
+msgid "**LMCache Parameters:**"
+msgstr "**LMCache 参数：**"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:79
+#: ../../source/kv_cache/storage_backends/maru.rst:95
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:80
+#: ../../source/kv_cache/storage_backends/maru.rst:96
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:81
+#: ../../source/kv_cache/storage_backends/maru.rst:97
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:82
+msgid "``maru_path``"
+msgstr "``maru_path``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:83
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:84
+msgid "Maru server URL (format: ``maru://host:port``)"
+msgstr "Maru 服务器 URL（格式：``maru://host:port``）"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:85
+msgid "``maru_pool_size``"
+msgstr "``maru_pool_size``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:86
+msgid "``4.0``"
+msgstr "``4.0``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:87
+msgid "CXL memory pool size per instance in GB (e.g., ``4``, ``0.5``)"
+msgstr "每个实例的 CXL 内存池大小（单位：GB，例如 ``4``、``0.5``）"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:89
+msgid "**Advanced Parameters (via extra_config):**"
+msgstr "**高级参数（通过 extra_config）：**"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:98
+msgid "``maru_instance_id``"
+msgstr "``maru_instance_id``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:99
+msgid "auto UUID"
+msgstr "自动 UUID"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:100
+msgid "Unique client instance identifier"
+msgstr "唯一客户端实例标识符"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:101
+msgid "``maru_timeout_ms``"
+msgstr "``maru_timeout_ms``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:102
+msgid "5000"
+msgstr "5000"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:103
+msgid "ZMQ RPC socket timeout in milliseconds"
+msgstr "ZMQ RPC 套接字超时（毫秒）"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:104
+msgid "``maru_use_async_rpc``"
+msgstr "``maru_use_async_rpc``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:105
+#: ../../source/kv_cache/storage_backends/maru.rst:111
+msgid "true"
+msgstr "真"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:106
+msgid "Async DEALER-ROUTER RPC (``false`` for synchronous REQ-REP)"
+msgstr "异步 DEALER-ROUTER RPC (``false`` 表示同步 REQ-REP)"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:107
+msgid "``maru_max_inflight``"
+msgstr "``maru_max_inflight``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:108
+msgid "64"
+msgstr "64"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:109
+msgid "Max concurrent async RPC requests"
+msgstr "最大并发异步 RPC 请求数"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:110
+msgid "``maru_eager_map``"
+msgstr "``maru_eager_map``"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:112
+msgid "Pre-map all shared regions on connect"
+msgstr "在连接时预先映射所有共享区域"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:115
+msgid "Additional Resources"
+msgstr "附加资源"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:117
+msgid "`Maru GitHub Repository <https://github.com/xcena-dev/maru>`_"
+msgstr "`Maru GitHub Repository <https://github.com/xcena-dev/maru>`_"
+
+#: ../../source/kv_cache/storage_backends/maru.rst:118
+msgid "`Maru Documentation <https://xcena-dev.github.io/maru/>`_"
+msgstr "`Maru 文档 <https://xcena-dev.github.io/maru/>`_"
+

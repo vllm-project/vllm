@@ -1,0 +1,211 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_http_api.rst:2
+msgid "Extending the HTTP API"
+msgstr "扩展 HTTP API"
+
+#: ../../source/developer_guide/extending_http_api.rst:4
+msgid ""
+"You can add new endpoints to the ``lmcache server`` HTTP frontend "
+"**without modifying any existing code**. An endpoint is just a Python "
+"module placed in ``lmcache/v1/multiprocess/http_apis/`` that exposes a "
+"FastAPI ``APIRouter``; ``HTTPAPIRegistry`` auto-discovers and mounts it "
+"at startup -- the same zero-modification pattern used by the :doc:`L2 "
+"adapters </mp/l2_storage/index>`."
+msgstr ""
+"您可以向 ``lmcache server`` HTTP 前端添加新端点，\\ **无需修改任何现有代码**\\ 。端点只需是放置在 "
+"``lmcache/v1/multiprocess/http_apis/`` 中的 Python 模块，并公开一个 FastAPI "
+"``APIRouter``\\ ；\\ ``HTTPAPIRegistry`` 会在启动时自动发现并挂载它——与 :doc:`L2 "
+"adapters </mp/l2_storage/index>` 所采用的零修改模式相同。"
+
+#: ../../source/developer_guide/extending_http_api.rst:12
+msgid "How discovery works"
+msgstr "自动发现机制"
+
+#: ../../source/developer_guide/extending_http_api.rst:14
+msgid ""
+"At startup, ``http_server.py`` hands the FastAPI app to "
+"``HTTPAPIRegistry`` (``lmcache/v1/multiprocess/http_api_registry.py``), "
+"which scans the ``http_apis/`` directory with ``pkgutil``, imports every "
+"module whose name ends with ``_api``, and includes any module-level "
+"``router``. The built-in modules follow this pattern:"
+msgstr ""
+"启动时，\\ ``http_server.py`` 将 FastAPI 应用实例传递给 ``HTTPAPIRegistry``\\ （\\ "
+"``lmcache/v1/multiprocess/http_api_registry.py``\\ ）。该注册器使用 ``pkgutil`` "
+"扫描 ``http_apis/`` 目录，导入所有名称以 ``_api`` 结尾的模块，并将其中定义的模块级 ``router`` "
+"注册到应用中。内置模块均遵循此模式："
+
+#: ../../source/developer_guide/extending_http_api.rst:24
+msgid "Module"
+msgstr "模块"
+
+#: ../../source/developer_guide/extending_http_api.rst:25
+msgid "Endpoint"
+msgstr "端点"
+
+#: ../../source/developer_guide/extending_http_api.rst:26
+msgid "Method"
+msgstr "方法"
+
+#: ../../source/developer_guide/extending_http_api.rst:27
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/extending_http_api.rst:28
+#: ../../source/developer_guide/extending_http_api.rst:32
+#: ../../source/developer_guide/extending_http_api.rst:40
+msgid "``info_api.py``"
+msgstr "``info_api.py``"
+
+#: ../../source/developer_guide/extending_http_api.rst:29
+msgid "``/``"
+msgstr "``/``"
+
+#: ../../source/developer_guide/extending_http_api.rst:30
+#: ../../source/developer_guide/extending_http_api.rst:34
+#: ../../source/developer_guide/extending_http_api.rst:42
+msgid "GET"
+msgstr "GET"
+
+#: ../../source/developer_guide/extending_http_api.rst:31
+msgid "Basic liveness check"
+msgstr "基本存活检查"
+
+#: ../../source/developer_guide/extending_http_api.rst:33
+msgid "``/healthcheck``"
+msgstr "``/healthcheck``"
+
+#: ../../source/developer_guide/extending_http_api.rst:35
+msgid "Kubernetes probe endpoint"
+msgstr "Kubernetes 探针端点"
+
+#: ../../source/developer_guide/extending_http_api.rst:36
+msgid "``cache_api.py``"
+msgstr "``cache_api.py``"
+
+#: ../../source/developer_guide/extending_http_api.rst:37
+msgid "``/cache/clear``"
+msgstr "``/cache/clear``"
+
+#: ../../source/developer_guide/extending_http_api.rst:38
+msgid "POST"
+msgstr "POST"
+
+#: ../../source/developer_guide/extending_http_api.rst:39
+msgid "Force-clear the L1 cache"
+msgstr "强制清除 L1 缓存"
+
+#: ../../source/developer_guide/extending_http_api.rst:41
+msgid "``/status``"
+msgstr "``/status``"
+
+#: ../../source/developer_guide/extending_http_api.rst:43
+msgid "Internal status report"
+msgstr "内部状态报告"
+
+#: ../../source/developer_guide/extending_http_api.rst:46
+msgid "Adding an endpoint"
+msgstr "添加端点"
+
+#: ../../source/developer_guide/extending_http_api.rst:48
+msgid ""
+"Create a file in ``lmcache/v1/multiprocess/http_apis/`` whose name ends "
+"with ``_api.py`` and expose a ``router``:"
+msgstr ""
+"在 ``lmcache/v1/multiprocess/http_apis/`` 中创建一个文件，文件名以 ``_api.py`` "
+"结尾，并公开一个 ``router``\\ ："
+
+#: ../../source/developer_guide/extending_http_api.rst:72
+msgid ""
+"That's it -- ``HTTPAPIRegistry`` discovers and mounts it on the next "
+"server startup; no other file needs to change."
+msgstr "就这些 —— ``HTTPAPIRegistry`` 会在下次服务器启动时自动发现并挂载该模块，无需修改其他文件。"
+
+#: ../../source/developer_guide/extending_http_api.rst:76
+msgid "Module contract"
+msgstr "模块契约"
+
+#: ../../source/developer_guide/extending_http_api.rst:78
+msgid "An API module **must**:"
+msgstr "API 模块 **必须**\\ ："
+
+#: ../../source/developer_guide/extending_http_api.rst:80
+msgid ""
+"live in ``lmcache/v1/multiprocess/http_apis/`` with a filename ending in "
+"``_api.py``;"
+msgstr "位于 ``lmcache/v1/multiprocess/http_apis/`` 目录下，文件名以 ``_api.py`` 结尾；"
+
+#: ../../source/developer_guide/extending_http_api.rst:82
+msgid "expose a module-level ``router`` of type ``fastapi.APIRouter``."
+msgstr "公开一个模块级的 ``router``\\ ，类型为 ``fastapi.APIRouter``\\ 。"
+
+#: ../../source/developer_guide/extending_http_api.rst:84
+msgid "An API module **should**:"
+msgstr "API 模块 **应该**\\ ："
+
+#: ../../source/developer_guide/extending_http_api.rst:86
+msgid ""
+"guard against uninitialized state by checking "
+"``request.app.state.engine`` and returning ``503`` when it is ``None``;"
+msgstr ""
+"通过检查 ``request.app.state.engine`` 防范引擎未初始化的情况，并在其为 ``None`` 时返回 ``503``\\"
+" ；"
+
+#: ../../source/developer_guide/extending_http_api.rst:88
+msgid "use ``lmcache.logging.init_logger(__name__)`` for logging;"
+msgstr "使用 ``lmcache.logging.init_logger(__name__)`` 进行日志记录；"
+
+#: ../../source/developer_guide/extending_http_api.rst:89
+msgid "use ``async`` handlers and avoid blocking I/O."
+msgstr "使用 ``async`` 处理函数，避免阻塞式 I/O。"
+
+#: ../../source/developer_guide/extending_http_api.rst:91
+msgid ""
+"An API module **must not** import or mutate the ``app`` object from "
+"``http_server.py``."
+msgstr "API 模块 **不得** 导入或修改 ``http_server.py`` 中的 ``app`` 对象。"
+
+#: ../../source/developer_guide/extending_http_api.rst:95
+msgid "Accessing shared state"
+msgstr "访问共享状态"
+
+#: ../../source/developer_guide/extending_http_api.rst:97
+msgid ""
+"``app.state`` is the shared context populated during server startup. "
+"Reach it through the request object:"
+msgstr "``app.state`` 是服务器启动时填充的共享上下文，可通过请求对象访问："
+
+#: ../../source/developer_guide/extending_http_api.rst:108
+msgid ""
+"For the full design rationale see "
+"``docs/design/v1/multiprocess/http_api_extension.md`` in the source tree."
+msgstr "完整的设计说明请参见源码树中的 ``docs/design/v1/multiprocess/http_api_extension.md``\\ 。"
+
+#~ msgid "``healthcheck_api.py``"
+#~ msgstr "``healthcheck_api.py``"
+
+#~ msgid "``/clear-cache``"
+#~ msgstr "``/clear-cache``"
+
+#~ msgid "``status_api.py``"
+#~ msgstr "``status_api.py``"
+

@@ -1,0 +1,175 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-25 19:26-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/non_kv_cache/hidden_states.rst:2
+msgid "Hidden states"
+msgstr "隐藏状态"
+
+#: ../../source/non_kv_cache/hidden_states.rst:4
+msgid ""
+"The **HiddenStateStore** caches per-token *hidden-state* tensors "
+"(intermediate activations from an inference forward pass) alongside the KV "
+"cache, keyed by the same chunk keys. It exists to support any system where a "
+"downstream stage needs an upstream stage's intermediate activations for the "
+"cached prefix and cannot reconstruct them from KV alone — for example a vLLM-"
+"Omni ``thinker -> talker`` pipeline, where the talker consumes the thinker's "
+"hidden states for tokens whose KV the engine restored without re-running "
+"prefill."
+msgstr "**HiddenStateStore** 在 KV Cache 之外缓存每个 token 的隐藏状态张量（推理前向传播过程中的中间激活），并使用相同的块键作为索引。它的存在是为了支持这样一类系统：下游阶段需要上游阶段为已缓存前缀计算的中间激活，且无法仅凭 KV 重建这些激活——例如 vLLM-Omni 的 ``thinker -> talker`` 流水线，其中 talker 会消费 thinker 为某些 token 生成的隐藏状态，而引擎在恢复这些 token 的 KV 时并未重新运行 Prefill。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:14
+msgid ""
+"Without this store, restoring KV alone causes downstream stages to see "
+"truncated or wrong activations for the cached prefix. With it, the talker "
+"(or any equivalent consumer) gets a contiguous ``[num_cached_prefix_tokens, "
+"hidden_dim]`` tensor matching the KV prefix LMCache restored."
+msgstr "如果没有这个存储，仅恢复 KV 会导致下游阶段读到的已缓存前缀激活被截断或出错。有了它，talker（或任何等价的消费方）就能获得一个连续的 ``[num_cached_prefix_tokens, hidden_dim]`` 张量，与 LMCache 恢复的 KV 前缀相匹配。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:21
+msgid "Enabling it"
+msgstr "启用方法"
+
+#: ../../source/non_kv_cache/hidden_states.rst:23
+msgid "Set three keys in the LMCache YAML (``LMCACHE_CONFIG_FILE``):"
+msgstr "在 LMCache YAML（``LMCACHE_CONFIG_FILE``）中设置三个键："
+
+#: ../../source/non_kv_cache/hidden_states.rst:33
+msgid ""
+"``enable_hidden_state_cache`` — master switch. When ``false`` (the default), "
+"``engine.hidden_state_store`` is ``None`` and integrators must skip all HS "
+"APIs on that worker."
+msgstr "``enable_hidden_state_cache`` —— 总开关。当为 ``false``\\ （默认值）时，``engine.hidden_state_store`` 为 ``None``，集成方必须在该 worker 上跳过所有 HS API。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:36
+msgid ""
+"``max_hidden_state_cpu_size`` — pinned-CPU pool size in GiB, dedicated to "
+"hidden states. Must be ``> 0`` when the store is enabled. The pool is "
+"**independent** of the KV pool; HS allocator pressure never evicts KV."
+msgstr "``max_hidden_state_cpu_size`` —— 专用于隐藏状态的固定 CPU 内存池大小（单位 GiB）。启用该存储时必须 ``> 0``。该内存池\\ **独立**\\ 于 KV 内存池；HS 分配器的压力绝不会逐出 KV。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:40
+msgid ""
+"``hidden_state_layers`` — optional allowlist of ``layer_idx`` values "
+"accepted on ``store_hidden_states``. Leave unset to accept all layer "
+"indices. Use this only when you know exactly which hook indices the worker "
+"writes (e.g. matching a fork's hybrid multimodal hook list)."
+msgstr "``hidden_state_layers`` —— ``store_hidden_states`` 接受的 ``layer_idx`` 值的可选白名单。不设置则接受所有层索引。仅当您确切知道 worker 写入哪些 hook 索引时才使用它（例如匹配某个 fork 的混合多模态 hook 列表）。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:47
+msgid "Using it from a worker"
+msgstr "在 worker 中使用"
+
+#: ../../source/non_kv_cache/hidden_states.rst:49
+msgid "The store is exposed on the engine (not as engine-level methods):"
+msgstr "该存储暴露在引擎上（而非作为引擎级方法）："
+
+#: ../../source/non_kv_cache/hidden_states.rst:68
+msgid "Notes:"
+msgstr "注意事项："
+
+#: ../../source/non_kv_cache/hidden_states.rst:70
+msgid ""
+"``token_ids`` is always the **full** prefix so chunk keys align with KV "
+"exactly. ``token_offset`` lets incremental callers (such as vLLM-Omni) pass "
+"only the newly computed rows in ``hidden_states`` without zero-padding the "
+"already-cached prefix."
+msgstr "``token_ids`` 始终是\\ **完整**\\ 前缀，因此块键能与 KV 精确对齐。``token_offset`` 允许增量调用方（例如 vLLM-Omni）只传入 ``hidden_states`` 中新计算的行，而无需对已缓存的前缀进行零填充。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:74
+msgid ""
+"``layer_idx`` is the *storage* layer index. Callers that need several "
+"intermediate tensors per request (e.g. multimodal hook outputs *plus* the "
+"main text hidden state) call ``store_hidden_states`` once per distinct "
+"``layer_idx`` and retrieve per layer on restore."
+msgstr "``layer_idx`` 是存储层索引。每个请求需要多个中间张量的调用方（例如多模态 hook 输出加上主文本隐藏状态）会为每个不同的 ``layer_idx`` 各调用一次 ``store_hidden_states``，并在恢复时按层检索。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:79
+msgid ""
+"``retrieve_hidden_states`` is **prefix-strict**: it returns the longest "
+"contiguous CPU ``float32`` prefix where every chunk has both KV and HS for "
+"the requested ``layer_idx``, and stops at the first chunk where either is "
+"missing."
+msgstr "``retrieve_hidden_states`` 是\\ **前缀严格**\\ 的：它返回最长的连续 CPU ``float32`` 前缀，其中每个块对于所请求的 ``layer_idx`` 都同时具备 KV 和 HS，并在第一个缺少任一者的块处停止。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:85
+msgid "Eviction model"
+msgstr "逐出模型"
+
+#: ../../source/non_kv_cache/hidden_states.rst:87
+msgid "The store implements a **coupled-but-asymmetric** eviction rule:"
+msgstr "该存储实现了一种\\ **耦合但非对称**\\ 的逐出规则："
+
+#: ../../source/non_kv_cache/hidden_states.rst:89
+msgid ""
+"**KV evicted ⇒ HS evicted.** On every ``retrieve_hidden_states`` the store "
+"asks the KV ``StorageManager`` whether KV is still present for each chunk "
+"key. If KV is gone, the orphan HS entry is dropped and the returned prefix "
+"ends there."
+msgstr "**KV 被逐出 ⇒ HS 被逐出。** 在每次 ``retrieve_hidden_states`` 时，该存储会向 KV 的 ``StorageManager`` 查询每个块键对应的 KV 是否仍然存在。如果 KV 已不存在，则丢弃对应的孤立 HS 条目，返回的前缀到此结束。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:93
+msgid ""
+"**HS evicted ⇏ KV evicted.** Pressure on the HS pinned pool only evicts HS "
+"entries (its own LRU), never KV."
+msgstr "**HS 被逐出 ⇏ KV 被逐出。** HS 固定内存池的压力只会逐出 HS 条目（其自身的 LRU），绝不会逐出 KV。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:95
+msgid ""
+"**Restore stops at first missing HS or KV chunk** for the requested layer."
+msgstr "**对于所请求的层，恢复会在第一个缺失的 HS 或 KV 块处停止。**"
+
+#: ../../source/non_kv_cache/hidden_states.rst:99
+msgid "Design notes (user-visible)"
+msgstr "设计说明（用户可见）"
+
+#: ../../source/non_kv_cache/hidden_states.rst:101
+msgid ""
+"**Separate pinned pool from KV.** KV tensors and hidden-state tensors have "
+"heterogeneous shapes and dtypes, so they get independent allocators. "
+"``max_hidden_state_cpu_size`` sizes the HS pool only."
+msgstr "**与 KV 分离的固定内存池。** KV 张量和隐藏状态张量具有异构的形状和数据类型，因此它们使用各自独立的分配器。``max_hidden_state_cpu_size`` 仅设置 HS 内存池的大小。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:105
+msgid ""
+"**Same chunk keys as KV.** The store reuses the engine's ``TokenDatabase`` "
+"so HS chunks share the exact ``CacheEngineKey`` as the matching KV chunks. "
+"This is what enables the lazy coupled eviction check."
+msgstr "**与 KV 相同的块键。** 该存储复用引擎的 ``TokenDatabase``，因此 HS 块与匹配的 KV 块共享完全相同的 ``CacheEngineKey``。正是这一点使得惰性耦合逐出检查成为可能。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:109
+msgid ""
+"**Lazy coupled-eviction check.** No callbacks or shared indices are required "
+"between KV and HS — the store asks ``storage_manager.contains(key)`` per "
+"chunk on retrieve. Works uniformly for any backend that implements "
+"``contains()``."
+msgstr "**惰性耦合逐出检查。** KV 与 HS 之间不需要任何回调或共享索引——该存储在检索时为每个块调用 ``storage_manager.contains(key)``。对于任何实现了 ``contains()`` 的后端，其行为都完全一致。"
+
+#: ../../source/non_kv_cache/hidden_states.rst:114
+msgid ""
+"The full internal design (class layering, code paths, follow-up work) lives "
+"at :file:`docs/design/v1/hidden_state_store.md` in the source tree."
+msgstr "完整的内部设计（类的分层、代码路径、后续工作）位于源码树中的 :file:`docs/design/v1/hidden_state_store.md`。"
+
+#~ msgid "Hidden States"
+#~ msgstr "隐藏状态"
+
+#~ msgid "Hidden-state caching is **in progress**."
+#~ msgstr "隐藏状态缓存功能 **正在开发中**\\ 。"

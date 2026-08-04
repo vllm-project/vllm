@@ -1,0 +1,32 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/file_and_block.rst:2
+msgid "File & Block"
+msgstr "文件与块"
+
+#: ../../source/mp/l2_storage/file_and_block.rst:4
+msgid ""
+"File-system and block-device backends that persist KV cache to local or "
+"networked storage. These are conceptually similar -- they write KV "
+"objects to files or fixed-size slots on a disk or block device."
+msgstr "将 KV 缓存持久化到本地或网络存储的文件系统和块设备后端。二者在概念上相似——均将 KV 对象写入文件或磁盘、块设备上的固定大小槽位。"
+

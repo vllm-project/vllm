@@ -1,0 +1,49 @@
+# vLLM Deployment used by the M1 LMCache injection smoke spec.
+#
+# Unlike vllm_deployment.yaml (the e2e_gpu round-trip, which mounts the
+# connection ConfigMap and uses a `sh -c` wrapper), this pod OPTS IN to
+# LMCacheEngine dependency injection via the mutating webhook. The webhook
+# appends --kv-transfer-config <inline JSON>, sets hostIPC=true, and adds
+# PYTHONHASHSEED=0.
+#
+# The spec asserts the admission mutation directly off the pod object, so the
+# pod never needs to run — a tiny placeholder image keeps the smoke CPU-only and
+# avoids a multi-GB vLLM image pull on the Kind worker.
+#
+# Placeholders substituted by the spec:
+#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects hostIPC)
+#   __ENGINE_NAME__  — LMCacheEngine metadata.name (bound via annotation)
+#
+# CRITICAL: launch args-only (no `command:` override) or the webhook SKIPs with
+# lmcache.ai/lmcache-skip-reason=command-override.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-lmcache-inject
+  namespace: __NAMESPACE__
+  labels:
+    app: vllm-lmcache-inject
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-lmcache-inject
+  template:
+    metadata:
+      labels:
+        app: vllm-lmcache-inject
+        # OPT-IN: the webhook's objectSelector matches this label.
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        # BIND: names the LMCacheEngine (same namespace) to inject for.
+        lmcache.ai/lmcache-engine: "__ENGINE_NAME__"
+    spec:
+      containers:
+        - name: vllm
+          # Placeholder image: the pod is never expected to run — the spec only
+          # asserts the webhook's admission-time mutation on the pod spec.
+          image: busybox:1.36
+          args:
+            - "Qwen/Qwen2.5-0.5B"
+            - "--port"
+            - "8000"

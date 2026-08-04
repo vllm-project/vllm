@@ -1,0 +1,4 @@
+chunk_size: 256
+local_cpu: False
+max_local_cpu_size: 10
+remote_url: "mock://100/?peeking_latency=1&read_throughput=2&write_throughput=2"

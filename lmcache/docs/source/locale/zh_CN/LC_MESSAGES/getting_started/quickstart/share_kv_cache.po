@@ -1,0 +1,255 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:4
+msgid "Example: Share KV cache across multiple LLMs"
+msgstr "示例：在多个 LLM 之间共享 KV Cache"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:11
+msgid ""
+"LMCache should be able to reduce the generation time of the second and "
+"following calls."
+msgstr "LMCache 应该能够减少第二次及后续调用的生成时间。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:13
+msgid ""
+"We have examples for the following types of across-instance KV cache "
+"sharing:"
+msgstr "我们有以下类型的跨实例 KV Cache 共享的示例："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:15
+msgid ""
+"KV cache sharing through a centralized cache server: "
+"``centralized_sharing``"
+msgstr "通过集中式缓存服务器的 KV Cache 共享：\\ ``centralized_sharing``"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:16
+msgid "KV cache sharing through p2p cache transfer: ``p2p_sharing``"
+msgstr "通过点对点缓存传输共享 KV 缓存: ``p2p_sharing``"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:19
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:21
+msgid "Your server should have at least 2 GPUs."
+msgstr "您的服务器应至少配备 2 个 GPU。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:23
+msgid ""
+"For Centralized sharing, this will use the port 8000 and 8001 (for vLLM) "
+"and port 65432 (for LMCache)."
+msgstr "对于集中式共享，这将使用端口 8000 和 8001（用于 vLLM）以及端口 65432（用于 LMCache）。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:25
+msgid "For P2P sharing:"
+msgstr "对于 P2P 共享："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:27
+msgid "`NIXL <https://github.com/ai-dynamo/nixl>`_ installed on the host."
+msgstr "`NIXL <https://github.com/ai-dynamo/nixl>`_ 安装在主机上。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:28
+msgid "Port 8010 and 8011 for 2 vllms servers."
+msgstr "用于 2 个 vLLM 服务器的 8010 和 8011 端口。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:29
+msgid "Port 8200 and 8202 for 2 p2p initialization connections."
+msgstr "端口 8200 和 8202 用于 2 个 p2p 初始化连接。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:30
+msgid "Port 8201 and 8203 for 2 p2p lookup connections."
+msgstr "端口 8201 和 8203 用于 2 个 p2p 查找连接。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:31
+msgid "Port 8300 for controller pull requests."
+msgstr "端口 8300 用于控制器拉取请求。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:32
+msgid "Port 8400 for controller reply requests."
+msgstr "控制器回复请求的端口为 8400。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:33
+msgid "Port 8500 and 8501 for 2 LMCache workers."
+msgstr "8500 和 8501 端口用于 2 个 LMCache 工作线程。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:34
+msgid ""
+"Port 9000 for controller main port (arbitrary and can be changed) to "
+"start the controller."
+msgstr "端口 9000 用于控制器主端口（任意且可以更改），以启动控制器。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:37
+msgid "Centralized KV cache sharing"
+msgstr "集中式 KV Cache 共享"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:39
+msgid ""
+"This section demonstrates how to share KV cache across multiple vLLM "
+"instances using a centralized LMCache server."
+msgstr "本节演示如何通过集中式 LMCache 服务器在多个 vLLM 实例之间共享 KV Cache。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:41
+msgid ""
+"**Important**: For centralized cache sharing (which is cross-process "
+"cases), ensure all processes use the same `PYTHONHASHSEED` to keep the "
+"hash of the KV cache consistent across processes: ``export "
+"PYTHONHASHSEED=0``."
+msgstr ""
+"**重要**\\ ：对于集中式缓存共享（跨进程情况），确保所有进程使用相同的 `PYTHONHASHSEED` 以保持 KV "
+"缓存在进程之间的一致性：\\ ``export PYTHONHASHSEED=0``\\ 。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:44
+msgid "Setup centralized sharing"
+msgstr "设置集中式共享"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:46
+msgid ""
+"First, create a configuration file named ``lmcache_config.yaml`` with the"
+" following content:"
+msgstr "首先，创建一个名为 ``lmcache_config.yaml`` 的配置文件，内容如下："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:56
+msgid "Run centralized sharing example"
+msgstr "运行集中式共享示例"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:58
+msgid "Start the LMCache centralized server,"
+msgstr "启动 LMCache 中央服务器，"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:64
+msgid "In a different terminal,"
+msgstr "在另一个终端中，"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:76
+msgid "In another terminal,"
+msgstr "在另一个终端中，"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:89
+msgid "Wait until both engines are ready."
+msgstr "等待直到两个引擎都准备好。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:91
+msgid "Send one request to the engine at port 8000,"
+msgstr "向端口 8000 的引擎发送一个请求，"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:103
+msgid "Send the same request to the engine at port 8001,"
+msgstr "将相同的请求发送到端口 8001 的引擎。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:115
+msgid ""
+"The second request will automatically retrieve and reuse the KV cache "
+"from the first instance, significantly reducing generation time."
+msgstr "第二个请求将自动从第一个实例中检索并重用 KV Cache，显著减少生成时间。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:118
+msgid "P2P KV cache sharing"
+msgstr "P2P KV Cache 共享"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:120
+msgid ""
+"This section demonstrates how to share KV cache across multiple vLLM "
+"instances using peer-to-peer transfer."
+msgstr "本节演示如何通过点对点传输在多个 vLLM 实例之间共享 KV Cache。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:123
+msgid "Configure LMCache instances"
+msgstr "配置 LMCache 实例"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:125
+msgid ""
+"Create two configuration files for the P2P sharing setup. The values that"
+" differ between the files are the ``lmcache_instance_id`` and the "
+"P2P/controller port assignments."
+msgstr "为 P2P 共享设置创建两个配置文件。两个文件之间不同的值是 ``lmcache_instance_id`` 和 P2P/控制器端口分配。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:127
+msgid "Instance 1 configuration (``p2p_example1.yaml``):"
+msgstr "实例 1 配置 (``p2p_example1.yaml``):"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:153
+msgid "Instance 2 configuration (``p2p_example2.yaml``):"
+msgstr "实例 2 配置 (``p2p_example2.yaml``):"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:179
+msgid ""
+"Save both files in the directory that you will mount into the container "
+"(referenced later as ``$YAML_FILES``)."
+msgstr "将两个文件保存在您将挂载到容器中的目录中（稍后称为 ``$YAML_FILES``\\ ）。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:182
+msgid "Run the P2P sharing workflow"
+msgstr "运行 P2P 共享工作流"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:184
+msgid ""
+"Configure the environment on the host and open a shell inside the "
+"container:"
+msgstr "在主机上配置环境并在容器内打开一个 shell："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:204
+msgid "Start the LMCache controller and monitoring endpoints:"
+msgstr "启动 LMCache 控制器和监控端点："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:210
+msgid "Launch two vLLM engines, each with its own LMCache worker configuration."
+msgstr "启动两个 vLLM 引擎，每个引擎都有自己的 LMCache 工作配置。"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:212
+msgid "Start vLLM engine 1 on GPU 0:"
+msgstr "在 GPU 0 上启动 vLLM 引擎 1："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:222
+msgid "Start vLLM engine 2 on GPU 1:"
+msgstr "在 GPU 1 上启动 vLLM 引擎 2："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:232
+msgid "Populate the KV cache by sending a request to the first engine:"
+msgstr "通过向第一个引擎发送请求来填充 KV Cache："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:244
+msgid "Send the same request to the second engine to demonstrate cache retrieval:"
+msgstr "将相同的请求发送到第二个引擎以演示缓存检索："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:257
+msgid "Expected output"
+msgstr "预期输出"
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:259
+msgid ""
+"When the second request successfully retrieves the cache from the first "
+"instance, the logs should include entries similar to:"
+msgstr "当第二个请求成功从第一个实例检索到缓存时，日志应包含类似于以下内容的条目："
+
+#: ../../source/getting_started/quickstart/share_kv_cache.rst:270
+msgid ""
+"These logs indicate that the peer connection was established and the "
+"cache was transferred successfully."
+msgstr "这些日志表明对等连接已建立，并且缓存已成功传输。"
+

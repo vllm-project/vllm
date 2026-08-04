@@ -1,0 +1,168 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/quickstart/index.rst:4
+msgid "More Examples"
+msgstr "更多示例"
+
+#: ../../source/getting_started/quickstart/index.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/getting_started/quickstart/index.rst:11
+msgid ""
+"This section provides quick examples to help you get started with "
+"LMCache's key features."
+msgstr "本节提供快速示例，以帮助您开始使用 LMCache 的关键功能。"
+
+#: ../../source/getting_started/quickstart/index.rst:14
+msgid "KV Cache Offloading"
+msgstr "KV Cache 卸载"
+
+#: ../../source/getting_started/quickstart/index.rst:16
+msgid ""
+"KV cache offloading allows you to move KV caches from GPU memory to CPU "
+"memory or other storage devices. This feature is particularly useful "
+"when:"
+msgstr "KV Cache 卸载允许您将 KV 缓存从显存移动到 CPU 内存或其他存储设备。此功能在以下情况下特别有用："
+
+#: ../../source/getting_started/quickstart/index.rst:18
+msgid ""
+"There are requests shares the same prefix (e.g., long system prompt, "
+"reusing chat history in chat applications, or caching offline-processed "
+"data)."
+msgstr "存在共享相同前缀的请求（例如，长系统提示、在聊天应用中重用聊天历史或缓存离线处理的数据）。"
+
+#: ../../source/getting_started/quickstart/index.rst:19
+msgid "The GPU memory is limited to save all the KV caches."
+msgstr "显存有限，无法保存所有的 KV Cache。"
+
+#: ../../source/getting_started/quickstart/index.rst:21
+msgid ""
+"By offloading KV caches, LMCache can reduce both time-to-first-token "
+"(TTFT) and GPU cycles."
+msgstr "通过卸载 KV 缓存，LMCache 可以减少首次令牌时间 (TTFT) 和显存周期。"
+
+#: ../../source/getting_started/quickstart/index.rst:23
+msgid "See :ref:`offload_kv_cache` for more details."
+msgstr "有关更多详细信息，请参见 :ref:`offload_kv_cache`。"
+
+#: ../../source/getting_started/quickstart/index.rst:26
+msgid "KV Cache Sharing"
+msgstr "KV Cache 共享"
+
+#: ../../source/getting_started/quickstart/index.rst:28
+msgid ""
+"KV cache sharing enables sharing the KV cache across different LLM "
+"instances. This feature is beneficial when:"
+msgstr "KV Cache 共享允许在不同的 LLM 实例之间共享 KV Cache。当满足以下条件时，此功能非常有用："
+
+#: ../../source/getting_started/quickstart/index.rst:30
+msgid "There are multiple LLM instances running in the same system."
+msgstr "在同一系统中运行多个 LLM 实例。"
+
+#: ../../source/getting_started/quickstart/index.rst:31
+msgid "The requests that share the same prefix may go to different LLM instances."
+msgstr "具有相同前缀的请求可能会发送到不同的 LLM 实例。"
+
+#: ../../source/getting_started/quickstart/index.rst:33
+msgid ""
+"Sharing KV caches also reduces TTFT and GPU computation by eliminating "
+"redundant calculations across different LLM instances."
+msgstr "共享 KV Cache 还通过消除不同 LLM 实例之间的冗余计算来减少 TTFT 和 GPU 计算。"
+
+#: ../../source/getting_started/quickstart/index.rst:35
+msgid "See :ref:`share_kv_cache` for more details."
+msgstr "有关更多详细信息，请参阅 :ref:`share_kv_cache`。"
+
+#: ../../source/getting_started/quickstart/index.rst:38
+msgid "Disaggregated Prefill"
+msgstr "分离式预填充"
+
+#: ../../source/getting_started/quickstart/index.rst:40
+msgid ""
+"Disaggregated prefill separates the prefill and decode phases across "
+"different compute resources. This approach:"
+msgstr "分离式 Prefill 将预填充和解码阶段分开，使用不同的计算资源。此方法："
+
+#: ../../source/getting_started/quickstart/index.rst:42
+msgid "Allows specialized hardware allocation for each phase of inference"
+msgstr "允许为推理的每个阶段分配专用硬件"
+
+#: ../../source/getting_started/quickstart/index.rst:43
+msgid "Enables more efficient resource utilization in distributed settings"
+msgstr "在分布式环境中实现更高效的资源利用。"
+
+#: ../../source/getting_started/quickstart/index.rst:44
+msgid ""
+"Improves overall system throughput by optimizing for the different "
+"computational patterns of prefill vs. decode"
+msgstr "通过优化 Prefill 和解码的不同计算模式，提高整体系统吞吐量。"
+
+#: ../../source/getting_started/quickstart/index.rst:46
+msgid ""
+"This architecture is particularly valuable in large-scale deployment "
+"scenarios where maximizing resource efficiency and keeping a stable "
+"generation speed are both important."
+msgstr "这种架构在大规模部署场景中尤其有价值，在这些场景中，最大化资源效率和保持稳定的生成速度都很重要。"
+
+#: ../../source/getting_started/quickstart/index.rst:48
+msgid "See :ref:`disaggregated_prefill` for more details."
+msgstr "有关更多详细信息，请参见 :ref:`disaggregated_prefill`。"
+
+#: ../../source/getting_started/quickstart/index.rst:51
+msgid "Standalone Starter"
+msgstr "独立启动器"
+
+#: ../../source/getting_started/quickstart/index.rst:53
+msgid ""
+"The LMCache Standalone Starter allows you to run LMCacheEngine as a "
+"standalone service without vLLM or GPU dependencies. This is particularly"
+" useful for:"
+msgstr "LMCache 独立启动器允许您将 LMCacheEngine 作为独立服务运行，而无需 vLLM 或 GPU 依赖。这对于以下情况特别有用："
+
+#: ../../source/getting_started/quickstart/index.rst:55
+msgid "Testing and development environments"
+msgstr "测试和开发环境"
+
+#: ../../source/getting_started/quickstart/index.rst:56
+msgid "CPU-only deployments"
+msgstr "仅 CPU 部署"
+
+#: ../../source/getting_started/quickstart/index.rst:57
+msgid "Distributed cache scenarios"
+msgstr "分布式缓存场景"
+
+#: ../../source/getting_started/quickstart/index.rst:58
+msgid "Integration with custom applications"
+msgstr "与自定义应用程序集成"
+
+#: ../../source/getting_started/quickstart/index.rst:60
+msgid "See :ref:`standalone_starter` for more details."
+msgstr "有关更多详细信息，请参阅 :ref:`standalone_starter`。"
+
+#: ../../source/getting_started/quickstart/index.rst:63
+msgid "Detailed Examples"
+msgstr "详细示例"
+

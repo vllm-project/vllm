@@ -1,0 +1,362 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:2
+msgid "1p1d"
+msgstr "1p1d"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/disaggregated_prefill`."
+msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/disaggregated_prefill`。"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:10
+msgid "One Prefiller, One Decoder (1p1d) Example"
+msgstr "一个 Prefill 组件，一个解码器 (1p1d) 示例"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:12
+msgid ""
+"This example demonstrates how to run LMCache with disaggregated prefill "
+"using NIXL on a single node with a 1 prefiller + 1 decoder setup. This "
+"configuration separates the compute-intensive prefill operations from the"
+" decode operations, allowing for better resource utilization and "
+"performance optimization."
+msgstr ""
+"此示例演示了如何在单个节点上使用 NIXL 以分离式 Prefill 运行 LMCache，配置为 1 个 Prefiller + 1 个 "
+"Decoder。此配置将计算密集型的 Prefill 操作与解码操作分离，从而实现更好的资源利用和性能优化。"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:15
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:17
+msgid "The 1p1d setup consists of three main components:"
+msgstr "1p1d 设置由三个主要组件组成："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:19
+msgid ""
+"**Prefiller Server** - Handles the prefill phase of inference (initial "
+"prompt processing)"
+msgstr "**Prefill 服务器** - 处理推理的预填充阶段（初始提示处理）"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:20
+msgid ""
+"**Decoder Server** - Handles the decode phase of inference (token "
+"generation)"
+msgstr "**解码服务器** - 处理推理的解码阶段（令牌生成）"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:21
+msgid "**Proxy Server** - Coordinates requests between the prefiller and decoder"
+msgstr "**代理服务器** - 协调预填充器和解码器之间的请求"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:45
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:47
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr "**LMCache**: 使用 ``pip install lmcache`` 安装"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:48
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+"**NIXL**: 从 `NIXL GitHub repository <https://github.com/ai-dynamo/nixl>`_"
+" 安装"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:49
+msgid "**Hardware**: At least 2 GPUs"
+msgstr "**硬件**\\ ：至少需要 2 个 GPU"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:50
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr "**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:53
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:55
+msgid "**Set your Hugging Face token**:"
+msgstr "**设置你的 Hugging Face 令牌**\\ ："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:61
+msgid "**Navigate to the example directory**:"
+msgstr "**导航到示例目录**\\ ："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:67
+msgid "**Run the example**:"
+msgstr "**运行示例**:"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:73
+msgid "The script will automatically:"
+msgstr "该脚本将自动："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:75
+msgid "Launch a prefiller instance on port 7100 (GPU 0)"
+msgstr "在端口 7100（GPU 0）上启动一个 Prefill 实例"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:76
+msgid "Launch a decoder instance on port 7200 (GPU 1)"
+msgstr "在端口 7200 上启动解码器实例（GPU 1）"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:77
+msgid "Launch a proxy server on port 9100"
+msgstr "在 9100 端口启动一个代理服务器"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:78
+msgid "Wait for all servers to be ready"
+msgstr "等待所有服务器准备就绪"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:80
+msgid "Press ``Ctrl+C`` to stop all servers."
+msgstr "按 ``Ctrl+C`` 停止所有服务器。"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:83
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:85
+msgid ""
+"**Important**: For correct KV cache transfer, ensure all processes use "
+"the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
+"across processes:"
+msgstr ""
+"**重要**\\ ：为了正确的 KV Cache 传输，确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache "
+"在进程间的一致性："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:92
+msgid "Prefiller Configuration"
+msgstr "分离式 Prefill 配置"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:94
+msgid "The prefiller is configured via ``configs/lmcache-prefiller-config.yaml``:"
+msgstr "预填充器通过 ``configs/lmcache-prefiller-config.yaml`` 进行配置："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:110
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:136
+msgid "Key settings:"
+msgstr "关键设置："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:112
+msgid "``pd_role: \"sender\"`` - Configures this instance to send KV cache data"
+msgstr "``pd_role: \"sender\"`` - 配置此实例以发送 KV Cache 数据"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:113
+msgid "``pd_buffer_size: 1073741824 # 1GB`` - Buffer size for transfers"
+msgstr "``pd_buffer_size: 1073741824 # 1GB`` - 传输的缓冲区大小"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:114
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:140
+msgid "``pd_buffer_device: \"cuda\"`` - Uses GPU memory for buffering"
+msgstr "``pd_buffer_device: \"cuda\"`` - 使用显存进行缓冲"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:117
+msgid "Decoder Configuration"
+msgstr "解码器配置"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:119
+msgid "The decoder is configured via ``configs/lmcache-decoder-config.yaml``:"
+msgstr "解码器通过 ``configs/lmcache-decoder-config.yaml`` 进行配置："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:138
+msgid ""
+"``pd_role: \"receiver\"`` - Configures this instance to receive KV cache "
+"data"
+msgstr "``pd_role: \"receiver\"`` - 配置此实例以接收 KV Cache 数据"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:139
+msgid "``pd_buffer_size: 2147483648 # 2GB`` - Buffer size for transfers"
+msgstr "``pd_buffer_size: 2147483648 # 2GB`` - 传输的缓冲区大小"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:143
+msgid "Components Deep Dive"
+msgstr "组件深入分析"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:146
+msgid "Proxy Server (disagg_proxy_server.py)"
+msgstr "代理服务器 (disagg_proxy_server.py)"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:148
+msgid "The proxy server coordinates the disaggregated prefill workflow:"
+msgstr "代理服务器协调分离式 Prefill 工作流："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:150
+msgid "**Request Handling**: Receives client requests on port 9100"
+msgstr "**请求处理**\\ ：在 9100 端口接收客户端请求"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:151
+msgid ""
+"**Prefill Coordination**: Sends requests to the prefiller with "
+"``max_tokens=1``"
+msgstr "**分离式 Prefill 协调**: 发送请求给 Prefill 模块，\\ ``max_tokens=1``"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:152
+msgid "**Prefill Response**: Receives prefiller that says nixl transfer is done"
+msgstr "**Prefill Response**: 接收预填充器，表示 nixl 转移已完成"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:153
+msgid "**Response Streaming**: Streams the full response from the decoder"
+msgstr "**响应流**\\ ：从解码器流式传输完整响应"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:154
+msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
+msgstr "**性能监控**: 跟踪首次令牌时间（TTFT）统计信息"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:156
+msgid "Supported endpoints:"
+msgstr "支持的端点："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:158
+msgid "``/v1/completions``"
+msgstr "``/v1/completions``"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:159
+msgid "``/v1/chat/completions``"
+msgstr "``/v1/chat/completions``"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:162
+msgid "vLLM Server Launcher (disagg_vllm_launcher.sh)"
+msgstr "vLLM 服务器启动器 (disagg_vllm_launcher.sh)"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:164
+msgid ""
+"This script launches individual vLLM servers with appropriate "
+"configurations:"
+msgstr "此脚本启动具有适当配置的单个 vLLM 服务器："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:166
+msgid "**Prefiller Launch Command**:"
+msgstr "**Prefill 启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:183
+msgid "**Decoder Launch Command**:"
+msgstr "**解码器启动命令**:"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:201
+msgid "Testing and Benchmarking"
+msgstr "测试与基准测试"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:204
+msgid "Basic Test"
+msgstr "基本测试"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:206
+msgid "Once all servers are running, you can test with a simple curl command:"
+msgstr "一旦所有服务器都在运行，您可以使用简单的 curl 命令进行测试："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:218
+msgid "Performance Benchmarking"
+msgstr "性能基准测试"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:220
+msgid "For comprehensive performance testing, use vLLM's benchmark tool:"
+msgstr "要进行全面的性能测试，请使用 vLLM 的基准测试工具："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:229
+msgid ""
+"This benchmark: - Sends requests to port 9100 (proxy server) - Uses "
+"random prompts with 7500 input tokens - Generates 200 output tokens per "
+"request - Tests with 30 total prompts at 1 request/second"
+msgstr ""
+"此基准测试： - 向 9100 端口（代理服务器）发送请求 - 使用 7500 个输入 token 的随机提示 - 每个请求生成 200 个输出 "
+"token - 使用 30 个总提示以 1 请求/秒的速度进行测试"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:236
+msgid "Log Files and Monitoring"
+msgstr "日志文件和监控"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:238
+msgid "The example generates three log files for monitoring:"
+msgstr "该示例生成三个用于监控的日志文件："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:240
+msgid "``prefiller.log`` - Prefiller server logs and errors"
+msgstr "``prefiller.log`` - Prefill 服务器日志和错误"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:241
+msgid "``decoder.log`` - Decoder server logs and errors"
+msgstr "``decoder.log`` - 解码器服务器日志和错误"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:242
+msgid "``proxy.log`` - Proxy server logs and TTFT statistics"
+msgstr "``proxy.log`` - 代理服务器日志和 TTFT 统计信息"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:244
+msgid ""
+"The proxy server automatically calculates and displays TTFT statistics "
+"every 5 seconds:"
+msgstr "代理服务器每 5 秒自动计算并显示 TTFT 统计信息："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:257
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:260
+msgid "Common Issues"
+msgstr "常见问题"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:262
+msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
+msgstr "**显存**\\ ：确保每个 GPU 具有足够的内存以支持模型"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:263
+msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
+msgstr "**NIXL 安装**: 验证 NIXL 是否正确安装并可访问"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:264
+msgid "**Port Conflicts**: Check that ports 7100, 7200, and 9000 are available"
+msgstr "**端口冲突**\\ ：检查端口 7100、7200 和 9000 是否可用"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:265
+msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"
+msgstr "**HF Token**: 确保您的 Hugging Face 令牌可以访问 Llama 模型"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:268
+msgid "Error Recovery"
+msgstr "错误恢复"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:270
+msgid "If any server fails to start:"
+msgstr "如果任何服务器无法启动："
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:272
+msgid "Check the corresponding log file for error details"
+msgstr "检查相应的日志文件以获取错误详情"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:273
+msgid "Verify GPU availability with ``nvidia-smi``"
+msgstr "使用 ``nvidia-smi`` 验证 GPU 可用性"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:274
+msgid "Ensure all dependencies are installed"
+msgstr "确保所有依赖项已安装"
+
+#: ../../source/disaggregated_prefill/nixl/1p1d.rst:275
+msgid "Try restarting with ``Ctrl+C`` followed by re-running the script"
+msgstr "尝试使用 ``Ctrl+C`` 重启，然后重新运行脚本。"
+

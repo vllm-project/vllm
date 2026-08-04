@@ -1,0 +1,134 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/aerospike.rst:2
+msgid "Aerospike"
+msgstr "Aerospike"
+
+#: ../../source/mp/l2_storage/aerospike.rst:4
+msgid ""
+"An L2 adapter backed by the native C++ Aerospike connector (the same "
+"``ConnectorBase`` worker-pool harness used by ``fs_native``), wrapped "
+"with ``NativeConnectorL2Adapter``.  KV objects are stored under a meta "
+"record plus optional payload segments so values larger than the server "
+"record cap are transparently sharded."
+msgstr "一个由原生 C++ Aerospike 连接器支持的 L2 适配器（与 ``fs_native`` 使用的相同 ``ConnectorBase`` 工作池框架），由 ``NativeConnectorL2Adapter`` 封装。KV 对象以一条元记录加若干可选负载段的形式存储，超出服务器记录上限的值将被透明地拆分为多个分片。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:10
+msgid "**Prerequisites -- Building with Aerospike support:**"
+msgstr "**前提条件 -- 构建时启用 Aerospike 支持：**"
+
+#: ../../source/mp/l2_storage/aerospike.rst:12
+msgid ""
+"The Aerospike extension is **not** built by default.  Install the "
+"Aerospike C client, then build with ``BUILD_AEROSPIKE=1`` (or set "
+"``AEROSPIKE_INCLUDE_DIR``):"
+msgstr "Aerospike 扩展\\ **默认不**\\ 构建。请先安装 Aerospike C 客户端，然后使用 ``BUILD_AEROSPIKE=1`` 进行构建（或设置 ``AEROSPIKE_INCLUDE_DIR``\\ ）："
+
+#: ../../source/mp/l2_storage/aerospike.rst:19
+msgid ""
+"See :doc:`/developer_guide/extending_lmcache/native_connectors` (section "
+"\"Built-in Aerospike backend\") for installing the C client into "
+"``.deps/`` and the ``aerospike-client-c.env`` example."
+msgstr "请参阅 :doc:`/developer_guide/extending_lmcache/native_connectors`（章节“内置 Aerospike 后端”）以了解如何将 C 客户端安装到 ``.deps/`` 以及 ``aerospike-client-c.env`` 示例。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:23
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/aerospike.rst:25
+msgid "``hosts``: Seed hosts as ``host:port[,host:port...]``."
+msgstr "``hosts``: 种子主机格式为 ``host:port[,host:port...]``\\ 。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:27
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/aerospike.rst:29
+msgid ""
+"``namespace`` (str, default ``\"lmcache\"``): Aerospike namespace.  Must "
+"exist on the server and have ``nsup-period > 0`` if you rely on TTL "
+"expiry."
+msgstr "``namespace`` (str, default ``\"lmcache\"``): Aerospike 命名空间。该命名空间必须已在服务器上创建；若需依赖 TTL 自动过期，还须满足 ``nsup-period > 0``\\ 。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:31
+msgid ""
+"``set_name`` / ``set`` (str, default ``\"kv_chunks\"``): Aerospike set "
+"name."
+msgstr "``set_name`` / ``set`` (str, default ``\"kv_chunks\"``): Aerospike 集合名称。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:32
+msgid ""
+"``num_workers`` (int, default ``8``, > 0): C++ worker threads for I/O.  "
+"This is the real I/O queue depth -- raise it to push throughput."
+msgstr "``num_workers`` (int, default ``8``, > 0): 用于 I/O 的 C++ 工作线程数。这是实际的 I/O 队列深度——适当调高此值可提升吞吐量。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:34
+msgid "``read_timeout_ms`` (int, default ``1000``): Client read timeout."
+msgstr "``read_timeout_ms`` (int, default ``1000``): 客户端读取超时时间（毫秒）。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:35
+msgid "``write_timeout_ms`` (int, default ``2000``): Client write timeout."
+msgstr "``write_timeout_ms`` (int, default ``2000``): 客户端写入超时时间（毫秒）。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:36
+msgid ""
+"``default_ttl_seconds`` (int, default ``86400``): Record TTL.  ``0`` uses"
+" the namespace default TTL."
+msgstr "``default_ttl_seconds`` (int, default ``86400``): 记录的生存时间（TTL）。 ``0`` 使用命名空间的默认 TTL。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:38
+msgid ""
+"``target_segment_bytes`` (int, default ``0``): Target shard size.  ``0`` "
+"uses the discovered server record cap."
+msgstr "``target_segment_bytes`` (int, default ``0``): 目标分片大小。 ``0`` 使用发现的服务器记录上限。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:40
+msgid ""
+"``max_record_bytes`` (int, default ``0``): Override the server record "
+"cap. ``0`` discovers it at construction time."
+msgstr "``max_record_bytes`` (int, default ``0``): 覆盖服务器记录上限。 ``0`` 在构造时发现该上限。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:42
+msgid ""
+"``username`` / ``password`` (str, default ``\"\"``): Optional Enterprise "
+"Edition authentication."
+msgstr "``username`` / ``password`` (str, default ``\"\"``): 可选的企业版身份验证。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:44
+msgid ""
+"``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB for"
+" client-side usage tracking / eviction.  ``0`` disables tracking."
+msgstr "``max_capacity_gb`` (float, default ``0``): 客户端侧用量跟踪与逐出所使用的最大 L2 容量（GB）。\\ ``0`` 表示禁用跟踪。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:47
+msgid ""
+"**Environment variable fallbacks.**  When the corresponding config value "
+"is empty, these environment variables are used: "
+"``LMCACHE_AEROSPIKE_HOSTS``, ``LMCACHE_AEROSPIKE_NAMESPACE``, "
+"``LMCACHE_AEROSPIKE_SET``, ``LMCACHE_AEROSPIKE_USERNAME``, "
+"``LMCACHE_AEROSPIKE_PASSWORD``."
+msgstr "**环境变量回退。** 当相应的配置值为空时，将使用这些环境变量：\\ ``LMCACHE_AEROSPIKE_HOSTS``\\ 、\\ ``LMCACHE_AEROSPIKE_NAMESPACE``\\ 、\\ ``LMCACHE_AEROSPIKE_SET``\\ 、\\ ``LMCACHE_AEROSPIKE_USERNAME``\\ 、\\ ``LMCACHE_AEROSPIKE_PASSWORD``\\ 。"
+
+#: ../../source/mp/l2_storage/aerospike.rst:52
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+

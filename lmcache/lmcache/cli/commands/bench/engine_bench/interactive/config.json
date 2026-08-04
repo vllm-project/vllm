@@ -1,0 +1,10 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "workload": "long-doc-qa",
+  "kv_cache_volume": 100.0,
+  "tokens_per_gb_kvcache": 6553,
+  "ldqa_document_length": 10000,
+  "ldqa_query_per_document": 2,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 3
+}

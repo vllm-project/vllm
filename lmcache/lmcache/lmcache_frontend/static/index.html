@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMCache Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="/static/img/logo.png" type="image/png">
+</head>
+<body>
+    <div class="container-fluid">
+        <header class="bg-primary text-white p-3 mb-4">
+            <h1>LMCache Cluster Monitoring</h1>
+            <div class="row align-items-center">
+                <div class="col-md-6">
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <div class="position-relative">
+                                <input type="text" id="proxySearchInput" class="form-control" placeholder="Search and select proxy..." autocomplete="off">
+                                <select id="proxySelector" class="form-select d-none">
+                                    <option value="">-- Select Proxy --</option>
+                                </select>
+                                <div id="proxyDropdown" class="dropdown-menu" style="max-height: 300px; overflow-y: auto; width: 100%;">
+                                    <!-- Proxy options will be populated here -->
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <select id="targetSelector" class="form-select" disabled>
+                                <option value="">-- Select Target --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-2 row g-2">
+                        <div class="col-md-6">
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="envFilterInput" placeholder="Filter by env (e.g., TAG=TaijiDS)">
+                                <button id="filterNodesBtn" class="btn btn-outline-primary" type="button">
+                                    <i class="bi bi-funnel"></i> Filter Nodes
+                                </button>
+                                <button id="clearFilterBtn" class="btn btn-outline-secondary" type="button">
+                                    <i class="bi bi-x"></i> Clear
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <button id="refreshNodesBtn" class="btn btn-sm btn-outline-primary me-2">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh Nodes
+                            </button>
+                            <button id="refreshPageBtn" class="btn btn-sm btn-outline-primary me-2">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh Page
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6 text-end">
+                    <span id="currentNode" class="badge bg-info fs-6">No node selected</span>
+                </div>
+            </div>
+        </header>
+
+        <ul class="nav nav-tabs" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="overview-tab" data-bs-toggle="tab" data-bs-target="#overview" type="button" role="tab">Overview</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="metrics-tab" data-bs-toggle="tab" data-bs-target="#metrics" type="button" role="tab">Metrics</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="threads-tab" data-bs-toggle="tab" data-bs-target="#threads" type="button" role="tab">Threads</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="loglevel-tab" data-bs-toggle="tab" data-bs-target="#loglevel" type="button" role="tab">Log Level</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="config-tab" data-bs-toggle="tab" data-bs-target="#config" type="button" role="tab">Config</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="meta-tab" data-bs-toggle="tab" data-bs-target="#meta" type="button" role="tab">Meta</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="inference-tab" data-bs-toggle="tab" data-bs-target="#inference" type="button" role="tab">Inference</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="env-tab" data-bs-toggle="tab" data-bs-target="#env" type="button" role="tab">Environment</button>
+            </li>
+            <!-- Add Node Management Tab -->
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="node-management-tab" data-bs-toggle="tab" data-bs-target="#node-management" type="button" role="tab">Node Management</button>
+            </li>
+        </ul>
+
+        <div class="tab-content p-3 border border-top-0" id="myTabContent">
+            <div class="tab-pane fade show active" id="overview" role="tabpanel">
+                <h3>Node Overview</h3>
+                <div id="overviewContent">Please select a target node first</div>
+            </div>
+
+            <div class="tab-pane fade" id="metrics" role="tabpanel">
+                <h3>Performance Metrics</h3>
+                <pre id="metricsContent">Please select a target node first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="threads" role="tabpanel">
+                <h3>Thread Information</h3>
+                <pre id="threadsContent">Please select a target node first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="loglevel" role="tabpanel">
+                <h3>Log Level Management</h3>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="loggerInput" class="form-label">Logger Name (leave empty for all)</label>
+                            <input type="text" class="form-control" id="loggerInput" placeholder="Enter logger name">
+                        </div>
+                        <div class="mb-3">
+                            <label for="logLevelSelector" class="form-label">Log Level</label>
+                            <select class="form-select" id="logLevelSelector">
+                                <option value="">-- Read Level --</option>
+                                <option value="TRACE">TRACE</option>
+                                <option value="DEBUG">DEBUG</option>
+                                <option value="INFO">INFO</option>
+                                <option value="WARN">WARN</option>
+                                <option value="ERROR">ERROR</option>
+                                <option value="FATAL">FATAL</option>
+                                <option value="OFF">OFF</option>
+                            </select>
+                        </div>
+                        <button id="setLogLevelBtn" class="btn btn-primary">Set Level</button>
+                    </div>
+                    <div class="col-md-6">
+                        <h4>Current Log Levels</h4>
+                        <pre id="logLevelContent">Please select a target node first</pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="config" role="tabpanel">
+                <h3>Configuration Management</h3>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label for="configKeyInput" class="form-label">Configuration Key (leave empty for all)</label>
+                            <input type="text" class="form-control" id="configKeyInput" placeholder="Enter config key">
+                        </div>
+                        <div class="mb-3">
+                            <label for="configValueInput" class="form-label">Configuration Value</label>
+                            <input type="text" class="form-control" id="configValueInput" placeholder="Enter config value">
+                        </div>
+                        <button id="getConfigBtn" class="btn btn-info me-2">Get Config</button>
+                        <button id="setConfigBtn" class="btn btn-primary">Set Config</button>
+                    </div>
+                    <div class="col-md-6">
+                        <h4>Current Configuration</h4>
+                        <pre id="configContent">Please select a target node first</pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="meta" role="tabpanel">
+                <h3>Meta Information</h3>
+                <pre id="metaContent">Please select a target node first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="inference" role="tabpanel">
+                <h3>Inference Information</h3>
+                <pre id="inferenceContent">Please select a target node first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="env" role="tabpanel">
+                <h3>Environment Variables</h3>
+                <div class="mb-3">
+                    <input type="text" class="form-control" id="envSearchInput" placeholder="Search environment variables...">
+                </div>
+                <pre id="envContent">Please select a target node first</pre>
+            </div>
+
+            <!-- Node Management Tab -->
+            <div class="tab-pane fade" id="node-management" role="tabpanel">
+                <h3>Node Management</h3>
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h5 class="card-title">Add/Update Node</h5>
+                        <div class="mb-3">
+                            <label for="nodeName" class="form-label">Node Name</label>
+                            <input type="text" class="form-control" id="nodeName" placeholder="Unique node name">
+                        </div>
+                        <div class="mb-3">
+                            <label for="nodeHost" class="form-label">Host</label>
+                            <input type="text" class="form-control" id="nodeHost" placeholder="Hostname or IP">
+                        </div>
+                        <div class="mb-3">
+                            <label for="nodePort" class="form-label">Port/Socket Path</label>
+                            <input type="text" class="form-control" id="nodePort" placeholder="Port number or socket path">
+                        </div>
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" class="form-check-input" id="isProxyCheck">
+                            <label class="form-check-label" for="isProxyCheck">Is Proxy Node</label>
+                        </div>
+                        <div class="mb-3">
+                            <label for="proxyIdInput" class="form-label">Proxy ID (if this node needs proxy)</label>
+                            <input type="text" class="form-control" id="proxyIdInput" placeholder="Enter proxy node name">
+                        </div>
+                        <button id="addNodeBtn" class="btn btn-primary me-2">Add Node</button>
+                        <button id="updateNodeBtn" class="btn btn-warning me-2">Update Node</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Current Nodes</h5>
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Host</th>
+                                        <th>Port/Socket</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="nodeListBody">
+                                    <!-- Node list will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

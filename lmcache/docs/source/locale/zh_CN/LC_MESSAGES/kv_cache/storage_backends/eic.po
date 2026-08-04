@@ -1,0 +1,85 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:2
+msgid "EIC"
+msgstr "EIC"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:9
+msgid ""
+"EIC(Elastic Instant Cache) is a distributed database designed for LLM KV "
+"Cache. It supports RDMA, GDR and has the capabilities of distributed "
+"disaster tolerance and expansion. You can understand the principles and "
+"architecture of EIC through these articles:"
+msgstr ""
+"EIC（弹性瞬时缓存）是为 LLM KV Cache 设计的分布式数据库。它支持 "
+"RDMA、GDR，并具备分布式灾难容忍和扩展能力。您可以通过这些文章了解 EIC 的原理和架构："
+
+#: ../../source/kv_cache/storage_backends/eic.rst:12
+msgid "https://mp.weixin.qq.com/s/tasDqXf0Gxr3o_WCJ2IJUQ"
+msgstr "https://mp.weixin.qq.com/s/tasDqXf0Gxr3o_WCJ2IJUQ"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:13
+msgid "https://mp.weixin.qq.com/s/b_4YhTa96Zeklh23lv8qBw"
+msgstr "https://mp.weixin.qq.com/s/b_4YhTa96Zeklh23lv8qBw"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:16
+msgid "Deploy EIC"
+msgstr "部署 EIC"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:18
+msgid ""
+"You can visit the official link https://console.volcengine.com/eic and "
+"deploy EIC KVCache on your compute cluster with web UI. In addition, we "
+"provide particular image in volcano engine, which integrates various "
+"optimizations based on the official image. You may use "
+"tests/v1/storage_backend/test_eic.py to detect the connectivity of EIC."
+msgstr ""
+"您可以访问官方链接 https://console.volcengine.com/eic 并通过 Web UI 在您的计算集群上部署 EIC "
+"KVCache。此外，我们在火山引擎中提供了特定的镜像，该镜像基于官方镜像集成了各种优化。您可以使用 "
+"tests/v1/storage_backend/test_eic.py 来检测 EIC 的连接性。"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:22
+msgid "Deploy Model With EIC"
+msgstr "使用 EIC 部署模型"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:24
+msgid "You can enable EIC KVCache offload with the official interface, such as"
+msgstr "您可以通过官方接口启用 EIC KVCache 卸载，例如"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:35
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/eic.rst:45
+msgid ""
+"For more details, you can see "
+"https://www.volcengine.com/docs/85848/1749188."
+msgstr "有关更多详细信息，请参见 https://www.volcengine.com/docs/85848/1749188。"
+

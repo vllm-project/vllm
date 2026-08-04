@@ -1,0 +1,156 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Optional native backend build artifacts (scripts/build_libaerospike.sh)
+.deps/
+.aerospike-ci.env
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+durations/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Vim temporary files
+.*.sw*
+
+# misc
+outdated/
+perf-test.py
+*.prof
+*.so
+.ycm_extra_conf.py
+
+# temp tests
+lmcache/experimental/tests
+
+# example
+/examples/example_local.yaml
+/examples/openai_chat_completion_client_local.py
+/lmcache/experimental/examples
+/examples/debug
+/examples/p2p/bash.sh
+
+# example output
+*/offline_inference_outputs.jsonl
+/examples/offline_inference/offline_inference_outputs.jsonl
+/examples/save_decode_cache/offline_inference_outputs.jsonl
+/examples/offline_inference/buggy_example.py
+/examples/test_example
+
+# benchmark results
+*.csv
+
+# disk cache
+/remote_disk
+/local_disk
+/tests/local_disk
+/tests/remote_disk
+*.pt
+
+# random scripts
+/misc_scripts
+
+# nvtx profile report
+*.nsys-rep
+*.sqlite
+
+# docs/build
+/docs/build/
+/docs/build.sh
+/docs/output/
+
+/try
+
+# reference kernels
+/csrc/temp.cu
+
+# PyCharm
+.idea/
+
+# JetBrains run configurations
+.run/
+
+# VSCode
+.vscode/
+
+# Setuptools scm version
+/lmcache/_version.py
+
+# Generated hip files
+/csrc_hip
+/csrc/*.hip
+/csrc/*_hip.cuh
+/csrc/*_hip.cpp
+/csrc/*_hip.h
+
+# SYCL build artifacts
+/build_sycl/
+
+# Ignore all log files
+*.log
+
+# uv
+uv.lock
+
+# Coding agent instructions
+GEMINI.md
+COPILOT.md
+CURSOR.md
+AIDER.md
+
+# Operator build artifacts
+operator/bin/
+operator/dist/
+operator/cover.out
+operator/coverage.html
+operator/Dockerfile.cross
+*.spv
+
+# Compiled gettext catalogs (built from .po at HTML build time)
+docs/source/locale/**/*.mo

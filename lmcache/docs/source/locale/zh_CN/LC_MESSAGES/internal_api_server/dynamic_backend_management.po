@@ -1,0 +1,174 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:4
+msgid "Dynamic Backend Management"
+msgstr "动态后端管理"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/http_api`。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:11
+msgid ""
+"LMCache provides a set of internal API endpoints that allow you to "
+"**list**, **close**, and **create** storage backends at runtime without "
+"restarting the serving engine.  This is useful when you need to switch "
+"between different storage configurations on the fly — for example, "
+"migrating from a ``LocalDiskBackend`` to a ``GdsBackend``, or changing "
+"the remote connector from a filesystem connector to Redis."
+msgstr ""
+"LMCache 提供了一组内部 API 端点，允许您在运行时 **列出**\\ 、\\ **关闭** 和 **创建** "
+"存储后端，而无需重启服务引擎。当您需要动态切换不同的存储配置时，这非常有用——例如，从 ``LocalDiskBackend`` 迁移到 "
+"``GdsBackend``\\ ，或将远程连接器从文件系统连接器更改为 Redis。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:19
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:21
+msgid "The workflow for dynamically switching a storage backend is:"
+msgstr "动态切换存储后端的工作流程是："
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:23
+msgid "**Close** the backend you want to replace."
+msgstr "**关闭**\\ 您想要替换的后端。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:24
+msgid "**Update** the relevant configuration via the ``POST /conf`` API."
+msgstr "**更新**\\ 相关配置通过 ``POST /conf`` API。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:25
+msgid ""
+"**Create** new backends — only backends that are not already present will"
+" be created."
+msgstr "**创建** 新的后端 — 只有尚不存在的后端才会被创建。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:28
+msgid ""
+"Any backend that was **not** closed will be skipped during creation, so "
+"the operation is safe and idempotent."
+msgstr "任何\\ **未**\\ 关闭的后端在创建过程中将被跳过，因此该操作是安全且幂等的。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:32
+msgid "API Endpoints"
+msgstr "API 端点"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:35
+msgid "``GET /backends``"
+msgstr "``GET /backends``"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:37
+msgid "List all active storage backends."
+msgstr "列出所有活动的存储后端。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:43
+#: ../../source/internal_api_server/dynamic_backend_management.rst:63
+#: ../../source/internal_api_server/dynamic_backend_management.rst:85
+msgid "Response:"
+msgstr "响应："
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:53
+#, python-brace-format
+msgid "``DELETE /backends/{backend_name}``"
+msgstr "``DELETE /backends/{backend_name}``"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:55
+msgid ""
+"Close and remove a specific storage backend.  After this call the backend"
+" is fully shut down and removed from the internal dictionary, ensuring no"
+" stale references remain."
+msgstr "关闭并移除特定的存储后端。此调用后，后端将完全关闭并从内部字典中移除，确保没有过时的引用残留。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:76
+msgid "``POST /backends``"
+msgstr "``POST /backends``"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:78
+msgid ""
+"Create new storage backends based on the current ``LMCacheEngineConfig``."
+" Existing backends are skipped."
+msgstr "根据当前的 ``LMCacheEngineConfig`` 创建新的存储后端。现有的后端将被跳过。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:101
+msgid "Use-Case Examples"
+msgstr "用例示例"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:104
+msgid "Switching from ``LocalDiskBackend`` to ``GdsBackend``"
+msgstr "从 ``LocalDiskBackend`` 切换到 ``GdsBackend``"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:106
+msgid ""
+"If you originally configured a local-disk backend and want to migrate to "
+"NVIDIA GPUDirect Storage (GDS) at runtime:"
+msgstr "如果您最初配置了本地磁盘后端，并希望在运行时迁移到 NVIDIA GPUDirect Storage (GDS)："
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:129
+msgid "Switching ``RemoteBackend`` connector (FS → Redis)"
+msgstr "切换 ``RemoteBackend`` 连接器 (FS → Redis)"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:131
+msgid "To change the remote connector type without restarting:"
+msgstr "要在不重启的情况下更改远程连接器类型："
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:152
+msgid "Replacing only one backend while keeping others"
+msgstr "仅替换一个后端而保持其他后端不变"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:154
+msgid ""
+"If only the ``RemoteBackend`` needs to be updated but the "
+"``LocalCPUBackend`` should stay untouched:"
+msgstr "如果只需要更新 ``RemoteBackend`` 而 ``LocalCPUBackend`` 应保持不变："
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:171
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:173
+msgid ""
+"Closing the ``LocalCPUBackend`` is possible but should be done with "
+"caution since many other backends rely on it as an intermediate buffer."
+msgstr "关闭 ``LocalCPUBackend`` 是可能的，但应谨慎进行，因为许多其他后端依赖它作为中间缓冲区。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:175
+msgid ""
+"The ``POST /backends`` endpoint calls the same ``CreateStorageBackends`` "
+"factory that is used during engine initialization, so all backend types "
+"(local CPU, local disk, GDS, remote, P2P, plugins, etc.) are supported."
+msgstr ""
+"``POST /backends`` 端点调用与引擎初始化期间使用的相同 ``CreateStorageBackends`` "
+"工厂，因此支持所有后端类型（本地 CPU、本地磁盘、GDS、远程、P2P、插件等）。"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:179
+msgid ""
+"After creating backends, the ``StorageManager`` automatically refreshes "
+"its internal references (``non_allocator_backends``, "
+"``local_cpu_backend``, etc.)."
+msgstr ""
+"创建后端后，\\ ``StorageManager`` 会自动刷新其内部引用（\\ ``non_allocator_backends``\\ "
+"、\\ ``local_cpu_backend`` 等）。"
+

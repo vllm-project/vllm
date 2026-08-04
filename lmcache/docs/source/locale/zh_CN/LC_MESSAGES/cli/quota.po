@@ -1,0 +1,239 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/quota.rst:2
+msgid "lmcache quota"
+msgstr "lmcache quota"
+
+#: ../../source/cli/quota.rst:4
+msgid ""
+"The ``lmcache quota`` command manages per-salt cache quotas on a running "
+"LMCache server. Quotas are soft limits: exceeding a quota triggers "
+"eviction on the next cycle (~1 s) rather than rejecting writes."
+msgstr "``lmcache quota`` 命令管理运行中的 LMCache 服务器上的每个 salt 的缓存配额。配额是软限制：超过配额会在下一个周期（约 1 秒）触发逐出，而不是拒绝写入。"
+
+#: ../../source/cli/quota.rst:29
+msgid "set"
+msgstr "设置"
+
+#: ../../source/cli/quota.rst:31
+msgid "Create or update a quota for a given ``cache_salt``."
+msgstr "为给定的 ``cache_salt`` 创建或更新配额。"
+
+#: ../../source/cli/quota.rst:37 ../../source/cli/quota.rst:87
+#: ../../source/cli/quota.rst:134 ../../source/cli/quota.rst:211
+msgid "**Example:**"
+msgstr "**示例：**"
+
+#: ../../source/cli/quota.rst:49 ../../source/cli/quota.rst:100
+#: ../../source/cli/quota.rst:178 ../../source/cli/quota.rst:222
+msgid "**Options:**"
+msgstr "**选项:**"
+
+#: ../../source/cli/quota.rst:55 ../../source/cli/quota.rst:106
+#: ../../source/cli/quota.rst:184 ../../source/cli/quota.rst:228
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/quota.rst:56 ../../source/cli/quota.rst:107
+#: ../../source/cli/quota.rst:185 ../../source/cli/quota.rst:229
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/cli/quota.rst:57 ../../source/cli/quota.rst:108
+#: ../../source/cli/quota.rst:186 ../../source/cli/quota.rst:230
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/quota.rst:58 ../../source/cli/quota.rst:109
+#: ../../source/cli/quota.rst:231
+msgid "``<salt>``"
+msgstr "``<salt>``"
+
+#: ../../source/cli/quota.rst:59 ../../source/cli/quota.rst:63
+#: ../../source/cli/quota.rst:110 ../../source/cli/quota.rst:232
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/cli/quota.rst:60
+msgid ""
+"The ``cache_salt`` identifier. Use ``_default`` for anonymous (un-salted)"
+" traffic."
+msgstr "``cache_salt`` 标识符。对于匿名（未加盐）流量，请使用 ``_default``\\ 。"
+
+#: ../../source/cli/quota.rst:62
+msgid "``--limit-gb``"
+msgstr "``--limit-gb``"
+
+#: ../../source/cli/quota.rst:64
+msgid "Quota limit in gigabytes (non-negative float)."
+msgstr "以千兆字节为单位的配额限制（非负浮点数）。"
+
+#: ../../source/cli/quota.rst:65 ../../source/cli/quota.rst:112
+#: ../../source/cli/quota.rst:187 ../../source/cli/quota.rst:234
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/quota.rst:66 ../../source/cli/quota.rst:69
+#: ../../source/cli/quota.rst:72 ../../source/cli/quota.rst:75
+#: ../../source/cli/quota.rst:113 ../../source/cli/quota.rst:116
+#: ../../source/cli/quota.rst:119 ../../source/cli/quota.rst:122
+#: ../../source/cli/quota.rst:188 ../../source/cli/quota.rst:191
+#: ../../source/cli/quota.rst:194 ../../source/cli/quota.rst:197
+#: ../../source/cli/quota.rst:235 ../../source/cli/quota.rst:238
+#: ../../source/cli/quota.rst:241 ../../source/cli/quota.rst:244
+msgid "No"
+msgstr "不"
+
+#: ../../source/cli/quota.rst:67 ../../source/cli/quota.rst:114
+#: ../../source/cli/quota.rst:189 ../../source/cli/quota.rst:236
+msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
+msgstr "LMCache HTTP 服务器 URL（默认：\\ ``http://localhost:8080``\\ ）。"
+
+#: ../../source/cli/quota.rst:68 ../../source/cli/quota.rst:115
+#: ../../source/cli/quota.rst:190 ../../source/cli/quota.rst:237
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/quota.rst:70 ../../source/cli/quota.rst:117
+#: ../../source/cli/quota.rst:192 ../../source/cli/quota.rst:239
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
+
+#: ../../source/cli/quota.rst:71 ../../source/cli/quota.rst:118
+#: ../../source/cli/quota.rst:193 ../../source/cli/quota.rst:240
+msgid "``--output``"
+msgstr "``--output``"
+
+#: ../../source/cli/quota.rst:73
+msgid "Save output to a file (uses the format chosen by ``--format``)."
+msgstr "将输出保存到文件中（使用 ``--format`` 选择的格式）。"
+
+#: ../../source/cli/quota.rst:74 ../../source/cli/quota.rst:121
+#: ../../source/cli/quota.rst:196 ../../source/cli/quota.rst:243
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/quota.rst:76
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/cli/quota.rst:79
+msgid "get"
+msgstr "获取"
+
+#: ../../source/cli/quota.rst:81
+msgid "Show the current quota limit and live usage for a specific ``cache_salt``."
+msgstr "显示特定 ``cache_salt`` 的当前配额限制和实时使用情况。"
+
+#: ../../source/cli/quota.rst:111 ../../source/cli/quota.rst:233
+msgid "The ``cache_salt`` identifier."
+msgstr "``cache_salt`` 标识符。"
+
+#: ../../source/cli/quota.rst:120 ../../source/cli/quota.rst:195
+#: ../../source/cli/quota.rst:242
+msgid "Save output to a file."
+msgstr "将输出保存到文件。"
+
+#: ../../source/cli/quota.rst:123 ../../source/cli/quota.rst:198
+#: ../../source/cli/quota.rst:245
+msgid "Suppress stdout output."
+msgstr "抑制标准输出。"
+
+#: ../../source/cli/quota.rst:126
+msgid "list"
+msgstr "列表"
+
+#: ../../source/cli/quota.rst:128
+msgid "List all registered quotas along with their current usage."
+msgstr "列出所有注册的配额及其当前使用情况。"
+
+#: ../../source/cli/quota.rst:151
+msgid "**JSON output:**"
+msgstr "**JSON 输出：**"
+
+#: ../../source/cli/quota.rst:201
+msgid "delete"
+msgstr "删除"
+
+#: ../../source/cli/quota.rst:203
+msgid ""
+"Remove a quota entry for a given ``cache_salt``. Any bytes still cached "
+"under this salt become over-budget on the next eviction cycle and will be"
+" evicted (effective limit drops to 0)."
+msgstr "删除给定 ``cache_salt`` 的配额条目。此盐下仍然缓存的任何字节将在下一个逐出周期中超出预算，并将被逐出（有效限制降至 0）。"
+
+#: ../../source/cli/quota.rst:248
+msgid "Exit Codes"
+msgstr "退出代码"
+
+#: ../../source/cli/quota.rst:254
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/quota.rst:255
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/quota.rst:256
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/quota.rst:257
+msgid "Success."
+msgstr "成功。"
+
+#: ../../source/cli/quota.rst:258
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/quota.rst:259
+msgid "Error (connection failure, server error, bad arguments)."
+msgstr "错误（连接失败、服务器错误、参数错误）。"
+
+#: ../../source/cli/quota.rst:262
+msgid "The ``_default`` Salt"
+msgstr "``_default`` 盐"
+
+#: ../../source/cli/quota.rst:264
+msgid ""
+"The LMCache server uses an empty string (``\"\"``) as the ``cache_salt`` "
+"for anonymous / un-salted traffic. Since empty strings cannot appear in "
+"URL path parameters, the HTTP API (and this CLI) uses the sentinel "
+"``_default`` in its place."
+msgstr "LMCache 服务器使用空字符串 (``\"\"``) 作为匿名 / 未加盐流量的 ``cache_salt``\\ 。由于空字符串不能出现在 URL 路径参数中，HTTP API（以及此 CLI）使用哨兵 ``_default`` 代替。"
+
+#: ../../source/cli/quota.rst:278
+msgid "Common Patterns"
+msgstr "常见模式"
+
+#: ../../source/cli/quota.rst:280
+msgid "**Provision quotas for multiple tenants:**"
+msgstr "**为多个租户配置配额：**"
+
+#: ../../source/cli/quota.rst:288
+msgid "**Monitor usage in a script:**"
+msgstr "**在脚本中监控使用情况：**"
+
+#: ../../source/cli/quota.rst:296
+msgid "**Revoke access (evict all cached data for a salt):**"
+msgstr "**撤销访问（逐出所有缓存数据以便于一个盐）：**"
+

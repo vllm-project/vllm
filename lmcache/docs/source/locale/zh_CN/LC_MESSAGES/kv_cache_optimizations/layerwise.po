@@ -1,0 +1,308 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:2
+msgid "Layerwise KV Transfer"
+msgstr "逐层 KV 传输"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:9
+msgid ""
+"The storage and loading of KV Cache on a layer granularity is a key "
+"optimization that allows for forward pass to \"stagger\" through its "
+"computation as each layer's KV Cache is received instead of only waiting "
+"to begin after the entire loading"
+msgstr ""
+"在逐层粒度上存储和加载 KV Cache 是一个关键优化，它允许前向传播在计算过程中“错开”，因为每一层的 KV Cache "
+"在接收后就可以开始，而不必等到整个加载完成后才开始。"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:11
+msgid ""
+"CacheBlend is implemented on top of the layerwise codepath in order to "
+"pipeline recompute and loading to mask the latency of loading KV Cache."
+msgstr "CacheBlend 是在逐层代码路径之上实现的，目的是将重计算和加载进行流水线处理，以掩盖加载 KV Cache 的延迟。"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:13
+msgid "Basic Codepath"
+msgstr "基本代码路径"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:30
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:32
+msgid "**CacheEngine**"
+msgstr "**CacheEngine**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:33
+msgid "The main orchestrator containing two primary generators:"
+msgstr "主要协调器，包含两个主要生成器："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:35
+msgid ""
+"**Retrieval Generator** (N + 2 yields): Handles layer-by-layer KV cache "
+"loading with on-demand memory allocation"
+msgstr "**检索生成器** (N + 2 生成): 处理逐层 KV Cache 加载，按需分配内存"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:36
+msgid ""
+"**Storage Generator** (N + 1 yields): Manages layer-by-layer KV cache "
+"saving with upfront CPU memory allocation"
+msgstr "**存储生成器** (N + 1 yields): 管理逐层 KV Cache 保存，并提前分配 CPU 内存"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:38
+msgid "**LayerwiseGPUConnector**"
+msgstr "**LayerwiseGPUConnector**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:39
+msgid "Manages GPU-CPU memory transfers with dedicated CUDA streams:"
+msgstr "管理使用专用 CUDA 流的 GPU-CPU 内存传输："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:41
+msgid ""
+"**Load GPU Buffer**: Temporary GPU memory for CPU→GPU transfers "
+"(``use_gpu: true``)"
+msgstr "**加载 GPU 缓冲区**\\ ：用于 CPU→GPU 传输的临时显存（\\ ``use_gpu: true``\\ ）"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:42
+msgid ""
+"**Store GPU Buffer**: Temporary GPU memory for GPU→CPU transfers "
+"(``use_gpu: true``)"
+msgstr "**存储 GPU 缓冲区**\\ ：用于 GPU→CPU 传输的临时显存（\\ ``use_gpu: true``\\ ）"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:43
+msgid ""
+"**Nested Generators**: ``batched_to_gpu()`` and ``batched_from_gpu()`` "
+"handle actual memory operations"
+msgstr "**嵌套生成器**: ``batched_to_gpu()`` 和 ``batched_from_gpu()`` 处理实际的内存操作"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:45
+msgid "**StorageManager**"
+msgstr "**存储管理器**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:46
+msgid "Handles persistent storage operations:"
+msgstr "处理持久存储操作："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:48
+msgid ""
+"``layerwise_batched_get()``: Asynchronous retrieval with ``.result()`` "
+"for request-level concurrency"
+msgstr "``layerwise_batched_get()``: 使用 ``.result()`` 进行请求级并发的异步检索"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:49
+msgid "``batched_put()``: Stores memory objects to persistent backends"
+msgstr "``batched_put()``: 将内存对象存储到持久后端"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:52
+msgid "Execution Flow"
+msgstr "执行流程"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:54
+msgid "The layerwise pipeline follows a numbered execution sequence:"
+msgstr "逐层管道遵循编号的执行顺序："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:56
+msgid "**1. start_load_kv()**"
+msgstr "**1. start_load_kv()**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:57
+msgid "Initializes Retrieval Generator via ``lmcache_engine.retrieve_layer()``"
+msgstr "通过 ``lmcache_engine.retrieve_layer()`` 初始化检索生成器"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:58
+msgid "Performs setup (1st ``next()``) and loads layer 0 (2nd ``next()``)"
+msgstr "执行设置（第一次 ``next()``\\ ）并加载第 0 层（第二次 ``next()``\\ ）"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:59
+msgid "Creates ``layerwise_retrievers`` list for ongoing layer processing"
+msgstr "创建 ``layerwise_retrievers`` 列表以进行持续的层处理"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:61
+msgid "**2. wait_for_layer_load()** (repeated for each layer)"
+msgstr "**2. wait_for_layer_load()** (对每一层重复执行)"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:62
+msgid "Advances Retrieval Generator via ``next()`` to process layer i"
+msgstr "通过 ``next()`` 使检索生成器向前推进以处理第 i 层"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:63
+msgid ""
+"Triggers ``StorageManager.layerwise_batched_get()`` for async cache "
+"retrieval"
+msgstr "触发 ``StorageManager.layerwise_batched_get()`` 进行异步缓存查找"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:64
+msgid ""
+"Calls GPU Load Generator's ``batched_to_gpu()`` to transfer memory "
+"objects to GPU"
+msgstr "调用 GPU Load Generator 的 ``batched_to_gpu()`` 将内存对象传输到 GPU"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:65
+msgid ""
+"**Last request in batch**: Synchronizes "
+"``current_stream.wait_stream(load_stream)``"
+msgstr "**批处理中的最后请求**\\ ：同步 ``current_stream.wait_stream(load_stream)``"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:67
+msgid "**3. save_kv_layer()** (repeated for each layer)"
+msgstr "**3. save_kv_layer()**\\ （对每一层重复执行）"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:68
+msgid ""
+"**First call only**: Creates Storage Generator with upfront CPU memory "
+"allocation"
+msgstr "**首次调用仅**\\ ：创建具有预先分配 CPU 内存的存储生成器"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:69
+msgid "Advances Storage Generator via ``next()`` to process layer i"
+msgstr "通过 ``next()`` 进展存储生成器以处理第 i 层"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:70
+msgid ""
+"Calls GPU Store Generator's ``batched_from_gpu()`` to transfer GPU data "
+"to CPU"
+msgstr "调用 GPU 存储生成器的 ``batched_from_gpu()`` 将 GPU 数据传输到 CPU"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:71
+msgid ""
+"**First request in batch**: Synchronizes "
+"``store_stream.wait_stream(current_stream)``"
+msgstr "**批处理中的第一个请求**\\ ：同步 ``store_stream.wait_stream(current_stream)``"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:73
+msgid "**4. wait_for_save()**"
+msgstr "**4. wait_for_save()**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:74
+msgid "Finalizes Storage Generator with last ``next()`` call"
+msgstr "通过最后一次 ``next()`` 调用来完成存储生成器"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:75
+msgid "Completes all ``StorageManager.batched_put()`` operations"
+msgstr "完成所有 ``StorageManager.batched_put()`` 操作"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:76
+msgid "Performs GPU Store Generator cleanup"
+msgstr "执行 GPU 存储生成器清理"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:79
+msgid "Key Optimizations"
+msgstr "关键优化"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:81
+msgid "**Pipelined Memory Operations**"
+msgstr "**流水线内存操作**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:82
+msgid "The system overlaps layer N+1 computation with layer N storage."
+msgstr "系统将第 N+1 层的计算与第 N 层的存储重叠。"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:84
+msgid "**Stream Synchronization**"
+msgstr "**流同步**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:85
+msgid "Three CUDA streams coordinate operations:"
+msgstr "三个 CUDA 流协调操作："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:87
+msgid "``current_stream``: vLLM's forward pass computation"
+msgstr "``current_stream``: vLLM 的前向传播计算"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:88
+msgid "``load_stream``: KV cache loading operations"
+msgstr "``load_stream``: KV Cache 加载操作"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:89
+msgid "``store_stream``: KV cache storing operations"
+msgstr "``store_stream``: KV Cache 存储操作"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:91
+msgid "**Batch-Level Coordination**"
+msgstr "**批量级协调**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:92
+msgid "Multiple requests are processed together with specialized synchronization:"
+msgstr "多个请求一起处理，并使用专门的同步机制："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:94
+msgid ""
+"**First request**: Provides store stream synchronization to prevent GPU "
+"buffer corruption"
+msgstr "**第一次请求**\\ ：提供存储流同步以防止 GPU 缓冲区损坏"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:95
+msgid ""
+"**Last request**: Provides load stream synchronization to ensure KV cache"
+" availability"
+msgstr "**最后请求**\\ ：提供加载流同步以确保 KV Cache 可用性"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:97
+msgid "**Memory Allocation Strategies**"
+msgstr "**内存分配策略**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:98
+msgid "**Retrieval**: Layer-by-layer allocation"
+msgstr "**检索**\\ ：逐层分配"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:99
+msgid "**Storage**: Upfront allocation for all layers"
+msgstr "**存储**\\ ：为所有层的预先分配"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:101
+msgid "**Cache Key Management**"
+msgstr "**缓存键管理**"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:102
+msgid ""
+"Multi-layer cache engine keys use ``split_layers(N)`` to create per-layer"
+" kubernetes_deployment"
+msgstr "多层缓存引擎密钥使用 ``split_layers(N)`` 来创建每层的 kubernetes_deployment"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:105
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:107
+msgid "Enable layerwise caching by setting:"
+msgstr "通过设置启用逐层缓存："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:113
+msgid ""
+"The system automatically selects appropriate layerwise GPU connectors "
+"based on configuration:"
+msgstr "系统会根据配置自动选择适当的逐层显卡连接器："
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:115
+msgid "``VLLMPagedMemLayerwiseGPUConnector``: For standard layerwise operations"
+msgstr "``VLLMPagedMemLayerwiseGPUConnector``: 用于标准逐层操作"
+
+#: ../../source/kv_cache_optimizations/layerwise.rst:116
+msgid "``VLLMBufferLayerwiseGPUConnector``: When blending is enabled"
+msgstr "``VLLMBufferLayerwiseGPUConnector``: 当启用混合时"
+

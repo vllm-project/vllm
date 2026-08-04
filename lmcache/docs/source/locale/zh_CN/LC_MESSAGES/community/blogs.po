@@ -1,0 +1,36 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/community/blogs.rst:2
+msgid "Blogs"
+msgstr "博客"
+
+#: ../../source/community/blogs.rst:4
+msgid ""
+"LMCache is a community-driven open-source project and we publish regular "
+"blog posts to share updates, performance comparison and new features. You"
+" can find the latest blog posts below:"
+msgstr "LMCache 是一个由社区驱动的开源项目，我们定期发布博客文章以分享更新、性能比较和新功能。您可以在下面找到最新的博客文章："
+
+#: ../../source/community/blogs.rst:7
+msgid "`LMCache blogs <https://blog.lmcache.ai/>`_"
+msgstr "`LMCache blogs <https://blog.lmcache.ai/>`_"
+

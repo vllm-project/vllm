@@ -1,0 +1,1046 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/vllm_apis.rst:4
+msgid "vLLM / Inference APIs"
+msgstr "vLLM / 推理 API"
+
+#: ../../source/internal_api_server/vllm_apis.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/http_api`。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:11
+msgid ""
+"These APIs are specific to vLLM inference workers and provide cache "
+"management, configuration, freeze control, chunk statistics, and version "
+"information."
+msgstr "这些 API 特定于 vLLM 推理工作者，提供缓存管理、配置、冻结控制、块统计和版本信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:17
+msgid "Endpoints"
+msgstr "端点"
+
+#: ../../source/internal_api_server/vllm_apis.rst:20
+msgid "Version & Info"
+msgstr "版本与信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:23
+msgid "``GET /lmc_version`` — LMCache Version"
+msgstr "``GET /lmc_version`` — LMCache 版本"
+
+#: ../../source/internal_api_server/vllm_apis.rst:25
+msgid "Get the LMCache library version string."
+msgstr "获取 LMCache 库版本字符串。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:27
+#: ../../source/internal_api_server/vllm_apis.rst:42
+#: ../../source/internal_api_server/vllm_apis.rst:57
+#: ../../source/internal_api_server/vllm_apis.rst:72
+#: ../../source/internal_api_server/vllm_apis.rst:103
+#: ../../source/internal_api_server/vllm_apis.rst:129
+#: ../../source/internal_api_server/vllm_apis.rst:210
+#: ../../source/internal_api_server/vllm_apis.rst:347
+#: ../../source/internal_api_server/vllm_apis.rst:443
+#: ../../source/internal_api_server/vllm_apis.rst:583
+#: ../../source/internal_api_server/vllm_apis.rst:666
+#: ../../source/internal_api_server/vllm_apis.rst:720
+#: ../../source/internal_api_server/vllm_apis.rst:968
+#: ../../source/internal_api_server/vllm_apis.rst:1008
+msgid "**Method**: ``GET``"
+msgstr "**方法**: ``GET``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:28
+msgid "**Path**: ``/lmc_version``"
+msgstr "**路径**: ``/lmc_version``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:29
+#: ../../source/internal_api_server/vllm_apis.rst:44
+#: ../../source/internal_api_server/vllm_apis.rst:59
+#: ../../source/internal_api_server/vllm_apis.rst:105
+#: ../../source/internal_api_server/vllm_apis.rst:445
+#: ../../source/internal_api_server/vllm_apis.rst:535
+#: ../../source/internal_api_server/vllm_apis.rst:560
+#: ../../source/internal_api_server/vllm_apis.rst:585
+#: ../../source/internal_api_server/vllm_apis.rst:617
+#: ../../source/internal_api_server/vllm_apis.rst:643
+#: ../../source/internal_api_server/vllm_apis.rst:668
+#: ../../source/internal_api_server/vllm_apis.rst:722
+#: ../../source/internal_api_server/vllm_apis.rst:757
+#: ../../source/internal_api_server/vllm_apis.rst:830
+#: ../../source/internal_api_server/vllm_apis.rst:889
+#: ../../source/internal_api_server/vllm_apis.rst:922
+#: ../../source/internal_api_server/vllm_apis.rst:946
+#: ../../source/internal_api_server/vllm_apis.rst:970
+#: ../../source/internal_api_server/vllm_apis.rst:1010
+msgid "**Parameters**: None"
+msgstr "**参数**: 无"
+
+#: ../../source/internal_api_server/vllm_apis.rst:30
+msgid "**Response**: Plain version string."
+msgstr "**响应**\\ ：纯文本版本字符串。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:38
+msgid "``GET /commit_id`` — LMCache Commit ID"
+msgstr "``GET /commit_id`` — LMCache 提交 ID"
+
+#: ../../source/internal_api_server/vllm_apis.rst:40
+msgid "Get the LMCache git commit ID."
+msgstr "获取 LMCache git 提交 ID。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:43
+msgid "**Path**: ``/commit_id``"
+msgstr "**路径**: ``/commit_id``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:45
+msgid "**Response**: Plain commit ID string."
+msgstr "**响应**: 纯文本提交 ID 字符串。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:53
+msgid "``GET /version`` — Full Version Info"
+msgstr "``GET /version`` — 完整版本信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:55
+msgid "Get full version info (version + commit ID)."
+msgstr "获取完整版本信息（版本 + 提交 ID）。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:58
+msgid "**Path**: ``/version``"
+msgstr "**路径**: ``/version``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:60
+msgid "**Response**: Combined version string."
+msgstr "**响应**: 组合版本字符串。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:68
+msgid "``GET /inference_info`` — Inference Information"
+msgstr "``GET /inference_info`` — 推理信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:70
+msgid "Get inference information including vLLM config and LMCache details."
+msgstr "获取推理信息，包括 vLLM 配置和 LMCache 详细信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:73
+msgid "**Path**: ``/inference_info``"
+msgstr "**路径**: ``/inference_info``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:74
+#: ../../source/internal_api_server/vllm_apis.rst:131
+#: ../../source/internal_api_server/vllm_apis.rst:212
+#: ../../source/internal_api_server/vllm_apis.rst:241
+#: ../../source/internal_api_server/vllm_apis.rst:276
+#: ../../source/internal_api_server/vllm_apis.rst:316
+#: ../../source/internal_api_server/vllm_apis.rst:349
+#: ../../source/internal_api_server/vllm_apis.rst:406
+#: ../../source/internal_api_server/vllm_apis.rst:781
+#: ../../source/internal_api_server/vllm_apis.rst:1036
+#: ../../source/internal_api_server/vllm_apis.rst:1079
+msgid "**Parameters**:"
+msgstr "**参数**:"
+
+#: ../../source/internal_api_server/vllm_apis.rst:77
+#: ../../source/internal_api_server/vllm_apis.rst:134
+#: ../../source/internal_api_server/vllm_apis.rst:215
+#: ../../source/internal_api_server/vllm_apis.rst:244
+#: ../../source/internal_api_server/vllm_apis.rst:279
+#: ../../source/internal_api_server/vllm_apis.rst:319
+#: ../../source/internal_api_server/vllm_apis.rst:352
+#: ../../source/internal_api_server/vllm_apis.rst:409
+#: ../../source/internal_api_server/vllm_apis.rst:784
+#: ../../source/internal_api_server/vllm_apis.rst:1039
+#: ../../source/internal_api_server/vllm_apis.rst:1082
+msgid "Name"
+msgstr "名称"
+
+#: ../../source/internal_api_server/vllm_apis.rst:77
+#: ../../source/internal_api_server/vllm_apis.rst:134
+#: ../../source/internal_api_server/vllm_apis.rst:215
+#: ../../source/internal_api_server/vllm_apis.rst:244
+#: ../../source/internal_api_server/vllm_apis.rst:279
+#: ../../source/internal_api_server/vllm_apis.rst:319
+#: ../../source/internal_api_server/vllm_apis.rst:352
+#: ../../source/internal_api_server/vllm_apis.rst:409
+#: ../../source/internal_api_server/vllm_apis.rst:480
+#: ../../source/internal_api_server/vllm_apis.rst:784
+#: ../../source/internal_api_server/vllm_apis.rst:1039
+#: ../../source/internal_api_server/vllm_apis.rst:1082
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/internal_api_server/vllm_apis.rst:77
+#: ../../source/internal_api_server/vllm_apis.rst:134
+#: ../../source/internal_api_server/vllm_apis.rst:215
+#: ../../source/internal_api_server/vllm_apis.rst:244
+#: ../../source/internal_api_server/vllm_apis.rst:279
+#: ../../source/internal_api_server/vllm_apis.rst:319
+#: ../../source/internal_api_server/vllm_apis.rst:352
+#: ../../source/internal_api_server/vllm_apis.rst:409
+#: ../../source/internal_api_server/vllm_apis.rst:480
+#: ../../source/internal_api_server/vllm_apis.rst:784
+#: ../../source/internal_api_server/vllm_apis.rst:1039
+#: ../../source/internal_api_server/vllm_apis.rst:1082
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/internal_api_server/vllm_apis.rst:79
+msgid "``format``"
+msgstr "``format``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:79
+#: ../../source/internal_api_server/vllm_apis.rst:136
+#: ../../source/internal_api_server/vllm_apis.rst:217
+#: ../../source/internal_api_server/vllm_apis.rst:281
+#: ../../source/internal_api_server/vllm_apis.rst:321
+#: ../../source/internal_api_server/vllm_apis.rst:354
+#: ../../source/internal_api_server/vllm_apis.rst:411
+#: ../../source/internal_api_server/vllm_apis.rst:482
+#: ../../source/internal_api_server/vllm_apis.rst:1041
+#: ../../source/internal_api_server/vllm_apis.rst:1084
+msgid "str"
+msgstr "字符串"
+
+#: ../../source/internal_api_server/vllm_apis.rst:79
+msgid "(Optional) Reserved for future use"
+msgstr "(可选) 保留以备将来使用"
+
+#: ../../source/internal_api_server/vllm_apis.rst:82
+#: ../../source/internal_api_server/vllm_apis.rst:106
+#: ../../source/internal_api_server/vllm_apis.rst:170
+#: ../../source/internal_api_server/vllm_apis.rst:249
+#: ../../source/internal_api_server/vllm_apis.rst:284
+#: ../../source/internal_api_server/vllm_apis.rst:324
+#: ../../source/internal_api_server/vllm_apis.rst:359
+#: ../../source/internal_api_server/vllm_apis.rst:414
+#: ../../source/internal_api_server/vllm_apis.rst:446
+#: ../../source/internal_api_server/vllm_apis.rst:487
+#: ../../source/internal_api_server/vllm_apis.rst:536
+#: ../../source/internal_api_server/vllm_apis.rst:561
+#: ../../source/internal_api_server/vllm_apis.rst:586
+#: ../../source/internal_api_server/vllm_apis.rst:618
+#: ../../source/internal_api_server/vllm_apis.rst:644
+#: ../../source/internal_api_server/vllm_apis.rst:669
+#: ../../source/internal_api_server/vllm_apis.rst:723
+#: ../../source/internal_api_server/vllm_apis.rst:758
+#: ../../source/internal_api_server/vllm_apis.rst:789
+#: ../../source/internal_api_server/vllm_apis.rst:831
+#: ../../source/internal_api_server/vllm_apis.rst:890
+#: ../../source/internal_api_server/vllm_apis.rst:923
+#: ../../source/internal_api_server/vllm_apis.rst:947
+#: ../../source/internal_api_server/vllm_apis.rst:971
+#: ../../source/internal_api_server/vllm_apis.rst:1011
+#: ../../source/internal_api_server/vllm_apis.rst:1044
+#: ../../source/internal_api_server/vllm_apis.rst:1087
+msgid "**Response**: ``application/json``"
+msgstr "**响应**: ``application/json``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:88
+msgid "**Error Response** (HTTP 500):"
+msgstr "**错误响应** (HTTP 500):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:99
+msgid "``GET /inference_version`` — vLLM Version"
+msgstr "``GET /inference_version`` — vLLM 版本"
+
+#: ../../source/internal_api_server/vllm_apis.rst:101
+msgid "Get the vLLM version information."
+msgstr "获取 vLLM 版本信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:104
+msgid "**Path**: ``/inference_version``"
+msgstr "**路径**: ``/inference_version``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:112
+#: ../../source/internal_api_server/vllm_apis.rst:259
+#: ../../source/internal_api_server/vllm_apis.rst:290
+#: ../../source/internal_api_server/vllm_apis.rst:330
+#: ../../source/internal_api_server/vllm_apis.rst:427
+#: ../../source/internal_api_server/vllm_apis.rst:452
+#: ../../source/internal_api_server/vllm_apis.rst:542
+#: ../../source/internal_api_server/vllm_apis.rst:567
+#: ../../source/internal_api_server/vllm_apis.rst:592
+#: ../../source/internal_api_server/vllm_apis.rst:624
+#: ../../source/internal_api_server/vllm_apis.rst:650
+#: ../../source/internal_api_server/vllm_apis.rst:675
+#: ../../source/internal_api_server/vllm_apis.rst:764
+#: ../../source/internal_api_server/vllm_apis.rst:896
+#: ../../source/internal_api_server/vllm_apis.rst:929
+#: ../../source/internal_api_server/vllm_apis.rst:953
+#: ../../source/internal_api_server/vllm_apis.rst:977
+#: ../../source/internal_api_server/vllm_apis.rst:1017
+#: ../../source/internal_api_server/vllm_apis.rst:1050
+#: ../../source/internal_api_server/vllm_apis.rst:1093
+msgid "**Example Response**:"
+msgstr "**示例响应**:"
+
+#: ../../source/internal_api_server/vllm_apis.rst:122
+msgid "Configuration & Metadata"
+msgstr "配置与元数据"
+
+#: ../../source/internal_api_server/vllm_apis.rst:125
+msgid "``GET /conf`` — Get Configuration"
+msgstr "``GET /conf`` — 获取配置"
+
+#: ../../source/internal_api_server/vllm_apis.rst:127
+msgid "Get current LMCache engine configuration values."
+msgstr "获取当前 LMCache 引擎配置值。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:130
+#: ../../source/internal_api_server/vllm_apis.rst:167
+msgid "**Path**: ``/conf``"
+msgstr "**路径**: ``/conf``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:136
+#: ../../source/internal_api_server/vllm_apis.rst:217
+msgid "``names``"
+msgstr "``names``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:136
+msgid "(Optional) Comma-separated list of config names to filter"
+msgstr "（可选）以逗号分隔的配置名称列表，用于过滤。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:139
+msgid ""
+"**Response**: ``application/json`` — JSON object of configuration key-"
+"value pairs."
+msgstr "**响应**: ``application/json`` — 配置键值对的 JSON 对象。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:151
+msgid "``POST /conf`` — Update Configuration (Experimental)"
+msgstr "``POST /conf`` — 更新配置（实验性）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:153
+msgid "Update one or more configuration values at runtime."
+msgstr "在运行时更新一个或多个配置值。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:157
+msgid ""
+"This feature is currently **experimental**. All configuration keys are "
+"mutable at runtime by default unless explicitly marked as ``\"mutable\": "
+"False`` in ``_CONFIG_DEFINITIONS``. The default will be changed to "
+"**immutable** once the feature is stabilized."
+msgstr ""
+"此功能目前是 **实验性** 的。除非在 ``_CONFIG_DEFINITIONS`` 中明确标记为 ``\"mutable\": "
+"False``\\ ，否则所有配置键在运行时默认是可变的。一旦该功能稳定，默认值将更改为 **不可变**\\ 。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:162
+msgid ""
+"Updating a configuration only modifies the value in the "
+"``LMCacheEngineConfig`` object. If a component has already cached the "
+"value elsewhere, the change will **not** take effect for that component."
+msgstr ""
+"更新配置仅会修改 ``LMCacheEngineConfig`` 对象中的值。如果某个组件已经在其他地方缓存了该值，则该更改对该组件将\\ "
+"**无效**\\ 。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:166
+#: ../../source/internal_api_server/vllm_apis.rst:274
+#: ../../source/internal_api_server/vllm_apis.rst:314
+#: ../../source/internal_api_server/vllm_apis.rst:404
+#: ../../source/internal_api_server/vllm_apis.rst:474
+#: ../../source/internal_api_server/vllm_apis.rst:755
+#: ../../source/internal_api_server/vllm_apis.rst:779
+#: ../../source/internal_api_server/vllm_apis.rst:828
+#: ../../source/internal_api_server/vllm_apis.rst:887
+#: ../../source/internal_api_server/vllm_apis.rst:920
+#: ../../source/internal_api_server/vllm_apis.rst:944
+msgid "**Method**: ``POST``"
+msgstr "**方法**: ``POST``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:168
+#: ../../source/internal_api_server/vllm_apis.rst:476
+msgid "**Content-Type**: ``application/json``"
+msgstr "**Content-Type**: ``application/json``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:169
+msgid "**Request Body**: JSON object with config name-value pairs."
+msgstr "**请求体**: JSON 对象，包含配置的名称-值对。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:178
+#: ../../source/internal_api_server/vllm_apis.rst:496
+msgid "**Example Response** (HTTP 200):"
+msgstr "**示例响应** (HTTP 200):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:189
+msgid "**Example Response** (partial failure, HTTP 400):"
+msgstr "**示例响应**\\ （部分失败，HTTP 400）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:198
+msgid "**Error Cases**:"
+msgstr "**错误案例**:"
+
+#: ../../source/internal_api_server/vllm_apis.rst:200
+msgid "Unknown config key → ``\"Unknown config\"``"
+msgstr "未知的配置键 → ``\"Unknown config\"``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:201
+msgid "Immutable config key → ``\"Config is not mutable at runtime\"``"
+msgstr "不可变配置键 → ``\"配置在运行时不可变\"``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:202
+msgid "Invalid JSON body → HTTP 400"
+msgstr "无效的 JSON 主体 → HTTP 400"
+
+#: ../../source/internal_api_server/vllm_apis.rst:206
+msgid "``GET /meta`` — Engine Metadata"
+msgstr "``GET /meta`` — 引擎元数据"
+
+#: ../../source/internal_api_server/vllm_apis.rst:208
+msgid ""
+"Get metadata of the LMCache engine (e.g., worker_id, model_name, "
+"kv_shape)."
+msgstr "获取 LMCache 引擎的元数据（例如，worker_id、model_name、kv_shape）。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:211
+msgid "**Path**: ``/meta``"
+msgstr "**路径**: ``/meta``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:217
+msgid "(Optional) Comma-separated list of attribute names to filter"
+msgstr "（可选）以逗号分隔的属性名称列表，用于过滤"
+
+#: ../../source/internal_api_server/vllm_apis.rst:220
+msgid "**Response**: ``application/json`` — JSON object of metadata attributes."
+msgstr "**响应**: ``application/json`` — 元数据属性的 JSON 对象。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:232
+msgid "Cache Operations"
+msgstr "缓存操作"
+
+#: ../../source/internal_api_server/vllm_apis.rst:235
+msgid "``DELETE /cache/clear`` — Clear Cache"
+msgstr "``DELETE /cache/clear`` — 清除缓存"
+
+#: ../../source/internal_api_server/vllm_apis.rst:237
+msgid "Clear cached KV data from the LMCache engine."
+msgstr "从 LMCache 引擎中清除缓存的 KV 数据。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:239
+msgid "**Method**: ``DELETE``"
+msgstr "**方法**: ``DELETE``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:240
+msgid "**Path**: ``/cache/clear``"
+msgstr "**路径**: ``/cache/clear``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:246
+msgid "``locations``"
+msgstr "``locations``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:246
+msgid "list[str]"
+msgstr "列表[str]"
+
+#: ../../source/internal_api_server/vllm_apis.rst:246
+msgid ""
+"(Optional) Storage backends to clear (e.g. ``LocalCPUBackend``, "
+"``LocalDiskBackend``). If not specified, clears all."
+msgstr ""
+"(可选) 要清除的存储后端（例如 ``LocalCPUBackend``\\ 、\\ ``LocalDiskBackend``\\ "
+"）。如果未指定，则清除所有。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:270
+msgid "``POST /cache/store`` — Store KV Cache"
+msgstr "``POST /cache/store`` — 存储 KV Cache"
+
+#: ../../source/internal_api_server/vllm_apis.rst:272
+msgid "Store KV cache data into the LMCache engine using mock tokens."
+msgstr "使用模拟令牌将 KV Cache 数据存储到 LMCache 引擎中。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:275
+msgid "**Path**: ``/cache/store``"
+msgstr "**路径**: ``/cache/store``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:281
+#: ../../source/internal_api_server/vllm_apis.rst:321
+msgid "``tokens_mock``"
+msgstr "``tokens_mock``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:281
+msgid ""
+"Two comma-separated numbers: ``\"start,end\"`` (e.g. ``\"0,100\"`` "
+"generates tokens [0..99])"
+msgstr "两个用逗号分隔的数字：\\ ``\"start,end\"``\\ （例如，\\ ``\"0,100\"`` 生成令牌 [0..99]）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:299
+msgid "**Error Response** (missing params, HTTP 400):"
+msgstr "**错误响应**\\ （缺少参数，HTTP 400）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:310
+msgid "``POST /cache/retrieve`` — Retrieve KV Cache"
+msgstr "``POST /cache/retrieve`` — 检索 KV Cache"
+
+#: ../../source/internal_api_server/vllm_apis.rst:312
+msgid "Retrieve KV cache data from the LMCache engine using mock tokens."
+msgstr "使用模拟令牌从 LMCache 引擎检索 KV Cache 数据。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:315
+msgid "**Path**: ``/cache/retrieve``"
+msgstr "**路径**: ``/cache/retrieve``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:321
+msgid "Two comma-separated numbers: ``\"start,end\"`` (e.g. ``\"0,100\"``)"
+msgstr "两个用逗号分隔的数字：\\ ``\"start,end\"``\\ （例如 ``\"0,100\"``\\ ）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:342
+msgid "``GET /cache/kvcache/check`` — KVCache Checksum"
+msgstr "``GET /cache/kvcache/check`` — KVCache 校验和"
+
+#: ../../source/internal_api_server/vllm_apis.rst:344
+msgid ""
+"Compute MD5 checksums for kvcaches at specified slot_mapping positions. "
+"Used for verifying that stored and retrieved kvcaches are identical."
+msgstr "计算指定 slot_mapping 位置的 KVCache 的 MD5 校验和。用于验证存储和检索的 KVCache 是否相同。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:348
+msgid "**Path**: ``/cache/kvcache/check``"
+msgstr "**路径**: ``/cache/kvcache/check``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:354
+msgid "``slot_mapping``"
+msgstr "``slot_mapping``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:354
+msgid ""
+"Slot indices, comma-separated. Supports ranges: ``\"0,1,2,3\"`` or "
+"``\"1,2,3,[9,12],17,19\"``"
+msgstr "槽索引，以逗号分隔。支持范围：\\ ``\"0,1,2,3\"`` 或 ``\"1,2,3,[9,12],17,19\"``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:355
+msgid "``chunk_size``"
+msgstr "``chunk_size``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:355
+#: ../../source/internal_api_server/vllm_apis.rst:483
+#: ../../source/internal_api_server/vllm_apis.rst:484
+msgid "int"
+msgstr "整数"
+
+#: ../../source/internal_api_server/vllm_apis.rst:355
+msgid "Chunk size for computing per-chunk checksums (required)"
+msgstr "每块计算每块校验和的块大小（必需）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:356
+msgid "``layerwise``"
+msgstr "``layerwise``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:356
+#: ../../source/internal_api_server/vllm_apis.rst:786
+msgid "bool"
+msgstr "布尔值"
+
+#: ../../source/internal_api_server/vllm_apis.rst:356
+msgid "If ``true``, output per-layer checksums per chunk (default: ``false``)"
+msgstr "如果 ``true``\\ ，则每个块输出每层的校验和（默认值：\\ ``false``\\ ）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:369
+msgid "**Example Response** (``layerwise=false``):"
+msgstr "**示例响应** (``layerwise=false``):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:382
+msgid "**Example Response** (``layerwise=true``):"
+msgstr "**示例响应** (``layerwise=true``):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:400
+msgid "``POST /cache/kvcache/record_slot`` — Toggle Slot Logging"
+msgstr "``POST /cache/kvcache/record_slot`` — 切换槽记录"
+
+#: ../../source/internal_api_server/vllm_apis.rst:402
+msgid ""
+"Enable or disable KVCache slot_mapping logging during store/retrieve "
+"operations."
+msgstr "在存储/检索操作期间启用或禁用 KVCache slot_mapping 日志记录。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:405
+msgid "**Path**: ``/cache/kvcache/record_slot``"
+msgstr "**路径**: ``/cache/kvcache/record_slot``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:411
+msgid "``enabled``"
+msgstr "``enabled``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:411
+msgid ""
+"``\"true\"`` to enable, ``\"false\"`` to disable. Omit to query current "
+"status."
+msgstr "``\"true\"`` 表示启用，\\ ``\"false\"`` 表示禁用。省略此项以查询当前状态。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:438
+msgid "``GET /cache/kvcache/info`` — KVCache Information"
+msgstr "``GET /cache/kvcache/info`` — KVCache 信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:440
+msgid ""
+"Get information about the current kvcaches structure including layer "
+"names, shapes, and device info."
+msgstr "获取当前 KVCache 结构的信息，包括层名称、形状和设备信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:444
+msgid "**Path**: ``/cache/kvcache/info``"
+msgstr "**路径**: ``/cache/kvcache/info``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:470
+msgid "``POST /cache/load-fs-chunks`` — Load FS Chunks"
+msgstr "``POST /cache/load-fs-chunks`` — 加载 FS 块"
+
+#: ../../source/internal_api_server/vllm_apis.rst:472
+msgid ""
+"Load chunk files from FSConnector storage into LocalCPUBackend's hot "
+"cache."
+msgstr "从 FSConnector 存储加载块文件到 LocalCPUBackend 的热缓存中。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:475
+msgid "**Path**: ``/cache/load-fs-chunks``"
+msgstr "**路径**: ``/cache/load-fs-chunks``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:477
+msgid "**Request Body**:"
+msgstr "**请求体**\\ ："
+
+#: ../../source/internal_api_server/vllm_apis.rst:480
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/internal_api_server/vllm_apis.rst:482
+msgid "``config_path``"
+msgstr "``config_path``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:482
+msgid "Path to LMCache engine configuration YAML file (required)"
+msgstr "LMCache 引擎配置 YAML 文件的路径（必填）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:483
+msgid "``max_chunks``"
+msgstr "``max_chunks``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:483
+msgid "(Optional) Maximum number of chunks to load"
+msgstr "(可选) 最大加载块数"
+
+#: ../../source/internal_api_server/vllm_apis.rst:484
+msgid "``max_failed_keys``"
+msgstr "``max_failed_keys``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:484
+msgid "Maximum failed keys to report (default: 10)"
+msgstr "报告的最大失败键数（默认：10）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:488
+msgid "**Tags**: ``cache-management``"
+msgstr "**标签**: ``cache-management``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:508
+msgid "**Error Response** (invalid config, HTTP 400):"
+msgstr "**错误响应**\\ （无效配置，HTTP 400）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:520
+msgid "Freeze Mode"
+msgstr "冻结模式"
+
+#: ../../source/internal_api_server/vllm_apis.rst:523
+msgid "``PUT /freeze/enable`` — Enable Freeze Mode"
+msgstr "``PUT /freeze/enable`` — 启用冻结模式"
+
+#: ../../source/internal_api_server/vllm_apis.rst:525
+msgid "Enable freeze mode for the LMCache engine. When enabled:"
+msgstr "为 LMCache 引擎启用冻结模式。启用后："
+
+#: ../../source/internal_api_server/vllm_apis.rst:527
+msgid "All store operations will be skipped (no new data stored)"
+msgstr "所有存储操作将被跳过（不存储新数据）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:528
+msgid "Only ``local_cpu`` backend will be used for retrieval"
+msgstr "仅使用 ``local_cpu`` 后端进行检索"
+
+#: ../../source/internal_api_server/vllm_apis.rst:529
+msgid "No admit/evict messages will be generated"
+msgstr "不会生成 admit/evict 消息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:531
+msgid "This protects the local_cpu hot cache from changes."
+msgstr "这可以保护本地 CPU 热缓存不受更改。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:533
+#: ../../source/internal_api_server/vllm_apis.rst:558
+#: ../../source/internal_api_server/vllm_apis.rst:615
+#: ../../source/internal_api_server/vllm_apis.rst:641
+#: ../../source/internal_api_server/vllm_apis.rst:1034
+#: ../../source/internal_api_server/vllm_apis.rst:1077
+msgid "**Method**: ``PUT``"
+msgstr "**方法**: ``PUT``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:534
+msgid "**Path**: ``/freeze/enable``"
+msgstr "**路径**: ``/freeze/enable``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:554
+msgid "``PUT /freeze/disable`` — Disable Freeze Mode"
+msgstr "``PUT /freeze/disable`` — 禁用冻结模式"
+
+#: ../../source/internal_api_server/vllm_apis.rst:556
+msgid "Disable freeze mode. Store operations will proceed normally."
+msgstr "禁用冻结模式。存储操作将正常进行。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:559
+msgid "**Path**: ``/freeze/disable``"
+msgstr "**路径**: ``/freeze/disable``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:579
+msgid "``GET /freeze/status`` — Freeze Status"
+msgstr "``GET /freeze/status`` — 冻结状态"
+
+#: ../../source/internal_api_server/vllm_apis.rst:581
+msgid "Get the current freeze mode status."
+msgstr "获取当前冻结模式状态。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:584
+msgid "**Path**: ``/freeze/status``"
+msgstr "**路径**: ``/freeze/status``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:604
+msgid "Hot Cache"
+msgstr "热缓存"
+
+#: ../../source/internal_api_server/vllm_apis.rst:606
+msgid ""
+"These endpoints control the hot cache feature of LocalCPUBackend. When "
+"hot cache is enabled, frequently accessed KV cache data will be kept in "
+"CPU memory for faster retrieval."
+msgstr ""
+"这些端点控制 LocalCPUBackend 的热缓存功能。当启用热缓存时，频繁访问的 KV Cache 数据将保留在 CPU "
+"内存中，以便更快地检索。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:611
+msgid "``PUT /hot_cache/enable`` — Enable Hot Cache"
+msgstr "``PUT /hot_cache/enable`` — 启用热缓存"
+
+#: ../../source/internal_api_server/vllm_apis.rst:613
+msgid "Enable hot cache for the LocalCPUBackend."
+msgstr "为 LocalCPUBackend 启用热缓存。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:616
+msgid "**Path**: ``/hot_cache/enable``"
+msgstr "**路径**: ``/hot_cache/enable``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:636
+msgid "``PUT /hot_cache/disable`` — Disable Hot Cache"
+msgstr "``PUT /hot_cache/disable`` — 禁用热缓存"
+
+#: ../../source/internal_api_server/vllm_apis.rst:638
+msgid ""
+"Disable hot cache for the LocalCPUBackend. Existing hot cache entries "
+"will be cleared and no new data will be written."
+msgstr "禁用 LocalCPUBackend 的热缓存。现有的热缓存条目将被清除，且不会写入新数据。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:642
+msgid "**Path**: ``/hot_cache/disable``"
+msgstr "**路径**: ``/hot_cache/disable``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:662
+msgid "``GET /hot_cache/status`` — Hot Cache Status"
+msgstr "``GET /hot_cache/status`` — 热缓存状态"
+
+#: ../../source/internal_api_server/vllm_apis.rst:664
+msgid "Get the current hot cache status of LocalCPUBackend."
+msgstr "获取 LocalCPUBackend 的当前热缓存状态。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:667
+msgid "**Path**: ``/hot_cache/status``"
+msgstr "**路径**: ``/hot_cache/status``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:687
+msgid "Chunk Statistics"
+msgstr "块统计"
+
+#: ../../source/internal_api_server/vllm_apis.rst:689
+msgid ""
+"These endpoints manage chunk-level statistics collection via "
+"``ChunkStatisticsLookupClient``. They are only available when the lookup "
+"client supports statistics."
+msgstr "这些端点通过 ``ChunkStatisticsLookupClient`` 管理块级统计信息的收集。只有在查找客户端支持统计信息时，它们才可用。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:695
+msgid "Lookup Client/Server Management"
+msgstr "查找客户端/服务器管理"
+
+#: ../../source/internal_api_server/vllm_apis.rst:697
+msgid ""
+"These endpoints allow runtime management of the lookup client and server."
+" They are useful for dynamically reconfiguring the lookup mechanism "
+"without restarting the service."
+msgstr "这些端点允许对查找客户端和服务器进行运行时管理。它们对于在不重启服务的情况下动态重新配置查找机制非常有用。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:703
+msgid "**Configuration Update Required First**"
+msgstr "**首先需要更新配置**"
+
+#: ../../source/internal_api_server/vllm_apis.rst:705
+msgid ""
+"Before calling ``/lookup/create`` or ``/lookup/recreate``, you **MUST** "
+"update the configuration via the ``/conf`` API first. The new lookup "
+"client/server will be created using ``LookupClientFactory``."
+msgstr ""
+"在调用 ``/lookup/create`` 或 ``/lookup/recreate`` 之前，您 **必须** 首先通过 ``/conf`` "
+"API 更新配置。新的查找客户端/服务器将使用 ``LookupClientFactory`` 创建。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:709
+msgid ""
+"For some configurations (e.g., switching "
+"``enable_scheduler_bypass_lookup``), you only need to update the "
+"**scheduler's** configuration and recreate its lookup client. The workers"
+" don't need changes in this case."
+msgstr ""
+"对于某些配置（例如，切换 ``enable_scheduler_bypass_lookup``\\ ），您只需更新 **调度器** "
+"的配置并重新创建其查找客户端。在这种情况下，工作节点无需更改。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:715
+msgid "``GET /lookup/info`` — Lookup Client/Server Information"
+msgstr "``GET /lookup/info`` — 查找客户端/服务器信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:717
+msgid ""
+"Get information about the current lookup client and server status. Shows "
+"wrapper chain if applicable (e.g., "
+"``HitLimitLookupClient(LMCacheLookupClient)``)."
+msgstr ""
+"获取当前查找客户端和服务器状态的信息。如果适用，显示包装链（例如，\\ "
+"``HitLimitLookupClient(LMCacheLookupClient)``\\ ）。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:721
+msgid "**Path**: ``/lookup/info``"
+msgstr "**路径**: ``/lookup/info``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:729
+#: ../../source/internal_api_server/vllm_apis.rst:853
+msgid "**Example Response** (scheduler):"
+msgstr "**示例响应**\\ （调度器）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:739
+#: ../../source/internal_api_server/vllm_apis.rst:863
+msgid "**Example Response** (worker):"
+msgstr "**示例响应** (工作者):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:751
+msgid "``POST /lookup/close`` — Close Lookup Client/Server"
+msgstr "``POST /lookup/close`` — 关闭查找客户端/服务器"
+
+#: ../../source/internal_api_server/vllm_apis.rst:753
+msgid "Close the current lookup client (scheduler) or server (worker)."
+msgstr "关闭当前的查找客户端（调度器）或服务器（工作节点）。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:756
+msgid "**Path**: ``/lookup/close``"
+msgstr "**路径**: ``/lookup/close``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:775
+msgid "``POST /lookup/create`` — Create Lookup Client/Server"
+msgstr "``POST /lookup/create`` — 创建查找客户端/服务器"
+
+#: ../../source/internal_api_server/vllm_apis.rst:777
+msgid ""
+"Create a new lookup client (scheduler) or server (worker) using current "
+"config."
+msgstr "使用当前配置创建一个新的查找客户端（调度器）或服务器（工作进程）。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:780
+msgid "**Path**: ``/lookup/create``"
+msgstr "**路径**: ``/lookup/create``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:786
+msgid "``dryrun``"
+msgstr "``dryrun``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:786
+msgid "If ``true``, only show what would be created"
+msgstr "如果为 ``true``\\ ，则仅显示将要创建的内容。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:799
+msgid "**Example Response** (dryrun):"
+msgstr "**示例响应**\\ （干运行）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:809
+msgid "**Example Response** (actual create):"
+msgstr "**示例响应** (实际创建):"
+
+#: ../../source/internal_api_server/vllm_apis.rst:820
+msgid "``POST /lookup/recreate`` — Recreate Lookup Client/Server"
+msgstr "``POST /lookup/recreate`` — 重新创建查找客户端/服务器"
+
+#: ../../source/internal_api_server/vllm_apis.rst:822
+msgid ""
+"Recreate the lookup client or server (equivalent to close + create). The "
+"endpoint automatically determines which component based on role:"
+msgstr "重新创建查找客户端或服务器（相当于关闭 + 创建）。该端点会根据角色自动确定哪个组件："
+
+#: ../../source/internal_api_server/vllm_apis.rst:825
+msgid "**scheduler** role: recreates lookup client"
+msgstr "**scheduler** 角色：重新创建查找客户端"
+
+#: ../../source/internal_api_server/vllm_apis.rst:826
+msgid "**worker** role: recreates lookup server"
+msgstr "**worker** 角色：重新创建查找服务器"
+
+#: ../../source/internal_api_server/vllm_apis.rst:829
+msgid "**Path**: ``/lookup/recreate``"
+msgstr "**路径**: ``/lookup/recreate``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:833
+msgid "**Usage Flow**:"
+msgstr "**使用流程**:"
+
+#: ../../source/internal_api_server/vllm_apis.rst:875
+msgid "**Client-only Changes**"
+msgstr "**仅客户端更改**"
+
+#: ../../source/internal_api_server/vllm_apis.rst:877
+msgid ""
+"For some configuration changes (e.g., switching "
+"``enable_scheduler_bypass_lookup``), you only need to update the "
+"scheduler's configuration and recreate its lookup client. Worker-side "
+"lookup servers don't need to be recreated in this case."
+msgstr ""
+"对于某些配置更改（例如，切换 ``enable_scheduler_bypass_lookup``\\ "
+"），您只需更新调度器的配置并重新创建其查找客户端。在这种情况下，工作节点的查找服务器无需重新创建。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:883
+msgid "``POST /chunk_statistics/start`` — Start Statistics"
+msgstr "``POST /chunk_statistics/start`` — 开始统计"
+
+#: ../../source/internal_api_server/vllm_apis.rst:885
+msgid "Start collecting chunk statistics."
+msgstr "开始收集块统计信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:888
+msgid "**Path**: ``/chunk_statistics/start``"
+msgstr "**路径**: ``/chunk_statistics/start``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:905
+msgid "**Error Response** (not supported, HTTP 400):"
+msgstr "**错误响应**\\ （不支持，HTTP 400）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:916
+msgid "``POST /chunk_statistics/stop`` — Stop Statistics"
+msgstr "``POST /chunk_statistics/stop`` — 停止统计"
+
+#: ../../source/internal_api_server/vllm_apis.rst:918
+msgid "Stop collecting chunk statistics."
+msgstr "停止收集块统计信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:921
+msgid "**Path**: ``/chunk_statistics/stop``"
+msgstr "**路径**: ``/chunk_statistics/stop``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:940
+msgid "``POST /chunk_statistics/reset`` — Reset Statistics"
+msgstr "``POST /chunk_statistics/reset`` — 重置统计信息"
+
+#: ../../source/internal_api_server/vllm_apis.rst:942
+msgid "Reset all collected chunk statistics."
+msgstr "重置所有收集的块统计信息。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:945
+msgid "**Path**: ``/chunk_statistics/reset``"
+msgstr "**路径**: ``/chunk_statistics/reset``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:964
+msgid "``GET /chunk_statistics/status`` — Statistics Status"
+msgstr "``GET /chunk_statistics/status`` — 统计状态"
+
+#: ../../source/internal_api_server/vllm_apis.rst:966
+msgid "Get current chunk statistics and auto-exit configuration."
+msgstr "获取当前块统计信息和自动退出配置。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:969
+msgid "**Path**: ``/chunk_statistics/status``"
+msgstr "**路径**: ``/chunk_statistics/status``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:995
+msgid "Bypass Mode"
+msgstr "旁路模式"
+
+#: ../../source/internal_api_server/vllm_apis.rst:997
+msgid ""
+"Bypass mode allows dynamically skipping specific storage backends at "
+"runtime. Bypassed backends are excluded from ``contains``/``put``/``get``"
+" operations. This is useful for fault injection testing, isolating a "
+"problematic backend, or debugging without restarting the engine."
+msgstr ""
+"绕过模式允许在运行时动态跳过特定的存储后端。被绕过的后端将被排除在 ``contains``/``put``/``get`` "
+"操作之外。这对于故障注入测试、隔离有问题的后端或在不重启引擎的情况下进行调试非常有用。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1004
+msgid "``GET /bypass/list`` — List Bypassed Backends"
+msgstr "``GET /bypass/list`` — 列出被绕过的后端"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1006
+msgid "List all currently bypassed backends and all available backend names."
+msgstr "列出所有当前被绕过的后端和所有可用的后端名称。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1009
+msgid "**Path**: ``/bypass/list``"
+msgstr "**路径**: ``/bypass/list``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1029
+msgid "``PUT /bypass/add`` — Add a Backend to Bypass List"
+msgstr "``PUT /bypass/add`` — 将后端添加到绕过列表"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1031
+msgid ""
+"Add a backend to the bypass list. The bypassed backend will be excluded "
+"from ``contains``/``put``/``get`` operations."
+msgstr "将后端添加到绕过列表中。被绕过的后端将被排除在 ``contains``/``put``/``get`` 操作之外。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1035
+msgid "**Path**: ``/bypass/add``"
+msgstr "**路径**: ``/bypass/add``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1041
+#: ../../source/internal_api_server/vllm_apis.rst:1084
+msgid "``backend_name``"
+msgstr "``backend_name``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1041
+msgid "Name of the backend to bypass (required)"
+msgstr "要绕过的后端名称（必填）"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1062
+#: ../../source/internal_api_server/vllm_apis.rst:1105
+msgid "**Error Response** (unknown backend, HTTP 400):"
+msgstr "**错误响应**\\ （未知后端，HTTP 400）："
+
+#: ../../source/internal_api_server/vllm_apis.rst:1073
+msgid "``PUT /bypass/remove`` — Remove a Backend from Bypass List"
+msgstr "``PUT /bypass/remove`` — 从旁路列表中移除后端"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1075
+msgid "Remove a backend from the bypass list, restoring it to normal operation."
+msgstr "从旁路列表中移除后端，恢复其正常操作。"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1078
+msgid "**Path**: ``/bypass/remove``"
+msgstr "**路径**: ``/bypass/remove``"
+
+#: ../../source/internal_api_server/vllm_apis.rst:1084
+msgid "Name of the backend to restore (required)"
+msgstr "恢复的后端名称（必填）"
+

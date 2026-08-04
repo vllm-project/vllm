@@ -1,0 +1,88 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/s3.rst:2
+msgid "S3"
+msgstr "S3"
+
+#: ../../source/mp/l2_storage/s3.rst:4
+msgid ""
+"An L2 adapter that stores KV cache objects as S3 objects using the AWS "
+"Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any "
+"S3-compatible endpoint (MinIO, Ceph RGW, etc.)."
+msgstr "一个 L2 适配器，使用 AWS 通用运行时 (CRT) 将 KV cache 对象存储为 S3 对象。支持 AWS S3、S3 Express One Zone 以及任何兼容 S3 的端点（MinIO、Ceph RGW 等）。"
+
+#: ../../source/mp/l2_storage/s3.rst:8
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/s3.rst:10
+msgid ""
+"``s3_endpoint``: Bucket URL -- either ``\"s3://<bucket>\"`` or the bare "
+"host form (used for non-AWS endpoints)."
+msgstr "``s3_endpoint``: 存储桶 URL -- 可以是 ``\"s3://<bucket>\"`` 或纯主机名形式（用于非 AWS 端点）。"
+
+#: ../../source/mp/l2_storage/s3.rst:12
+msgid "``s3_region``: AWS region string (e.g. ``\"us-west-2\"``)."
+msgstr "``s3_region``: AWS 区域字符串（例如 ``\"us-west-2\"``）。"
+
+#: ../../source/mp/l2_storage/s3.rst:14
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/s3.rst:16
+msgid "``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads."
+msgstr "``s3_num_io_threads`` (int, default ``64``): CRT I/O 线程数。"
+
+#: ../../source/mp/l2_storage/s3.rst:17
+msgid "``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN."
+msgstr "``s3_prefer_http2`` (bool, default ``true``): 通过 ALPN 协商 HTTP/2。"
+
+#: ../../source/mp/l2_storage/s3.rst:18
+msgid ""
+"``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express "
+"signing for S3 Express One Zone buckets."
+msgstr "``s3_enable_s3express`` (bool, default ``false``): 为 S3 Express 单可用区存储桶启用 S3 Express 签名。"
+
+#: ../../source/mp/l2_storage/s3.rst:20
+msgid ""
+"``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a "
+"plain-HTTP endpoint (e.g. a local MinIO)."
+msgstr "``disable_tls`` (bool, default ``false``): 在指向普通 HTTP 端点时绕过 TLS（例如本地 MinIO）。"
+
+#: ../../source/mp/l2_storage/s3.rst:22
+msgid ""
+"``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static "
+"credentials; omit both to use the AWS default credential provider chain "
+"(environment, EC2 instance profile, etc.)."
+msgstr "``aws_access_key_id`` / ``aws_secret_access_key`` （字符串）：静态凭证；若两者均省略，则使用 AWS 默认凭证提供链（环境变量、EC2 实例配置等）。"
+
+#: ../../source/mp/l2_storage/s3.rst:25
+msgid ""
+"``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by "
+"``get_usage()``.  A value of ``0`` disables aggregate eviction "
+"(``usage_fraction == -1.0``)."
+msgstr "``max_capacity_gb`` (浮点数，默认 ``0.0``)：由 ``get_usage()`` 使用的总容量。值为 ``0`` 时禁用总逐出（``usage_fraction == -1.0``）。"
+
+#: ../../source/mp/l2_storage/s3.rst:29
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+

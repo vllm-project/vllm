@@ -1,0 +1,178 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/query.rst:2
+msgid "lmcache query"
+msgstr "lmcache query"
+
+#: ../../source/cli/query.rst:4
+msgid ""
+"The ``lmcache query`` command sends a single OpenAI-compatible inference "
+"request and reports token and latency metrics. It has two targets:"
+msgstr "``lmcache query`` 命令发送一个单一的兼容 OpenAI 的推理请求，并报告令牌和延迟指标。它有两个目标："
+
+#: ../../source/cli/query.rst:11
+msgid "``engine`` — send one request to a serving engine's HTTP API."
+msgstr "``engine`` — 向服务引擎的 HTTP API 发送一个请求。"
+
+#: ../../source/cli/query.rst:12
+msgid "``kvcache`` — query KV-cache endpoints (not implemented yet)."
+msgstr "``kvcache`` — 查询 KV Cache 端点（尚未实现）。"
+
+#: ../../source/cli/query.rst:16
+msgid "query engine"
+msgstr "查询引擎"
+
+#: ../../source/cli/query.rst:18
+#, python-brace-format
+msgid ""
+"The ``query engine`` subcommand sends one request to the engine API and "
+"reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads "
+"``lmcache/cli/documents/lmcache.txt``, and custom documents can be passed"
+" with ``--documents NAME=PATH``. The prompt token count is taken directly"
+" from the usage data reported by the engine (``stream_options: "
+"{include_usage: true}``)."
+msgstr "``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： ``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``\\ ，并且可以通过 ``--documents NAME=PATH`` 传递自定义文档。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options: {include_usage: true}``)。"
+
+#: ../../source/cli/query.rst:45
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/query.rst:51
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/query.rst:52
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/cli/query.rst:53
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/query.rst:54
+msgid "``--url URL``"
+msgstr "``--url URL``"
+
+#: ../../source/cli/query.rst:55 ../../source/cli/query.rst:58
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/cli/query.rst:56
+msgid "Serving engine base URL (e.g. ``http://localhost:8000/v1``)."
+msgstr "服务引擎基础 URL（例如 ``http://localhost:8000/v1``\\ ）。"
+
+#: ../../source/cli/query.rst:57
+msgid "``--prompt TEXT``"
+msgstr "``--prompt TEXT``"
+
+#: ../../source/cli/query.rst:59
+#, python-brace-format
+msgid ""
+"Prompt text with optional ``{name}`` placeholders. ``{lmcache}`` expands "
+"to the bundled sample document."
+msgstr "带有可选 ``{name}`` 占位符的提示文本。 ``{lmcache}`` 展开为捆绑的示例文档。"
+
+#: ../../source/cli/query.rst:61
+msgid "``--model ID``"
+msgstr "``--model ID``"
+
+#: ../../source/cli/query.rst:62 ../../source/cli/query.rst:66
+#: ../../source/cli/query.rst:69 ../../source/cli/query.rst:72
+#: ../../source/cli/query.rst:76 ../../source/cli/query.rst:79
+#: ../../source/cli/query.rst:83 ../../source/cli/query.rst:86
+#: ../../source/cli/query.rst:89
+msgid "No"
+msgstr "不"
+
+#: ../../source/cli/query.rst:63
+msgid ""
+"Model ID for the serving engine. Auto-detected from the engine's reported"
+" usage if omitted."
+msgstr "服务引擎的模型 ID。如果省略，将根据引擎报告的使用情况自动检测。"
+
+#: ../../source/cli/query.rst:65
+msgid "``--max-tokens N``"
+msgstr "``--max-tokens N``"
+
+#: ../../source/cli/query.rst:67
+msgid "Maximum completion tokens (default: 128)."
+msgstr "最大完成令牌数（默认：128）。"
+
+#: ../../source/cli/query.rst:68
+msgid "``--timeout SECS``"
+msgstr "``--timeout SECS``"
+
+#: ../../source/cli/query.rst:70
+msgid "HTTP timeout in seconds (default: 30)."
+msgstr "HTTP 超时（单位：秒，默认值：30）。"
+
+#: ../../source/cli/query.rst:71
+msgid "``--documents NAME=PATH``"
+msgstr "``--documents NAME=PATH``"
+
+#: ../../source/cli/query.rst:73
+#, python-brace-format
+msgid ""
+"Load file text for ``{NAME}`` in ``--prompt``. Accepts one or more "
+"``NAME=PATH`` values."
+msgstr "在 ``--prompt`` 中加载 ``{NAME}`` 的文件文本。接受一个或多个 ``NAME=PATH`` 值。"
+
+#: ../../source/cli/query.rst:75
+msgid "``--completions``"
+msgstr "``--completions``"
+
+#: ../../source/cli/query.rst:77
+msgid "Use ``POST /v1/completions`` only."
+msgstr "仅使用 ``POST /v1/completions``\\ 。"
+
+#: ../../source/cli/query.rst:78
+msgid "``--chat-first``"
+msgstr "``--chat-first``"
+
+#: ../../source/cli/query.rst:80
+msgid "Try ``/v1/chat/completions`` first, then fall back to ``/v1/completions``."
+msgstr "首先尝试 ``/v1/chat/completions``\\ ，然后回退到 ``/v1/completions``\\ 。"
+
+#: ../../source/cli/query.rst:82
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/query.rst:84
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
+
+#: ../../source/cli/query.rst:85
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/cli/query.rst:87
+msgid "Save metrics to a file (format follows ``--format``)."
+msgstr "将指标保存到文件中（格式遵循 ``--format``\\ ）。"
+
+#: ../../source/cli/query.rst:88
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/query.rst:90
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+

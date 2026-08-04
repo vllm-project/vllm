@@ -1,0 +1,138 @@
+[build-system]
+# Requirements for package build
+# Should be mirrored in requirements/build.txt (for builds external to setuptools)
+# The recommended installation from source will avoid the requirements here in order
+# to stay flexible for the torch version with `--no-build-isolation`. Thus, these packages
+# should be installed before `pip install -e . --no-build-isolation`.
+# However, build isolation is still used for the cibuildwheel releases
+# Thus, we will still lock a torch version here because we can choose to release wheels
+# in sync with vllm and update our torch version accordingly
+requires = [
+    "packaging>=24.2",
+    "setuptools>=68.0.0",
+    "setuptools_scm>=8",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-cli"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.10,<3.14"
+dynamic = ["dependencies", "version"]
+
+[project.scripts]
+lmcache="lmcache.cli.main:main"
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools_scm]
+version_file = "lmcache/_version.py"
+# do not include +gREV local version, required for Test PyPI upload
+local_scheme = "no-local-version"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements/cli.txt"] }
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["lmcache", "lmcache*"]
+
+[tool.ruff]
+# same as Black's default line length
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    #"SIM",
+    # Ruff does not support isort's import_headings feature, yet.
+    # "I",
+    # flake8-logging-format
+    #"G",
+    # flake8-self (private member access)
+    "SLF",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore SLF everywhere except lmcache/v1/multiprocess/
+"!lmcache/v1/multiprocess/**" = ["SLF"]
+"!lmcache/v1/distributed/**" = ["SLF"]
+
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+
+[tool.mypy]
+
+platform = "linux"
+modules = ["lmcache", "tests", "benchmarks"]
+
+disable_error_code = [
+    #"annotation-unchecked",
+    #"union-attr",
+    #"var-annotated",
+    #"arg-type",
+    # "call-arg",
+    #"import-untyped",
+    #"attr-defined",
+    #"return-value",
+    #"assignment",
+    #"call-overload",
+    #"misc",
+]
+
+ignore_missing_imports = true
+explicit_package_bases = true
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
+
+[tool.codespell]
+ignore-words-list = "afterall,allready,notin"
+skip = "operator/config/crd/bases/*"

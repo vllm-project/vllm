@@ -1,0 +1,12 @@
+# A self-signed Issuer used to mint the webhook serving certificate. cert-manager must
+# be installed in the cluster (it is a hard prerequisite for the webhook, per design §10).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+  namespace: system
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selfSigned: {}

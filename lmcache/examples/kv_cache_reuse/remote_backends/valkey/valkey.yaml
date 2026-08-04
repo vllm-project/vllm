@@ -1,0 +1,9 @@
+chunk_size: 256
+local_cpu: true
+max_local_cpu_size: 5.0
+remote_url: "valkey://<cluster-endpoint>:6379"
+remote_serde: "naive"
+pre_caching_hash_algorithm: sha256_cbor_64bit
+extra_config:
+  valkey_num_workers: 32
+  valkey_mode: "cluster"

@@ -1,0 +1,132 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:2
+msgid "Azure Blob Storage Backend"
+msgstr "Azure Blob 存储后端"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:4
+msgid ""
+"LMCache can offload KV cache to Azure Blob Storage via an async-native "
+"connector (parity with the S3 backend, no NIXL dependency). The connector"
+" is selected by an ``azure://`` ``remote_url``."
+msgstr "LMCache 可以通过异步原生连接器将 KV Cache 卸载到 Azure Blob Storage（与 S3 后端相同，无 NIXL 依赖）。连接器由 ``azure://`` ``remote_url`` 选择。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:9
+msgid "Optional Packages"
+msgstr "可选包"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:11
+msgid ""
+"The Azure SDKs are optional dependencies and are imported lazily, so "
+"install them only when you use this backend:"
+msgstr "Azure SDK 是可选依赖项，并且是按需导入的，因此仅在使用此后端时安装它们："
+
+#: ../../source/kv_cache/storage_backends/azure.rst:21
+msgid "URL Format"
+msgstr "URL 格式"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:27
+msgid ""
+"The container name is the only value carried in the URL. The storage "
+"account and credentials are supplied via ``extra_config``."
+msgstr "容器名称是 URL 中唯一携带的值。存储帐户和凭据通过 ``extra_config`` 提供。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:31
+msgid "Example Configuration"
+msgstr "示例配置"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:46
+msgid "Configuration Parameters (in extra_config)"
+msgstr "配置参数（在 extra_config 中）"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:48
+msgid ""
+"**azure_account_url**: Storage account URL, e.g. "
+"``https://<account>.blob.core.windows.net``. Required unless "
+"``azure_connection_string`` is provided."
+msgstr "**azure_account_url**: 存储帐户 URL，例如 ``https://<account>.blob.core.windows.net``。除非提供 ``azure_connection_string``，否则为必填项。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:51
+msgid ""
+"**azure_connection_string**: Full Azure Storage connection string. When "
+"set, it is used on its own and the other fields are ignored."
+msgstr "**azure_connection_string**: 完整的 Azure 存储连接字符串。当设置时，它单独使用，其他字段将被忽略。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:53
+msgid ""
+"**azure_account_key**: Storage account shared key (paired with "
+"``azure_account_url``)."
+msgstr "**azure_account_key**: 存储账户共享密钥（与 ``azure_account_url`` 配对）。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:55
+msgid ""
+"**azure_sas_token**: Shared Access Signature token (paired with "
+"``azure_account_url``)."
+msgstr "**azure_sas_token**: 共享访问签名令牌（与 ``azure_account_url`` 配对）。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:59
+msgid "Authentication"
+msgstr "认证"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:61
+msgid "Exactly one credential path is resolved, most-explicit-first:"
+msgstr "恰好解析出一个凭证路径，优先考虑最明确的："
+
+#: ../../source/kv_cache/storage_backends/azure.rst:63
+msgid "**azure_connection_string** — if set, it wins."
+msgstr "**azure_connection_string** — 如果设置了，它将优先。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:64
+msgid "**azure_account_url + azure_account_key** — shared-key auth."
+msgstr "**azure_account_url + azure_account_key** — 共享密钥认证。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:65
+msgid "**azure_account_url + azure_sas_token** — SAS-token auth."
+msgstr "**azure_account_url + azure_sas_token** — SAS 令牌认证。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:66
+msgid ""
+"**azure_account_url** only — falls back to ``DefaultAzureCredential`` "
+"(managed identity, environment variables, Azure CLI login, etc.), which "
+"requires the ``azure-identity`` package."
+msgstr "**azure_account_url** 仅 — 回退到 ``DefaultAzureCredential``（托管身份、环境变量、Azure CLI 登录等），这需要 ``azure-identity`` 包。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:70
+msgid ""
+"``azure_account_url`` is required for every path except the connection-"
+"string case."
+msgstr "``azure_account_url`` 在每个路径中都是必需的，除了连接字符串的情况。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:74
+msgid "Notes"
+msgstr "注意事项"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:76
+msgid "Only full chunks are stored; set ``save_unfull_chunk: False``."
+msgstr "仅存储完整块；设置 ``save_unfull_chunk: False``。"
+
+#: ../../source/kv_cache/storage_backends/azure.rst:77
+msgid ""
+"Keys are flattened into one blob per chunk (same flat layout as the S3 "
+"backend)."
+msgstr "键被扁平化为每个块一个 blob（与 S3 后端相同的扁平布局）。"
+

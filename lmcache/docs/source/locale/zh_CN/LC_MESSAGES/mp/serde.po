@@ -1,0 +1,275 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-29 10:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/serde.rst:2
+msgid "KV Cache Compression"
+msgstr "KV Cache 压缩"
+
+#: ../../source/mp/serde.rst:4
+msgid ""
+"LMCache supports a **per-adapter serde** that transforms KV cache data on"
+" its way to and from an L2 adapter. Typical uses: quantization (shrink "
+"storage footprint), compression, encryption."
+msgstr ""
+"LMCache 支持 **按适配器独立配置的 serde**\\ ，在 KV Cache 数据进出 L2 "
+"适配器时对其进行转换。典型用途：量化（缩小存储占用）、压缩、加密。"
+
+#: ../../source/mp/serde.rst:14
+msgid "When to use serde"
+msgstr "何时使用 serde"
+
+#: ../../source/mp/serde.rst:16
+msgid ""
+"**Save L2 storage or bandwidth.** fp8 quantization halves byte volume vs."
+" bf16 with minor accuracy loss — a good fit for disk / remote adapters."
+msgstr "**节省 L2 存储或带宽。** fp8 量化相比于 bf16 将字节体积减半，且准确度损失较小——非常适合磁盘/远程适配器。"
+
+#: ../../source/mp/serde.rst:19
+msgid ""
+"**Encrypt at rest.** Wrap the raw bytes with authenticated encryption "
+"before they land on disk."
+msgstr "**静态加密。** 在原始字节写入磁盘之前，使用经过身份验证的加密进行包装。"
+
+#: ../../source/mp/serde.rst:21
+msgid ""
+"**Custom compression.** Anything lossless (lz4/zstd) or lossy (CacheGen-"
+"style) can be plugged in via the ``Serializer`` / ``Deserializer`` ABCs."
+msgstr ""
+"**自定义压缩。** 任何无损（lz4/zstd）或有损（CacheGen 风格）都可以通过 ``Serializer`` / "
+"``Deserializer`` ABC 插入。"
+
+#: ../../source/mp/serde.rst:25
+msgid ""
+"Serde is **opt-in per adapter**: one ``--l2-adapter`` may use fp8 while "
+"another stores raw bytes. When omitted, the adapter behaves exactly as if"
+" serde did not exist (no extra allocations, no extra threads)."
+msgstr ""
+"Serde 是 **按适配器可选启用** 的：一个 ``--l2-adapter`` 可以使用 "
+"fp8，而另一个则存储原始字节。若省略，适配器行为与未使用 serde 时完全一致（无额外内存分配，无额外线程）。"
+
+#: ../../source/mp/serde.rst:31
+msgid "Configuring serde on an L2 adapter"
+msgstr "在 L2 适配器上配置 serde"
+
+#: ../../source/mp/serde.rst:33
+msgid ""
+"Add a ``\"serde\"`` sub-dict to any ``--l2-adapter`` JSON spec. The "
+"``type`` field selects a registered serde; remaining keys are forwarded "
+"to the serde factory."
+msgstr ""
+"向任何 ``--l2-adapter`` JSON 规范添加一个 ``\"serde\"`` 子字典。\\ ``type`` 字段选择一个已注册的"
+" serde；其余键将转发到 serde 工厂。"
+
+#: ../../source/mp/serde.rst:48
+msgid "Built-in serde types"
+msgstr "内置 serde 类型"
+
+#: ../../source/mp/serde.rst:52
+msgid "``type``"
+msgstr "``type``"
+
+#: ../../source/mp/serde.rst:53
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/serde.rst:54
+msgid "Config fields"
+msgstr "配置字段"
+
+#: ../../source/mp/serde.rst:55
+msgid "``fp8``"
+msgstr "``fp8``"
+
+#: ../../source/mp/serde.rst:56
+msgid ""
+"Quantize each element to 8-bit float; dequantize on load. Lossy but "
+"highly compressible."
+msgstr "将每个元素量化为 8 位浮点数；在加载时反量化。虽然有损，但高度可压缩。"
+
+#: ../../source/mp/serde.rst:58
+msgid ""
+"``fp8_dtype`` (default ``float8_e4m3fn``; also accepts ``float8_e5m2``), "
+"``max_workers`` (thread pool size, default 1)"
+msgstr ""
+"``fp8_dtype``\\ （默认 ``float8_e4m3fn``\\ ；也接受 ``float8_e5m2``\\ ），\\ "
+"``max_workers``\\ （线程池大小，默认 1）"
+
+#: ../../source/mp/serde.rst:61
+msgid "``turboquant``"
+msgstr "``turboquant``"
+
+#: ../../source/mp/serde.rst:62
+msgid ""
+"Compress KV tensors with TurboQuant presets before L2 store and "
+"reconstruct them on load."
+msgstr "在 L2 存储之前使用 TurboQuant 预设压缩 KV 张量，并在加载时重构它们。"
+
+#: ../../source/mp/serde.rst:64
+msgid ""
+"``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional, default"
+" 128), ``block_size`` (default 16), ``max_workers`` (thread pool size, "
+"default 1)"
+msgstr "``preset``（默认 ``turboquant_k8v4``），``head_dim``（可选，默认 128），``block_size``（默认 16），``max_workers``（线程池大小，默认 1）"
+
+#: ../../source/mp/serde.rst:70
+msgid "TurboQuant serde"
+msgstr "TurboQuant 序列化与反序列化"
+
+#: ../../source/mp/serde.rst:72
+msgid ""
+"TurboQuant serde can be enabled by setting ``\"type\": \"turboquant\"`` "
+"in the adapter serde config. If ``preset`` is omitted, TurboQuant serde "
+"defaults to ``turboquant_k8v4``."
+msgstr "TurboQuant serde 可以通过在适配器 serde 配置中设置 ``\"type\": \"turboquant\"`` 来启用。如果省略 ``preset``，TurboQuant serde 默认使用 ``turboquant_k8v4``。"
+
+#: ../../source/mp/serde.rst:91
+msgid "Supported presets:"
+msgstr "支持的预设："
+
+#: ../../source/mp/serde.rst:97
+msgid "Preset"
+msgstr "预设"
+
+#: ../../source/mp/serde.rst:98
+msgid "Key path"
+msgstr "键路径"
+
+#: ../../source/mp/serde.rst:99
+msgid "Value path"
+msgstr "值路径"
+
+#: ../../source/mp/serde.rst:100
+msgid "``turboquant_k8v4``"
+msgstr "``turboquant_k8v4``"
+
+#: ../../source/mp/serde.rst:101
+msgid "FP8 key"
+msgstr "FP8 键"
+
+#: ../../source/mp/serde.rst:102 ../../source/mp/serde.rst:105
+#: ../../source/mp/serde.rst:108
+msgid "4-bit value quantization"
+msgstr "4位值量化"
+
+#: ../../source/mp/serde.rst:103
+msgid "``turboquant_4bit_nc``"
+msgstr "``turboquant_4bit_nc``"
+
+#: ../../source/mp/serde.rst:104
+msgid "4-bit MSE key with norm correction"
+msgstr "带有范数校正的 4 位 MSE 键"
+
+#: ../../source/mp/serde.rst:106
+msgid "``turboquant_k3v4_nc``"
+msgstr "``turboquant_k3v4_nc``"
+
+#: ../../source/mp/serde.rst:107 ../../source/mp/serde.rst:110
+msgid "3-bit MSE key with norm correction"
+msgstr "带有范数校正的 3 位 MSE 密钥"
+
+#: ../../source/mp/serde.rst:109
+msgid "``turboquant_3bit_nc``"
+msgstr "``turboquant_3bit_nc``"
+
+#: ../../source/mp/serde.rst:111
+msgid "3-bit value quantization"
+msgstr "3位值量化"
+
+#: ../../source/mp/serde.rst:115
+msgid "Writing a custom serde"
+msgstr "编写自定义 serde"
+
+#: ../../source/mp/serde.rst:117
+msgid ""
+"Implement the two sync ABCs (``Serializer``, ``Deserializer``) with your "
+"transform logic, then register a factory keyed on a name you pick:"
+msgstr ""
+"实现两个同步 ABC（\\ ``Serializer``\\ ，\\ ``Deserializer``\\ "
+"），并使用您的转换逻辑，然后注册一个以您选择的名称为键的工厂："
+
+#: ../../source/mp/serde.rst:149
+msgid "Reference it from your adapter config:"
+msgstr "从您的适配器配置中引用它："
+
+#: ../../source/mp/serde.rst:157
+msgid "Notes"
+msgstr "注意事项"
+
+#: ../../source/mp/serde.rst:159
+msgid ""
+"**Buffer size.** ``estimate_serialized_size(layout)`` must return an "
+"upper bound on the actual serialized output — include any safety margin "
+"directly in the estimate (e.g., the built-in fp8 serializer returns ``1.5"
+" * num_elements``)."
+msgstr ""
+"**缓冲区大小。** ``estimate_serialized_size(layout)`` "
+"必须返回实际序列化输出的上限——安全余量应直接计入估算值（例如，内置的 fp8 序列化器返回 ``1.5 * num_elements``\\ "
+"）。"
+
+#: ../../source/mp/serde.rst:163
+msgid ""
+"**Failure handling.** If any step fails (serialize, store, load, or "
+"deserialize), the whole submitted batch is reported as failed — partial "
+"success within one batch is not surfaced. Failed keys are cleaned up "
+"automatically."
+msgstr ""
+"**失败处理。** "
+"如果任何步骤失败（序列化、存储、加载或反序列化），整个提交的批次均报告为失败——批次内的部分成功不会对外呈现。失败的键会自动清理。"
+
+#: ../../source/mp/serde.rst:167
+msgid ""
+"**Thread pool.** ``AsyncSerdeProcessor(max_workers=N)`` controls the pool"
+" size. Transforms that release the GIL (e.g., torch ops) benefit from ``N"
+" > 1``; pure-Python transforms do not."
+msgstr ""
+"**线程池。** ``AsyncSerdeProcessor(max_workers=N)`` "
+"控制池的大小。释放全局解释器锁（GIL）的变换（例如，torch 操作）可以从 ``N > 1`` 中受益；纯 Python 变换则不然。"
+
+#: ../../source/mp/serde.rst:173
+msgid "Example"
+msgstr "示例"
+
+#: ../../source/mp/serde.rst:175
+msgid ""
+"An end-to-end script that starts an lmcache server with fp8 on a disk "
+"adapter, runs vLLM, clears L1, and re-runs the same request to trigger "
+"the L2 prefetch + fp8 deserialize path lives at "
+":file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test "
+"(no vLLM required) is at "
+":file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`."
+msgstr ""
+"一个端到端的脚本，它在磁盘适配器上启动一个带有 fp8 的 lmcache 服务器，运行 vLLM，清除 L1，然后重新运行相同的请求以触发 L2"
+" 预取 + fp8 反序列化路径，位于 :file:`examples/serde/fp8/`。一个基于 pytest 的文件系统往返测试（不需要"
+" vLLM）位于 :file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`。"
+
+#: ../../source/mp/serde.rst:183
+msgid "Compression methods"
+msgstr "压缩方法"
+
+#: ../../source/mp/serde.rst:185
+msgid ""
+"Higher-level KV cache compression methods layered on top of the per-"
+"adapter serde mechanism:"
+msgstr "构建于按适配器 serde 机制之上的高阶 KV Cache 压缩方法："
+
+#~ msgid "L2 Serde (Serialization / Deserialization)"
+#~ msgstr "L2 序列化（Serialization / Deserialization）"
+

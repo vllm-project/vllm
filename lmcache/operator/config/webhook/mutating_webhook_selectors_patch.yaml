@@ -1,0 +1,40 @@
+# Strategic-merge patch adding the blast-radius selectors that controller-gen
+# cannot express. Webhooks are merged by their `name`, so each entry only patches
+# the matching webhook (mcacheblendpod.lmcache.ai = CacheBlend, mlmcachepod.lmcache.ai =
+# LMCache). Each injector has its own opt-in label so the two never cross-fire.
+#
+# - objectSelector: only mutate pods carrying the injector's opt-in label
+#   (lmcache.ai/cacheblend-inject / lmcache.ai/lmcache-inject = "true"); keeps the
+#   cluster-wide CREATE-pods rule from touching unrelated workloads.
+# - namespaceSelector: never mutate pods in kube-system / kube-public / the operator
+#   namespace (which runs under the "restricted" PSS profile and would reject the
+#   injected hostIPC), per design §10.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- name: mcacheblendpod.lmcache.ai
+  objectSelector:
+    matchLabels:
+      lmcache.ai/cacheblend-inject: "true"
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system
+      - kube-public
+      - lmcache-operator-system
+- name: mlmcachepod.lmcache.ai
+  objectSelector:
+    matchLabels:
+      lmcache.ai/lmcache-inject: "true"
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system
+      - kube-public
+      - lmcache-operator-system

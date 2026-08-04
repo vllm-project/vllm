@@ -1,0 +1,122 @@
+# vLLM Deployment used by the e2e_gpu integration spec.
+#
+# Renders a single-replica vLLM serve, configured to reach the LMCache
+# DaemonSet via the operator-produced <engine>-connection ConfigMap.
+# Placeholders are substituted by the spec at apply time so the test
+# can target whichever namespace/engine/model the run was parameterised
+# with:
+#
+#   __NAMESPACE__       — engine namespace
+#   __ENGINE_NAME__     — LMCacheEngine metadata.name (also Service / ConfigMap name)
+#   __MODEL__           — Hugging Face model id (e.g., Qwen/Qwen2.5-0.5B)
+#   __VLLM_IMAGE__      — container image (defaults to lmcache/vllm-openai:latest,
+#                         the bundled vLLM + LMCache build)
+#
+# Requirements baked in (matching the operator's LMCache pod template
+# and the constraints of cudaIpcOpenMemHandle-based KV handoff):
+#   - hostIPC: true                — share /dev/shm with the LMCache pod
+#   - runtimeClassName: nvidia     — same as LMCache so they co-schedule
+#                                    on GPU nodes
+#   - nodeSelector: gpu.present    — pin to a GPU node so the service's
+#                                    internalTrafficPolicy=Local routes
+#                                    to the on-node LMCache pod
+#   - nvidia.com/gpu: 1            — consume one GPU device
+#   - --no-enable-prefix-caching   — REQUIRED: APC must be off so prompt
+#                                    re-runs miss vLLM's local KV and
+#                                    fall through to LMCache lookup
+#   - --kv-transfer-config         — inlined from the operator-produced
+#                                    ConfigMap by the entrypoint wrapper
+#                                    (vllm serve takes a JSON string,
+#                                    not a path)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-smoke
+  namespace: __NAMESPACE__
+  labels:
+    app: vllm-smoke
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-smoke
+  template:
+    metadata:
+      labels:
+        app: vllm-smoke
+    spec:
+      hostIPC: true
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: vllm
+          image: __VLLM_IMAGE__
+          imagePullPolicy: IfNotPresent
+          # vllm serve --kv-transfer-config takes the JSON connector
+          # config as a single argv token (string), so we read the
+          # mounted ConfigMap file inline via `cat`. Going through a
+          # shell wrapper keeps the JSON source of truth in the
+          # operator-produced ConfigMap rather than duplicated here.
+          #
+          # --load-format dummy: skip downloading the model weights
+          # from Hugging Face. vLLM still fetches the model's metadata
+          # (config.json, tokenizer.json) but generates random weights
+          # in-process. The test asserts on KV-cache hit counters, not
+          # on generation quality, so dummy weights are fine and we
+          # save several GB of download + ~5 min of test runtime.
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              exec vllm serve "__MODEL__"
+              --port 8000
+              --no-enable-prefix-caching
+              --enforce-eager
+              --load-format dummy
+              --gpu-memory-utilization 0.5
+              --kv-transfer-config "$(cat /etc/lmcache/kv-transfer-config.json)"
+          env:
+            # MP transport requires single-process scheduler so the
+            # connector lives in the same proc as the engine core.
+            - name: VLLM_ENABLE_V1_MULTIPROCESSING
+              value: "0"
+            # Determinism: same prompt -> same chunk hashes across runs
+            # so the cache lookup on the second request actually hits.
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "all"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            # /v1/models is ready only after the model is loaded onto
+            # the GPU — a strong signal that the LMCache connector
+            # also negotiated successfully (otherwise vllm would have
+            # crashed during init).
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          volumeMounts:
+            - name: lmcache-connection
+              mountPath: /etc/lmcache
+              readOnly: true
+      volumes:
+        - name: lmcache-connection
+          configMap:
+            # __ENGINE_NAME__-connection is owned by the LMCacheEngine
+            # so its lifecycle is tied to the CR — the test asserts on
+            # GC of this same ConfigMap in lifecycle_smoke_test.go.
+            name: __ENGINE_NAME__-connection
+            items:
+              - key: kv-transfer-config.json
+                path: kv-transfer-config.json

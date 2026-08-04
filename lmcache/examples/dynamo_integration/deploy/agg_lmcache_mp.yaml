@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lmcache
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      sharedMemory:
+        disabled: true
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: PYTHONHASHSEED
+              value: "0"
+          volumeMounts:
+            - name: kv-transfer-config
+              mountPath: /etc/lmcache
+              readOnly: true
+          command:
+            - /bin/sh
+            - -c
+            - exec python3 -m dynamo.vllm "$@" --kv-transfer-config "$(cat /etc/lmcache/kv-transfer-config.json)"
+            - --
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disable-hybrid-kv-cache-manager
+        volumes:
+          - name: kv-transfer-config
+            configMap:
+              name: lmcache-mp-connection   # = <LMCacheEngine.metadata.name>-connection
+
+        # Required for CUDA IPC between vLLM and LMCache
+        hostIPC: true

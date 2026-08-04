@@ -1,0 +1,17 @@
+{%- if versions %}
+<div class="version-selector">
+  <label for="version-select">Version:</label>
+  <select id="version-select" onchange="location.href=this.value;">
+    {%- for version in versions %}
+    <option value="{{ version.url }}" 
+            {%- if version.name == current_version %} selected="selected"{% endif %}>
+      {%- if version.name == smv_latest_version -%}
+        {{ version.name }} (latest)
+      {%- else -%}
+        {{ version.name }}
+      {%- endif -%}
+    </option>
+    {%- endfor %}
+  </select>
+</div>
+{%- endif %}

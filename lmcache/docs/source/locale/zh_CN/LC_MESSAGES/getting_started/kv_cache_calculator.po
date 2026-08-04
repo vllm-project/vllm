@@ -1,0 +1,45 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/kv_cache_calculator.rst:2
+msgid "KV Cache Size Calculator"
+msgstr "KV Cache 大小计算器"
+
+#: ../../source/getting_started/kv_cache_calculator.rst:4
+msgid "Use this interactive calculator to:"
+msgstr "使用此交互式计算器来："
+
+#: ../../source/getting_started/kv_cache_calculator.rst:6
+msgid ""
+"**Calculate KV Cache Size**: Estimate the memory required for caching a "
+"specific number of tokens"
+msgstr "**计算 KV Cache 大小**\\ ：估算缓存特定数量的令牌所需的内存"
+
+#: ../../source/getting_started/kv_cache_calculator.rst:7
+msgid ""
+"**Calculate Maximum Tokens**: Find out how many tokens you can cache "
+"given your available GPU RAM"
+msgstr "**计算最大令牌数**\\ ：找出在可用的 GPU RAM 下可以缓存多少令牌"
+
+#: ../../source/getting_started/kv_cache_calculator.rst:9
+msgid "This helps you plan memory requirements for your LMCache deployment."
+msgstr "这可以帮助您规划 LMCache 部署的内存需求。"
+

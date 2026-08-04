@@ -1,0 +1,146 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:2
+msgid "Weka"
+msgstr "Weka"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:14
+msgid ""
+"WekaFS is a high-performance, distributed filesystem and is a supported "
+"option for KV Cache offloading in LMCache. Even though the local "
+"filesystem backend can work with a WekaFS mount, this particular backend "
+"is optimized for Weka's characteristics. It leverages GPUDirect Storage "
+"for I/O and it allows data-sharing between multiple LMCache instances."
+msgstr ""
+"WekaFS 是一个高性能的分布式文件系统，是 LMCache 中 KV Cache 卸载的支持选项。尽管本地文件系统后端可以与 WekaFS "
+"挂载一起工作，但该后端针对 Weka 的特性进行了优化。它利用 GPUDirect Storage 进行 I/O，并允许多个 LMCache "
+"实例之间的数据共享。"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:20
+msgid "Ways to configure LMCache WEKA Offloading"
+msgstr "配置 LMCache WEKA 卸载的方法"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:22
+msgid "**1. Environment Variables:**"
+msgstr "**1. 环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:38
+msgid "**2. Configuration File**:"
+msgstr "**2. 配置文件**:"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:40
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:42
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:59
+msgid "GDS Buffer Size Explanation"
+msgstr "GDS 缓冲区大小说明"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:61
+msgid ""
+"The backend currently pre-registers buffer space to speed up GDS "
+"operations. This buffer space is registered in VRAM so options like "
+"``--gpu-memory-utilization`` from ``vllm`` should be considered when "
+"setting it. For example, a good rule of thumb for H100 which generally "
+"has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
+"utilization 0.85`` and depending on your workflow fine-tune it from "
+"there."
+msgstr ""
+"后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-"
+"utilization`` 选项，例如来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 "
+"8GiB 开始，并设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程进行微调。"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:69
+msgid "Setup Example"
+msgstr "设置示例"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:73
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:75
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:77
+msgid "Weka already installed and mounted."
+msgstr "Weka 已经安装并挂载。"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:79
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr "vllm 和 lmcache 已安装 (:doc:`安装指南 <../../getting_started/installation>`)"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:81
+msgid "Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``"
+msgstr "Hugging Face 访问 ``meta-llama/Llama-3.1-8B-Instruct``"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:87
+msgid "**Step 1. Create cache directory under your Weka mount:**"
+msgstr "**步骤 1. 在您的 Weka 挂载下创建缓存目录：**"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:89
+msgid "To find all your WekaFS mounts run:"
+msgstr "要查找所有 WekaFS 挂载，请运行："
+
+#: ../../source/kv_cache/storage_backends/weka.rst:95
+msgid "For the sake of this example let's say that the above returns:"
+msgstr "为了这个例子，我们假设上面的返回结果是："
+
+#: ../../source/kv_cache/storage_backends/weka.rst:101
+msgid "Then create a directory under it (the name here is arbitrary):"
+msgstr "然后在其下创建一个目录（这里的名称是任意的）："
+
+#: ../../source/kv_cache/storage_backends/weka.rst:107
+msgid "**Step 2. Start a vLLM server with Weka offloading enabled:**"
+msgstr "**步骤 2. 启动一个启用 Weka 卸载的 vLLM 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:109
+msgid "Create a an lmcache configuration file called: ``weka-offload.yaml``"
+msgstr "创建一个名为 ``weka-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:120
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr "如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+

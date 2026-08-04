@@ -1,0 +1,13 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: lmcache-mp   # produces the "lmcache-mp-connection" ConfigMap the workers mount
+  namespace: default   # must match the namespace the workers are deployed into
+spec:
+  image:
+    repository: lmcache/vllm-openai
+    tag: my-tag
+    pullPolicy: IfNotPresent
+  # L1 (CPU RAM) cache size -- bump for production workloads.
+  l1:
+    sizeGB: 16

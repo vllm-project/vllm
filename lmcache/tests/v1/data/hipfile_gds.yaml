@@ -1,0 +1,9 @@
+# Configuration for GDS backend with hipFile (AMD ROCm)
+chunk_size: 256
+gds_path: "/tmp/hipfile-gds/test-cache"
+local_cpu: False
+save_decode_cache: True
+gds_buffer_size: 128
+gds_backend: "hipfile"
+extra_config:
+  use_direct_io: true

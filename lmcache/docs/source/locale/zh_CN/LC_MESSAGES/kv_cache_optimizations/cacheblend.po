@@ -1,0 +1,57 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:2
+msgid "CacheBlend"
+msgstr "CacheBlend"
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:4
+msgid ""
+"CacheBlend lets LMCache reuse the KV cache of **any** repeated text chunk"
+" -- not only a shared prefix -- by selectively recomputing a small "
+"fraction of tokens at chunk boundaries. This cuts time-to-first-token for"
+" RAG and multi-document workloads where the reusable context is not a "
+"clean prefix."
+msgstr "CacheBlend 允许 LMCache 重用 **任何** 重复文本块的 KV 缓存，而不仅仅是共享前缀——通过在块边界有选择地对少量 token 进行重计算来实现。这可以降低 RAG 和多文档场景下的首 token 延迟（TTFT），适用于可复用上下文并非干净前缀的情况。"
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:10
+msgid "Enabling CacheBlend (MP mode)"
+msgstr "启用 CacheBlend（MP 模式（多进程））"
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:12
+msgid "Start the LMCache server with the blend engine:"
+msgstr "使用 blend 引擎启动 LMCache 服务器："
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:18
+msgid ""
+"The ``blend`` engine composes a ``BlendModule`` into the server and "
+"requires ``--supported-transfer-mode`` to be ``lmcache_driven`` or "
+"``auto`` (the default). See :doc:`/mp/configuration` for the related "
+"server flags."
+msgstr "``blend`` 引擎将 ``BlendModule`` 组合到服务器中，并要求 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ （默认值）。有关相关服务器标志，请参见 :doc:`/mp/configuration`。"
+
+#: ../../source/kv_cache_optimizations/cacheblend.rst:24
+msgid ""
+"The in-process CacheBlend documentation -- configuration knobs such as "
+"``LMCACHE_ENABLE_BLENDING`` and an end-to-end example -- is preserved in "
+"the Legacy section: :doc:`/kv_cache_optimizations/blending`."
+msgstr "进程内 CacheBlend 文档——包括配置项（如 ``LMCACHE_ENABLE_BLENDING``\\ ）及端到端示例——已保留在旧版章节中： :doc:`/kv_cache_optimizations/blending`。"
+

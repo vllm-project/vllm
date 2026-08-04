@@ -1,0 +1,233 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/index.rst:2
+msgid "CLI Reference"
+msgstr "CLI 参考"
+
+#: ../../source/cli/index.rst:4
+msgid ""
+"The ``lmcache`` command-line interface provides tools for launching, "
+"managing, inspecting, and benchmarking LMCache servers and the inference "
+"engines in front of them."
+msgstr "``lmcache`` 命令行接口提供了启动、管理、检查和基准测试 LMCache 服务器及其前面的推理引擎的工具。"
+
+#: ../../source/cli/index.rst:12
+msgid ""
+"After installing LMCache, the ``lmcache`` command is available globally. "
+"Run ``lmcache -h`` to see all commands, or ``lmcache <command> -h`` for a"
+" specific command."
+msgstr "安装 LMCache 后，\\ ``lmcache`` 命令可以全局使用。运行 ``lmcache -h`` 查看所有命令，或运行 ``lmcache <command> -h`` 查看特定命令的帮助。"
+
+#: ../../source/cli/index.rst:17
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/cli/index.rst:19
+msgid "The ``lmcache`` CLI ships in two packages:"
+msgstr "``lmcache`` CLI 包含两个软件包："
+
+#: ../../source/cli/index.rst:25
+msgid "Package"
+msgstr "包"
+
+#: ../../source/cli/index.rst:26
+msgid "Install"
+msgstr "安装"
+
+#: ../../source/cli/index.rst:27
+msgid "When to use"
+msgstr "何时使用"
+
+#: ../../source/cli/index.rst:28
+msgid "``lmcache``"
+msgstr "``lmcache``"
+
+#: ../../source/cli/index.rst:29
+msgid "``pip install lmcache``"
+msgstr "``pip install lmcache``"
+
+#: ../../source/cli/index.rst:30
+msgid ""
+"Full install: server, CLI, and CUDA extensions. Required for ``server``, "
+"``bench server``, ``bench l2``, and ``trace``. Linux + GPU."
+msgstr "完整安装：服务器、CLI 和 CUDA 扩展。\\ ``server``\\ 、\\ ``bench server``\\ 、\\ ``bench l2`` 和 ``trace`` 所需。Linux + GPU。"
+
+#: ../../source/cli/index.rst:33
+msgid "``lmcache-cli``"
+msgstr "``lmcache-cli``"
+
+#: ../../source/cli/index.rst:34
+msgid "``pip install lmcache-cli``"
+msgstr "``pip install lmcache-cli``"
+
+#: ../../source/cli/index.rst:35
+msgid ""
+"CLI only: ``ping``, ``query``, ``describe``, ``kvcache``, ``quota``, "
+"``bench engine``. No GPU required, any OS."
+msgstr "仅限 CLI: ``ping``, ``query``, ``describe``, ``kvcache``, ``quota``, ``bench engine``\\ 。不需要 GPU，任何操作系统均可。"
+
+#: ../../source/cli/index.rst:40
+msgid ""
+"Do not install both packages in the same environment — they both provide "
+"the ``lmcache`` entry point."
+msgstr "请勿在同一环境中安装这两个软件包 — 它们都提供 ``lmcache`` 入口点。"
+
+#: ../../source/cli/index.rst:44
+msgid "Available Commands"
+msgstr "可用命令"
+
+#: ../../source/cli/index.rst:50
+msgid "Command"
+msgstr "命令"
+
+#: ../../source/cli/index.rst:51
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/index.rst:52
+msgid ":doc:`server`"
+msgstr ":doc:`server`"
+
+#: ../../source/cli/index.rst:53
+msgid "Launch the LMCache MP server (ZMQ + HTTP). Requires the full install."
+msgstr "启动 LMCache MP 服务器（ZMQ + HTTP）。需要完整安装。"
+
+#: ../../source/cli/index.rst:54
+msgid ":doc:`coordinator`"
+msgstr ":doc:`coordinator`"
+
+#: ../../source/cli/index.rst:55
+msgid "Launch the LMCache MP coordinator (HTTP instance registry)."
+msgstr "启动 LMCache MP 协调器（HTTP 实例注册表）。"
+
+#: ../../source/cli/index.rst:56
+msgid ":doc:`describe`"
+msgstr ":doc:`describe`"
+
+#: ../../source/cli/index.rst:57
+msgid "Show detailed status of a running LMCache service."
+msgstr "显示正在运行的 LMCache 服务的详细状态。"
+
+#: ../../source/cli/index.rst:58
+msgid ":doc:`ping`"
+msgstr ":doc:`ping`"
+
+#: ../../source/cli/index.rst:59
+msgid "Liveness check for LMCache or vLLM servers."
+msgstr "对 LMCache 或 vLLM 服务器的存活检查。"
+
+#: ../../source/cli/index.rst:60
+msgid ":doc:`query`"
+msgstr ":doc:`query`"
+
+#: ../../source/cli/index.rst:61
+msgid "Single-shot query interface for the serving engine."
+msgstr "服务引擎的单次查询接口。"
+
+#: ../../source/cli/index.rst:62
+msgid ":doc:`bench`"
+msgstr ":doc:`bench`"
+
+#: ../../source/cli/index.rst:63
+msgid ""
+"Run sustained benchmarks against an inference engine (``engine``), an "
+"LMCache MP server (``server``), or an L2 cache adapter (``l2``)."
+msgstr "对推理引擎（\\ ``engine``\\ ）、LMCache MP 服务器（\\ ``server``\\ ）或 L2 缓存适配器（\\ ``l2``\\ ）运行持续基准测试。"
+
+#: ../../source/cli/index.rst:66
+msgid ":doc:`kvcache`"
+msgstr ":doc:`kvcache`"
+
+#: ../../source/cli/index.rst:67
+msgid "Manage KV cache state (e.g. clear L1 cache) on a running server."
+msgstr "在运行的服务器上管理 KV Cache 状态（例如，清除 L1 缓存）。"
+
+#: ../../source/cli/index.rst:68
+msgid ":doc:`quota`"
+msgstr ":doc:`quota`"
+
+#: ../../source/cli/index.rst:69
+msgid "Manage per-salt cache quotas (set, get, list, delete)."
+msgstr "管理每个盐值的缓存配额（设置、获取、列出、删除）。"
+
+#: ../../source/cli/index.rst:70
+msgid ":doc:`trace`"
+msgstr ":doc:`trace`"
+
+#: ../../source/cli/index.rst:71
+msgid "Inspect and replay storage-level trace files."
+msgstr "检查和重放存储级跟踪文件。"
+
+#: ../../source/cli/index.rst:72
+msgid ":doc:`tool`"
+msgstr ":doc:`tool`"
+
+#: ../../source/cli/index.rst:73
+msgid "Run offline analysis tools (e.g. the cache simulator)."
+msgstr "运行离线分析工具（例如缓存模拟器）。"
+
+#: ../../source/cli/index.rst:76
+msgid "Output Formats"
+msgstr "输出格式"
+
+#: ../../source/cli/index.rst:78
+msgid "Commands that produce metrics share three common flags:"
+msgstr "产生指标的命令共享三个常见标志："
+
+#: ../../source/cli/index.rst:80
+#, python-brace-format
+msgid "``--format {terminal,json}`` — stdout format (default: ``terminal``)."
+msgstr "``--format {terminal,json}`` — 标准输出格式（默认：\\ ``terminal``\\ ）。"
+
+#: ../../source/cli/index.rst:81
+msgid "``--output PATH`` — also write metrics to a file (uses ``--format``)."
+msgstr "``--output PATH`` — 还将指标写入文件（使用 ``--format``\\ ）。"
+
+#: ../../source/cli/index.rst:82
+msgid "``-q`` / ``--quiet`` — suppress stdout; rely on the exit code."
+msgstr "``-q`` / ``--quiet`` — 抑制 stdout；依赖退出代码。"
+
+#: ../../source/cli/index.rst:84
+msgid ""
+"The terminal output uses human-readable labels (e.g. ``\"Round trip time "
+"(ms)\"``), while JSON uses machine-readable keys (e.g. "
+"``\"round_trip_time_ms\"``)."
+msgstr "终端输出使用人类可读的标签（例如 ``\"Round trip time (ms)\"``\\ ），而 JSON 使用机器可读的键（例如 ``\"round_trip_time_ms\"``\\ ）。"
+
+#: ../../source/cli/index.rst:89
+msgid "Adding New Commands"
+msgstr "添加新命令"
+
+#: ../../source/cli/index.rst:91
+msgid ""
+"New CLI subcommands are added by creating a ``BaseCommand`` subclass "
+"under ``lmcache/cli/commands/``; they are discovered and registered "
+"automatically. See :doc:`/developer_guide/cli` for details."
+msgstr ""
+"通过在 ``lmcache/cli/commands/`` 下创建 ``BaseCommand`` 子类来添加新的 CLI "
+"子命令；它们会被自动发现和注册。有关详细信息，请参见 :doc:`/developer_guide/cli`。"
+
+#~ msgid ""
+#~ "For a comprehensive guide with examples,"
+#~ " see :doc:`/getting_started/cli`."
+#~ msgstr "有关带有示例的全面指南，请参见 :doc:`/getting_started/cli`。"
+

@@ -1,0 +1,163 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/gemma3.rst:4
+msgid "Gemma 3"
+msgstr "Gemma 3"
+
+#: ../../source/recipes/gemma3.rst:7
+msgid "Validated models"
+msgstr "验证过的模型"
+
+#: ../../source/recipes/gemma3.rst:9
+msgid "`google/gemma-3-4b-it <https://huggingface.co/google/gemma-3-4b-it>`_"
+msgstr "`google/gemma-3-4b-it <https://huggingface.co/google/gemma-3-4b-it>`_"
+
+#: ../../source/recipes/gemma3.rst
+msgid "vLLM"
+msgstr "vLLM"
+
+#: ../../source/recipes/gemma3.rst:16
+msgid ""
+"**Engine documentation:** `Gemma 3 in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
+"language-models>`_ (architecture ``Gemma3ForConditionalGeneration``)."
+msgstr ""
+"**引擎文档：** `Gemma 3 在 vLLM 支持的模型 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
+"language-models>`_ (架构 ``Gemma3ForConditionalGeneration``)。"
+
+#: ../../source/recipes/gemma3.rst:21
+msgid "**Status:** Validated with LMCache."
+msgstr "**状态:** 已通过 LMCache 验证。"
+
+#: ../../source/recipes/gemma3.rst:23
+msgid "Start the LMCache MP server:"
+msgstr "启动 LMCache MP 服务器："
+
+#: ../../source/recipes/gemma3.rst:31
+msgid "Start vLLM with the LMCache MP connector:"
+msgstr "使用 LMCache MP 连接器启动 vLLM："
+
+#: ../../source/recipes/gemma3.rst:42
+msgid ""
+"Gemma 3 interleaves local (sliding-window) and global (full) attention "
+"layers, so vLLM keeps its **hybrid KV cache manager** on and exposes "
+"multiple KV cache groups. LMCache stores and retrieves all of them "
+"through its hybrid memory allocator support -- ``LMCacheMPConnector`` "
+"advertises ``SupportsHMA``, so vLLM does not auto-disable the hybrid "
+"manager and no extra configuration is required."
+msgstr "Gemma 3 交错使用 local (sliding-window) 和 global (full) attention 层，因此 vLLM 保持其 **混合 KV Cache 管理器** 开启，并公开多个 KV Cache 组。LMCache 通过其混合内存分配器支持存储和检索所有这些组——``LMCacheMPConnector`` 声明 ``SupportsHMA``\\ ，因此 vLLM 不会自动禁用混合管理器，也无需额外配置。"
+
+#: ../../source/recipes/gemma3.rst:49
+msgid ""
+"``google/gemma-3-4b-it`` is a gated model; authenticate with the Hugging "
+"Face Hub (e.g. set ``HF_TOKEN``) before serving. Adjust ``--tensor-"
+"parallel-size`` to match your hardware. For the generic LMCache + vLLM "
+"wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr "``google/gemma-3-4b-it`` 是一个 gated 模型；在启动服务之前，请通过 Hugging Face Hub 进行身份验证（例如，设置 ``HF_TOKEN``\\ ）。请根据您的硬件调整 ``--tensor-parallel-size``\\ 。有关通用 LMCache + vLLM 连接配置（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/gemma3.rst:55
+msgid ""
+"If there are any issues with vLLM setup, please refer to the `vLLM "
+"Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
+"for more details."
+msgstr ""
+"如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes "
+"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
+
+#: ../../source/recipes/gemma3.rst
+msgid "SGLang"
+msgstr "SGLang"
+
+#: ../../source/recipes/gemma3.rst:61
+msgid "**Status:** Not validated with LMCache."
+msgstr "**状态：** 未通过 LMCache 验证。"
+
+#: ../../source/recipes/gemma3.rst
+msgid "TRT-LLM"
+msgstr "TRT-LLM"
+
+#: ../../source/recipes/gemma3.rst:65
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/gemma3.rst:68
+msgid "CacheBlend support"
+msgstr "CacheBlend 支持"
+
+#: ../../source/recipes/gemma3.rst:70
+msgid "Not validated."
+msgstr "未验证。"
+
+#: ../../source/recipes/gemma3.rst:73
+msgid "Compression support"
+msgstr "压缩支持"
+
+#: ../../source/recipes/gemma3.rst:79
+msgid "Method"
+msgstr "方法"
+
+#: ../../source/recipes/gemma3.rst:80
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/recipes/gemma3.rst:81
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/recipes/gemma3.rst:82
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+
+#: ../../source/recipes/gemma3.rst:83
+msgid "Not validated"
+msgstr "未验证"
+
+#: ../../source/recipes/gemma3.rst:87
+msgid "Caveats"
+msgstr "注意事项"
+
+#: ../../source/recipes/gemma3.rst:89
+msgid ""
+"**Gated model.** ``google/gemma-3-4b-it`` requires accepting the license "
+"on Hugging Face and authenticating (e.g. ``HF_TOKEN``) before it can be "
+"served."
+msgstr "**Gated 模型。** ``google/gemma-3-4b-it`` 需要在 Hugging Face 上接受许可并进行身份验证（例如 ``HF_TOKEN``\\ ），才能提供服务。"
+
+#: ../../source/recipes/gemma3.rst:91
+msgid ""
+"**Hybrid attention.** Gemma 3 is a hybrid (sliding-window + full-"
+"attention) model. LMCache transfers every KV cache group via its hybrid "
+"memory allocator support, so caching works transparently. This applies to"
+" the standard paged attention used by Gemma 3; Mamba / linear-attention "
+"hybrids (whose recurrent state caches LMCache cannot yet transfer) are "
+"not supported."
+msgstr "**hybrid attention。** Gemma 3 是一个混合（sliding window + full attention）模型。LMCache 通过其混合内存分配器支持传输每个 KV Cache 组，因此缓存可透明运作。这适用于 Gemma 3 使用的 standard paged attention；Mamba / linear attention 混合模型（其递归状态缓存 LMCache 目前尚无法传输）暂不支持。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "Gemma3ForConditionalGeneration"
+#~ msgstr "Gemma3ForConditionalGeneration"
+

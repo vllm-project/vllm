@@ -1,0 +1,342 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/disaggregated_prefill.rst:4
+msgid "Disaggregated Prefill"
+msgstr "分离式预填充"
+
+#: ../../source/mp/disaggregated_prefill.rst:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/mp/disaggregated_prefill.rst:9
+msgid ""
+"Disaggregated prefill (P/D) runs prefill and decode on separate vLLM "
+"instances: a **prefill** instance computes the prompt's KV, hands it to a"
+" **decode** instance over NIXL, and the decoder generates tokens without "
+"recomputing the prompt. Prefill- and decode-heavy work then scale "
+"independently."
+msgstr "分离式 Prefill (P/D) 在不同的 vLLM 实例上运行 Prefill 和解码：一个 **Prefill** 实例计算提示的 KV，将其通过 NIXL 交给一个 **解码** 实例，解码器生成令牌而无需重新计算提示。Prefill 和解码密集型工作可以独立扩展。"
+
+#: ../../source/mp/disaggregated_prefill.rst:14
+msgid ""
+"**LMCache MP adds cross-request KV reuse on top.** Each vLLM instance "
+"also offloads its KV to a co-located LMCache server, so a recurring "
+"prefix — on a later request, or after eviction from GPU HBM — is loaded "
+"from LMCache instead of recomputed. KV-source order on the prefill path: "
+"local GPU cache → LMCache → recompute."
+msgstr "**LMCache MP 在此基础上增加了跨请求的 KV 重用。** 每个 vLLM 实例还将其 KV 卸载到一个共置的 LMCache 服务器，因此在后续请求中，或在从 GPU HBM 逐出后，重复的前缀将从 LMCache 加载，而不是重新计算。预取路径上的 KV 源顺序：本地 GPU 缓存 → LMCache → 重计算。"
+
+#: ../../source/mp/disaggregated_prefill.rst:20
+msgid ""
+"Both are composed with vLLM's ``MultiConnector``, which runs two "
+"connectors per instance:"
+msgstr "两者都是通过 vLLM 的 ``MultiConnector`` 组合而成，每个实例运行两个连接器："
+
+#: ../../source/mp/disaggregated_prefill.rst:23
+msgid ""
+"``NixlConnector`` — the prefill→decode KV handoff for the current "
+"request, over NIXL (UCX / RDMA)."
+msgstr "``NixlConnector`` — 当前请求的 Prefill→解码 KV 移交，通过 NIXL (UCX / RDMA)。"
+
+#: ../../source/mp/disaggregated_prefill.rst:25
+msgid ""
+"``LMCacheMPConnector`` — offload/load to the instance's LMCache server "
+"for cross-request reuse."
+msgstr "``LMCacheMPConnector`` — 卸载/加载到实例的 LMCache 服务器以实现跨请求重用。"
+
+#: ../../source/mp/disaggregated_prefill.rst:28
+msgid ""
+"A vLLM **router** in P/D mode sends each request to a prefill then a "
+"decode instance and threads the NIXL handshake between them."
+msgstr "在 P/D 模式下，vLLM **路由器** 将每个请求发送到一个 Prefill 实例，然后是一个解码实例，并在它们之间线程化 NIXL 握手。"
+
+#: ../../source/mp/disaggregated_prefill.rst:32
+msgid "How it works"
+msgstr "它是如何工作的"
+
+#: ../../source/mp/disaggregated_prefill.rst:34
+msgid "A minimal deployment is five processes:"
+msgstr "最小部署需要五个进程："
+
+#: ../../source/mp/disaggregated_prefill.rst:36
+msgid ""
+"**Prefill vLLM (producer)** — ``MultiConnector[NixlConnector "
+"(kv_producer), LMCacheMPConnector]``; computes prompt KV, stores it to "
+"its LMCache server, and exposes it for the decoder to pull over NIXL."
+msgstr "**Prefill vLLM (生产者)** — ``MultiConnector[NixlConnector (kv_producer), LMCacheMPConnector]``; 计算提示 KV，将其存储到 LMCache 服务器，并为解码器提供拉取功能。"
+
+#: ../../source/mp/disaggregated_prefill.rst:39
+msgid ""
+"**Decode vLLM (consumer)** — ``MultiConnector[NixlConnector "
+"(kv_consumer), LMCacheMPConnector]``; pulls prompt KV from the producer "
+"and generates output."
+msgstr "**解码 vLLM (消费者)** — ``MultiConnector[NixlConnector (kv_consumer), LMCacheMPConnector]``; 从生产者拉取提示 KV 并生成输出。"
+
+#: ../../source/mp/disaggregated_prefill.rst:41
+msgid ""
+"**Two LMCache servers** — one ``lmcache server`` per vLLM instance (they "
+"must not share one)."
+msgstr "**两个 LMCache 服务器** — 每个 vLLM 实例一个 ``lmcache server``（它们不能共享一个）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:43
+msgid ""
+"**Router** — ``vllm-router --vllm-pd-disaggregation`` routes prefill then"
+" decode."
+msgstr "**路由器** — ``vllm-router --vllm-pd-disaggregation`` 路由 Prefill 然后解码。"
+
+#: ../../source/mp/disaggregated_prefill.rst:46
+msgid ""
+"To share reuse across the prefill and decode pools too, layer :doc:`P2P "
+"KV cache sharing <p2p>` on top (give both servers a coordinator and "
+"``--p2p-advertise-url``)."
+msgstr "为了在 Prefill 和解码池之间共享重用，在顶部逐层 :doc:`P2P KV Cache 共享 <p2p>`（给两个服务器一个协调器和 ``--p2p-advertise-url``）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:51
+msgid "Requirements"
+msgstr "要求"
+
+#: ../../source/mp/disaggregated_prefill.rst:55
+msgid ""
+"`vllm-project/vllm#46865 <https://github.com/vllm-"
+"project/vllm/pull/46865>`_ (the MultiConnector real-blocks fix) unblocks "
+"LMCache offload under ``MultiConnector``. Without it, offload silently "
+"never triggers."
+msgstr "`vllm-project/vllm#46865 <https://github.com/vllm-project/vllm/pull/46865>`_ （MultiConnector 实际块修复）解锁了在 ``MultiConnector`` 下的 LMCache 卸载。没有它，卸载将静默地永远不会触发。"
+
+#: ../../source/mp/disaggregated_prefill.rst:60
+msgid ""
+"**NIXL** available in the vLLM environment (``lmcache[nixl]`` extra, "
+"which pulls ``nixl>=1.3.0``)."
+msgstr "**NIXL** 在 vLLM 环境中可用（``lmcache[nixl]`` 附加项，拉取 ``nixl>=1.3.0``）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:64
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/disaggregated_prefill.rst:66
+msgid ""
+"Each vLLM instance takes a ``--kv-transfer-config`` selecting "
+"``MultiConnector`` with two sub-connectors:"
+msgstr "每个 vLLM 实例都需要一个 ``--kv-transfer-config``，选择 ``MultiConnector``，并包含两个子连接器："
+
+#: ../../source/mp/disaggregated_prefill.rst:73
+msgid "Key"
+msgstr "键"
+
+#: ../../source/mp/disaggregated_prefill.rst:74
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/disaggregated_prefill.rst:75
+msgid "``kv_connector`` = ``MultiConnector``"
+msgstr "``kv_connector`` = ``MultiConnector``"
+
+#: ../../source/mp/disaggregated_prefill.rst:76
+msgid "Runs the ``kv_connector_extra_config.connectors`` side by side."
+msgstr "并行运行 ``kv_connector_extra_config.connectors``。"
+
+#: ../../source/mp/disaggregated_prefill.rst:77
+msgid "``kv_role``"
+msgstr "``kv_role``"
+
+#: ../../source/mp/disaggregated_prefill.rst:78
+msgid ""
+"``kv_producer`` (prefill) or ``kv_consumer`` (decode), on both the top-"
+"level ``MultiConnector`` and the nested ``NixlConnector``."
+msgstr "``kv_producer``（Prefill）或 ``kv_consumer``（解码），在顶层 ``MultiConnector`` 和嵌套的 ``NixlConnector`` 上均适用。"
+
+#: ../../source/mp/disaggregated_prefill.rst:80
+msgid "``NixlConnector``"
+msgstr "``NixlConnector``"
+
+#: ../../source/mp/disaggregated_prefill.rst:81
+msgid ""
+"The prefill→decode handoff. Set ``kv_load_failure_policy`` = ``fail`` so "
+"a failed transfer surfaces instead of silently recomputing."
+msgstr "Prefill→解码交接。将 ``kv_load_failure_policy`` 设置为 ``fail``，以便在传输失败时显式显示，而不是静默重计算。"
+
+#: ../../source/mp/disaggregated_prefill.rst:83
+msgid "``LMCacheMPConnector``"
+msgstr "``LMCacheMPConnector``"
+
+#: ../../source/mp/disaggregated_prefill.rst:84
+msgid "Offload/load to the local LMCache server; use ``kv_role`` = ``kv_both``."
+msgstr "卸载/加载到本地 LMCache 服务器；使用 ``kv_role`` = ``kv_both``。"
+
+#: ../../source/mp/disaggregated_prefill.rst:85
+msgid "``lmcache.mp.host`` / ``lmcache.mp.port``"
+msgstr "``lmcache.mp.host`` / ``lmcache.mp.port``"
+
+#: ../../source/mp/disaggregated_prefill.rst:86
+msgid ""
+"Transport+host and ZMQ ``--port`` of the instance's LMCache server "
+"(distinct per instance)."
+msgstr "实例的 LMCache 服务器的传输主机和 ZMQ ``--port``（每个实例不同）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:89
+msgid ""
+"The NIXL transfer is tuned via environment variables on the vLLM "
+"instances: ``VLLM_NIXL_SIDE_CHANNEL_HOST`` (host advertised for the "
+"handshake, reachable by the peer), ``VLLM_NIXL_SIDE_CHANNEL_PORT`` "
+"(**must differ between instances on the same host**; default ``5600``), "
+"plus ``UCX_NET_DEVICES=all`` and ``NCCL_CUMEM_ENABLE=1``. See "
+":doc:`/cli/server` for the full ``lmcache server`` flag list."
+msgstr "NIXL 传输通过 vLLM 实例上的环境变量进行调整：``VLLM_NIXL_SIDE_CHANNEL_HOST``（用于握手的主机，由对等方可达），``VLLM_NIXL_SIDE_CHANNEL_PORT``（**在同一主机上的实例之间必须不同**；默认值为 ``5600``），以及 ``UCX_NET_DEVICES=all`` 和 ``NCCL_CUMEM_ENABLE=1``。有关完整的 ``lmcache server`` 标志列表，请参见 :doc:`/cli/server`。"
+
+#: ../../source/mp/disaggregated_prefill.rst:97
+msgid "Running a deployment"
+msgstr "运行部署"
+
+#: ../../source/mp/disaggregated_prefill.rst:99
+msgid ""
+"The example below places the prefill pool, the decode pool, and the "
+"router on separate hosts. Replace ``<PREFILL_IP>`` / ``<DECODE_IP>`` with"
+" routable addresses and ``<model>`` with the model path (identical on "
+"both instances)."
+msgstr "下面的示例将 Prefill 池、解码池和路由器放置在不同的主机上。将 ``<PREFILL_IP>`` / ``<DECODE_IP>`` 替换为可路由地址，并将 ``<model>`` 替换为模型路径（在两个实例上相同）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:103
+msgid "**Step 1 — prefill LMCache server** (on the prefill host):"
+msgstr "**步骤 1 — Prefill LMCache 服务器**（在 Prefill 主机上）："
+
+#: ../../source/mp/disaggregated_prefill.rst:112
+msgid "**Step 2 — prefill vLLM (producer)** (on the prefill host):"
+msgstr "**步骤 2 — Prefill vLLM（生产者）**（在 Prefill 主机上）："
+
+#: ../../source/mp/disaggregated_prefill.rst:122
+msgid ""
+"The producer advertises its NIXL side channel on ``<PREFILL_IP>:5600`` "
+"and offloads to the LMCache server on port ``6555``."
+msgstr "生产者在 ``<PREFILL_IP>:5600`` 上宣传其 NIXL 边通道，并将任务卸载到端口 ``6555`` 的 LMCache 服务器上。"
+
+#: ../../source/mp/disaggregated_prefill.rst:125
+msgid "**Step 3 — decode LMCache server** (on the decode host):"
+msgstr "**步骤 3 — 解码 LMCache 服务器**（在解码主机上）："
+
+#: ../../source/mp/disaggregated_prefill.rst:134
+msgid "**Step 4 — decode vLLM (consumer)** (on the decode host):"
+msgstr "**步骤 4 — 解码 vLLM（消费者）**（在解码主机上）："
+
+#: ../../source/mp/disaggregated_prefill.rst:144
+msgid ""
+"The consumer offloads to the LMCache server on port ``6556``; its side-"
+"channel port (``5558``) differs from the producer's so the two can share "
+"a host."
+msgstr "消费者将任务卸载到端口 ``6556`` 的 LMCache 服务器；其侧信道端口 (``5558``) 与生产者的不同，以便两者可以共享一个主机。"
+
+#: ../../source/mp/disaggregated_prefill.rst:147
+msgid "**Step 5 — router** (on any host that can reach both vLLM instances):"
+msgstr "**步骤 5 — 路由器**（在任何可以访问两个 vLLM 实例的主机上）："
+
+#: ../../source/mp/disaggregated_prefill.rst:158
+msgid ""
+"Send requests to the router (``http://<ROUTER_IP>:30000/v1/...``); it "
+"handles the prefill→decode split transparently."
+msgstr "将请求发送到路由器（``http://<ROUTER_IP>:30000/v1/...``）；它透明地处理 Prefill→解码的分离。"
+
+#: ../../source/mp/disaggregated_prefill.rst:162
+msgid "Running on a single node (testing & debugging)"
+msgstr "在单个节点上运行（测试和调试）"
+
+#: ../../source/mp/disaggregated_prefill.rst:164
+msgid ""
+"Same five processes over ``localhost``, prefill on GPU 6 and decode on "
+"GPU 7. The instances must differ in **every** shared-host port: the "
+"LMCache ``--port`` and ``--http-port``, the vLLM ``--port``, and "
+"``VLLM_NIXL_SIDE_CHANNEL_PORT``."
+msgstr "在 ``localhost`` 上运行相同的五个进程，GPU 6 上进行 Prefill，GPU 7 上进行解码。实例必须在 **每个** 共享主机端口上有所不同：LMCache 的 ``--port`` 和 ``--http-port``，vLLM 的 ``--port``，以及 ``VLLM_NIXL_SIDE_CHANNEL_PORT``。"
+
+#: ../../source/mp/disaggregated_prefill.rst:189
+msgid ""
+"Add ``--enable-tracing --otlp-endpoint http://localhost:4317`` to each "
+"``lmcache server`` to export traces/metrics to a local OpenTelemetry "
+"collector."
+msgstr "将 ``--enable-tracing --otlp-endpoint http://localhost:4317`` 添加到每个 ``lmcache server`` 以将跟踪/指标导出到本地 OpenTelemetry 收集器。"
+
+#: ../../source/mp/disaggregated_prefill.rst:194
+msgid ""
+"On a single host, NIXL over ``localhost`` uses loopback/TCP, not RDMA, so"
+" latencies are not representative — single-node mode is for "
+"**functional** testing only."
+msgstr "在单个主机上，NIXL 通过 ``localhost`` 使用回环/TCP，而不是 RDMA，因此延迟并不具有代表性——单节点模式仅用于 **功能** 测试。"
+
+#: ../../source/mp/disaggregated_prefill.rst:199
+msgid "Verifying it is working"
+msgstr "验证其是否正常工作"
+
+#: ../../source/mp/disaggregated_prefill.rst:206
+msgid ""
+"**P/D routing** — the response ``id`` is stamped with the workers, e.g. "
+"``cmpl-___prefill_addr_localhost:8001___decode_addr_localhost:8002_...``."
+msgstr "**P/D 路由** — 响应 ``id`` 被标记为工作节点，例如 ``cmpl-___prefill_addr_localhost:8001___decode_addr_localhost:8002_...``。"
+
+#: ../../source/mp/disaggregated_prefill.rst:208
+#, python-brace-format
+msgid ""
+"**NIXL transfer** — the decode vLLM logs ``KV Transfer metrics: "
+"NixlConnector={'Num successful transfers': N, ...}``."
+msgstr "**NIXL 传输** — 解码 vLLM 日志 ``KV Transfer metrics: NixlConnector={'Num successful transfers': N, ...}``."
+
+#: ../../source/mp/disaggregated_prefill.rst:210
+msgid ""
+"**LMCache offload** — ``storage_manager.l1_manager.total_object_count`` "
+"in ``curl -s http://localhost:8090/status`` grows (prompts must be at "
+"least ``--chunk-size`` tokens to store anything)."
+msgstr "**LMCache 卸载** — ``storage_manager.l1_manager.total_object_count`` 在 ``curl -s http://localhost:8090/status`` 中增长（提示必须至少为 ``--chunk-size`` 个标记才能存储任何内容）。"
+
+#: ../../source/mp/disaggregated_prefill.rst:213
+msgid ""
+"**LMCache hit rate** — read vLLM's **\"External prefix cache hit rate\"**"
+" log line (the fraction of prefill tokens served from LMCache), *not* the"
+" LMCache server ``/status``. It stays ``0`` while the working set fits in"
+" GPU HBM and rises once reuse spills out of the GPU cache."
+msgstr "**LMCache 命中率** — 阅读 vLLM 的 **“外部前缀缓存命中率”** 日志行（从 LMCache 提供的 Prefill 令牌的比例），*而不是* LMCache 服务器 ``/status``。当工作集适合显存时，它保持为 ``0``，一旦重用溢出显存缓存，它就会上升。"
+
+#: ../../source/mp/disaggregated_prefill.rst:219
+msgid "Limitations and tuning"
+msgstr "限制与调优"
+
+#: ../../source/mp/disaggregated_prefill.rst:221
+msgid ""
+"**Keep cold KV transfers bounded under high concurrency.** vLLM's native "
+"NIXL P/D path is sensitive to many large *cold* transfers (full-prompt, "
+"nothing cached) in flight at once. Keep the decode instance's GPU KV "
+"cache large enough to hold the working set so transfers stay small and "
+"cache-served, or reduce concurrency when per-request transfers are large."
+msgstr "**在高并发下保持冷 KV 传输的边界。** vLLM 的原生 NIXL P/D 路径对同时进行的许多大型 *冷* 传输（完整提示，未缓存）非常敏感。保持解码实例的 GPU KV Cache 足够大，以容纳工作集，从而使传输保持较小并由缓存服务，或者在每个请求的传输较大时减少并发。"
+
+#~ msgid ""
+#~ "The multiprocess (MP) implementation of "
+#~ "disaggregated prefill is **coming soon**."
+#~ msgstr "分离式预填充的 MP 模式（多进程）实现 **即将推出**\\ 。"
+
+#~ msgid ""
+#~ "Until it lands, the in-process "
+#~ "implementation (NIXL and shared-storage "
+#~ "transports) is documented in the "
+#~ ":doc:`Legacy section <../legacy/index>`: "
+#~ ":doc:`../disaggregated_prefill/nixl/index`."
+#~ msgstr ""
+#~ "在它发布之前，进程内实现（NIXL 和共享存储传输）已在 :doc:`旧版部分 "
+#~ "<../legacy/index>` 中记录： "
+#~ ":doc:`../disaggregated_prefill/nixl/index`。"
+

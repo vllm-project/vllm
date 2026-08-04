@@ -1,0 +1,174 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:2
+msgid "3FS"
+msgstr "3FS"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:14
+msgid ""
+"3FS (Fire-Flyer File System) is an AI native distributed file-system "
+"which provides high performance and low latency. It is a supported option"
+" for KV Cache offloading in LMCache. Even though the FSConnector backend "
+"can work with 3FS storage cluster, but it access data in 3FS storage "
+"cluster by FUSE interfaces. It can't leverage 3FS high performance. This "
+"particular backend uses 3FS native USRBIO(User Space Ring Based IO) "
+"interfaces to access 3FS storage cluster which get high performance."
+msgstr ""
+"3FS（火飞文件系统）是一个 AI 原生的分布式文件系统，提供高性能和低延迟。它是 LMCache 卸载 KV Cache 的一个支持选项。尽管 "
+"FSConnector 后端可以与 3FS 存储集群一起工作，但它通过 FUSE 接口访问 3FS 存储集群，无法利用 3FS "
+"的高性能。这个特定的后端使用 3FS 原生的 USRBIO（用户空间环形 IO）接口访问 3FS 存储集群，从而获得高性能。"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:21
+msgid "Configure LMCache 3FS Offloading"
+msgstr "配置 LMCache 3FS 卸载"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:23
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:25
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:71
+msgid "There are 2 methods to config hf3fs remote backend:"
+msgstr "配置 hf3fs 远程后端有两种方法："
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:72
+msgid "Plugin name mode, uses the parameter remote_storage_plugins(Recommend)"
+msgstr "插件名称模式，使用参数 remote_storage_plugins（推荐）"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:73
+msgid ""
+"URL mode, uses the parameter remote_url(Deprecated, will be removed in a "
+"future)"
+msgstr "URL 模式，使用参数 remote_url（已弃用，将在未来删除）"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:75
+msgid ""
+"For URL mode, the base_path is contained in the url. For plugin name "
+"mode, there are 2 methods to set base_path:"
+msgstr "对于 URL 模式，base_path 包含在 url 中。对于插件名称模式，有两种方法可以设置 base_path："
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:76
+#, python-brace-format
+msgid ""
+"remote_storage_plugin.{plugin name}.base_path, it sets the base_path for "
+"a plugin instance."
+msgstr "remote_storage_plugin.{plugin name}.base_path，它为插件实例设置 base_path。"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:77
+msgid "e.g.:remote_storage_plugin.hf3fs.primary.base_path"
+msgstr "e.g.:remote_storage_plugin.hf3fs.primary.base_path"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:78
+msgid "hf3fs_base_path, it set the base_path for all plugin instances"
+msgstr "hf3fs_base_path，它为所有插件实例设置了 base_path"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:81
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:85
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:87
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:89
+msgid "vllm and lmcache installed"
+msgstr "已安装 vllm 和 LMCache"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:91
+msgid "**Step 1. Install 3FS hf3fs_py_usrbio package**"
+msgstr "**步骤 1. 安装 3FS hf3fs_py_usrbio 包**"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:93
+msgid ""
+"The inference server need install 3FS hf3fs_py_usrbio package, recommend "
+"to build the package from source:"
+msgstr "推理服务器需要安装 3FS hf3fs_py_usrbio 包，建议从源代码构建该包："
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:104
+msgid ""
+"`3FS Build <https://github.com/deepseek-ai/3FS/blob/main/README.md#build-"
+"3fs>`_"
+msgstr ""
+"`3FS Build <https://github.com/deepseek-ai/3FS/blob/main/README.md#build-"
+"3fs>`_"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:107
+msgid "**Step 2. Setup 3FS storage cluster**"
+msgstr "**步骤 2. 设置 3FS 存储集群**"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:109
+msgid ""
+"`3FS Setup <https://github.com/deepseek-"
+"ai/3FS/blob/main/deploy/README.md>`_"
+msgstr "`3FS 设置 <https://github.com/deepseek-ai/3FS/blob/main/deploy/README.md>`_"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:112
+msgid "**Step 3. Deploy 3FS FUSE client in inference server**"
+msgstr "**步骤 3. 在推理服务器上部署 3FS FUSE 客户端**"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:114
+msgid ""
+"The inference server must deploy 3FS FUSE client(a fuse daemon process "
+"provided by 3FS), otherwise, it can't access 3FS storage cluster"
+msgstr "推理服务器必须部署 3FS FUSE 客户端（由 3FS 提供的 FUSE 守护进程），否则无法访问 3FS 存储集群。"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:117
+msgid ""
+"`Setup 3FS FUSE Client <https://github.com/deepseek-"
+"ai/3FS/blob/main/deploy/README.md#step-8-fuse-client>`_"
+msgstr ""
+"`设置 3FS FUSE 客户端 <https://github.com/deepseek-"
+"ai/3FS/blob/main/deploy/README.md#step-8-fuse-client>`_"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:120
+msgid "**Step 4. Start a vLLM server with 3FS offloading enabled**"
+msgstr "**步骤 4. 启动一个启用 3FS 卸载的 vLLM 服务器**"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:122
+msgid "Create a lmcache configuration file called: ``3fs-offload.yaml``"
+msgstr "创建一个名为 ``3fs-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:160
+msgid "Start vllm:"
+msgstr "启动 vLLM："
+

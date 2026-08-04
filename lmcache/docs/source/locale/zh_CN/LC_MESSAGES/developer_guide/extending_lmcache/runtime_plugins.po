@@ -1,0 +1,185 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:2
+msgid "Runtime Plugins"
+msgstr "运行时插件"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:4
+msgid ""
+"The LMCache runtime plugin system provides the ability to extend "
+"functionality by running custom scripts alongside LMCache processes. "
+"Plugins can be written in Python and Bash for now, and are managed by the"
+" ``RuntimePluginLauncher`` class."
+msgstr "LMCache 运行时插件系统提供了通过在 LMCache 进程旁边运行自定义脚本来扩展功能的能力。目前，插件可以用 Python 和 Bash 编写，并由 ``RuntimePluginLauncher`` 类管理。"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:7
+msgid "Key Use Cases"
+msgstr "关键使用案例"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:8
+msgid "Start metric reporters for centralized monitoring"
+msgstr "启动度量报告器以进行集中监控"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:9
+msgid "Implement log reporters for log collection systems"
+msgstr "实现日志报告器以用于日志收集系统"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:10
+msgid "Report process-level metrics to alerting systems"
+msgstr "将进程级别的指标报告给警报系统"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:11
+msgid "Implement health checks and service discovery"
+msgstr "实现健康检查和服务发现"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:12
+msgid "Custom cache management operations"
+msgstr "自定义缓存管理操作"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:15
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:16
+msgid ""
+"Runtime plugins are configured through environment variables and "
+"configuration files:"
+msgstr "运行时插件通过环境变量和配置文件进行配置："
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:18
+msgid ""
+"Environment Variables: - ``LMCACHE_RUNTIME_PLUGIN_ROLE``: Process role "
+"(e.g., ``SCHEDULER``, ``WORKER``) - ``LMCACHE_RUNTIME_PLUGIN_CONFIG``: "
+"JSON string containing plugin configuration - "
+"``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``: Current worker ID - "
+"``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``: Total worker count in cluster"
+msgstr "环境变量： - ``LMCACHE_RUNTIME_PLUGIN_ROLE``\\ ：进程角色（例如，\\ ``SCHEDULER``\\ ，\\ ``WORKER``\\ ） - ``LMCACHE_RUNTIME_PLUGIN_CONFIG``\\ ：包含插件配置的 JSON 字符串 - ``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``\\ ：当前工作线程 ID - ``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``\\ ：集群中的总工作线程数"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:24
+msgid "Configuration File (``lmcache.yaml``):"
+msgstr "配置文件 (``lmcache.yaml``):"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:35
+msgid "Runtime Plugin Naming Convention"
+msgstr "运行时插件命名约定"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:36
+msgid "Plugin filenames determine execution targets:"
+msgstr "插件文件名决定执行目标："
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:38
+msgid ""
+"Role-Specific Plugins: - Format: "
+"``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - Examples:"
+msgstr "角色特定插件： - 格式：\\ ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - 示例："
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:42
+msgid "``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``"
+msgstr "``scheduler_foo_plugin.py``\\ ：仅在 ``SCHEDULER`` 上运行"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:43
+msgid "``worker_0_test.sh``: Runs only on worker ID 0"
+msgstr "``worker_0_test.sh``: 仅在工作节点 ID 0 上运行"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:44
+msgid "``all_plugin.sh``: Runs on all workers"
+msgstr "``all_plugin.sh``: 在所有工作节点上运行"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:46
+msgid ""
+"Notes: - Role names are case-insensitive - Worker ID must be numeric when"
+" specified - To target a specific worker ID, the filename must have at "
+"least three parts separated by underscores (e.g., "
+"`worker_<ID>_<DESCRIPTION>.ext`). A file named `worker_<DESCRIPTION>.ext`"
+" will run on all workers."
+msgstr "注意：- 角色名称不区分大小写 - 指定时工作节点 ID 必须为数字 - 要针对特定的工作节点 ID，文件名必须至少包含三个由下划线分隔的部分（例如，`worker_<ID>_<DESCRIPTION>.ext`）。名为 `worker_<DESCRIPTION>.ext` 的文件将在所有工作节点上运行。"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:52
+msgid "Execution Model"
+msgstr "执行模型"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:53
+msgid ""
+"**Interpreter Detection**: - Uses shebang line (e.g., "
+"``#!/opt/venv/bin/python``) - Fallback interpreters:"
+msgstr "**解释器检测**\\ ： - 使用 shebang 行（例如，\\ ``#!/opt/venv/bin/python``\\ ） - 备用解释器："
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:57
+msgid "``.py`` → ``python``"
+msgstr "``.py`` → ``python``"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:58
+msgid "``.sh`` → ``bash``"
+msgstr "``.sh`` → ``bash``"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:60
+msgid ""
+"**Output Handling**: - Stdout/stderr captured continuously - Logged with "
+"plugin name prefix"
+msgstr "**输出处理**\\ ：- 持续捕获标准输出/标准错误 - 以插件名称前缀记录"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:64
+msgid ""
+"**Process Management**: - Launched as subprocesses - Terminated when "
+"parent process exits"
+msgstr "**进程管理**\\ ： - 作为子进程启动 - 当父进程退出时终止"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:69
+msgid "Example Runtime Plugins"
+msgstr "示例运行时插件"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:70
+msgid "Python Plugin (``scheduler_foo_plugin.py``):"
+msgstr "Python 插件 (``scheduler_foo_plugin.py``):"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:76
+msgid "Bash Plugin (``all_plugin.sh``):"
+msgstr "Bash 插件 (``all_plugin.sh``):"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:83
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:84
+msgid "Keep runtime plugins lightweight and efficient"
+msgstr "保持运行时插件轻量和高效"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:85
+msgid "Use descriptive naming conventions"
+msgstr "使用描述性命名约定"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:86
+msgid "Implement graceful error handling"
+msgstr "实现优雅的错误处理"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:87
+msgid "Include shebang for portability"
+msgstr "包含 shebang 以提高可移植性"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:88
+msgid "Validate configuration inputs"
+msgstr "验证配置输入"
+
+#: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:89
+msgid "Add timeout mechanisms for long operations"
+msgstr "为长时间操作添加超时机制"
+

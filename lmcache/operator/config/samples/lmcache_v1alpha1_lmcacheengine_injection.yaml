@@ -1,0 +1,41 @@
+# LMCacheEngine that pins injected vLLM pods to a specific lmcache build.
+#
+# On top of the usual connection wiring (--kv-transfer-config, hostIPC,
+# PYTHONHASHSEED), spec.injection.payloadImage makes the webhook stage an lmcache
+# payload into every opted-in vLLM pod (emptyDir + init container + read-only
+# mount + PYTHONPATH=/lmcache-payload), so vLLM imports THAT lmcache instead of
+# the one baked into its image — an older vLLM image can run the newest lmcache,
+# and the vLLM client stays on the engine server's build. The payload's lmcache
+# must be ABI-compatible (Python minor + torch) with the vLLM image; see
+# docker/Dockerfile.payload.
+#
+# Pair with an opted-in vLLM Deployment
+# (config/samples/vllm_lmcache_injection_deployment.yaml): pod-template label
+# `lmcache.ai/lmcache-inject: "true"` + annotation
+# `lmcache.ai/lmcache-engine: "my-cache-versioned"`.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache-versioned
+  namespace: default
+spec:
+  # -- L1 cache (REQUIRED) --
+  l1:
+    sizeGB: 60
+  image:
+    repository: lmcache/vllm-openai # default
+    tag: dev # default
+    pullPolicy: IfNotPresent # Always | Never | IfNotPresent
+
+  # -- Code-payload injection --
+  injection:
+    payloadImage:
+      repository: lmcache/lmcache-payload
+      tag: dev
+      pullPolicy: IfNotPresent
+    # Private payload registry only — the Secret(s) must exist in the vLLM pod's
+    # namespace (the operator does not copy them cross-namespace):
+    # imagePullSecrets:
+    #   - name: my-registry-secret
+    # Name the vLLM container if it is not the first one in the pod:
+    # targetContainer: vllm

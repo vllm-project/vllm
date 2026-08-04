@@ -1,0 +1,12 @@
+# Paste this into the Buildkite pipeline's "Steps" editor for the
+# SGLang + LMCache MP integration test. Uploads the real pipeline
+# definition from the repo.
+agents:
+  queue: "k8s"
+
+env:
+  HF_TOKEN: ""  # set your HuggingFace token here (needed for gated model access)
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/sglang/pipeline.yml

@@ -1,0 +1,105 @@
+name: Build cu129 Artifacts
+
+# Reusable workflow that builds the cu129 CUDA 12.9 wheel via cibuildwheel
+# against the pytorch manylinux cu12.9 base image.
+# Uploaded as the `release-cu129-artifacts` GHA artifact.
+# The cu12.9 wheel carries no local version suffix and is published to a
+# dedicated v{tag}-cu12 GitHub Release (not PyPI).
+
+on:
+    workflow_call:
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    build-cu129-artifacts:
+        name: Build cu129 artifacts
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+
+            - name: Login to DockerHub
+              # Skip when either the username var or the token secret is
+              # absent. Secrets are not inherited into reusable workflows
+              # without `secrets: inherit`, and fork PRs never get secrets,
+              # so the token can legitimately be empty on some runs.
+              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+              env:
+                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Setup Python 3.13
+              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+              with:
+                python-version: "3.13"
+
+            - name: Install build tooling
+              run: |
+                python -m pip install --upgrade pip
+                pip install build cibuildwheel
+
+            - name: Clean up release artifacts
+              run: |
+                rm -rf dist/
+
+            - name: Get base version for cu12.9 wheel
+              run: |
+                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                  BASE="${GITHUB_REF_NAME#v}"
+                else
+                  BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
+                fi
+                echo "CU129_VERSION=${BASE}" >> "$GITHUB_ENV"
+
+            - name: Build cu12.9 CUDA wheels with cibuildwheel
+              env:
+                CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
+                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129'
+                CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+                  auditwheel repair
+                  --plat manylinux_2_28_x86_64
+                  --exclude libtorch.so
+                  --exclude libtorch_cuda.so
+                  --exclude libtorch_python.so
+                  --exclude libtorch_cpu.so
+                  --exclude libc10.so
+                  --exclude libc10_cuda.so
+                  --exclude libcudart.so.12
+                  -w {dest_dir} {wheel}
+                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+              run: |
+                python -m cibuildwheel --output-dir dist
+
+            - name: Upload cu12.9 release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: release-cu129-artifacts
+                path: dist/

@@ -1,0 +1,76 @@
+name: "Operator: CI"
+
+on:
+  push:
+    branches:
+      - dev
+      - "release-**"
+  pull_request:
+    branches:
+      - dev
+      - "release-**"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: operator
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      operator: ${{ steps.filter.outputs.operator == 'true' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            operator:
+              - 'operator/**'
+              - '.github/workflows/operator_ci.yml'
+
+  ci:
+    needs: changes
+    if: needs.changes.outputs.operator == 'true'
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+
+      - name: Check linter configuration
+        run: make lint-config
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: |
+          go mod tidy
+          make test

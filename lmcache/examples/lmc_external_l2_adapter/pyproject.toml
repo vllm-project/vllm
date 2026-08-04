@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmc-external-l2-adapter"
+version = "0.1.0"
+description = "Example external L2 adapter plugin for LMCache"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "lmcache",
+]
+
+[project.urls]
+homepage = "https://github.com/LMCache/LMCache"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lmc_external_l2_adapter*"]
+
+[tool.ruff]
+line-length = 88

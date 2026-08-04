@@ -1,0 +1,256 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1600 1400"
+     xmlns="http://www.w3.org/2000/svg"
+     preserveAspectRatio="xMinYMin meet">
+
+  <!-- GPU Model Runner Box -->
+  <rect x="50" y="50" width="450" height="650" fill="#e3f2fd" stroke="#1976d2" stroke-width="3" rx="10"/>
+  <text x="275" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#1976d2">GPU Model Runner</text>
+  
+  <!-- KV Cache Layers (Left Side) -->
+  <g id="kv-cache-layers">
+    
+    <!-- Layer 1 KV Cache -->
+    <rect x="20" y="110" width="90" height="35" fill="#ffe0b2" stroke="#f57c00" stroke-width="2" rx="5"/>
+    <text x="65" y="130" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#e65100">KV Cache 1</text>
+    
+    <!-- Layer 2 KV Cache -->
+    <rect x="20" y="210" width="90" height="35" fill="#ffe0b2" stroke="#f57c00" stroke-width="2" rx="5"/>
+    <text x="65" y="230" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#e65100">KV Cache 2</text>
+    
+    <!-- Dots for more layers -->
+    <circle cx="65" cy="280" r="4" fill="#666"/>
+    <circle cx="65" cy="295" r="4" fill="#666"/>
+    <circle cx="65" cy="310" r="4" fill="#666"/>
+    
+    <!-- Layer N KV Cache -->
+    <rect x="20" y="340" width="90" height="35" fill="#ffe0b2" stroke="#f57c00" stroke-width="2" rx="5"/>
+    <text x="65" y="360" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#e65100">KV Cache N</text>
+  </g>
+  
+  <!-- Numbered Operations in GPU Model Runner -->
+  
+  <!-- 1. start_load_kv() -->
+  <rect x="130" y="80" width="350" height="45" fill="#ffecb3" stroke="#f57f17" stroke-width="2" rx="5"/>
+  <text x="305" y="107" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#f57f17">start_load_kv()</text>
+  <circle cx="145" cy="90" r="12" fill="#ff9800" stroke="#ef6c00" stroke-width="2"/>
+  <text x="145" y="95" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">1</text>
+  
+  <!-- Layer 1 Processing -->
+  <g id="layer1">
+    <rect x="140" y="140" width="340" height="85" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <!-- 2. wait_for_layer_load() -->
+    <rect x="150" y="150" width="100" height="30" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="200" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#4a148c">wait_for_layer_load()</text>
+    <circle cx="165" cy="140" r="12" fill="#9c27b0" stroke="#6a1b9a" stroke-width="2"/>
+    <text x="165" y="145" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">2</text>
+    
+    <!-- Attention 1 -->
+    <rect x="265" y="150" width="70" height="30" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="300" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#bf360c">Attention 1</text>
+    
+    <!-- 3. save_kv_layer() -->
+    <rect x="350" y="150" width="120" height="30" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="410" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#1b5e20">save_kv_layer()</text>
+    <circle cx="365" cy="140" r="12" fill="#388e3c" stroke="#2e7d32" stroke-width="2"/>
+    <text x="365" y="145" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">3</text>
+    
+    <!-- Arrows -->
+    <path d="M 250 165 L 265 165" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <path d="M 335 165 L 350 165" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- Layer 2 Processing -->
+  <g id="layer2">
+    <rect x="140" y="240" width="340" height="85" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <rect x="150" y="250" width="100" height="30" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="200" y="268" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#4a148c">wait_for_layer_load()</text>
+    <circle cx="165" cy="240" r="12" fill="#9c27b0" stroke="#6a1b9a" stroke-width="2"/>
+    <text x="165" y="245" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">2</text>
+    
+    <rect x="265" y="250" width="70" height="30" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="300" y="268" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#bf360c">Attention 2</text>
+    
+    <rect x="350" y="250" width="120" height="30" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="410" y="268" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#1b5e20">save_kv_layer()</text>
+    <circle cx="365" cy="240" r="12" fill="#388e3c" stroke="#2e7d32" stroke-width="2"/>
+    <text x="365" y="245" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">3</text>
+    
+    <path d="M 250 265 L 265 265" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <path d="M 335 265 L 350 265" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- Dots for more layers -->
+  <circle cx="305" cy="350" r="4" fill="#666"/>
+  <circle cx="305" cy="365" r="4" fill="#666"/>
+  <circle cx="305" cy="380" r="4" fill="#666"/>
+  
+  <!-- Layer N Processing -->
+  <g id="layerN">
+    <rect x="140" y="400" width="340" height="85" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+    
+    <rect x="150" y="410" width="100" height="30" fill="#e1bee7" stroke="#8e24aa" stroke-width="1" rx="3"/>
+    <text x="200" y="428" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#4a148c">wait_for_layer_load()</text>
+    <circle cx="165" cy="400" r="12" fill="#9c27b0" stroke="#6a1b9a" stroke-width="2"/>
+    <text x="165" y="405" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">2</text>
+    
+    <rect x="265" y="410" width="70" height="30" fill="#fff3e0" stroke="#ef6c00" stroke-width="1" rx="3"/>
+    <text x="300" y="428" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#bf360c">Attention N</text>
+    
+    <rect x="350" y="410" width="120" height="30" fill="#e8f5e8" stroke="#388e3c" stroke-width="1" rx="3"/>
+    <text x="410" y="428" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#1b5e20">save_kv_layer()</text>
+    <circle cx="365" cy="400" r="12" fill="#388e3c" stroke="#2e7d32" stroke-width="2"/>
+    <text x="365" y="405" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">3</text>
+    
+    <path d="M 250 425 L 265 425" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <path d="M 335 425 L 350 425" stroke="#666" stroke-width="2" marker-end="url(#arrowhead)"/>
+  </g>
+  
+  <!-- 4. wait_for_save() -->
+  <rect x="170" y="520" width="280" height="45" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="5"/>
+  <text x="310" y="547" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#b71c1c">wait_for_save()</text>
+  <circle cx="185" cy="530" r="12" fill="#c62828" stroke="#b71c1c" stroke-width="2"/>
+  <text x="185" y="535" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">4</text>
+  
+  <!-- MAIN CACHE ENGINE -->
+  <rect x="520" y="100" width="600" height="600" fill="#e0f2f1" stroke="#00695c" stroke-width="3" rx="10"/>
+  <text x="820" y="125" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#004d40">CacheEngine</text>
+  
+  <!-- Multi-layer Cache Engine Key (note inside CacheEngine) -->
+  <text x="530" y="145" font-family="Arial, sans-serif" font-size="10" fill="#6a1b9a">Note: Multi-layer Cache Engine Key uses split_layers(N)</text>
+  
+  <!-- Retrieval Generator (inside CacheEngine) -->
+  <rect x="540" y="160" width="270" height="90" fill="#e1f5fe" stroke="#0277bd" stroke-width="2" rx="5"/>
+  <text x="675" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#01579b">Retrieval Generator (N + 2 yields)</text>
+  <text x="675" y="195" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#01579b">retrieve_layer() called by start_load_kv()</text>
+  <text x="675" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#01579b">• Layer-by-layer memory allocation</text>
+  <text x="675" y="225" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#01579b">• Contains GPU Load Generator (batched_to_gpu)</text>
+  <text x="675" y="240" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#01579b">• Calls StorageManager.layerwise_batched_get()</text>
+  
+  <!-- Storage Generator (inside CacheEngine) -->
+  <rect x="830" y="160" width="270" height="90" fill="#fff3e0" stroke="#ef6c00" stroke-width="2" rx="5"/>
+  <text x="965" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#bf360c">Storage Generator (N + 1 yields)</text>
+  <text x="965" y="195" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#bf360c">store_layer() - FIRST save_kv_layer() only</text>
+  <text x="965" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#bf360c">• Upfront CPU memory allocation (all layers)</text>
+  <text x="965" y="225" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#bf360c">• Contains GPU Store Generator (batched_from_gpu)</text>
+  <text x="965" y="240" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#bf360c">• Calls StorageManager.batched_put()</text>
+  
+  <!-- StorageManager (sub-component inside CacheEngine) -->
+  <rect x="540" y="270" width="250" height="120" fill="#fce4ec" stroke="#c2185b" stroke-width="2" rx="5"/>
+  <text x="665" y="290" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#880e4f">StorageManager</text>
+  
+  <!-- StorageManager Methods -->
+  <rect x="550" y="305" width="230" height="25" fill="#f8bbd9" stroke="#ad1457" stroke-width="1" rx="3"/>
+  <text x="665" y="320" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#4a148c">layerwise_batched_get() [async → .result()]</text>
+  
+  <rect x="550" y="340" width="230" height="25" fill="#f8bbd9" stroke="#ad1457" stroke-width="1" rx="3"/>
+  <text x="665" y="355" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#4a148c">batched_put(memory_objects)</text>
+  
+  <!-- LayerwiseGPUConnector (sub-component inside CacheEngine) -->
+  <rect x="810" y="270" width="290" height="200" fill="#fff9c4" stroke="#f9a825" stroke-width="2" rx="5"/>
+  <text x="955" y="290" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#f57f17">LayerwiseGPUConnector</text>
+  <text x="955" y="305" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#ef6c00">VLLMPagedMemLayerwiseGPUConnector</text>
+  
+  <!-- Batch Request Management -->
+  <rect x="820" y="315" width="270" height="30" fill="#fff8e1" stroke="#ff8f00" stroke-width="1" rx="3"/>
+  <text x="955" y="330" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#e65100">Batch: Req 1 (First) | Req 2 | ... | Req N (Last)</text>
+  
+  <!-- GPU Buffers -->
+  <rect x="820" y="355" width="120" height="50" fill="#ffecb3" stroke="#ffa000" stroke-width="1" rx="3"/>
+  <text x="880" y="375" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#ff6f00">Load GPU Buffer</text>
+  <text x="880" y="390" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#ff6f00">(use_gpu: true)</text>
+  
+  <rect x="960" y="355" width="120" height="50" fill="#ffecb3" stroke="#ffa000" stroke-width="1" rx="3"/>
+  <text x="1020" y="375" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#ff6f00">Store GPU Buffer</text>
+  <text x="1020" y="390" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#ff6f00">(use_gpu: true)</text>
+  
+  <!-- CUDA Streams -->
+  <rect x="820" y="415" width="270" height="45" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="5"/>
+  <text x="955" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#4a148c">CUDA Streams</text>
+  <text x="955" y="450" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#4a148c">load_stream | store_stream | current_stream</text>
+  
+  <!-- Synchronization details -->
+  <rect x="540" y="480" width="560" height="60" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="5"/>
+  <text x="820" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#b71c1c">Synchronization Details</text>
+  <text x="820" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#b71c1c">First Req: store_stream.wait_stream(current_stream) + sync prevents buffer override</text>
+  <text x="820" y="530" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#b71c1c">Last Req: current_stream.wait_stream(load_stream) prevents forward pass until KV loaded</text>
+  
+  <!-- Operation Boxes for Numbered Steps -->
+  
+  <!-- Operation 1 Box -->
+  <rect x="20" y="750" width="250" height="80" fill="#ffcc80" stroke="#ef6c00" stroke-width="2" rx="5"/>
+  <circle cx="35" cy="765" r="12" fill="#ff9800" stroke="#ef6c00" stroke-width="2"/>
+  <text x="35" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">1</text>
+  <text x="140" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#01579b">start_load_kv() Operations</text>
+  <text x="140" y="780" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#01579b">• Initialize Retrieval Generator</text>
+  <text x="140" y="795" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#01579b">• Call retrieve_layer() - 1st next() (setup)</text>
+  <text x="140" y="810" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#01579b">• Call retrieve_layer() - 2nd next() (layer 0)</text>
+  
+  <!-- Operation 2 Box -->
+  <rect x="290" y="750" width="250" height="80" fill="#d1c4e9" stroke="#6a1b9a" stroke-width="2" rx="5"/>
+  <circle cx="305" cy="765" r="12" fill="#9c27b0" stroke="#6a1b9a" stroke-width="2"/>
+  <text x="305" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">2</text>
+  <text x="415" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#0d47a1">wait_for_layer_load() Operations</text>
+  <text x="415" y="780" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#0d47a1">• Call retrieve_layer() - next() (layer i)</text>
+  <text x="415" y="795" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#0d47a1">• StorageManager.layerwise_batched_get()</text>
+  <text x="415" y="810" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#0d47a1">• GPU Load Gen: batched_to_gpu() next()</text>
+  
+  <!-- Operation 3 Box -->
+  <rect x="560" y="750" width="250" height="80" fill="#e8f5e8" stroke="#388e3c" stroke-width="2" rx="5"/>
+  <circle cx="575" cy="765" r="12" fill="#388e3c" stroke="#2e7d32" stroke-width="2"/>
+  <text x="575" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">3</text>
+  <text x="685" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#2e7d32">save_kv_layer() Operations</text>
+  <text x="685" y="780" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">• FIRST call: Create Storage Generator</text>
+  <text x="685" y="795" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">• Call store_layer() - next() (layer i)</text>
+  <text x="685" y="810" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">• GPU Store Gen: batched_from_gpu() next()</text>
+  
+  <!-- Operation 4 Box -->
+  <rect x="830" y="750" width="250" height="80" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="5"/>
+  <circle cx="845" cy="765" r="12" fill="#c62828" stroke="#b71c1c" stroke-width="2"/>
+  <text x="845" y="770" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="white">4</text>
+  <text x="955" y="765" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#b71c1c">wait_for_save() Operations</text>
+  <text x="955" y="780" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#b71c1c">• Call store_layer() - final next()</text>
+  <text x="955" y="795" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#b71c1c">• StorageManager.batched_put()</text>
+  <text x="955" y="810" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#b71c1c">• GPU Store Gen: final next() + cleanup</text>
+  <!-- Arrowhead definitions -->
+  <defs>
+    <!-- Standard arrowhead -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" 
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+    </marker>
+    <!-- Optional start arrowhead -->
+    <marker id="arrowhead-start" markerWidth="10" markerHeight="7" 
+            refX="1" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#666"/>
+    </marker>
+  </defs>
+
+  <!-- Rainbow trunk from all KV Caches up and over -->
+  <path d="M 110 127 
+           L 110 40 
+           L 1220 40 
+           L 1220 375"
+        stroke="#f57c00" stroke-width="2" stroke-dasharray="6,3"
+        fill="none" marker-start="url(#arrowhead-start)"/>
+  <path d="M 110 227 
+           L 110 40"
+        stroke="#f57c00" stroke-width="2" stroke-dasharray="6,3"
+        fill="none" marker-start="url(#arrowhead-start)"/>
+  <path d="M 110 357 
+           L 110 40"
+        stroke="#f57c00" stroke-width="2" stroke-dasharray="6,3"
+        fill="none" marker-start="url(#arrowhead-start)"/>
+
+  <!-- Fork into Load GPU Buffer -->
+  <path d="M 1220 375 L 940 375"
+        stroke="#f57c00" stroke-width="2" stroke-dasharray="6,3"
+        fill="none" marker-end="url(#arrowhead)"/>
+
+  <!-- Fork into Store GPU Buffer -->
+  <path d="M 1220 375 L 1080 375"
+        stroke="#f57c00" stroke-width="2" stroke-dasharray="6,3"
+        fill="none" marker-end="url(#arrowhead)"/>
+</svg> 

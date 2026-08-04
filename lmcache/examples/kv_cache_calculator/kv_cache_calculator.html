@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KV Cache Size Calculator</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            background-color: #f9f9f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            padding: 24px 12px 48px;
+        }
+
+        .lang-bar {
+            width: 100%;
+            max-width: 480px;
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 8px;
+            gap: 6px;
+        }
+
+        .lang-btn {
+            padding: 4px 12px;
+            font-size: 13px;
+            border: 1px solid #b0c4de;
+            border-radius: 20px;
+            background: #fff;
+            color: #3898ec;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .lang-btn.active, .lang-btn:hover {
+            background: #3898ec;
+            color: #fff;
+            border-color: #3898ec;
+        }
+
+        .card {
+            width: 100%;
+            max-width: 480px;
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 4px 24px rgba(56, 152, 236, 0.10), 0 1px 4px rgba(0,0,0,0.06);
+            padding: 32px 28px 24px;
+        }
+
+        .card h1 {
+            margin: 0 0 24px;
+            font-size: 22px;
+            font-weight: 700;
+            color: #1a2e4a;
+            letter-spacing: -0.3px;
+        }
+
+        .field {
+            margin-bottom: 18px;
+        }
+
+        .field label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 6px;
+            letter-spacing: 0.1px;
+        }
+
+        .field select, .field input {
+            width: 100%;
+            padding: 9px 12px;
+            font-size: 15px;
+            border: 1.5px solid #d0d9e8;
+            border-radius: 8px;
+            background: #f7faff;
+            color: #1a2e4a;
+            outline: none;
+            transition: border-color 0.15s, box-shadow 0.15s;
+            appearance: none;
+            -webkit-appearance: none;
+        }
+        .select-wrap {
+            position: relative;
+        }
+        .select-wrap::after {
+            content: "▾";
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            pointer-events: none;
+            color: #8aa4c8;
+            font-size: 14px;
+        }
+        .field select:focus, .field input:focus {
+            border-color: #3898ec;
+            box-shadow: 0 0 0 3px rgba(56,152,236,0.12);
+            background: #fff;
+        }
+
+        .calc-btn {
+            display: block;
+            width: 100%;
+            padding: 11px;
+            font-size: 15px;
+            font-weight: 600;
+            background: #3898ec;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s, transform 0.1s;
+            margin-top: 4px;
+        }
+        .calc-btn:hover { background: #1a7fd4; }
+        .calc-btn:active { transform: scale(0.98); }
+
+        #result {
+            margin-top: 20px;
+            padding: 14px 16px;
+            background: linear-gradient(90deg, #e8f4fd, #f0f8ff);
+            border-left: 4px solid #3898ec;
+            border-radius: 6px;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1a5fa8;
+            display: none;
+        }
+
+        #calculation-steps {
+            margin-top: 14px;
+            padding: 14px 16px;
+            background: #f7faff;
+            border: 1px solid #d8e8f8;
+            border-radius: 8px;
+            font-size: 12.5px;
+            line-height: 1.8;
+            color: #4a5568;
+            display: none;
+        }
+
+        .github-btn {
+            display: block;
+            width: 100%;
+            padding: 9px;
+            margin-top: 18px;
+            font-size: 13px;
+            font-weight: 500;
+            background: #f0f4fa;
+            color: #4a5568;
+            border: 1.5px solid #d0d9e8;
+            border-radius: 8px;
+            cursor: pointer;
+            text-align: center;
+            transition: background 0.15s;
+        }
+        .github-btn:hover { background: #e2eaf6; }
+
+        footer {
+            margin-top: 24px;
+            font-size: 12px;
+            color: #8aa4c8;
+        }
+    </style>
+</head>
+<body>
+    <div class="lang-bar">
+        <button class="lang-btn active" onclick="setLang('en')" id="btn-en">English</button>
+        <button class="lang-btn" onclick="setLang('zh')" id="btn-zh">中文</button>
+    </div>
+    <div class="card">
+        <h1 id="title">KV Cache Size Calculator</h1>
+
+        <div class="field">
+            <label id="lbl-model" for="model">Select LLM Model</label>
+            <div class="select-wrap">
+                <select id="model"></select>
+            </div>
+        </div>
+
+        <div class="field">
+            <label id="lbl-dtype" for="dtype">Data Type</label>
+            <div class="select-wrap">
+                <select id="dtype">
+                    <option value="float16">float16</option>
+                    <option value="bfloat16">bfloat16</option>
+                    <option value="float32">float32</option>
+                    <option value="int8">int8</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="field">
+            <label id="lbl-tokens" for="tokens">Number of Tokens</label>
+            <input type="number" id="tokens" placeholder="e.g. 4096">
+        </div>
+
+        <button class="calc-btn" onclick="calculateKVCache()" id="btn-calc">Calculate</button>
+
+        <div id="result"></div>
+        <div id="calculation-steps"></div>
+
+        <button class="github-btn" onclick="openGitHubRepo()" id="btn-github">
+            ➕ Contribute new models on GitHub
+        </button>
+    </div>
+    <footer id="footer">Developed by Zhuohan Gu @ LMCache team</footer>
+
+    <script>
+        let modelConfigs = {};
+        let currentLang = 'en';
+
+        const i18n = {
+            en: {
+                title: 'KV Cache Size Calculator',
+                lblModel: 'Select LLM Model',
+                lblDtype: 'Data Type',
+                lblTokens: 'Number of Tokens',
+                tokenPlaceholder: 'e.g. 4096',
+                btnCalc: 'Calculate',
+                btnGithub: '➕ Contribute new models on GitHub',
+                footer: 'Developed by Zhuohan Gu @ LMCache team',
+                errTokens: 'Please enter a valid number of tokens.',
+                errModel: 'Model not recognized.',
+                errDtype: 'Invalid data type selected.',
+                errLoad: 'Failed to load model configurations. Please try again later.',
+                detailsTitle: 'Calculation Details',
+                fldModel: 'Selected Model',
+                fldLayers: 'Number of Hidden Layers',
+                fldKvLoraRank: 'KV-LoRA Rank (latent dim)',
+                fldQkRopeHeadDim: 'QK-Rope Head Dim',
+                fldDtypeSize: 'Data Type Size',
+                fldTotalElem: 'Total Elements',
+                fldTotalBytes: 'Total Bytes',
+                fldKvSize: 'KV Cache Size',
+                fldKvHeads: 'Number of Key-Value Heads',
+                fldHeadDim: 'Head Dim',
+                fldClaFactor: 'CLA Share Factor',
+                fldEffLayers: 'Effective KV Layers',
+                fldHeadSize: 'Head Size',
+                fldHiddenSize: 'Hidden Size',
+                fldAttnHeads: 'Number of Attention Heads',
+                claNote: (f) => `every ${f} layers share one KV cache`,
+                headSizeNote: 'Hidden Size / Attention Heads',
+                bytes: 'bytes',
+                result: (gb) => `KV Cache Size: ${gb} GB`,
+            },
+            zh: {
+                title: 'KV Cache 大小计算器',
+                lblModel: '选择 LLM 模型',
+                lblDtype: '数据类型',
+                lblTokens: 'Token 数量',
+                tokenPlaceholder: '例如：4096',
+                btnCalc: '开始计算',
+                btnGithub: '➕ 在 GitHub 上贡献新模型',
+                footer: '由 LMCache 团队 Zhuohan Gu 开发',
+                errTokens: '请输入有效的 Token 数量。',
+                errModel: '未识别的模型。',
+                errDtype: '无效的数据类型。',
+                errLoad: '模型配置加载失败，请稍后重试。',
+                detailsTitle: '计算详情',
+                fldModel: '所选模型',
+                fldLayers: '隐藏层数',
+                fldKvLoraRank: 'KV-LoRA 秩（隐空间维度）',
+                fldQkRopeHeadDim: 'QK-RoPE Head Dim',
+                fldDtypeSize: '数据类型大小',
+                fldTotalElem: '总元素数',
+                fldTotalBytes: '总字节数',
+                fldKvSize: 'KV Cache 大小',
+                fldKvHeads: 'KV 头数',
+                fldHeadDim: 'Head Dim',
+                fldClaFactor: 'CLA 共享因子',
+                fldEffLayers: '有效 KV 层数',
+                fldHeadSize: 'Head Size',
+                fldHiddenSize: '隐藏层维度',
+                fldAttnHeads: '注意力头数',
+                claNote: (f) => `每 ${f} 层共享一份 KV Cache`,
+                headSizeNote: '隐藏层维度 / 注意力头数',
+                bytes: '字节',
+                result: (gb) => `KV Cache 大小：${gb} GB`,
+            }
+        };
+
+        function t(key, ...args) {
+            const v = i18n[currentLang][key];
+            return typeof v === 'function' ? v(...args) : v;
+        }
+
+        function setLang(lang) {
+            currentLang = lang;
+            document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+            document.getElementById('btn-zh').classList.toggle('active', lang === 'zh');
+            document.getElementById('title').textContent = t('title');
+            document.getElementById('lbl-model').textContent = t('lblModel');
+            document.getElementById('lbl-dtype').textContent = t('lblDtype');
+            document.getElementById('lbl-tokens').textContent = t('lblTokens');
+            document.getElementById('tokens').placeholder = t('tokenPlaceholder');
+            document.getElementById('btn-calc').textContent = t('btnCalc');
+            document.getElementById('btn-github').textContent = t('btnGithub');
+            document.getElementById('footer').textContent = t('footer');
+            // Re-render result if visible
+            if (document.getElementById('result').style.display !== 'none') {
+                calculateKVCache();
+            }
+        }
+
+        function openGitHubRepo() {
+            const githubUrl = 'https://github.com/LMCache/LMCache/issues/244#:~:text=https%3A//github.com/LMCache/LMCache/tree/dev/examples/kv_cache_calculator';
+            window.open(githubUrl, '_blank');
+        }
+
+        // Load model configurations: prefer local file, fallback to GitHub
+        async function loadModelConfigs() {
+            const localUrl = './modelconfig.json';
+            const remoteUrl = 'https://raw.githubusercontent.com/LMCache/LMCache/refs/heads/dev/examples/kv_cache_calculator/modelconfig.json';
+            // Try local first
+            try {
+                let response = await fetch(localUrl);
+                if (response.ok) {
+                    modelConfigs = await response.json();
+                    populateModelDropdown();
+                    return;
+                }
+            } catch (e) {
+                // ignore local fetch errors and fallback
+                console.debug('Local modelconfig.json not available locally, falling back to remote.');
+            }
+
+            // Fallback to remote
+            try {
+                const response = await fetch(remoteUrl);
+                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+                modelConfigs = await response.json();
+                populateModelDropdown();
+            } catch (error) {
+                console.error('Failed to load model configurations:', error);
+                showResult(t('errLoad'), true);
+            }
+        }
+
+        // Populate the model dropdown dynamically
+        function populateModelDropdown() {
+            const modelSelect = document.getElementById('model');
+            modelSelect.innerHTML = "";
+            const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+            const sortedModelNames = Object.keys(modelConfigs).sort(collator.compare);
+            for (const modelName of sortedModelNames) {
+                const option = document.createElement('option');
+                option.value = modelName;
+                option.textContent = modelName;
+                modelSelect.appendChild(option);
+            }
+        }
+
+        function showResult(html, isError = false) {
+            const el = document.getElementById('result');
+            el.innerHTML = html;
+            el.style.display = 'block';
+            el.style.borderLeftColor = isError ? '#e05252' : '#3898ec';
+            el.style.color = isError ? '#a02020' : '#1a5fa8';
+        }
+
+        async function calculateKVCache() {
+            if (Object.keys(modelConfigs).length === 0) await loadModelConfigs();
+
+            const model = document.getElementById('model').value;
+            const tokens = parseInt(document.getElementById('tokens').value);
+            const dtype = document.getElementById('dtype').value;
+
+            if (isNaN(tokens) || tokens <= 0) {
+                showResult(t('errTokens'), true);
+                document.getElementById('calculation-steps').style.display = 'none';
+                return;
+            }
+
+            const config = modelConfigs[model];
+            if (!config) {
+                showResult(t('errModel'), true);
+                document.getElementById('calculation-steps').style.display = 'none';
+                return;
+            }
+
+            let hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads;
+            let kv_lora_rank, qk_rope_head_dim;
+            let head_dim, head_size;
+
+            // Check for DeepSeek MLA models (prefix match covers V3, V3.1, V3.2, … ; plus R1)
+            const isDeepSeekModel = model.startsWith("deepseek-ai/DeepSeek-V3") || model === "deepseek-ai/DeepSeek-R1";
+
+            // Check for Qwen3 models (fuzzy matching)
+            const isQwen3Model = model.toLowerCase().includes("qwen/qwen3-");
+
+            // Check for GLM4 models (prefix matching)
+            const isGLM4Model = model.startsWith("zai-org/GLM-4.");
+
+            // Check for Hunyuan dense models (explicit head_dim, may differ from hidden/heads)
+            const isHunyuanDenseModel = model.toLowerCase().startsWith("tencent/hunyuan-") && model.toLowerCase() !== "tencent/hunyuan-large";
+
+            // Check for Hunyuan-Large (CLA: cross-layer attention sharing)
+            const isHunyuanLargeModel = model.toLowerCase() === "tencent/hunyuan-large";
+
+            const isGQAWithHeadDimModel = isQwen3Model || isGLM4Model || isHunyuanDenseModel;
+
+            if (isDeepSeekModel) {
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, kv_lora_rank, qk_rope_head_dim } = config);
+            } else if (isHunyuanLargeModel) {
+                // Hunyuan-Large uses CLA (Cross-Layer Attention): every cla_share_factor layers share one KV cache.
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
+                head_size = hidden_size / num_attention_heads;
+            } else if (isGQAWithHeadDimModel) {
+                // Qwen3, GLM4, and Hunyuan dense models all have an explicit head_dim in their configs.
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads, head_dim } = config);
+            } else {
+                ({ hidden_size, num_attention_heads, num_hidden_layers, num_key_value_heads } = config);
+                head_size = hidden_size / num_attention_heads;
+            }
+
+            // Determine dtype size in bytes
+            let dtype_size;
+            if (dtype === 'float32') dtype_size = 4;
+            else if (dtype === 'float16' || dtype === 'bfloat16') dtype_size = 2;
+            else if (dtype === 'int8') dtype_size = 1;
+            else {
+                showResult(t('errDtype'), true);
+                document.getElementById('calculation-steps').style.display = 'none';
+                return;
+            }
+
+            // Calculate KV cache size
+            let total_elements;
+            let effective_layers;
+            if (isDeepSeekModel) {
+                total_elements = num_hidden_layers * tokens * (kv_lora_rank + qk_rope_head_dim);
+            } else if (isHunyuanLargeModel) {
+                const cla_share_factor = config.cla_share_factor;
+                effective_layers = num_hidden_layers / cla_share_factor;
+                total_elements = 2 * effective_layers * tokens * num_key_value_heads * head_size;
+            } else if (isGQAWithHeadDimModel) {
+                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_dim;
+            } else {
+                total_elements = 2 * num_hidden_layers * tokens * num_key_value_heads * head_size;
+            }
+            const total_bytes = total_elements * dtype_size;
+            const kvCacheSizeGB = total_bytes / (1024 ** 3);
+
+            showResult(t('result', kvCacheSizeGB.toFixed(4)));
+
+            // Prepare calculation steps
+            const B = (s) => `<b>${s}</b>`;
+            let rows;
+            if (isDeepSeekModel) {
+                rows = [
+                    [B(t('fldModel')), model],
+                    [B(t('fldLayers')), num_hidden_layers],
+                    [B(t('fldKvLoraRank')), kv_lora_rank],
+                    [B(t('fldQkRopeHeadDim')), qk_rope_head_dim],
+                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
+                    [B(t('fldTotalElem')), `${num_hidden_layers} × ${tokens} × (${kv_lora_rank} + ${qk_rope_head_dim}) = ${total_elements}`],
+                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
+                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
+                ];
+            } else if (isHunyuanLargeModel) {
+                const cla_share_factor = config.cla_share_factor;
+                rows = [
+                    [B(t('fldModel')), model],
+                    [B(t('fldLayers')), num_hidden_layers],
+                    [B(t('fldClaFactor')), `${cla_share_factor} (${t('claNote', cla_share_factor)})`],
+                    [B(t('fldEffLayers')), `${num_hidden_layers} / ${cla_share_factor} = ${effective_layers}`],
+                    [B(t('fldKvHeads')), num_key_value_heads],
+                    [B(t('fldHeadSize')), `${head_size} (${t('headSizeNote')})`],
+                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
+                    [B(t('fldTotalElem')), `2 × ${effective_layers} × ${tokens} × ${num_key_value_heads} × ${head_size} = ${total_elements}`],
+                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
+                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
+                ];
+            } else if (isGQAWithHeadDimModel) {
+                rows = [
+                    [B(t('fldModel')), model],
+                    [B(t('fldLayers')), num_hidden_layers],
+                    [B(t('fldKvHeads')), num_key_value_heads],
+                    [B(t('fldHeadDim')), head_dim],
+                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
+                    [B(t('fldTotalElem')), `2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_dim} = ${total_elements}`],
+                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
+                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
+                ];
+            } else {
+                rows = [
+                    [B(t('fldModel')), model],
+                    [B(t('fldHiddenSize')), hidden_size],
+                    [B(t('fldAttnHeads')), num_attention_heads],
+                    [B(t('fldLayers')), num_hidden_layers],
+                    [B(t('fldKvHeads')), num_key_value_heads],
+                    [B(t('fldHeadSize')), `${head_size} (${t('headSizeNote')})`],
+                    [B(t('fldDtypeSize')), `${dtype_size} ${t('bytes')}`],
+                    [B(t('fldTotalElem')), `2 × ${num_hidden_layers} × ${tokens} × ${num_key_value_heads} × ${head_size} = ${total_elements}`],
+                    [B(t('fldTotalBytes')), `${total_elements} × ${dtype_size} = ${total_bytes} ${t('bytes')}`],
+                    [B(t('fldKvSize')), `${total_bytes} / 1024³ ≈ ${kvCacheSizeGB.toFixed(4)} GB`],
+                ];
+            }
+
+            const stepsEl = document.getElementById('calculation-steps');
+            stepsEl.innerHTML = `<b>${t('detailsTitle')}</b><br><br>` +
+                rows.map(([k, v]) => `${k}: ${v}`).join('<br>');
+            stepsEl.style.display = 'block';
+        }
+
+        document.getElementById('tokens').addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') calculateKVCache();
+        });
+
+        window.onload = function() {
+            loadModelConfigs();
+        };
+
+    </script>
+</body>
+</html>

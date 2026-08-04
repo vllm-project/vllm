@@ -1,0 +1,188 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/llama.rst:4
+msgid "Llama"
+msgstr "Llama"
+
+#: ../../source/recipes/llama.rst:7
+msgid "Validated models"
+msgstr "验证过的模型"
+
+#: ../../source/recipes/llama.rst:9
+msgid ""
+"`meta-llama/Meta-Llama-3.1-8B <https://huggingface.co/meta-"
+"llama/Llama-3.1-8B>`_"
+msgstr ""
+"`meta-llama/Meta-Llama-3.1-8B <https://huggingface.co/meta-"
+"llama/Llama-3.1-8B>`_"
+
+#: ../../source/recipes/llama.rst:10
+msgid ""
+"`meta-llama/Meta-Llama-3.1-8B-Instruct <https://huggingface.co/meta-"
+"llama/Llama-3.1-8B-Instruct>`_"
+msgstr ""
+"`meta-llama/Meta-Llama-3.1-8B-Instruct <https://huggingface.co/meta-"
+"llama/Llama-3.1-8B-Instruct>`_"
+
+#: ../../source/recipes/llama.rst:11
+msgid ""
+"`meta-llama/Meta-Llama-3.1-70B <https://huggingface.co/meta-"
+"llama/Llama-3.1-70B>`_"
+msgstr ""
+"`meta-llama/Meta-Llama-3.1-70B <https://huggingface.co/meta-"
+"llama/Llama-3.1-70B>`_"
+
+#: ../../source/recipes/llama.rst:12
+msgid ""
+"`meta-llama/Meta-Llama-3.1-70B-Instruct <https://huggingface.co/meta-"
+"llama/Llama-3.1-70B-Instruct>`_"
+msgstr ""
+"`meta-llama/Meta-Llama-3.1-70B-Instruct <https://huggingface.co/meta-"
+"llama/Llama-3.1-70B-Instruct>`_"
+
+#: ../../source/recipes/llama.rst
+msgid "vLLM"
+msgstr "vLLM"
+
+#: ../../source/recipes/llama.rst:19
+msgid ""
+"**Engine documentation:** `LlamaForCausalLM in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ (architecture `LlamaForCausalLM`)."
+msgstr ""
+"**引擎文档：** `vLLM 支持的模型中的 LlamaForCausalLM "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ （架构 `LlamaForCausalLM`）。"
+
+#: ../../source/recipes/llama.rst:24
+msgid "**Status:** Validated with LMCache."
+msgstr "**状态:** 已通过 LMCache 验证。"
+
+#: ../../source/recipes/llama.rst:26
+msgid ""
+"Apply for access on the model card page and add your `huggingface token "
+"<https://huggingface.co/docs/hub/en/security-tokens>`_ as an environment "
+"variable:"
+msgstr ""
+"在模型卡页面申请访问权限，并将您的 `huggingface token <https://huggingface.co/docs/hub/en"
+"/security-tokens>`_ 添加为环境变量："
+
+#: ../../source/recipes/llama.rst:36
+msgid "Start the LMCache MP server:"
+msgstr "启动 LMCache MP 服务器："
+
+#: ../../source/recipes/llama.rst:44
+msgid ""
+"Get the chat templates for tool calling by following the `Llama tool "
+"calling guide <https://docs.vllm.ai/en/latest/features/tool_calling"
+"/#llama-models-llama3_json>`_ from vLLM."
+msgstr "请参照 vLLM 的 `Llama 工具调用指南 <https://docs.vllm.ai/en/latest/features/tool_calling/#llama-models-llama3_json>`_ 获取工具调用所需的聊天模板。"
+
+#: ../../source/recipes/llama.rst:46
+msgid "Start vLLM with the LMCache MP connector:"
+msgstr "使用 LMCache MP 连接器启动 vLLM："
+
+#: ../../source/recipes/llama.rst:48
+msgid "**Meta-Llama-3.1-8B** (1 GPU):"
+msgstr "**Meta-Llama-3.1-8B** (1 GPU):"
+
+#: ../../source/recipes/llama.rst:59
+msgid "**Meta-Llama-3.1-8B-Instruct** (1 GPU):"
+msgstr "**Meta-Llama-3.1-8B-Instruct** (1 GPU):"
+
+#: ../../source/recipes/llama.rst:73
+msgid "**Meta-Llama-3.1-70B** (4 GPUs):"
+msgstr "**Meta-Llama-3.1-70B** (4 GPUs):"
+
+#: ../../source/recipes/llama.rst:85
+msgid "**Meta-Llama-3.1-70B-Instruct** (4 GPUs):"
+msgstr "**Meta-Llama-3.1-70B-Instruct** (4 GPUs):"
+
+#: ../../source/recipes/llama.rst:100
+msgid ""
+"Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
+" LMCache + vLLM wiring (ports, remote hosts), see "
+":doc:`../getting_started/quickstart`."
+msgstr ""
+"调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见"
+" :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/llama.rst
+msgid "SGLang"
+msgstr "SGLang"
+
+#: ../../source/recipes/llama.rst:106
+msgid "**Status:** Not validated with LMCache."
+msgstr "**状态：** 未通过 LMCache 验证。"
+
+#: ../../source/recipes/llama.rst
+msgid "TRT-LLM"
+msgstr "TRT-LLM"
+
+#: ../../source/recipes/llama.rst:110
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/llama.rst:113
+msgid "CacheBlend support"
+msgstr "CacheBlend 支持"
+
+#: ../../source/recipes/llama.rst:116
+msgid "Compression support"
+msgstr "压缩支持"
+
+#: ../../source/recipes/llama.rst:122
+msgid "Method"
+msgstr "方法"
+
+#: ../../source/recipes/llama.rst:123
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/recipes/llama.rst:124
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/recipes/llama.rst:125
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+
+#: ../../source/recipes/llama.rst:126
+msgid "Not validated"
+msgstr "未验证"
+
+#: ../../source/recipes/llama.rst:130
+msgid "Caveats"
+msgstr "注意事项"
+
+#: ../../source/recipes/llama.rst:132
+msgid "None known."
+msgstr "没有已知的问题。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "LlamaForCausalLM"
+#~ msgstr "LlamaForCausalLM"
+

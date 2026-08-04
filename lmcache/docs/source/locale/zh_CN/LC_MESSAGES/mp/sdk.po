@@ -1,0 +1,221 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/sdk.rst:2
+msgid "KV Cache SDK"
+msgstr "KV Cache SDK"
+
+#: ../../source/mp/sdk.rst:4
+msgid ""
+"The LMCache **SDK** lets you retrieve a request's KV cache from a LMCache"
+" server, transform it on the CPU, and store it back. This can be used for"
+" KV cache transformations, such as token dropping. In the example: we "
+"prefill a batch of long prompts, drop half of each request's KV chunks, "
+"and show the decode-throughput gain. The full runnable notebook lives at "
+"`examples/token_dropping/token_dropping.ipynb "
+"<https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_."
+msgstr "LMCache **SDK** 允许您从 LMCache 服务器检索请求的 KV 缓存，在 CPU 上进行转换，然后再存储回去。这可以用于 KV 缓存转换，例如丢弃令牌。在这个例子中：我们预填充一批长提示，丢弃每个请求的一半 KV 块，并展示解码吞吐量的提升。完整的可运行笔记本位于 `examples/token_dropping/token_dropping.ipynb <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_。"
+
+#: ../../source/mp/sdk.rst:18
+msgid "Why KV Cache SDK"
+msgstr "为什么选择 KV Cache SDK"
+
+#: ../../source/mp/sdk.rst:20
+msgid ""
+"**Improving Decode Throughput** when shrinking KV cache using token "
+"dropping. Token dropping reduces the KV cache size, allowing more "
+"requests to fit in a batch, improving decode throughput."
+msgstr "**通过丢弃令牌** 来提高解码吞吐量。当使用丢弃令牌缩小 KV Cache 时，KV Cache 的大小减少，使得更多请求可以适应一个批次，从而提高解码吞吐量。"
+
+#: ../../source/mp/sdk.rst:24
+msgid ""
+"The SDK gives you the hooks to retrieve a request's KV, supply your own "
+"function to edit the KV, and store the edited KV back. The SDK also "
+"provides a batched-stream API to prefill, modify, and store the cache "
+"back before decoding continues."
+msgstr "SDK 提供了钩子来检索请求的 KV，允许您提供自己的函数来编辑 KV，并将编辑后的 KV 存储回去。SDK 还提供了一个批量流 API，以便在继续解码之前进行预填充、修改和存储缓存。"
+
+#: ../../source/mp/sdk.rst:31
+msgid "How it works"
+msgstr "它是如何工作的"
+
+#: ../../source/mp/sdk.rst:33
+msgid "A request flows through three phases on the batched-stream API:"
+msgstr "请求在批处理流 API 上经历三个阶段："
+
+#: ../../source/mp/sdk.rst:35
+msgid ""
+"**prefill** — run each prompt through vLLM once (``max_tokens=1``); vLLM "
+"computes the KV cache and stores it in LMCache."
+msgstr "**预取** — 将每个提示通过 vLLM 运行一次（``max_tokens=1``）；vLLM 计算 KV Cache 并将其存储在 LMCache 中。"
+
+#: ../../source/mp/sdk.rst:37
+msgid ""
+"**modify** — the SDK retrieves the cached KV to CPU, hands it to your "
+"edit function, and stores the result back."
+msgstr "**修改** — SDK 将缓存的 KV 取回到 CPU，交给你的编辑函数，并将结果存储回去。"
+
+#: ../../source/mp/sdk.rst:39
+msgid "**decode** — continue generation against the smaller, edited cache."
+msgstr "**解码** — 在更小的、编辑过的缓存上继续生成。"
+
+#: ../../source/mp/sdk.rst:41
+msgid ""
+"The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with "
+"shape ``[2, L, T, D]`` (K/V, layers, chunk-aligned tokens, ``num_kv_heads"
+" * head_dim``)."
+msgstr "SDK 在 **CPU** 上运行，并以 ``HND`` 顺序提供形状为 ``[2, L, T, D]`` 的 KV 张量（K/V、层、块对齐的标记、``num_kv_heads * head_dim``）。"
+
+#: ../../source/mp/sdk.rst:46
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/sdk.rst:48
+msgid ""
+"To start the LMCache server with shared-memory transfer enabled, pass "
+"``--shm-name`` and disable lazy L1 allocation with ``--no-l1-use-lazy``. "
+"If shared memory is unavailable and these flags are not specified, the "
+"SDK falls back to pickle."
+msgstr "要启动启用共享内存传输的 LMCache 服务器，请传递 ``--shm-name`` 并使用 ``--no-l1-use-lazy`` 禁用懒惰的 L1 分配。如果共享内存不可用且未指定这些标志，SDK 将回退到 pickle。"
+
+#: ../../source/mp/sdk.rst:64
+msgid "Then start vLLM with the LMCache MP connector."
+msgstr "然后使用 LMCache MP 连接器启动 vLLM。"
+
+#: ../../source/mp/sdk.rst:80
+msgid ""
+"The SDK keys the KV cache by token ids: ``create_request`` takes the "
+"prompt as token ids, and every ``post_completion`` must report a "
+"``token_id`` for each generated token. The example gets these ids "
+"straight from vLLM by passing ``--return-tokens-as-token-ids``. "
+"Otherwise, if vLLM returns only text, the ``post_completion`` must "
+"tokenize each generated token back into a token id."
+msgstr "SDK通过令牌 ID 对 KV Cache 进行键控：``create_request`` 将提示作为令牌 ID，且每个 ``post_completion`` 必须报告每个生成令牌的 ``token_id``。该示例通过传递 ``--return-tokens-as-token-ids`` 直接从 vLLM 获取这些 ID。否则，如果 vLLM 仅返回文本，则 ``post_completion`` 必须将每个生成的令牌重新标记为令牌 ID。"
+
+#: ../../source/mp/sdk.rst:101
+msgid "Writing a custom edit function"
+msgstr "编写自定义编辑函数"
+
+#: ../../source/mp/sdk.rst:103
+msgid ""
+"An edit function takes the retrieved KV tensor and its token ids and "
+"returns the edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it to "
+"every stream."
+msgstr "编辑函数接受检索到的 KV 张量及其令牌 ID，并返回编辑后的 ``(kv, tokens)``。 ``batch.modify(fn)`` 将其应用于每个流。"
+
+#: ../../source/mp/sdk.rst:106
+msgid ""
+"``modify`` operates only on the **chunk-aligned** prefix. A trailing "
+"partial chunk is tracked by the SDK and re-sent on the next ``decode``, "
+"so ``tokens`` arrives already truncated to the cached length."
+msgstr "``modify`` 仅在 **块对齐** 前缀上操作。尾部的部分块由 SDK 跟踪，并在下一个 ``解码`` 时重新发送，因此 ``tokens`` 已经被截断到缓存的长度。"
+
+#: ../../source/mp/sdk.rst:112
+msgid "API reference"
+msgstr "API 参考"
+
+#: ../../source/mp/sdk.rst:118
+msgid "Function / method"
+msgstr "函数 / 方法"
+
+#: ../../source/mp/sdk.rst:119
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/sdk.rst:120
+msgid "``lmc_sdk.connect(url, http_url, model_name, timeout=60.0)``"
+msgstr "``lmc_sdk.connect(url, http_url, model_name, timeout=60.0)``"
+
+#: ../../source/mp/sdk.rst:121
+msgid ""
+"Create an SDK context and register the transfer context, pass it to every"
+" other call."
+msgstr "创建一个 SDK 上下文并注册传输上下文，将其传递给每个其他调用。"
+
+#: ../../source/mp/sdk.rst:123
+msgid "``lmc_sdk.close(ctx)``"
+msgstr "``lmc_sdk.close(ctx)``"
+
+#: ../../source/mp/sdk.rst:124
+msgid "Close the context and release resources. Called when done with the SDK."
+msgstr "关闭上下文并释放资源。在完成 SDK 的使用时调用。"
+
+#: ../../source/mp/sdk.rst:125
+msgid ""
+"``lmc_stream.create_request(ctx, post_completion, prompt_token_ids, "
+"cache_salt=\"\")``"
+msgstr "``lmc_stream.create_request(ctx, post_completion, prompt_token_ids, cache_salt=\"\")``"
+
+#: ../../source/mp/sdk.rst:127
+msgid "Create one request stream to add to a batch."
+msgstr "创建一个请求流以添加到批处理中。"
+
+#: ../../source/mp/sdk.rst:128
+msgid "``lmc_batch.LMCacheBatchedStream()``"
+msgstr "``lmc_batch.LMCacheBatchedStream()``"
+
+#: ../../source/mp/sdk.rst:129
+msgid "Create an empty batch."
+msgstr "创建一个空批次。"
+
+#: ../../source/mp/sdk.rst:130
+msgid "``batch.add(stream)``"
+msgstr "``batch.add(stream)``"
+
+#: ../../source/mp/sdk.rst:131
+msgid "Register a stream to the batch."
+msgstr "将流注册到批处理中。"
+
+#: ../../source/mp/sdk.rst:132
+msgid "``batch.prefill(sampling_params)``"
+msgstr "``batch.prefill(sampling_params)``"
+
+#: ../../source/mp/sdk.rst:133
+msgid ""
+"Prefill every stream once (``max_tokens`` forced to 1). Returns a "
+"``Metrics`` report."
+msgstr "一次 Prefill 每个流（``max_tokens`` 强制为 1）。返回一个 ``Metrics`` 报告。"
+
+#: ../../source/mp/sdk.rst:135
+msgid "``batch.modify(fn)``"
+msgstr "``batch.modify(fn)``"
+
+#: ../../source/mp/sdk.rst:136
+msgid ""
+"Apply the edit function ``fn`` to every stream's cached KV. Returns a "
+"``Metrics`` report."
+msgstr "将编辑函数 ``fn`` 应用到每个流的缓存 KV。返回一个 ``Metrics`` 报告。"
+
+#: ../../source/mp/sdk.rst:138
+msgid "``batch.decode(sampling_params)``"
+msgstr "``batch.decode(sampling_params)``"
+
+#: ../../source/mp/sdk.rst:139
+msgid "Decode every stream. Returns a ``Metrics`` report."
+msgstr "解码每个流。返回一个 ``Metrics`` 报告。"
+
+#: ../../source/mp/sdk.rst:141
+msgid ""
+"```Metrics`` returns ``input_tokens``, ``input_tput`` for prefill, "
+"``duration`` for modify, and ``output_tokens``, ``output_tput`` for "
+"decode."
+msgstr "```Metrics``` 返回 ``input_tokens``、``input_tput`` 用于 Prefill，``duration`` 用于修改，以及 ``output_tokens``、``output_tput`` 用于解码。"
+

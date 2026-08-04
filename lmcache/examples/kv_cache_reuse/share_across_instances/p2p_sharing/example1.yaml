@@ -1,0 +1,24 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 5
+enable_async_loading: True
+
+# P2P configurations
+enable_p2p: True
+p2p_host: "localhost"
+p2p_init_ports: 8200
+p2p_lookup_ports: 8201
+transfer_channel: "nixl"
+
+# Controller configurations
+enable_controller: True
+lmcache_instance_id: "lmcache_instance_1"
+controller_pull_url: "localhost:8300"
+controller_reply_url: "localhost:8400"
+lmcache_worker_ports: 8500
+
+extra_config:
+  lookup_backoff_time: 0.001
+  # P2P backend timeout configurations (optional, defaults shown)
+  p2p_socket_recv_timeout_ms: 30000  # Socket receive timeout in milliseconds
+  p2p_socket_send_timeout_ms: 10000  # Socket send timeout in milliseconds

@@ -1,0 +1,52 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: lmcache-server
+  namespace: multi-process
+spec:
+  selector:
+    matchLabels:
+      app: lmcache-server
+  template:
+    metadata:
+      labels:
+        app: lmcache-server
+    spec:
+      hostNetwork: true
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+      containers:
+        - name: lmcache-server
+          image: lmcache/standalone:nightly
+          command:
+            - /opt/venv/bin/python3
+            - -m
+            - lmcache.v1.multiprocess.server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "6555"
+            - --l1-size-gb
+            - "60"
+            - --eviction-policy
+            - LRU
+            - --max-workers
+            - "4"
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              # 65Gi = 60GB l1-size-gb + ~5GB overhead for Python runtime and server operations
+              memory: "65Gi"
+              cpu: "4"
+            limits:
+              memory: "120Gi"
+              cpu: "8"
+          env:
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"

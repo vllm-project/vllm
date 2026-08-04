@@ -1,0 +1,11 @@
+local_cpu.yaml
+local_cpu_mla.yaml
+local_disk.yaml
+pd.yaml
+multi_device.yaml
+async.yaml
+p2p.yaml
+layerwise.yaml
+local_cpu_with_v3.yaml
+local_disk_with_v3.yaml
+p2p_with_v3.yaml

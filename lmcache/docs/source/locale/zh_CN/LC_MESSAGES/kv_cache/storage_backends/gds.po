@@ -1,0 +1,401 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:2
+msgid "GDS Backend"
+msgstr "GDS 后端"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr ""
+"本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` "
+"以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:14
+msgid ""
+"This backend will work with any file system, whether local, remote, and "
+"remote with GDS-based optimizations. Remote file systems allow for "
+"multiple LMCache instances to share data seamlessly. The GDS (GPU-Direct "
+"Storage) optimizations are used for zero-copy I/O from GPU memory to "
+"storage systems. Supports both NVIDIA cuFile and AMD hipFile for GPU-"
+"direct storage."
+msgstr ""
+"该后端可以与任何文件系统配合使用，无论是本地的、远程的，还是带有基于 GDS 的优化的远程文件系统。远程文件系统允许多个 LMCache "
+"实例无缝共享数据。GDS（GPU-Direct Storage）优化用于实现从显存到存储系统的零拷贝 I/O。支持 NVIDIA cuFile 和"
+" AMD hipFile 进行 GPU 直接存储。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:22
+msgid "Ways to configure LMCache GDS Backend"
+msgstr "配置 LMCache GDS 后端的方法"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:24
+msgid "**1. Environment Variables:**"
+msgstr "**1. 环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:40
+msgid "**2. Configuration File**:"
+msgstr "**2. 配置文件**:"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:42
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:44
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:62
+msgid "Disk I/O Thread Pool"
+msgstr "磁盘 I/O 线程池"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:64
+msgid ""
+"The backend uses a thread pool for parallel disk I/O. The thread pool is "
+"always enabled regardless of whether GDS APIs or POSIX fallback is used, "
+"so both code paths benefit from concurrent reads and writes."
+msgstr "后端使用线程池进行并行磁盘 I/O。无论使用 GDS API 还是 POSIX 回退，线程池始终启用，因此两条代码路径都能从并发读写中受益。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:68
+msgid ""
+"The number of worker threads is controlled by "
+"``extra_config.disk_io_threads`` (default: 4). Increase this on fast NVMe"
+" drives for higher parallelism. Set to ``0`` to disable the thread pool "
+"entirely."
+msgstr "工作线程的数量由 ``extra_config.disk_io_threads`` 控制（默认值：4）。在快速的 NVMe 驱动器上增加此值以获得更高的并行性。设置为 ``0`` 以完全禁用线程池。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:72
+msgid "**Environment variable:**"
+msgstr "**环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:78
+#: ../../source/kv_cache/storage_backends/gds.rst:112
+msgid "**YAML config:**"
+msgstr "**YAML 配置：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:87
+msgid ""
+"The deprecated ``gds_io_threads`` key is no longer supported. Use "
+"``disk_io_threads`` instead."
+msgstr "不再支持已弃用的 ``gds_io_threads`` 键。请改用 ``disk_io_threads``。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:92
+msgid "Multi-Path (Multi-Device) Support"
+msgstr "多路径（多设备）支持"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:94
+msgid ""
+"When a system has multiple NVMe drives, you can distribute GDS I/O across"
+" them by specifying a comma-separated list of paths in ``gds_path``. The "
+"``gds_path_sharding`` option controls how each GPU worker selects its "
+"path. Currently only ``\"by_gpu\"`` is supported (the default), which "
+"selects a path based on the device index (``device_id % num_paths``), so "
+"traffic is spread evenly across the drives without any manual pinning."
+msgstr ""
+"当系统有多个 NVMe 驱动器时，可以通过在 ``gds_path`` 中指定以逗号分隔的路径列表来分配 GDS I/O。\\ "
+"``gds_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 ``\"by_gpu\"``\\ "
+"（默认），该选项根据设备索引（\\ ``device_id % num_paths``\\ "
+"）选择路径，因此流量在驱动器之间均匀分配，无需手动固定。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:101
+msgid ""
+"**Why this helps:** a single PCIe Gen 4 x4 NVMe tops out at ~7 GB/s. With"
+" four drives the aggregate bandwidth can reach ~28 GB/s, matching what "
+"multi-GPU systems need for KV cache eviction and prefetch."
+msgstr ""
+"**为什么这有帮助：** 单个 PCIe Gen 4 x4 NVMe 的最大速度约为 7 GB/s。使用四个驱动器时，聚合带宽可以达到约 28 "
+"GB/s，满足多 GPU 系统对 KV Cache 逐出和预取的需求。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:105
+msgid "**Environment variables:**"
+msgstr "**环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:119
+msgid "With the above configuration on a 4-GPU node:"
+msgstr "在 4-GPU 节点上使用上述配置："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:121
+msgid "``cuda:0`` writes to ``/mnt/nvme0/cache``"
+msgstr "``cuda:0`` 写入 ``/mnt/nvme0/cache``"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:122
+msgid "``cuda:1`` writes to ``/mnt/nvme1/cache``"
+msgstr "``cuda:1`` 写入 ``/mnt/nvme1/cache``"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:123
+msgid "``cuda:2`` writes to ``/mnt/nvme2/cache``"
+msgstr "``cuda:2`` 写入 ``/mnt/nvme2/cache``"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:124
+msgid "``cuda:3`` writes to ``/mnt/nvme3/cache``"
+msgstr "``cuda:3`` 写入 ``/mnt/nvme3/cache``"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:126
+msgid ""
+"If there are more GPUs than paths, the assignment wraps around (e.g. "
+"``cuda:4`` maps back to ``/mnt/nvme0/cache``). A single path (no commas) "
+"works exactly as before."
+msgstr ""
+"如果 GPU 的数量超过路径数量，则分配会循环（例如，\\ ``cuda:4`` 映射回 ``/mnt/nvme0/cache``\\ "
+"）。单个路径（没有逗号）与之前的工作方式完全相同。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:130
+msgid ""
+"All directories are created automatically at startup. Every path in the "
+"list must reside on a filesystem that the rest of the GDS configuration "
+"expects (e.g., all paths on GDS-capable mounts when using cuFile)."
+msgstr ""
+"所有目录在启动时会自动创建。列表中的每个路径必须位于 GDS 配置所期望的文件系统上（例如，在使用 cuFile 时，所有路径都必须位于支持 "
+"GDS 的挂载点上）。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:134
+msgid ""
+"**Read behavior:** on startup the backend scans **all** configured paths "
+"for previously-stored KV cache entries, regardless of GPU affinity.  This"
+" means a ``cuda:0`` worker whose write affinity is ``/mnt/nvme0/cache`` "
+"will still discover entries that were written to ``/mnt/nvme1/cache`` by "
+"``cuda:1`` in a prior run.  Writes, however, always go to the single "
+"affinity-selected path."
+msgstr ""
+"**读取行为：** 在启动时，后端会扫描 **所有** 配置的路径以查找先前存储的 KV Cache 条目，而不考虑 GPU "
+"亲和性。这意味着一个写入亲和性为 ``/mnt/nvme0/cache`` 的 ``cuda:0`` 工作线程仍然会发现之前由 "
+"``cuda:1`` 写入到 ``/mnt/nvme1/cache`` 的条目。然而，写入始终会发送到单个亲和性选择的路径。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:150
+msgid "GDS Buffer Size Explanation"
+msgstr "GDS 缓冲区大小说明"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:152
+msgid ""
+"The backend currently pre-registers buffer space to speed up GDS "
+"operations. This buffer space is registered in VRAM so options like "
+"``--gpu-memory-utilization`` from ``vllm`` should be considered when "
+"setting it. For example, a good rule of thumb for H100 which generally "
+"has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
+"utilization 0.85`` and depending on your workflow fine-tune it from "
+"there."
+msgstr ""
+"后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-"
+"utilization`` 选项，例如来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 "
+"8GiB 开始，并设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程进行微调。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:160
+msgid "Using AMD hipFile"
+msgstr "使用 AMD hipFile"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:164
+msgid ""
+"hipFile is alpha software and has been tested on limited hardware. For "
+"full installation details, see the `hipFile install guide "
+"<https://github.com/ROCm/rocm-"
+"systems/blob/develop/projects/hipfile/INSTALL.md>`__."
+msgstr ""
+"hipFile 是 alpha 版软件，仅在有限的硬件上进行了测试。有关完整的安装细节，请参见 `hipFile 安装指南 "
+"<https://github.com/ROCm/rocm-"
+"systems/blob/develop/projects/hipfile/INSTALL.md>`__。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:168
+#: ../../source/kv_cache/storage_backends/gds.rst:219
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:170
+msgid ""
+"**ROCm >= 7.2** with ``amdgpu-dkms >= 30.20.1`` (see the `ROCm quick "
+"start installation guide <https://rocm.docs.amd.com/projects/install-on-"
+"linux/en/latest/install/quick-start.html>`__)"
+msgstr ""
+"**ROCm >= 7.2** 和 ``amdgpu-dkms >= 30.20.1`` （请参阅 `ROCm 快速安装指南 "
+"<https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install"
+"/quick-start.html>`__）"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:172
+msgid "**Supported storage:** local NVMe drives only"
+msgstr "**支持的存储：** 仅限本地 NVMe 驱动器"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:173
+msgid "**Supported filesystems:** ext4 (mounted with ``data=ordered``) and xfs"
+msgstr "**支持的文件系统：** ext4（以 ``data=ordered`` 挂载）和 xfs"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:174
+msgid "**Kernel:** ``CONFIG_PCI_P2PDMA`` must be enabled"
+msgstr "**内核：** ``CONFIG_PCI_P2PDMA`` 必须启用"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:176
+msgid "**Quick install (Ubuntu 24.04):**"
+msgstr "**快速安装（Ubuntu 24.04）：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:187
+msgid ""
+"You can verify that the HIP libraries and kernel support AIS (AMD "
+"Infinity Storage) by running:"
+msgstr "您可以通过运行以下命令来验证 HIP 库和内核是否支持 AIS（AMD Infinity Storage）："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:193
+msgid ""
+"Successful output will show ``True`` for ``Kernel P2PDMA support``, ``HIP"
+" runtime``, and ``amdgpu``."
+msgstr ""
+"成功的输出将显示 ``Kernel P2PDMA support``\\ 、\\ ``HIP runtime`` 和 ``amdgpu`` 的值为"
+" ``True``\\ 。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:195
+msgid "**LMCache configuration:**"
+msgstr "**LMCache 配置：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:197
+msgid "To use AMD hipFile instead of NVIDIA cuFile, set the GDS backend:"
+msgstr "要使用 AMD hipFile 而不是 NVIDIA cuFile，请设置 GDS 后端："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:199
+msgid "**Environment Variables:**"
+msgstr "**环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:205
+msgid "**Configuration File:**"
+msgstr "**配置文件：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:211
+msgid ""
+"Note: The ``gds_buffer_size`` configuration is used for both cuFile and "
+"hipFile buffers."
+msgstr "注意：\\ ``gds_buffer_size`` 配置用于 cuFile 和 hipFile 缓冲区。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:215
+msgid "Setup Example"
+msgstr "设置示例"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:221
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:223
+msgid "A mounted file system. A file system supportings GDS will work best."
+msgstr "一个挂载的文件系统。支持 GDS 的文件系统效果最佳。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:225
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr "vllm 和 lmcache 已安装 (:doc:`安装指南 <../../getting_started/installation>`)"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:227
+msgid "Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``"
+msgstr "Hugging Face 访问 ``meta-llama/Llama-3.1-8B-Instruct``"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:233
+msgid "**Step 1. Create cache directory under your file system mount:**"
+msgstr "**步骤 1. 在您的文件系统挂载下创建缓存目录：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:235
+msgid ""
+"To find all the types of file systems supporting GDS in your system, use "
+"`gdscheck` from NVIDIA:"
+msgstr "要查找系统中支持 GDS 的所有文件系统类型，请使用 NVIDIA 的 `gdscheck`："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:241
+msgid "Check with your storage vendor on how to mount the remote file system."
+msgstr "请向您的存储供应商咨询如何挂载远程文件系统。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:243
+msgid ""
+"(For example, if you want to use a GDS-enabled NFS driver, try the "
+"modified [NFS stack](https://vastnfs.vastdata.com/), which is an open "
+"source driver that works with any standard [NFS "
+"RDMA](https://datatracker.ietf.org/doc/html/rfc5532) server. More vendor-"
+"specific instructions will be added here in the future)."
+msgstr ""
+"（例如，如果您想使用支持 GDS 的 NFS 驱动程序，可以尝试修改过的 [NFS "
+"stack](https://vastnfs.vastdata.com/)，这是一个与任何标准 [NFS "
+"RDMA](https://datatracker.ietf.org/doc/html/rfc5532) "
+"服务器兼容的开源驱动程序。将来会在这里添加更多特定于供应商的说明。）"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:249
+msgid ""
+"Create a directory under the file systew mount (the name here is "
+"arbitrary):"
+msgstr "在文件系统挂载下创建一个目录（这里的名称是任意的）："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:255
+msgid "**Step 2. Start a vLLM server with file backend enabled:**"
+msgstr "**步骤 2. 启动一个启用文件后端的 vLLM 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:257
+msgid "Create a an lmcache configuration file called: ``gds-backend.yaml``"
+msgstr "创建一个名为 ``gds-backend.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:268
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr "如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:287
+msgid "POSIX fallback"
+msgstr "POSIX 回退"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:289
+msgid ""
+"In some cases, libcufile implements its own internal POSIX fallback "
+"without `GdsBackend` being aware. In others, an error such as "
+"`RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)`"
+" may be throwned. Thus, backend can be configured to fallback to its own "
+"POSIX implementation when the usage of the GDS APIs is not successful."
+msgstr ""
+"在某些情况下，libcufile 实现了自己的内部 POSIX 回退，而 `GdsBackend` 并不知情。在其他情况下，可能会抛出类似 "
+"`RuntimeError: cuFileHandleRegister failed (cuFile err=5030, cuda_err=0)`"
+" 的错误。因此，当 GDS API 的使用不成功时，可以配置后端回退到其自己的 POSIX 实现。"
+
+#: ../../source/kv_cache/storage_backends/gds.rst:293
+msgid ""
+"To force `GdsBackend` not use GDS APIs for any reason, you can override "
+"its behavior via configuration:"
+msgstr "要强制 `GdsBackend` 在任何情况下都不使用 GDS API，您可以通过配置覆盖其行为："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:299
+msgid "Or via environment variable:"
+msgstr "或者通过环境变量："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:305
+msgid ""
+"The ``gds_backend`` field (default: ``cufile``) selects which GDS library"
+" to use. Supported backends are ``cufile`` (NVIDIA cuFile) and "
+"``hipfile`` (AMD hipFile):"
+msgstr ""
+"``gds_backend`` 字段（默认值：\\ ``cufile``\\ ）用于选择使用哪个 GDS 库。支持的后端有 "
+"``cufile``\\ （NVIDIA cuFile）和 ``hipfile``\\ （AMD hipFile）："
+
+#: ../../source/kv_cache/storage_backends/gds.rst:313
+msgid ""
+"Note that under this mode it would still use CUDA APIs to map and do "
+"operations the pre-registered GPU memory."
+msgstr "请注意，在此模式下，它仍将使用 CUDA API 来映射和操作预注册的显存。"
+

@@ -1,0 +1,67 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheCoordinator
+metadata:
+  name: my-coordinator
+  namespace: default
+spec:
+  # -- Container image (runs the same lmcache binary as the engines) --
+  image:
+    repository: lmcache/vllm-openai   # default
+    tag: latest                       # default
+    pullPolicy: IfNotPresent          # Always | Never | IfNotPresent
+  # imagePullSecrets:
+  #   - name: my-registry-secret
+
+  # -- Topology --
+  # replicas: 1                   # default
+
+  # -- HTTP server (maps to `lmcache coordinator` flags / MPCoordinatorConfig) --
+  # host: 0.0.0.0                 # default
+  # port: 9300                    # default, [1, 65535]
+
+  # -- Membership / health --
+  # instanceTimeout: 30           # default, seconds; must be > 0
+  # healthCheckInterval: 10       # default, seconds; 0 disables the loop
+
+  # -- L2 quota eviction --
+  # evictionCheckInterval: 5      # default, seconds; 0 disables the loop
+  # evictionRatio: 0.2            # default, range [0.0, 1.0]
+  # triggerWatermark: 1.0         # default, range (0.0, 1.0]
+
+  # -- Global CacheBlend directory --
+  # blendChunkSize: 256           # default; MUST equal the blend servers' chunk size
+  # blendProbeStride: 1           # default; 1 probes every offset for full recall
+
+  # -- Prometheus monitoring (coordinator has no /metrics endpoint yet) --
+  # prometheus:
+  #   enabled: false              # default
+  #   port: 9090                  # default
+  #   serviceMonitor:
+  #     enabled: false            # default, requires Prometheus Operator
+  #     interval: 30s             # default
+
+  # -- Resource requests/limits (no defaults; coordinator is CPU/memory light) --
+  # resourceOverrides:
+  #   requests:
+  #     cpu: "1"
+  #     memory: 1Gi
+  #   limits:
+  #     memory: 2Gi
+
+  # -- Logging --
+  # logLevel: INFO                # DEBUG | INFO | WARNING | ERROR
+
+  # -- Scheduling / pod overrides --
+  # nodeSelector: {}
+  # affinity: {}
+  # tolerations: []
+  # env: []
+  # volumes: []
+  # volumeMounts: []
+  # podAnnotations: {}
+  # podLabels: {}
+  # serviceAccountName: ""
+  # priorityClassName: ""
+
+  # -- Extra CLI flags (appended last, can override any auto-generated flag) --
+  # extraArgs: []

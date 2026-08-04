@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMCache Controller Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="/static/img/logo.png" type="image/png">
+</head>
+<body>
+    <div class="container-fluid">
+        <header class="bg-primary text-white p-3 mb-4">
+            <h1>LMCache Controller Dashboard</h1>
+            <div class="row align-items-center">
+                <div class="col-md-8">
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="controllerHostInput" placeholder="Controller Host (default: localhost)" value="localhost">
+                                <input type="text" class="form-control" id="controllerPortInput" placeholder="Controller Port (default: 9000)" value="9000">
+                                <button id="connectControllerBtn" class="btn btn-outline-light" type="button">
+                                    <i class="bi bi-plug"></i> Connect
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <button id="refreshAllBtn" class="btn btn-sm btn-outline-light me-2">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh All
+                            </button>
+                            <span id="connectionStatus" class="badge bg-warning">Not Connected</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 text-end">
+                    <span id="currentTime" class="badge bg-info fs-6"></span>
+                </div>
+            </div>
+        </header>
+
+        <ul class="nav nav-tabs" id="controllerTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="overview-tab" data-bs-toggle="tab" data-bs-target="#overview" type="button" role="tab">Overview</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="instances-tab" data-bs-toggle="tab" data-bs-target="#instances" type="button" role="tab">Instances</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="workers-tab" data-bs-toggle="tab" data-bs-target="#workers" type="button" role="tab">Workers</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="metrics-tab" data-bs-toggle="tab" data-bs-target="#metrics" type="button" role="tab">Metrics</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="threads-tab" data-bs-toggle="tab" data-bs-target="#threads" type="button" role="tab">Threads</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="env-tab" data-bs-toggle="tab" data-bs-target="#env" type="button" role="tab">Environment</button>
+            </li>
+        </ul>
+
+        <div class="tab-content p-3 border border-top-0" id="controllerTabContent">
+            <div class="tab-pane fade show active" id="overview" role="tabpanel">
+                <h3>Controller Overview</h3>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <h5 class="card-title">System Status</h5>
+                                <div id="systemStatus" class="text-center">
+                                    <div class="spinner-border" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <h5 class="card-title">Quick Stats</h5>
+                                <div id="quickStats" class="text-center">
+                                    <div class="spinner-border" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">Recent Activities</h5>
+                                <div id="recentActivities">
+                                    <div class="spinner-border" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="instances" role="tabpanel">
+                <h3>Instance Management</h3>
+                <div class="mb-3">
+                    <button id="refreshInstancesBtn" class="btn btn-primary me-2">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Instances
+                    </button>
+                    <button id="addInstanceBtn" class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addInstanceModal">
+                        <i class="bi bi-plus-circle"></i> Add Instance
+                    </button>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped" id="instances">
+                        <thead>
+                            <tr>
+                                <th>Instance ID</th>
+                                <th>IP Address</th>
+                                <th>Status</th>
+                                <th>Worker Count</th>
+                                <th>Key Count</th>
+                                <th>Last Heartbeat</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="instancesTableBody">
+                            <!-- Instances will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="workers" role="tabpanel">
+                <h3>Worker Management</h3>
+                <div class="mb-3">
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <select id="instanceFilter" class="form-select">
+                                <option value="">All Instances</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <button id="refreshWorkersBtn" class="btn btn-primary w-100">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped" id="workers">
+                        <thead>
+                            <tr>
+                                <th>Instance ID</th>
+                                <th>Worker ID</th>
+                                <th>IP</th>
+                                <th>Port</th>
+                                <th>Status</th>
+                                <th>Key Count</th>
+                                <th>Last Heartbeat</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="workersTableBody">
+                            <!-- Workers will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="metrics" role="tabpanel">
+                <h3>Performance Metrics</h3>
+                <div class="mb-3">
+                    <button id="refreshMetricsBtn" class="btn btn-primary">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Metrics
+                    </button>
+                </div>
+                <pre id="metricsContent">Please connect to controller first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="threads" role="tabpanel">
+                <h3>Thread Information</h3>
+                <div class="mb-3">
+                    <button id="refreshThreadsBtn" class="btn btn-primary">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Threads
+                    </button>
+                </div>
+                <pre id="threadsContent">Please connect to controller first</pre>
+            </div>
+
+            <div class="tab-pane fade" id="env" role="tabpanel">
+                <h3>Environment Variables</h3>
+                <div class="mb-3">
+                    <input type="text" class="form-control" id="envSearchInput" placeholder="Search environment variables...">
+                </div>
+                <pre id="envContent">Please connect to controller first</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Instance Modal -->
+    <div class="modal fade" id="addInstanceModal" tabindex="-1" aria-labelledby="addInstanceModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addInstanceModalLabel">Add New Instance</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="newInstanceId" class="form-label">Instance ID</label>
+                        <input type="text" class="form-control" id="newInstanceId" placeholder="Enter instance ID">
+                    </div>
+                    <div class="mb-3">
+                        <label for="newInstanceIp" class="form-label">IP Address</label>
+                        <input type="text" class="form-control" id="newInstanceIp" placeholder="Enter IP address">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="saveInstanceBtn">Save Instance</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/controller_app.js"></script>
+</body>
+</html>

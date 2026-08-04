@@ -1,0 +1,261 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/bigtable.rst:2
+msgid "Bigtable"
+msgstr "Bigtable"
+
+#: ../../source/mp/l2_storage/bigtable.rst:4
+msgid ""
+"An L2 adapter backed by Google Cloud Bigtable, enabling out-of-process "
+"remote KV caching. It supports Layer-Group Sharding to partition large "
+"tensor payloads across multiple column qualifiers to stay safely under "
+"Bigtable cell size limits."
+msgstr "一个由 Google Cloud Bigtable 支持的 L2 适配器，能够实现进程外的远程 KV 缓存。它支持层组分片，将大型张量负载划分到多个列限定符中，以确保安全地低于 Bigtable 单元格大小限制。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:7
+msgid "Why Choose Bigtable?"
+msgstr "为什么选择 Bigtable？"
+
+#: ../../source/mp/l2_storage/bigtable.rst:9
+msgid ""
+"Cloud Bigtable is an excellent choice as an L2 storage backend for "
+"enterprise-scale LLM serving workloads:"
+msgstr "Cloud Bigtable 是企业级 LLM 服务工作负载的 L2 存储后端的优秀选择："
+
+#: ../../source/mp/l2_storage/bigtable.rst:11
+msgid ""
+"**Sub-millisecond/Single-digit Latency**: SSD-backed Bigtable clusters "
+"deliver the low latency required for real-time prompt caching, preventing"
+" remote cache retrieval from bottlenecking LLM generation."
+msgstr "**亚毫秒/单数延迟**：基于 SSD 的 Bigtable 集群提供实时提示缓存所需的低延迟，防止远程缓存检索成为 LLM 生成的瓶颈。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:12
+msgid ""
+"**High Concurrency and Throughput**: Scales horizontally to handle "
+"thousands of concurrent queries from multiple vLLM instances, shielding "
+"the L1 memory from cache misses."
+msgstr "**高并发和吞吐量**：水平扩展以处理来自多个 vLLM 实例的数千个并发查询，保护 L1 内存免受缓存未命中的影响。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:13
+msgid ""
+"**Enterprise-Grade Managed Service**: Fully managed by Google Cloud, "
+"providing built-in multi-region replication, IAM access controls, and "
+"zero-downtime scaling."
+msgstr "**企业级托管服务**：由 Google Cloud 完全管理，提供内置的多区域复制、IAM 访问控制和零停机时间的扩展。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:14
+msgid ""
+"**Tier-Agnostic Storage Flexibility**: Decouples LMCache config from "
+"database deployments. Choose the **SSD Tier** for primary low-latency "
+"caching, or the **HDD Tier** for cost-effective, large-scale archival "
+"storage."
+msgstr "**与层级无关的存储灵活性**：将 LMCache 配置与数据库部署解耦。选择 **SSD 层** 作为主要低延迟缓存，或选择 **HDD 层** 作为经济高效的大规模归档存储。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:16
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/bigtable.rst:18
+msgid "``bigtable_project_id`` (str): Your Google Cloud Project ID."
+msgstr "``bigtable_project_id`` (str): 您的 Google Cloud 项目 ID。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:19
+msgid "``bigtable_instance_id`` (str): Your Cloud Bigtable Instance ID."
+msgstr "``bigtable_instance_id`` (str): 您的 Cloud Bigtable 实例 ID。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:20
+msgid "``bigtable_table_name`` (str): Bigtable table name."
+msgstr "``bigtable_table_name`` (str): Bigtable 表名。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:22
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/bigtable.rst:24
+msgid ""
+"``bigtable_family_name`` (str, default ``\"cf\"``): Column family name. "
+"Must be pre-created in the Bigtable table."
+msgstr "``bigtable_family_name`` (str, default ``\"cf\"``): 列族名称。必须在 Bigtable 表中预先创建。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:25
+msgid ""
+"``bigtable_column_name`` (str, default ``\"data\"``): Column qualifier "
+"name to use when sharding is disabled."
+msgstr "``bigtable_column_name`` (str, default ``\\\"data\\\"``): 当禁用分片时使用的列限定符名称。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:26
+msgid ""
+"``layer_group_size`` (int, default ``10``): Number of layers per column "
+"group. Set to ``0`` to disable Layer-Group Sharding."
+msgstr "``layer_group_size`` (int, default ``10``): 每个列组的层数。设置为 ``0`` 以禁用层组分片。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:27
+msgid ""
+"``bigtable_max_chunk_size_mb`` (float, default ``90.0``): The maximum "
+"allowed write limit when sharding is disabled (or when using CacheGen). "
+"Writes exceeding this are safely skipped to avoid database exceptions."
+msgstr "``bigtable_max_chunk_size_mb`` (float, default ``90.0``): 禁用分片时（或使用 CacheGen 时）允许的最大写入限制。超过此限制的写入将被安全跳过，以避免数据库异常。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:28
+msgid ""
+"``credentials_path`` (str, default ``None``): Absolute path to a GCP "
+"Service Account JSON key file. If omitted, it defaults to Application "
+"Default Credentials (ADC)."
+msgstr "``credentials_path`` (str, default ``None``): GCP 服务账户 JSON 密钥文件的绝对路径。如果省略，则默认为应用程序默认凭据 (ADC)。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:29
+msgid ""
+"``exists_cache_ttl_seconds`` (float, default ``10.0``): TTL in seconds "
+"for the internal cache that shields Bigtable from redundant lookup "
+"requests."
+msgstr "``exists_cache_ttl_seconds`` (float, default ``10.0``): 用于内部缓存的 TTL（生存时间），单位为秒，该缓存可以保护 Bigtable 免受冗余查找请求。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:30
+msgid ""
+"``bigtable_write_timeout_ms`` (float, default ``10000.0``): Maximum "
+"timeout for database writes."
+msgstr "``bigtable_write_timeout_ms`` (float, default ``10000.0``): 数据库写入的最大超时时间。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:31
+msgid ""
+"``bigtable_read_timeout_ms`` (float, default ``5000.0``): Maximum timeout"
+" for database reads."
+msgstr "``bigtable_read_timeout_ms`` (float, default ``5000.0``): 数据库读取的最大超时。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:33
+msgid ""
+"**Environment variable fallbacks.** When the corresponding config value "
+"is empty, these environment variables are used: ``BT_PROJECT_ID``, "
+"``BT_INSTANCE_ID``, ``BT_TABLE_NAME``."
+msgstr "**环境变量回退。** 当相应的配置值为空时，将使用这些环境变量：``BT_PROJECT_ID``、``BT_INSTANCE_ID``、``BT_TABLE_NAME``。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:36
+msgid "Tutorials & Configuration Examples"
+msgstr "教程与配置示例"
+
+#: ../../source/mp/l2_storage/bigtable.rst:39
+msgid "Tutorial 1: Serving Massive Models (FP8 Compression)"
+msgstr "教程 1：服务大规模模型（FP8 压缩）"
+
+#: ../../source/mp/l2_storage/bigtable.rst:41
+msgid ""
+"If you are serving extremely large models where individual KV cache "
+"chunks are massive, you can enable FP8 quantization compression. This "
+"compresses the KV cache footprint by **2x** and reduces network transfer "
+"overhead to Bigtable."
+msgstr "如果您正在服务极大的模型，其中单个 KV Cache 块非常庞大，您可以启用 FP8 量化压缩。这将 KV Cache 的占用空间压缩 **2x** 并减少传输到 Bigtable 的网络开销。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:43
+msgid ""
+"Add the ``\"serde\"`` sub-dictionary inside the Bigtable L2 adapter JSON "
+"spec:"
+msgstr "在 Bigtable L2 适配器 JSON 规范中添加 ``\"serde\"`` 子字典："
+
+#: ../../source/mp/l2_storage/bigtable.rst:65
+msgid ""
+"Tutorial 2: 3-Tier Hybrid Storage (Local CPU -> Redis L2 -> Bigtable SSD "
+"L3)"
+msgstr "教程 2：三层混合存储（本地 CPU -> Redis L2 -> Bigtable SSD L3）"
+
+#: ../../source/mp/l2_storage/bigtable.rst:67
+msgid ""
+"You can place a Redis/Valkey instance in front of Bigtable to serve as a "
+"fast hot cache, cascading requests down to Bigtable on misses."
+msgstr "您可以在 Bigtable 前面放置一个 Redis/Valkey 实例，作为快速热缓存，在未命中时将请求级联到 Bigtable。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:69
+msgid ""
+"Configure multiple L2 adapters sequentially using multiple "
+"``--l2-adapter`` arguments:"
+msgstr "使用多个 ``--l2-adapter`` 参数按顺序配置多个 L2 适配器："
+
+#: ../../source/mp/l2_storage/bigtable.rst:88
+msgid "Tutorial 3: Multi-Tier Storage Cascading (SSD Hot Tier -> HDD Archive)"
+msgstr "教程 3：多层存储级联（SSD 热层 -> HDD 存档）"
+
+#: ../../source/mp/l2_storage/bigtable.rst:90
+msgid ""
+"To balance low-latency performance for hot cache hits and cost-"
+"effectiveness for long-term archival storage, you can configure tiered "
+"storage (SSD to HDD) in two ways:"
+msgstr "为了平衡热缓存命中的低延迟性能和长期归档存储的成本效益，您可以通过两种方式配置分层存储（从 SSD 到 HDD）："
+
+#: ../../source/mp/l2_storage/bigtable.rst:93
+msgid ""
+"Method A: Native Bigtable Tiered Storage (Recommended - Zero "
+"Configuration)"
+msgstr "方法 A：原生 Bigtable 分层存储（推荐 - 零配置）"
+
+#: ../../source/mp/l2_storage/bigtable.rst:95
+msgid ""
+"Google Cloud Bigtable supports native **Tiered Storage**. By enabling an "
+"age-based tiering policy on your table via the Google Cloud Console, "
+"gcloud CLI, or Terraform, Bigtable automatically moves older/colder cells"
+" to a cost-effective infrequent-access storage tier in the background."
+msgstr "Google Cloud Bigtable 支持原生 **分层存储**。通过 Google Cloud 控制台、gcloud CLI 或 Terraform 在您的表上启用基于年龄的分层策略，Bigtable 会在后台自动将较旧/较冷的单元格移动到成本效益高的不频繁访问存储层。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:97
+msgid ""
+"**No LMCache configuration changes**: You only need to configure a single"
+" Bigtable L2 adapter in LMCache."
+msgstr "**无需更改 LMCache 配置**：您只需在 LMCache 中配置一个 Bigtable L2 适配器。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:98
+msgid ""
+"**No code changes**: Bigtable handles routing reads and writes to the "
+"correct tier transparently."
+msgstr "**无需代码更改**：Bigtable 透明地处理将读取和写入路由到正确层级。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:99
+msgid ""
+"**Natural aging**: Since cells are written with the default server "
+"timestamp, they will naturally age out based on the configured policy "
+"window."
+msgstr "**自然老化**：由于单元格是使用默认的服务器时间戳写入的，因此它们将根据配置的策略窗口自然老化。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:101
+msgid ""
+"For more information, see the official `Bigtable Tiered Storage Overview "
+"<https://cloud.google.com/bigtable/docs/tiered-storage>`_."
+msgstr "有关更多信息，请参阅官方的 `Bigtable 分层存储概述 <https://cloud.google.com/bigtable/docs/tiered-storage>`_。"
+
+#: ../../source/mp/l2_storage/bigtable.rst:104
+msgid "Method B: Manual LMCache Storage Cascade (Alternative)"
+msgstr "方法 B：手动 LMCache 存储级联（替代方案）"
+
+#: ../../source/mp/l2_storage/bigtable.rst:106
+msgid ""
+"If you prefer to manage separate physical Bigtable instances or tables "
+"(e.g. one SSD and one HDD), you can cascade them directly in LMCache by "
+"configuring multiple L2 adapters sequentially in your startup command:"
+msgstr "如果您更喜欢管理单独的物理 Bigtable 实例或表（例如，一个 SSD 和一个 HDD），您可以通过在启动命令中顺序配置多个 L2 适配器，直接在 LMCache 中级联它们："
+
+#: ../../source/mp/l2_storage/bigtable.rst:131
+msgid "Configuration Examples: Custom Timeouts and Explicit Service Account"
+msgstr "配置示例：自定义超时和显式服务账户"
+
+#: ../../source/mp/l2_storage/bigtable.rst:133
+msgid ""
+"You can configure custom database timeout settings and pass an explicit "
+"Service Account key file path in the JSON payload:"
+msgstr "您可以配置自定义数据库超时设置，并在 JSON 有效负载中传递显式服务帐户密钥文件路径："
+

@@ -1,0 +1,553 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/tool.rst:2
+msgid "lmcache tool"
+msgstr "lmcache tool"
+
+#: ../../source/cli/tool.rst:4
+msgid ""
+"The ``lmcache tool`` command groups offline analysis utilities bundled "
+"with LMCache."
+msgstr "``lmcache tool`` 命令将与 LMCache 捆绑在一起的离线分析工具进行分组。"
+
+#: ../../source/cli/tool.rst:11
+msgid ""
+"Three tools are available: ``cache-simulator`` replays lookup logs, "
+"``transfer-channel-benchmark`` measures peer-to-peer read throughput, and"
+" ``flamegraph`` profiles any running process."
+msgstr "提供了三个工具：``cache-simulator`` 重放查找日志，``transfer-channel-benchmark`` 测量点对点读取吞吐量，以及 ``flamegraph`` 记录任何正在运行的进程。"
+
+#: ../../source/cli/tool.rst:17
+msgid ""
+"``cache-simulator`` depends on the optional ``plot`` extras "
+"(``sortedcontainers`` / ``matplotlib``). If they are not installed, the "
+"sub-command is silently omitted from the CLI. Install the extras to "
+"enable it."
+msgstr ""
+"``cache-simulator`` 依赖于可选的 ``plot`` 附加组件（\\ ``sortedcontainers`` / "
+"``matplotlib``\\ ）。如果它们未安装，子命令将会在 CLI 中静默省略。安装附加组件以启用它。"
+
+#: ../../source/cli/tool.rst:24
+msgid "cache-simulator"
+msgstr "cache-simulator"
+
+#: ../../source/cli/tool.rst:26
+msgid ""
+"Replay LMCache lookup-hash JSONL logs through an LRU cache to measure the"
+" KV-cache token hit rate. It has three actions:"
+msgstr "通过 LRU 缓存重放 LMCache 查找哈希 JSONL 日志，以测量 KV Cache 的令牌命中率。它有三个操作："
+
+#: ../../source/cli/tool.rst:37
+msgid "Action"
+msgstr "操作"
+
+#: ../../source/cli/tool.rst:38 ../../source/cli/tool.rst:86
+#: ../../source/cli/tool.rst:133
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/tool.rst:39
+msgid "``simulate``"
+msgstr "``simulate``"
+
+#: ../../source/cli/tool.rst:40
+msgid ""
+"Replay logs at a fixed cache capacity; print a text report and save a "
+"7-panel statistics PNG."
+msgstr "在固定的缓存容量下重放日志；打印文本报告并保存 7 面板的统计 PNG。"
+
+#: ../../source/cli/tool.rst:42
+msgid "``sweep``"
+msgstr "``sweep``"
+
+#: ../../source/cli/tool.rst:43
+msgid ""
+"Sweep across a range of cache capacities and save a hit-rate vs. capacity"
+" PNG."
+msgstr "在一系列缓存容量中进行扫描，并保存命中率与容量的 PNG 图像。"
+
+#: ../../source/cli/tool.rst:45
+msgid "``gen-dataset``"
+msgstr "``gen-dataset``"
+
+#: ../../source/cli/tool.rst:46
+msgid ""
+"Generate a ``vllm bench serve`` custom dataset (JSONL) from lookup-hash "
+"JSONL logs, preserving prefix-sharing structure."
+msgstr "从查找哈希 JSONL 日志生成一个 ``vllm bench serve`` 自定义数据集 (JSONL)，保留前缀共享结构。"
+
+#: ../../source/cli/tool.rst:49
+msgid "Each action has its own flags. Run the built-in help for the full list:"
+msgstr "每个操作都有其自己的标志。运行内置帮助以获取完整列表："
+
+#: ../../source/cli/tool.rst:59
+msgid "transfer-channel-benchmark"
+msgstr "transfer-channel-benchmark"
+
+#: ../../source/cli/tool.rst:61
+msgid ""
+"Measure read throughput (GB/s) of the LMCache transfer channel "
+"(``lmcache/v1/distributed/transfer_channel/``) for batched peer-to-peer "
+"reads. It allocates the transferred objects through the same "
+"``L1MemoryManager`` production uses, so it exercises the real memory path"
+" rather than raw tensors."
+msgstr "测量 LMCache 传输通道（``lmcache/v1/distributed/transfer_channel/``）的读取吞吐量（GB/s），用于批量点对点读取。它通过与生产使用的相同 ``L1MemoryManager`` 分配传输的对象，因此它测试真实的内存路径，而不是原始张量。"
+
+#: ../../source/cli/tool.rst:67
+msgid ""
+"The benchmark runs as **two processes**, a ``server`` that registers a "
+"source buffer and serves its object catalog, and a ``client`` that reads "
+"a subset of those objects and reports throughput:"
+msgstr "基准测试以 **两个进程** 运行，一个 ``server`` 注册源缓冲区并提供其对象目录，另一个 ``client`` 读取这些对象的子集并报告吞吐量："
+
+#: ../../source/cli/tool.rst:85 ../../source/cli/tool.rst:131
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/tool.rst:87
+#, python-brace-format
+msgid "``--role {server,client}``"
+msgstr "``--role {server,client}``"
+
+#: ../../source/cli/tool.rst:88
+msgid ""
+"Required. ``server`` registers the source buffer; ``client`` reads from "
+"it and reports throughput."
+msgstr "必填。``server`` 注册源缓冲区；``client`` 从中读取并报告吞吐量。"
+
+#: ../../source/cli/tool.rst:90
+msgid "``--transfer-channel-type``"
+msgstr "``--transfer-channel-type``"
+
+#: ../../source/cli/tool.rst:91
+msgid "Transfer channel implementation to benchmark (default: ``nixl``)."
+msgstr "将传输通道实现用于基准测试（默认：``nixl``）。"
+
+#: ../../source/cli/tool.rst:92
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/tool.rst:93
+msgid ""
+"Server: bind address. Client: the server's advertise URL to read from "
+"(default: ``127.0.0.1:7600``)."
+msgstr "服务器：绑定地址。客户端：要读取的服务器广告 URL（默认：``127.0.0.1:7600``）。"
+
+#: ../../source/cli/tool.rst:95
+msgid "``--buffer-size``"
+msgstr "``--buffer-size``"
+
+#: ../../source/cli/tool.rst:96
+msgid "Server: total registered L1 source buffer, e.g. ``8GB``."
+msgstr "服务器：总共注册的 L1 源缓冲区，例如 ``8GB``。"
+
+#: ../../source/cli/tool.rst:97
+msgid "``--object-size`` / ``--page-size``"
+msgstr "``--object-size`` / ``--page-size``"
+
+#: ../../source/cli/tool.rst:98
+msgid ""
+"Size of each transferred object and the alignment; must match on both "
+"sides."
+msgstr "每个传输对象的大小和对齐方式；两侧必须匹配。"
+
+#: ../../source/cli/tool.rst:100
+msgid "``--num-objects`` / ``--iters``"
+msgstr "``--num-objects`` / ``--iters``"
+
+#: ../../source/cli/tool.rst:101
+msgid "Objects read per iteration, and number of measured iterations."
+msgstr "每次迭代读取的对象数量，以及测量的迭代次数。"
+
+#: ../../source/cli/tool.rst:102
+msgid "``--verify``"
+msgstr "``--verify``"
+
+#: ../../source/cli/tool.rst:103
+msgid "Check the bytes read against the source after transfer."
+msgstr "在传输后检查读取的字节与源的匹配情况。"
+
+#: ../../source/cli/tool.rst:105
+msgid ""
+"The ``--url``, ``--object-size``, and ``--page-size`` values must match "
+"between the two processes. Run either side with ``--help`` for the full "
+"list, including the client's own ``--listen-url`` and the catalog "
+"``--control-url``."
+msgstr "``--url``、``--object-size`` 和 ``--page-size`` 的值必须在两个进程之间匹配。运行任一侧并使用 ``--help`` 获取完整列表，包括客户端自己的 ``--listen-url`` 和目录的 ``--control-url``。"
+
+#: ../../source/cli/tool.rst:112
+msgid "flamegraph"
+msgstr "火焰图"
+
+#: ../../source/cli/tool.rst:114
+msgid ""
+"Attach a profiler to an already-running process, record for a fixed "
+"duration, and render a flame graph to find its bottlenecks."
+msgstr "将分析器附加到已运行的进程，记录固定时间，并渲染火焰图以查找瓶颈。"
+
+#: ../../source/cli/tool.rst:117
+msgid ""
+"It gives one unified interface over widely adopted profilers (``py-spy``,"
+" ``perf``, and ``bcc``), each producing a flame graph. A single "
+"``--mode`` spans the whole spectrum, from Python and GIL contention to "
+"CPU time, kernel frames, and blocked time: you pick a mode by what you "
+"want to see rather than which tool to run, and get consistent output, "
+"defaults, and permission checks across all six. It wraps these tools "
+"rather than replacing them (it names what to install, it does not install"
+" it), so a user or developer can find a pain point or a resource-heavy "
+"code path without stitching the tools together by hand."
+msgstr "它提供了一个统一的接口，支持广泛采用的分析工具（``py-spy``、``perf`` 和 ``bcc``），每个工具都生成一个火焰图。单个 ``--mode`` 涵盖了整个范围，从 Python 和 GIL 争用到 CPU 时间、内核帧和阻塞时间：您可以根据想要查看的内容选择模式，而不是根据要运行的工具，从而在所有六个工具中获得一致的输出、默认值和权限检查。它包装这些工具而不是替换它们（它指定要安装的内容，而不实际安装），因此用户或开发者可以找到痛点或资源密集型代码路径，而无需手动将工具拼接在一起。"
+
+#: ../../source/cli/tool.rst:132
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/cli/tool.rst:134
+msgid "``--pid``"
+msgstr "``--pid``"
+
+#: ../../source/cli/tool.rst:135
+msgid "*(required)*"
+msgstr "*(必需)*"
+
+#: ../../source/cli/tool.rst:136
+msgid "Process to profile."
+msgstr "处理以进行性能分析。"
+
+#: ../../source/cli/tool.rst:137
+msgid "``--mode``"
+msgstr "``--mode``"
+
+#: ../../source/cli/tool.rst:138
+msgid "``gil``"
+msgstr "``gil``"
+
+#: ../../source/cli/tool.rst:139
+msgid ""
+"One of ``on-cpu``, ``off-cpu``, ``wakeup``, ``offwake``, ``wall``, "
+"``gil``, or several comma-separated to record each in turn."
+msgstr "``on-cpu``, ``off-cpu``, ``wakeup``, ``offwake``, ``wall``, ``gil`` 或多个用逗号分隔的选项之一，以依次记录每个选项。"
+
+#: ../../source/cli/tool.rst:141
+msgid "``--duration``"
+msgstr "``--duration``"
+
+#: ../../source/cli/tool.rst:142
+msgid "``30``"
+msgstr "``30``"
+
+#: ../../source/cli/tool.rst:143
+msgid "Seconds to record. ``0`` records until interrupted with Ctrl-C."
+msgstr "记录的秒数。``0`` 表示记录直到被 Ctrl-C 中断。"
+
+#: ../../source/cli/tool.rst:144
+msgid "``--output``"
+msgstr "``--output``"
+
+#: ../../source/cli/tool.rst:145 ../../source/cli/tool.rst:148
+msgid "*(auto)*"
+msgstr "*(自动)*"
+
+#: ../../source/cli/tool.rst:146
+msgid "SVG path. Default ``/tmp/lmcache_bench_flames/pid<PID>.<mode>.svg``."
+msgstr "SVG 路径。默认 ``/tmp/lmcache_bench_flames/pid<PID>.<mode>.svg``。"
+
+#: ../../source/cli/tool.rst:147
+msgid "``--flamegraph-scripts-dir``"
+msgstr "``--flamegraph-scripts-dir``"
+
+#: ../../source/cli/tool.rst:149
+msgid "FlameGraph scripts directory; unused by ``wall`` / ``gil``."
+msgstr "FlameGraph 脚本目录；``wall`` / ``gil`` 未使用。"
+
+#: ../../source/cli/tool.rst:153
+msgid "Usage"
+msgstr "用法"
+
+#: ../../source/cli/tool.rst:163
+msgid ""
+"Reach for this command to profile a **real, unmodified process** (a "
+"production or vLLM-driven server under actual traffic, an idle server, or"
+" any arbitrary PID) without standing up a benchmark harness. The "
+"``bench`` commands (``lmcache bench l2`` / ``lmcache bench server``) "
+"instead profile a process under synthetic load they generate."
+msgstr "使用此命令可以对 **真实的、未修改的进程**（在实际流量下的生产或 vLLM 驱动的服务器、空闲服务器或任何任意 PID）进行性能分析，而无需搭建基准测试工具。``bench`` 命令（``lmcache bench l2`` / ``lmcache bench server``）则是在它们生成的合成负载下对进程进行性能分析。"
+
+#: ../../source/cli/tool.rst:170
+msgid "Modes"
+msgstr "模式"
+
+#: ../../source/cli/tool.rst:174
+msgid ""
+"LMCache is mostly Python, so the first question is usually where Python "
+"time goes and how contended the GIL is. **To profile Python execution or "
+"GIL contention**, use ``gil`` / ``wall`` (``py-spy``): one root frame per"
+" thread, attaching to an **unmodified** CPython target, but with no "
+"kernel frames."
+msgstr "LMCache 主要是用 Python 编写的，因此第一个问题通常是 Python 时间的去向以及 GIL 的争用情况。**要分析 Python 执行或 GIL 争用情况**，请使用 ``gil`` / ``wall`` (``py-spy``)：每个线程一个根帧，附加到 **未修改的** CPython 目标，但没有内核帧。"
+
+#: ../../source/cli/tool.rst:179
+msgid ""
+"**gil**: only threads holding the GIL, so interpreter-lock contention is "
+"directly visible (the default for a live server)."
+msgstr "**gil**：仅显示持有 GIL 的线程，因此解释器锁的争用直接可见（这是实时服务器的默认设置）。"
+
+#: ../../source/cli/tool.rst:181
+msgid "**wall**: wall-clock time per thread, blocked threads included."
+msgstr "**墙**：每个线程的墙钟时间，包括被阻塞的线程。"
+
+#: ../../source/cli/tool.rst:183
+msgid ""
+"But LMCache also uses C++, Rust, and CUDA to accelerate hot paths and "
+"release the GIL, and py-spy sees none of that. **To profile CPU/IO time, "
+"kernel frames, context switches, or a non-Python process** (or to get a "
+"cross-language picture of where the whole process spends time and "
+"blocks), use the whole-process modes (``perf`` / bcc): every thread, "
+"kernel frames, scheduler activity, any process, but merged into one "
+"chart."
+msgstr "但是 LMCache 还使用 C++、Rust 和 CUDA 来加速热路径并释放 GIL，而 py-spy 并未看到这些。**要分析 CPU/IO 时间、内核帧、上下文切换或非 Python 进程**（或获取整个进程花费时间和阻塞的跨语言视图），请使用整个进程模式（``perf`` / bcc）：每个线程、内核帧、调度器活动、任何进程，但合并为一个图表。"
+
+#: ../../source/cli/tool.rst:190
+msgid "**on-cpu** (``perf``): where CPU *cycles* go."
+msgstr "**在 CPU 上** (``perf``): CPU *周期* 的去向。"
+
+#: ../../source/cli/tool.rst:191
+msgid "**off-cpu** (``offcputime-bpfcc``): time spent *blocked* (I/O, locks)."
+msgstr "**离线 CPU** (``offcputime-bpfcc``): 花费在 *阻塞* 上的时间（I/O，锁）。"
+
+#: ../../source/cli/tool.rst:192
+msgid ""
+"**wakeup** (``wakeuptime-bpfcc``): the stacks that *do* the waking, "
+"ending others' sleep."
+msgstr "**唤醒** (``wakeuptime-bpfcc``): *唤醒* 的堆栈，结束其他线程的睡眠。"
+
+#: ../../source/cli/tool.rst:194
+msgid ""
+"**offwake** (``offwaketime-bpfcc``): ``off-cpu`` and ``wakeup`` combined,"
+" each blocked stack joined to the stack of the thread that woke it (that "
+"waker half drawn inverted on top). Use it when ``off-cpu`` shows a big "
+"blocked tower and you need the cause."
+msgstr "**offwake** (``offwaketime-bpfcc``): ``off-cpu`` 和 ``wakeup`` 的结合，每个被阻塞的栈与唤醒它的线程的栈相连（唤醒者的部分反向绘制在顶部）。当 ``off-cpu`` 显示出一个大的阻塞塔时使用它，以便找出原因。"
+
+#: ../../source/cli/tool.rst:199
+msgid ""
+"**How they work.** All run as external processes; what differs is *where "
+"the data is collected*, in the kernel (perf, bcc) or by reading the "
+"target's memory (py-spy):"
+msgstr "**它们是如何工作的。** 所有运行作为外部进程；不同之处在于 *数据的收集位置*，是在内核中（perf, bcc）还是通过读取目标的内存（py-spy）："
+
+#: ../../source/cli/tool.rst:203
+msgid ""
+"**perf** samples the CPU at 99 Hz, recording the running thread's stack, "
+"so it sees only on-CPU work and walks native stacks via frame pointers."
+msgstr "**perf** 以 99 Hz 的频率对 CPU 进行采样，记录正在运行的线程的调用栈，因此它只看到 CPU 上的工作，并通过帧指针遍历本地调用栈。"
+
+#: ../../source/cli/tool.rst:205
+msgid ""
+"**bcc** is *not* sampled: an eBPF program fires on scheduler events, so "
+"it can measure *blocked* time perf cannot, at a cost that grows with the "
+"target's context-switch rate. Loading eBPF needs privilege."
+msgstr "**bcc** *不是* 被采样的：eBPF 程序在调度事件上触发，因此它可以测量 perf 无法测量的 *阻塞* 时间，代价随着目标的上下文切换率而增加。加载 eBPF 需要特权。"
+
+#: ../../source/cli/tool.rst:208
+msgid ""
+"**py-spy** works in user space, reading the target's memory "
+"(``process_vm_readv``) with ``--nonblocking`` (no pause); it sees only "
+"Python frames and needs ``ptrace`` permission."
+msgstr "**py-spy** 在用户空间工作，通过 ``process_vm_readv`` 读取目标的内存，并使用 ``--nonblocking``（无暂停）；它只看到 Python 框架，并需要 ``ptrace`` 权限。"
+
+#: ../../source/cli/tool.rst:212
+msgid "**Equivalent raw commands** for ``--pid P``:"
+msgstr "**``--pid P`` 的等效原始命令：**"
+
+#: ../../source/cli/tool.rst:223
+msgid ""
+"**Native stacks need frame pointers.** The perf/bcc modes unwind native "
+"stacks through frame pointers (perf via ``-g``, bcc via "
+"``bpf_get_stackid``), so a target built with ``-fomit-frame-pointer`` "
+"shows broken C stacks in either; rebuild with ``-fno-omit-frame-"
+"pointer``. py-spy is unaffected (it reads the interpreter) but sees only "
+"Python."
+msgstr "**本地堆栈需要帧指针。** perf/bcc 模式通过帧指针展开本地堆栈（perf 通过 ``-g``，bcc 通过 ``bpf_get_stackid``），因此使用 ``-fomit-frame-pointer`` 构建的目标在两者中都会显示损坏的 C 堆栈；请使用 ``-fno-omit-frame-pointer`` 重新构建。py-spy 不受影响（它读取解释器），但仅看到 Python。"
+
+#: ../../source/cli/tool.rst:231
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/cli/tool.rst:233
+msgid ""
+"Each mode wraps an external tool that must be installed on the host "
+"running the command (the same host as the target); a missing one fails "
+"fast naming what to install."
+msgstr "每种模式都封装了一个必须在运行命令的主机上安装的外部工具（与目标相同的主机）；缺少工具时会快速失败并指明需要安装的内容。"
+
+#: ../../source/cli/tool.rst:237
+msgid ""
+"`py-spy <https://github.com/benfred/py-spy>`__ (``wall`` / ``gil``): "
+"reads the interpreter and renders its own SVG. Install with ``pip install"
+" py-spy``."
+msgstr "`py-spy <https://github.com/benfred/py-spy>`__ (``wall`` / ``gil``): 读取解释器并渲染自己的 SVG。使用 ``pip install py-spy`` 安装。"
+
+#: ../../source/cli/tool.rst:240
+msgid ""
+"Linux ``perf`` (``on-cpu``): ``sudo apt install linux-tools-generic`` "
+"(Debian / Ubuntu) or ``sudo dnf install perf`` (Fedora / RHEL); the "
+"package must match the running kernel. Rendered with the FlameGraph "
+"scripts below."
+msgstr "Linux ``perf`` (``on-cpu``): ``sudo apt install linux-tools-generic`` (Debian / Ubuntu) 或 ``sudo dnf install perf`` (Fedora / RHEL)；该软件包必须与正在运行的内核匹配。使用下面的 FlameGraph 脚本进行渲染。"
+
+#: ../../source/cli/tool.rst:243
+msgid ""
+"`bcc <https://github.com/iovisor/bcc>`__ (``off-cpu`` / ``wakeup`` / "
+"``offwake``): ``sudo apt install bpfcc-tools`` (Debian / Ubuntu) or "
+"``sudo dnf install bcc-tools`` (Fedora / RHEL). Its ``*-bpfcc`` tools "
+"also need ``sudo`` at run time."
+msgstr "`bcc <https://github.com/iovisor/bcc>`__ (``off-cpu`` / ``wakeup`` / ``offwake``): ``sudo apt install bpfcc-tools`` (Debian / Ubuntu) 或 ``sudo dnf install bcc-tools`` (Fedora / RHEL)。其 ``*-bpfcc`` 工具在运行时也需要 ``sudo``。"
+
+#: ../../source/cli/tool.rst:247
+msgid ""
+"`FlameGraph <https://github.com/brendangregg/FlameGraph>`__, by Brendan "
+"Gregg: folds and renders the perf/bcc SVGs. Cloned to ``~/FlameGraph`` on"
+" first use (needs ``git``); or point ``--flamegraph-scripts-dir`` at an "
+"existing checkout."
+msgstr "`FlameGraph <https://github.com/brendangregg/FlameGraph>`__，由 Brendan Gregg 提供：折叠并渲染 perf/bcc SVG。首次使用时克隆到 ``~/FlameGraph``（需要 ``git``）；或者将 ``--flamegraph-scripts-dir`` 指向现有的检出版本。"
+
+#: ../../source/cli/tool.rst:253
+msgid "Permissions"
+msgstr "权限"
+
+#: ../../source/cli/tool.rst:255
+msgid ""
+"**Naming Python frames in the perf/bcc modes** requires the target to "
+"have been *started* with ``PYTHONPERFSUPPORT=1`` (its perf trampoline "
+"map); you cannot enable it on a running process."
+msgstr "**在 perf/bcc 模式中命名 Python 框架** 需要目标在启动时设置 ``PYTHONPERFSUPPORT=1``（其 perf 跳板图）；您无法在运行中的进程上启用它。"
+
+#: ../../source/cli/tool.rst:261
+msgid ""
+"**If it was not set:** perf/bcc still record, but Python frames collapse "
+"to ``[unknown]`` (C/native stack only). Use ``gil`` / ``wall``, or "
+"restart the target with the variable set."
+msgstr "**如果未设置：** perf/bcc 仍然会记录，但 Python 框架会合并为 ``[unknown]``（仅 C/本地堆栈）。使用 ``gil`` / ``wall``，或在设置变量的情况下重新启动目标。"
+
+#: ../../source/cli/tool.rst:264
+msgid ""
+"**If it is set:** it adds a standing per-call overhead for the process's "
+"lifetime, so reserve it for a dedicated profiling session, not "
+"production."
+msgstr "**如果设置了：** 这会在进程的生命周期内增加每次调用的固定开销，因此请将其保留用于专门的性能分析会话，而不是生产环境。"
+
+#: ../../source/cli/tool.rst:268
+msgid ""
+"**System settings to adjust (bare-metal / VM).** Each tool needs a kernel"
+" permission; set the one for your mode, or run as root, which satisfies "
+"all three:"
+msgstr "**系统设置调整（裸机 / 虚拟机）。** 每个工具需要内核权限；设置适合您模式的权限，或者以 root 身份运行，这样可以满足所有三种情况："
+
+#: ../../source/cli/tool.rst:272
+msgid ""
+"``wall`` / ``gil`` (py-spy) read the target's memory via ``ptrace``, "
+"gated by Yama. Ubuntu / Debian default ``ptrace_scope`` to ``1`` (trace "
+"only descendants), which blocks attaching to a server:"
+msgstr "``wall`` / ``gil`` (py-spy) 通过 ``ptrace`` 读取目标的内存，受 Yama 限制。Ubuntu / Debian 默认将 ``ptrace_scope`` 设置为 ``1``（仅跟踪子进程），这会阻止附加到服务器："
+
+#: ../../source/cli/tool.rst:280
+msgid ""
+"``CAP_SYS_PTRACE`` (or root) bypasses it; py-spy also prints this hint "
+"when it is blocked."
+msgstr "``CAP_SYS_PTRACE``（或 root）可以绕过它；当被阻止时，py-spy 也会打印此提示。"
+
+#: ../../source/cli/tool.rst:282
+msgid ""
+"``on-cpu`` (perf) samples via ``perf_event_open``. Level ``3`` (a Debian "
+"addition) blocks it outright, and any level above ``2`` makes ``perf "
+"record`` silently write an empty file, so lower it:"
+msgstr "``on-cpu`` (perf) 通过 ``perf_event_open`` 进行采样。级别 ``3``（Debian 的附加功能）会直接阻止它，任何高于 ``2`` 的级别会使 ``perf record`` 静默写入一个空文件，因此请降低它："
+
+#: ../../source/cli/tool.rst:290
+msgid ""
+"``off-cpu`` / ``wakeup`` / ``offwake`` (bcc) load an eBPF program, so "
+"their ``*-bpfcc`` tools need ``sudo`` (root)."
+msgstr "``off-cpu`` / ``wakeup`` / ``offwake`` (bcc) 加载一个 eBPF 程序，因此它们的 ``*-bpfcc`` 工具需要 ``sudo``（root 权限）。"
+
+#: ../../source/cli/tool.rst:295
+msgid ""
+"**In a container, use the py-spy modes.** perf and bcc gate on host-wide "
+"kernel state a container should not change, so run them on the host (the "
+"settings above apply there)."
+msgstr "**在容器中，使用 py-spy 模式。** perf 和 bcc 依赖于主机范围的内核状态，容器不应更改，因此在主机上运行它们（上述设置适用于此）。"
+
+#: ../../source/cli/tool.rst:299
+msgid ""
+"py-spy works inside a container. Run the profiler in the **same "
+"container** as the target (or share its PID namespace with "
+"``--pid=container:<target>``) and start the container with ``--cap-add "
+"SYS_PTRACE``, the container equivalent of the ``ptrace_scope`` setting "
+"above:"
+msgstr "py-spy 可以在容器内工作。请在与目标 **相同的容器** 中运行分析器（或使用 ``--pid=container:<target>`` 共享其 PID 命名空间），并使用 ``--cap-add SYS_PTRACE`` 启动容器，这是上述 ``ptrace_scope`` 设置的容器等效项："
+
+#: ../../source/cli/tool.rst:310
+msgid ""
+"If the platform will not grant ``CAP_SYS_PTRACE`` (RunPod, some "
+"Kubernetes), you can still profile a process you start yourself: tracing "
+"your own child needs no capability, so launch the target **under** py-spy"
+" instead of attaching to it:"
+msgstr "如果平台不授予 ``CAP_SYS_PTRACE``（如 RunPod、某些 Kubernetes），您仍然可以对自己启动的进程进行分析：跟踪您自己的子进程不需要任何权限，因此请在 py-spy 下启动目标，而不是附加到它上。"
+
+#: ../../source/cli/tool.rst:323
+msgid "Cost"
+msgstr "成本"
+
+#: ../../source/cli/tool.rst:325
+msgid "The mechanisms give each mode a different cost *shape*:"
+msgstr "这些机制为每种模式提供了不同的成本 *形状*："
+
+#: ../../source/cli/tool.rst:327
+msgid ""
+"**perf**: *bounded*, a fixed 99 Hz sample, so overhead is constant; the "
+"cost is disk, as ``perf.data`` grows with duration × rate × threads × "
+"depth (deleted once rendered)."
+msgstr "**perf**: *有界*，固定的 99 Hz 采样，因此开销是恒定的；成本是磁盘，因为 ``perf.data`` 随着持续时间 × 速率 × 线程 × 深度而增长（渲染后删除）。"
+
+#: ../../source/cli/tool.rst:330
+msgid ""
+"**bcc**: *unbounded*, firing on every scheduler event ties cost to the "
+"target's event rate, so a busy service fires the probe constantly. Output"
+" is tiny."
+msgstr "**bcc**: *无界*，在每个调度程序事件上触发，成本与目标的事件速率相关，因此繁忙的服务会不断触发探针。输出非常小。"
+
+#: ../../source/cli/tool.rst:333
+msgid ""
+"**py-spy**: lightest *on the target*, its sampling runs off the target's "
+"CPUs, whereas perf and bcc steal the target's cycles."
+msgstr "**py-spy**: 最轻量级的 *在目标上*，其采样运行在目标的 CPU 上，而 perf 和 bcc 则占用目标的周期。"
+
+#: ../../source/cli/tool.rst:336
+msgid ""
+"On a production server, prefer ``wall`` / ``gil`` and keep ``--duration``"
+" short; if you need a whole-process mode, ``on-cpu``'s bounded cost is "
+"safer than the bcc modes on a busy target."
+msgstr "在生产服务器上，优先使用 ``wall`` / ``gil`` 并保持 ``--duration`` 较短；如果需要整个进程模式，``on-cpu`` 的有限成本比在繁忙目标上的 bcc 模式更安全。"
+
+#~ msgid "Currently one tool is available: ``cache-simulator``."
+#~ msgstr "目前可用的工具有一个：\\ ``cache-simulator``\\ 。"
+

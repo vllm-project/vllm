@@ -1,0 +1,62 @@
+# LMCache payload image for the operator's code-payload injection.
+#
+# When an LMCacheEngine sets spec.injection.payloadImage, the mutating webhook
+# (operator/internal/webhook/lmcache_pod_injector.go) stages this image into a
+# vLLM pod: it ships the `lmcache` tree under /payload and, on start, copies it
+# into a shared emptyDir that the vLLM container imports via
+# PYTHONPATH=/lmcache-payload — overriding the lmcache baked into the vLLM image
+# so the vLLM client and the LMCache engine server run one matched build.
+#
+# Webhook contract (keep in lockstep):
+#   - the tree lives under /payload;
+#   - the ENTRYPOINT copies /payload into $SHARED_DIR (the webhook sets
+#     SHARED_DIR=/lmcache-payload and mounts a RW emptyDir there);
+#   - no command override — one makes the webhook skip staging.
+#
+# lmcache ships COMPILED extensions (.so) tied to a Python minor + torch/CUDA
+# ABI, so this image EXTRACTS the already-built lmcache from a source image
+# rather than recompiling. Set SOURCE_IMAGE to your vLLM image (or an
+# ABI-compatible one).
+#
+# Build:
+#   docker build -f docker/Dockerfile.payload \
+#     --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
+#     -t <registry>/lmcache-payload:latest-nightly .
+#
+# Smoke test:
+#   docker run --rm -e SHARED_DIR=/out -v "$PWD/out:/out" <registry>/lmcache-payload:...
+#   test -f out/lmcache/__init__.py
+
+# The image whose installed lmcache tree is extracted into the payload. Its
+# Python/torch/CUDA ABI must match the vLLM pods that will import the payload.
+ARG SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly
+
+#################### EXTRACT ####################
+# Pull the installed `lmcache` package (and its dist-info, for version metadata)
+# out of the source image into /payload. The location is resolved from the
+# running interpreter so it tracks whatever site-packages / venv the image uses.
+FROM ${SOURCE_IMAGE} AS extract
+
+RUN set -eux; \
+    SITE="$(python3 -c 'import os, lmcache; print(os.path.dirname(os.path.dirname(os.path.abspath(lmcache.__file__))))')"; \
+    test -f "$SITE/lmcache/__init__.py"; \
+    mkdir -p /payload; \
+    for d in "$SITE"/lmcache "$SITE"/lmcache-*.dist-info; do \
+        [ -e "$d" ] && cp -a "$d" /payload/; \
+    done; \
+    test -f /payload/lmcache/__init__.py; \
+    python3 -c 'import lmcache; print("payload lmcache:", getattr(lmcache, "__version__", "unknown"))'
+
+#################### PAYLOAD ####################
+# Minimal image whose only job is to copy /payload into the injected emptyDir.
+# busybox provides `cp -a`; SHARED_DIR is supplied at run time by the webhook
+# (defaulted here only so a standalone `docker run -e SHARED_DIR=...` works).
+FROM busybox:1.37
+
+COPY --from=extract /payload /payload
+
+ENV SHARED_DIR=/lmcache-payload
+
+# `cp -a /payload/.` copies the tree CONTENTS (so $SHARED_DIR/lmcache/... lands
+# directly on PYTHONPATH). `${SHARED_DIR:?}` fails loudly if the env is missing.
+ENTRYPOINT ["/bin/sh", "-c", "set -eux; mkdir -p \"${SHARED_DIR:?SHARED_DIR must be set}\"; cp -a /payload/. \"${SHARED_DIR}/\""]

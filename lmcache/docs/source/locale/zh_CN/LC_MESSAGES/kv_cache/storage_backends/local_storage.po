@@ -1,0 +1,398 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:2
+msgid "Local storage"
+msgstr "本地存储"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:12
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:14
+msgid ""
+"CPU RAM and Local Storage are the two ways of offloading KV cache onto "
+"non-GPU memory of the same machine that is running inference."
+msgstr "CPU RAM 和本地存储是将 KV Cache 卸载到同一台运行推理的机器的非 GPU 内存的两种方式。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:19
+msgid "Two ways to configure LMCache Disk Offloading:"
+msgstr "配置 LMCache 磁盘卸载的两种方式："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:22
+msgid "**1. Environment Variables:**"
+msgstr "**1. 环境变量：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:41
+msgid "**2. Configuration File**:"
+msgstr "**2. 配置文件**:"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:43
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:63
+msgid "Multi-Path (Multi-Device) Disk Offloading"
+msgstr "多路径（多设备）磁盘卸载"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:65
+msgid ""
+"If you have **multiple NVMe devices** (or any independent mount points), "
+"you can assign each GPU its own disk path so that each device writes to a"
+" dedicated drive."
+msgstr "如果您有 **多个 NVMe 设备**\\ （或任何独立的挂载点），您可以为每个 GPU 分配自己的磁盘路径，以便每个设备写入专用驱动器。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:68
+msgid ""
+"Specify a **comma-separated list** of paths in ``local_disk``. Each path "
+"can optionally use the ``file://`` prefix.  The "
+"``local_disk_path_sharding`` option controls how each GPU worker selects "
+"its path.  Currently only ``\"by_gpu\"`` is supported (the default), "
+"which selects a path based on the device index (``device_id % "
+"num_paths``), so all KV cache files from a given GPU land on the same "
+"NVMe.  This is especially useful when GPUs and NVMe devices share a PCIe "
+"switch or NUMA node."
+msgstr ""
+"在 ``local_disk`` 中指定一个 **以逗号分隔的路径列表**\\ 。每个路径可以选择性地使用 ``file://`` 前缀。 "
+"``local_disk_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 "
+"``\"by_gpu\"``\\ （默认），它根据设备索引（\\ ``device_id % num_paths``\\ ）选择路径，因此来自给定"
+" GPU 的所有 KV 缓存文件都会落在同一个 NVMe 上。当 GPU 和 NVMe 设备共享 PCIe 交换机或 NUMA "
+"节点时，这尤其有用。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:76
+msgid "For example, with two GPUs and two paths:"
+msgstr "例如，使用两个 GPU 和两个路径："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:78
+msgid "``cuda:0`` → ``/mnt/nvme0/kvcache/``"
+msgstr "``cuda:0`` → ``/mnt/nvme0/kvcache/``"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:79
+msgid "``cuda:1`` → ``/mnt/nvme1/kvcache/``"
+msgstr "``cuda:1`` → ``/mnt/nvme1/kvcache/``"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:81
+msgid "``max_local_disk_size`` is the **total budget** shared across all paths."
+msgstr "``max_local_disk_size`` 是所有路径共享的 **总预算**\\ 。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:83
+msgid "**Environment variable example:**"
+msgstr "**环境变量示例：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:91
+msgid "**YAML example:**"
+msgstr "**YAML 示例：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:101
+msgid ""
+"Each GPU worker uses only its assigned path, so O_DIRECT alignment is "
+"determined by that path's filesystem block size.  Different devices may "
+"have different block sizes without issue."
+msgstr "每个 GPU 工作节点仅使用其分配的路径，因此 O_DIRECT 对齐由该路径的文件系统块大小决定。不同设备可能具有不同的块大小而不会出现问题。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:107
+msgid ""
+"If you are able to use kernel-level RAID 0 (e.g. ``mdadm --level=0``) you"
+" will get true block-level striping (even a single large file can use "
+"bandwidth from both devices simultaneously).  The multi-path feature is "
+"most useful when you cannot or do not want to reconfigure the block "
+"devices — for example, when they already have other data."
+msgstr ""
+"如果您能够使用内核级 RAID 0（例如 ``mdadm --level=0``\\ "
+"），您将获得真正的块级条带化（即使是单个大文件也可以同时使用两个设备的带宽）。当您无法或不想重新配置块设备时，多路径功能最为有用——例如，当它们已经包含其他数据时。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:114
+msgid "Local Storage Explanation:"
+msgstr "本地存储说明："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:116
+msgid ""
+"Unlike CPU RAM offloading, disk offloading is *disabled* by default "
+"(``local_disk`` is set to ``None``) and the max local disk size is set to"
+" 0GB instead of 5GB like the default max local cpu size since the disk "
+"space is not strictly necessary for LMCache to function."
+msgstr ""
+"与 CPU RAM 卸载不同，磁盘卸载默认是禁用的（\\ ``local_disk`` 设置为 ``None``\\ ），最大本地磁盘大小设置为 "
+"0GB，而不是像默认最大本地 CPU 大小那样设置为 5GB，因为磁盘空间对于 LMCache 的功能并不是严格必要的。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:120
+msgid ""
+"Furthermore, instead of greedily allocating the max space up front like "
+"the pinned CPU RAM, the disk backend will create one file per KV cache "
+"chunk as they are stored, evicting if capacity is exceeded (LRU "
+"currently)."
+msgstr ""
+"此外，与固定的 CPU RAM 不同，磁盘后端不会贪婪地提前分配最大空间，而是会在存储时为每个 KV "
+"缓存块创建一个文件，如果超出容量则逐出（当前使用 LRU）。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:123
+msgid ""
+"The disk and remote (see :doc:`Redis <./redis>`, :doc:`Mooncake "
+"<./mooncake>`, :doc:`Valkey <./valkey>`, :doc:`InfiniStore "
+"<./infinistore>`) backends have asynchronous put() operations so that the"
+" IO latency will not slow down inference in addition to blocking get() "
+"operations. The local disk backend also has a prefetch() operation that "
+"will preemptively move KV caches from the disk to CPU RAM offloading "
+"storage (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM"
+" <./cpu_ram>`) for specified tokens (these KV caches are also still kept "
+"in the disk)."
+msgstr ""
+"磁盘和远程后端（参见 :doc:`Redis <./redis>`、:doc:`Mooncake "
+"<./mooncake>`、:doc:`Valkey <./valkey>`、:doc:`InfiniStore "
+"<./infinistore>`）具有异步 put() 操作，因此 IO 延迟不会在阻塞 get() 操作的同时减慢推理。 本地磁盘后端还具有 "
+"prefetch() 操作，该操作将主动将 KV 缓存从磁盘移动到 CPU 内存卸载存储（即应设置 "
+"``LMCACHE_LOCAL_CPU=True``\\ ，参见 :doc:`CPU RAM "
+"<./cpu_ram>`），以便为指定的令牌预取（这些 KV 缓存仍然保留在磁盘中）。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:130
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:132
+msgid ""
+"The following diagram shows the overall architecture of the Local Disk "
+"Backend:"
+msgstr "下图展示了本地磁盘后端的整体架构："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:180
+msgid "**Key Components:**"
+msgstr "**关键组件：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:182
+msgid ""
+"**Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk "
+"metadata (file path, size, shape, dtype, pin status)"
+msgstr "**元数据字典**\\ ：将每个 ``CacheEngineKey`` 映射到其磁盘元数据（文件路径、大小、形状、数据类型、固定状态）"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:183
+msgid ""
+"**Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) "
+"that tracks access patterns and decides which entries to evict when space"
+" is needed"
+msgstr "**缓存策略**\\ ：可配置的逐出策略（LRU、LFU、FIFO 或 MRU），跟踪访问模式并决定在需要空间时逐出哪些条目"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:184
+msgid ""
+"**LocalDiskWorker**: Async task executor with priority queue - prefetch "
+"tasks run first (priority 0), then deletes (priority 1), then saves "
+"(priority 2). The number of I/O worker threads is configurable via "
+"``extra_config.disk_io_threads`` (default: 4)."
+msgstr "**LocalDiskWorker**\\\\ ：带有优先级队列的异步任务执行器 - 预取任务优先运行（优先级 0），然后是删除（优先级 1），最后是保存（优先级 2）。I/O 工作线程的数量可以通过 ``extra_config.disk_io_threads`` 配置（默认值：4）。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:185
+msgid ""
+"**Local Disk**: Filesystem where KV cache chunks are stored as individual"
+" ``.pt`` files"
+msgstr "**本地磁盘**\\ ：KV Cache 块作为单独的 ``.pt`` 文件存储的文件系统"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:189
+msgid "Save Flow (PUT)"
+msgstr "保存流程 (PUT)"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:208
+msgid "Load Flow (GET)"
+msgstr "加载流程 (GET)"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:230
+msgid "Online Inference Example"
+msgstr "在线推理示例"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:232
+msgid ""
+"This example is almost identical to the :doc:`CPU RAM <./cpu_ram>` "
+"example."
+msgstr "这个示例与 :doc:`CPU RAM <./cpu_ram>` 示例几乎相同。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:234
+msgid "Let's feel the TTFT (time to first token) differential!"
+msgstr "让我们感受一下 TTFT（首次令牌时间）差异！"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:238
+msgid "**Prerequisites:**"
+msgstr "**前提条件：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:240
+msgid ""
+"A Machine with at least one GPU. Adjust the max model length of your vllm"
+" instance depending on your GPU memory and the long context you want to "
+"use."
+msgstr "一台至少配备一块 GPU 的机器。根据您的显存和希望使用的长上下文调整 vllm 实例的最大模型长度。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:242
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr "vllm 和 lmcache 已安装 (:doc:`安装指南 <../../getting_started/installation>`)"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:244
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr "Hugging Face 访问 ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:250
+msgid "A few packages:"
+msgstr "一些软件包："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:258
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr "**第 0 步. 为此示例设置一个目录:**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:265
+msgid "**Step 1. Prepare a long context!**"
+msgstr "**步骤 1. 准备一个长上下文！**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:267
+msgid ""
+"We want a context long enough that vllm's prefix caching will not be able"
+" to hold the KV caches in GPU memory and LMCache is necessary to keep KV "
+"caches in non-GPU memory:"
+msgstr "我们希望上下文足够长，以至于 vLLM 的前缀缓存无法将 KV 缓存保留在显存中，因此需要 LMCache 将 KV 缓存保留在非显存中："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:275
+msgid "**Step 2. Start a vLLM server with Disk offloading enabled:**"
+msgstr "**步骤 2. 启动一个启用磁盘卸载的 vLLM 服务器：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:277
+msgid ""
+"*Generally, it is not recommended but we will disable CPU offloading to "
+"feel just the disk offloading latency.*"
+msgstr "通常不推荐这样做，但我们将禁用 CPU 卸载，以便仅感受磁盘卸载的延迟。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:279
+msgid "Create a an lmcache configuration file called: ``disk-offload.yaml``"
+msgstr "创建一个名为 ``disk-offload.yaml`` 的 lmcache 配置文件"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:281
+msgid "Example ``config.yaml``:"
+msgstr "示例 ``config.yaml``:"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:291
+msgid ""
+"If you don't want to use a config file, uncomment the first five "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr "如果您不想使用配置文件，请取消注释前五个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``\\ ："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:308
+msgid ""
+"``--kv-transfer-config``: This is the parameter that actually tells vLLM "
+"to use LMCache for KV cache offloading."
+msgstr "``--kv-transfer-config``: 这是实际告诉 vLLM 使用 LMCache 进行 KV Cache 卸载的参数。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:309
+msgid "``kv_connector``: Specifies the LMCache connector for vLLM V1"
+msgstr "``kv_connector``: 指定 vLLM V1 的 LMCache 连接器"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:310
+msgid ""
+"``kv_role``: Set to \"kv_both\" for both storing and loading KV cache "
+"(important because we will run two queries and the first will "
+"produce/store a KV cache while the second will consume/load that KV "
+"cache)"
+msgstr ""
+"``kv_role``: 设置为 \\\"kv_both\\\" 以同时存储和加载 KV "
+"Cache（重要，因为我们将运行两个查询，第一个将生成/存储一个 KV Cache，而第二个将消费/加载该 KV Cache）"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:313
+msgid "**Step 3. Query TTFT improvements with LMCache:**"
+msgstr "**步骤 3. 使用 LMCache 查询 TTFT 改进：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:315
+msgid ""
+"Once the Open AI compatible server is running on default vllm port 8000, "
+"let's query it twice with the same long context!"
+msgstr "一旦 Open AI 兼容的服务器在默认的 vllm 端口 8000 上运行，让我们用相同的长上下文查询两次！"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:317
+msgid "Create a script called ``query-twice.py`` and paste the following code:"
+msgstr "创建一个名为 ``query-twice.py`` 的脚本，并粘贴以下代码："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:383
+msgid "Then run:"
+msgstr "然后运行："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:389
+msgid ""
+"Since we're in streaming mode, you'll be able to feel the TTFT "
+"differential in real time!"
+msgstr "由于我们处于流式模式，您将能够实时感受到 TTFT 差异！"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:392
+msgid ""
+"Note that if we were to enable ``LMCACHE_LOCAL_CPU=True``, we would just "
+"be using the same example from :doc:`CPU RAM <./cpu_ram>` since the CPU "
+"RAM is checked before the disk by LMCache. In practice, the disk will be "
+"capable of storing a larger quantity of KV caches so the CPU RAM "
+"offloading will only be able to store a subset of the disk's KV caches."
+msgstr ""
+"请注意，如果我们启用 ``LMCACHE_LOCAL_CPU=True``\\ ，我们将仅使用来自 :doc:`CPU RAM "
+"<./cpu_ram>` 的相同示例，因为 LMCache 在检查磁盘之前会先检查 CPU RAM。实际上，磁盘能够存储更多的 KV 缓存，因此 "
+"CPU RAM 的卸载只能存储磁盘 KV 缓存的一个子集。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:398
+msgid "**Example Output:**"
+msgstr "**示例输出：**"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:424
+msgid "TTFT Improvement: 6.166 seconds     (42.6x faster)"
+msgstr "TTFT 改进：6.166 秒（快 42.6 倍）"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:426
+msgid ""
+"If you look at the logs of your vLLM server, you should see (the logs are"
+" truncated for cleanliness):"
+msgstr "如果你查看 vLLM 服务器的日志，你应该会看到（日志已为整洁而截断）："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:451
+msgid "Check out your KV Cache in your SSD:"
+msgstr "查看您 SSD 中的 KV Cache："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:460
+msgid "Tips:"
+msgstr "提示："
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:462
+msgid ""
+"If you want to run the ``query-twice.py`` script multiple times, you'll "
+"need to either restart the vLLM LMCache server or change the prefix of "
+"the context you pass in since you've already warmed LMCache."
+msgstr ""
+"如果您想多次运行 ``query-twice.py`` 脚本，您需要重启 vLLM LMCache "
+"服务器或更改您传入的上下文前缀，因为您已经预热了 LMCache。"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:464
+msgid ""
+"The max model length here was decided by running an L4 with only 23GB of "
+"GPU memory. If you have more memory, you can increase the max model "
+"length and modify ``query-twice.py`` to use more of the long context. "
+"LMCache TTFT improvement becomes more pronounced as the context length "
+"increases!"
+msgstr ""
+"这里的最大模型长度是通过仅使用 23GB 显存的 L4 运行决定的。如果您有更多内存，可以增加最大模型长度并修改 ``query-"
+"twice.py`` 以使用更多的长上下文。随着上下文长度的增加，LMCache 的 TTFT 改进变得更加明显！"
+

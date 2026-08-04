@@ -1,0 +1,64 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:2
+msgid "Using NIXL"
+msgstr "使用 NIXL"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/disaggregated_prefill`."
+msgstr "此页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/disaggregated_prefill`。"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:9
+msgid ""
+"NIXL (NVIDIA Inference Xfer Library) is a high-performance library "
+"designed for accelerating point to point communications in AI inference "
+"frameworks. It provides an abstraction over various types of memory (CPU "
+"and GPU) and storage through a modular plug-in architecture, enabling "
+"efficient data transfer and coordination between different components of "
+"the inference pipeline."
+msgstr ""
+"NIXL（NVIDIA 推理传输库）是一个高性能库，旨在加速 AI 推理框架中的点对点通信。它通过模块化插件架构提供对各种类型内存（CPU 和 "
+"GPU）和存储的抽象，使得推理管道中不同组件之间的数据传输和协调更加高效。"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:12
+msgid ""
+"LMCache supports using NIXL as the underlying communication library for "
+"prefill-decode disaggregation."
+msgstr "LMCache 支持将 NIXL 作为分离式 Prefill-解码的底层通信库。"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:14
+msgid ""
+"For detailed installation instructions of LMCache with NIXL, please refer"
+" to our `installation guide "
+"<https://docs.google.com/document/d/1c93fANc2DPSUvR5ndCMysU2E29nYvjE2e3GLxHRWZls/edit?tab=t.0>`_."
+msgstr ""
+"有关使用 NIXL 安装 LMCache 的详细说明，请参阅我们的 `安装指南 "
+"<https://docs.google.com/document/d/1c93fANc2DPSUvR5ndCMysU2E29nYvjE2e3GLxHRWZls/edit?tab=t.0>`_。"
+
+#: ../../source/disaggregated_prefill/nixl/index.rst:17
+msgid "Examples"
+msgstr "示例"
+

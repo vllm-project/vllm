@@ -1,0 +1,6 @@
+steps:  
+  - label: ":wastebasket: Kill all"
+    key: "clean"
+    command: |
+      bash .buildkite/scripts/clean.sh
+      sudo rm -rf /var/cache/buildkite/*.lock

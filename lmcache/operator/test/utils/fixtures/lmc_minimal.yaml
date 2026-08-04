@@ -1,0 +1,19 @@
+# Minimal LMCacheEngine fixture used by the smoke test harness.
+#
+# The fixture intentionally sets nodeSelector to {} (empty map) so the
+# operator's SetDefaults does NOT fall back to nvidia.com/gpu.present.
+# That keeps the DaemonSet schedulable on a no-GPU Kind cluster, which
+# is required for the no-GPU smoke tier. The pods will not become Ready
+# (no nvidia runtime / image), but the operator will still reconcile
+# every K8s artifact it owns — which is what the smokes assert on.
+#
+# Tests that need a deterministic, non-default port should use
+# lmc_custom_port.yaml or PatchLMCSpec instead.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: smoke-minimal
+spec:
+  nodeSelector: {}
+  l1:
+    sizeGB: 10

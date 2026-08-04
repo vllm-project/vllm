@@ -1,0 +1,295 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:4
+msgid "Usage Stats Collection"
+msgstr "使用统计收集"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:6
+msgid ""
+"LMCache collects anonymous usage data by default to help the engineering "
+"team understand real-world workloads, prioritize optimizations, and "
+"improve reliability. All collected data is aggregated and contains no "
+"sensitive user information."
+msgstr "LMCache 默认收集匿名使用数据，以帮助工程团队了解实际工作负载，优先优化并提高可靠性。所有收集的数据都是汇总的，并不包含敏感用户信息。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:8
+msgid ""
+"A sanitized subset of the aggregated data may be publicly released for "
+"the community’s benefit (for example, see a daily usage report `here "
+"<https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_)."
+msgstr ""
+"聚合数据的一个经过清洗的子集可能会公开发布，以惠及社区（例如，查看每日使用报告 `here "
+"<https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:11
+msgid "What data is collected?"
+msgstr "收集了哪些数据？"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:13
+msgid ""
+"Usage stats are implemented in the ``lmcache/usage_telemetry/`` package. "
+"The one-shot messages sent at startup depend on how LMCache runs."
+msgstr "使用统计信息在 ``lmcache/usage_telemetry/`` 包中实现。启动时发送的一次性消息取决于 LMCache 的运行方式。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:16
+msgid ""
+"When LMCache runs **inside the serving engine** (the single-process "
+"integrations for vLLM, SGLang, and TensorRT-LLM), engine startup sends:"
+msgstr "当 LMCache **在服务引擎内部**（vLLM、SGLang 和 TensorRT-LLM 的单进程集成）运行时，引擎启动会发送："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:19
+msgid ""
+"**EnvMessage** Captures environment details such as cloud provider, CPU "
+"info, total memory, architecture, GPU count/type, and execution source."
+msgstr "**EnvMessage** 捕获环境细节，例如云提供商、CPU 信息、总内存、架构、GPU 数量/类型和执行源。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:22
+msgid ""
+"**EngineMessage** Records engine configuration and metadata, including "
+"cache settings (chunk size, local device, cache limits), remote backend "
+"parameters, blending settings, model name, world size, and KV-cache "
+"dtype/shape."
+msgstr ""
+"**EngineMessage** "
+"记录引擎配置和元数据，包括缓存设置（块大小、本地设备、缓存限制）、远程后端参数、混合设置、模型名称、全局大小，以及 KV Cache "
+"的数据类型/形状。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:25
+msgid ""
+"**MetadataMessage** Reports execution metadata: the timestamp when the "
+"run started and total duration in seconds."
+msgstr "**MetadataMessage** 报告执行元数据：运行开始的时间戳和总持续时间（以秒为单位）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:28
+msgid ""
+"When LMCache runs as a **standalone multiprocess (MP) cache server** "
+"(``lmcache server``), server startup sends:"
+msgstr "当 LMCache 作为 **独立的多进程 (MP) 缓存服务器** (``lmcache server``) 运行时，服务器启动会发送："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:31
+msgid ""
+"**EnvMessage** Same environment snapshot as above, taken on the cache-"
+"server host."
+msgstr "**EnvMessage** 与上述相同的环境快照，取自缓存服务器主机。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:34
+msgid ""
+"**MPServerMessage** Records the server configuration: LMCache version, "
+"chunk size, hash algorithm, engine type, transfer mode, worker pool "
+"sizes, whether P2P is enabled, L1 size and medium (DRAM / GDS / "
+"DRAM+DevDAX), eviction policy, the configured L2 adapter and serde types,"
+" and the L2 store/prefetch policies."
+msgstr ""
+"**MPServerMessage** 记录服务器配置：LMCache 版本、块大小、哈希算法、引擎类型、传输模式、工作池大小、是否启用 "
+"P2P、L1 大小和介质（DRAM / GDS / DRAM+DevDAX）、逐出策略、配置的 L2 适配器和序列化类型，以及 L2 "
+"存储/预取策略。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:41
+msgid ""
+"The MP server's ``--instance-id`` is **never** sent: it can be operator-"
+"chosen and therefore identifying. Model names are not known at server "
+"startup (vLLM instances register later) and are not part of this message."
+msgstr ""
+"MP 服务器的 ``--instance-id`` **永远** "
+"不会被发送：它可以由操作员选择，因此可能具有识别性。模型名称在服务器启动时是未知的（vLLM 实例稍后注册），并且不属于此消息的一部分。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:46
+msgid ""
+"In addition to the one-shot messages above, both deployment modes "
+"periodically send interval counters (**ContinuousContextMessage**: tokens"
+" retrieved, tokens stored, stored KV bytes, process uptime). Idle "
+"intervals are still sent and double as a liveness heartbeat. Single-"
+"process mode additionally sends a cache-lifespan histogram "
+"(**CacheLifespanMessage**). The flush interval is "
+"``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600)."
+msgstr "除了上述一次性消息外，两种部署模式定期发送间隔计数器（**ContinuousContextMessage**：检索的令牌、存储的令牌、存储的 KV 字节、进程运行时间）。空闲间隔仍然会发送，并双重作为存活心跳。单进程模式还额外发送缓存生命周期直方图（**CacheLifespanMessage**）。刷新间隔为 ``LMCACHE_USAGE_TRACK_INTERVAL`` 秒（默认 600）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:54
+msgid "Every payload carries four common fields:"
+msgstr "每个有效负载都携带四个公共字段："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:56
+msgid ""
+"``session_id`` -- a random UUID minted once per process, joining the one-"
+"shot context with the continuous messages of the same run."
+msgstr "``session_id`` -- 每个进程生成一次的随机 UUID，将一次性上下文与同一运行的连续消息连接起来。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:58
+msgid ""
+"``machine_id`` -- a random UUID persisted at "
+"``~/.config/lmcache/machine_id``, grouping sessions from the same "
+"machine. It is never derived from hardware identifiers (MAC address, "
+"hostname)."
+msgstr ""
+"``machine_id`` -- 一个随机的 UUID，持久化在 "
+"``~/.config/lmcache/machine_id``，用于将来自同一台机器的会话分组。它从不派生自硬件标识符（MAC 地址、主机名）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:61
+msgid "``schema_version`` -- the version of the message schema."
+msgstr "``schema_version`` -- 消息模式的版本。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:62
+msgid ""
+"``deployment_mode`` -- ``single_process`` (LMCache inside the serving "
+"engine) or ``mp_server`` (standalone MP cache server)."
+msgstr ""
+"``deployment_mode`` -- ``single_process``（服务引擎内部的 LMCache）或 "
+"``mp_server``（独立的 MP 缓存服务器）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:65
+msgid ""
+"These messages are serialized to JSON and POSTed to the LMCache usage "
+"server."
+msgstr "这些消息被序列化为 JSON 并通过 POST 发送到 LMCache 使用服务器。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:68
+msgid "Example JSON payload"
+msgstr "示例 JSON 有效负载"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:88
+msgid "Previewing collected data"
+msgstr "预览收集的数据"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:90
+msgid ""
+"If you enable **local logging**, usage messages are appended to your "
+"specified log file. To inspect the most recent entries:"
+msgstr "如果您启用 **本地日志记录**\\ ，使用消息将附加到您指定的日志文件中。要检查最近的条目："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:97
+msgid "Configuration & Opt-out"
+msgstr "配置与选择退出"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:99
+msgid ""
+"By default, usage tracking is **enabled**. Any one of the following opt-"
+"outs disables all usage stats collection:"
+msgstr "默认情况下，使用情况跟踪是 **启用** 的。以下任一选择退出将禁用所有使用情况统计收集："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:110
+msgid ""
+"When tracking is disabled, ``InitializeUsageContext`` will return "
+"``None`` and no data will be sent or logged, and no state files (such as "
+"``machine_id``) will be created."
+msgstr ""
+"当跟踪被禁用时，``InitializeUsageContext`` 将返回 "
+"``None``，并且不会发送或记录任何数据，也不会创建任何状态文件（例如 ``machine_id``）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:115
+msgid "Reference"
+msgstr "参考"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:121
+msgid "Environment variable / file"
+msgstr "环境变量 / 文件"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:122
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:123
+msgid "Effect"
+msgstr "效果"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:124
+msgid "``LMCACHE_TRACK_USAGE``"
+msgstr "``LMCACHE_TRACK_USAGE``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:125
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:128
+msgid "unset"
+msgstr "未设置"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:126
+msgid "Set to ``false`` to disable all usage stats collection."
+msgstr "设置为 ``false`` 以禁用所有使用统计数据收集。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:127
+msgid "``DO_NOT_TRACK``"
+msgstr "``DO_NOT_TRACK``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:129
+msgid ""
+"Set to ``1``/``true``/``yes`` to disable collection (cross-tool "
+"convention)."
+msgstr "设置为 ``1``/``true``/``yes`` 以禁用收集（跨工具约定）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:131
+msgid "``LMCACHE_USAGE_TRACK_URL``"
+msgstr "``LMCACHE_USAGE_TRACK_URL``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:132
+msgid "``http://stats.lmcache.ai:8080``"
+msgstr "``http://stats.lmcache.ai:8080``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:133
+msgid "Override the stats server endpoint (e.g. for a private sink)."
+msgstr "覆盖统计服务器端点（例如，用于私有接收端）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:134
+msgid "``LMCACHE_USAGE_TRACK_INTERVAL``"
+msgstr "``LMCACHE_USAGE_TRACK_INTERVAL``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:135
+msgid "``600``"
+msgstr "``600``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:136
+msgid "Seconds between continuous-message flushes."
+msgstr "连续消息刷新之间的秒数。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:137
+msgid "``~/.config/lmcache/machine_id``"
+msgstr "``~/.config/lmcache/machine_id``"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:138
+msgid "created on first send"
+msgstr "首次发送时创建"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:139
+msgid ""
+"Holds the random anonymous machine UUID. Delete it to rotate the "
+"identifier."
+msgstr "保存随机的匿名机器 UUID。删除它以旋转标识符。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:143
+msgid "Local logging"
+msgstr "本地日志记录"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:145
+msgid ""
+"If you would like to log to a file in addition to (or instead of) sending"
+" data to the server, pass a local-log path when initializing:"
+msgstr "如果您希望在将数据发送到服务器的同时（或替代）记录到文件中，请在初始化时传递一个本地日志路径："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:157
+msgid ""
+"Omitting the ``local_log`` argument (or passing ``None``) disables local "
+"file logging."
+msgstr "省略 ``local_log`` 参数（或传递 ``None``\\ ）将禁用本地文件日志记录。"
+
+#~ msgid ""
+#~ "Usage stats are emitted as three "
+#~ "message types, implemented in "
+#~ "``usage_context.py``:"
+#~ msgstr "使用统计信息以三种消息类型发出，具体实现位于 ``usage_context.py``\\ ："
+

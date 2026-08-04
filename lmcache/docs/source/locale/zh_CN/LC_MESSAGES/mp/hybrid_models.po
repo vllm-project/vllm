@@ -1,0 +1,546 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-29 10:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/hybrid_models.rst:2
+msgid "Hybrid Attention Models"
+msgstr "Hybrid Attention 模型"
+
+#: ../../source/mp/hybrid_models.rst:4
+msgid ""
+"Some models interleave more than one attention type across their layers —"
+" most commonly **sliding-window attention** on most layers and **full "
+"attention** on a few. vLLM serves these with its *hybrid KV cache "
+"manager*, which splits the model's layers into multiple **KV cache "
+"groups** (one per attention behavior)."
+msgstr ""
+"一些模型在其层中交错使用多种注意力类型——最常见的是在大多数层上使用 **sliding-window attention**\\ "
+"，而在少数层上使用 **full attention**\\ 。vLLM 通过其混合 KV 缓存管理器来服务这些模型，该管理器将模型的层分成多个 "
+"**KV 缓存组**\\ （每种注意力行为一个）。"
+
+#: ../../source/mp/hybrid_models.rst:9
+msgid ""
+"The LMCache multiprocess connector (``LMCacheMPConnector``) supports "
+"these hybrid models: it stores and retrieves the KV cache for every "
+"group, so prefix caching and KV reuse work the same way they do for plain"
+" models."
+msgstr ""
+"LMCache 多进程连接器 (``LMCacheMPConnector``) 支持这些混合模型：它为每个组存储和检索 KV "
+"Cache，因此前缀缓存和 KV 重用的工作方式与普通模型相同。"
+
+#: ../../source/mp/hybrid_models.rst:18
+msgid "Validated hybrid models"
+msgstr "验证过的混合模型"
+
+#: ../../source/mp/hybrid_models.rst:20
+msgid "Recipe pages for the validated hybrid-attention architectures:"
+msgstr "经过验证的 hybrid attention 架构的配方页面："
+
+#: ../../source/mp/hybrid_models.rst:26 ../../source/mp/hybrid_models.rst:188
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/mp/hybrid_models.rst:27 ../../source/mp/hybrid_models.rst:75
+msgid "Attention layout"
+msgstr "注意力布局"
+
+#: ../../source/mp/hybrid_models.rst:28
+msgid "Recipe"
+msgstr "配方"
+
+#: ../../source/mp/hybrid_models.rst:29
+msgid "Gemma 3"
+msgstr "Gemma 3"
+
+#: ../../source/mp/hybrid_models.rst:30 ../../source/mp/hybrid_models.rst:33
+#: ../../source/mp/hybrid_models.rst:36
+msgid "Sliding-window + full"
+msgstr "sliding window + full"
+
+#: ../../source/mp/hybrid_models.rst:31
+msgid ":doc:`/recipes/gemma3`"
+msgstr ":doc:`/recipes/gemma3`"
+
+#: ../../source/mp/hybrid_models.rst:32
+msgid "Gemma 4"
+msgstr "Gemma 4"
+
+#: ../../source/mp/hybrid_models.rst:34
+msgid ":doc:`/recipes/gemma4`"
+msgstr ":doc:`/recipes/gemma4`"
+
+#: ../../source/mp/hybrid_models.rst:35 ../../source/mp/hybrid_models.rst:80
+msgid "gpt-oss"
+msgstr "gpt-oss"
+
+#: ../../source/mp/hybrid_models.rst:37
+msgid ":doc:`/recipes/gpt_oss`"
+msgstr ":doc:`/recipes/gpt_oss`"
+
+#: ../../source/mp/hybrid_models.rst:38
+msgid "Qwen3.5 / Qwen3.6 series"
+msgstr "Qwen3.5 / Qwen3.6 系列"
+
+#: ../../source/mp/hybrid_models.rst:39
+msgid "Mamba / GDN + full"
+msgstr "Mamba / GDN + full"
+
+#: ../../source/mp/hybrid_models.rst:40
+msgid ":doc:`/recipes/qwen3_5`"
+msgstr ":doc:`/recipes/qwen3_5`"
+
+#: ../../source/mp/hybrid_models.rst:41
+msgid "DeepSeek-V4-Flash"
+msgstr "DeepSeek-V4-Flash"
+
+#: ../../source/mp/hybrid_models.rst:42
+msgid "Sparse-MLA (multiple KV groups)"
+msgstr "稀疏-MLA（多个 KV 组）"
+
+#: ../../source/mp/hybrid_models.rst:43
+msgid ":doc:`/recipes/deepseek_v4_flash`"
+msgstr ":doc:`/recipes/deepseek_v4_flash`"
+
+#: ../../source/mp/hybrid_models.rst:44
+msgid "GLM 5.1/5.2"
+msgstr "GLM 5.1/5.2"
+
+#: ../../source/mp/hybrid_models.rst:45
+msgid "Dynamic Sparse Attention (multiple KV groups)"
+msgstr "动态稀疏注意力（多个 KV 组）"
+
+#: ../../source/mp/hybrid_models.rst:46
+msgid ":doc:`/recipes/glm5_2`"
+msgstr ":doc:`/recipes/glm5_2`"
+
+#: ../../source/mp/hybrid_models.rst:47
+msgid "MiniMax-M3"
+msgstr "MiniMax-M3"
+
+#: ../../source/mp/hybrid_models.rst:48
+msgid "Sparse attention + lightning indexer (mixed KV formats in one group)"
+msgstr "稀疏注意力 + 闪电索引器（一个组中的混合 KV 格式）"
+
+#: ../../source/mp/hybrid_models.rst:49
+msgid ":doc:`/recipes/minimax_m3`"
+msgstr ":doc:`/recipes/minimax_m3`"
+
+#: ../../source/mp/hybrid_models.rst:64
+msgid "What Works"
+msgstr "已支持的内容"
+
+#: ../../source/mp/hybrid_models.rst:66
+msgid ""
+"Models whose layers all use **standard paged attention** — including "
+"hybrids that mix sliding-window and full attention — are supported with "
+"no special configuration. Examples:"
+msgstr ""
+"所有层均使用 **standard paged attention** 的模型——包括混合 sliding-window 和 full "
+"attention 的混合模型——在没有特殊配置的情况下得到支持。示例："
+
+#: ../../source/mp/hybrid_models.rst:74
+msgid "Model family"
+msgstr "模型系列"
+
+#: ../../source/mp/hybrid_models.rst:76
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/mp/hybrid_models.rst:77
+msgid "Gemma 2 / Gemma 3"
+msgstr "Gemma 2 / Gemma 3"
+
+#: ../../source/mp/hybrid_models.rst:78 ../../source/mp/hybrid_models.rst:81
+msgid "Interleaved sliding-window + full"
+msgstr "交错 sliding-window + full"
+
+#: ../../source/mp/hybrid_models.rst:79 ../../source/mp/hybrid_models.rst:82
+#: ../../source/mp/hybrid_models.rst:88
+msgid "Supported"
+msgstr "支持"
+
+#: ../../source/mp/hybrid_models.rst:83
+msgid "Qwen3.5 (and other Gated-DeltaNet hybrids)"
+msgstr "Qwen3.5（以及其他 Gated-DeltaNet 混合模型）"
+
+#: ../../source/mp/hybrid_models.rst:84
+msgid "Interleaved Mamba/GDN + full"
+msgstr "交错 Mamba/GDN + full"
+
+#: ../../source/mp/hybrid_models.rst:85
+msgid "Supported (see below)"
+msgstr "支持（见下文）"
+
+#: ../../source/mp/hybrid_models.rst:86
+msgid "Llama, Qwen2/Qwen3 (dense), Mistral, …"
+msgstr "Llama, Qwen2/Qwen3 (dense), Mistral, …"
+
+#: ../../source/mp/hybrid_models.rst:87
+msgid "Single attention type"
+msgstr "单一注意力类型"
+
+#: ../../source/mp/hybrid_models.rst:90
+msgid ""
+"Just point vLLM at the LMCache server as usual (see "
+":doc:`/getting_started/quickstart`); LMCache detects the model's KV cache"
+" groups automatically at registration time."
+msgstr ""
+"只需像往常一样将 vLLM 指向 LMCache 服务器（请参见 "
+":doc:`/getting_started/quickstart`）；LMCache 在注册时会自动检测模型的 KV 缓存组。"
+
+#: ../../source/mp/hybrid_models.rst:95
+msgid ""
+"Because ``LMCacheMPConnector`` advertises hybrid support to vLLM, vLLM "
+"keeps its hybrid KV cache manager **enabled** for these models (it does "
+"not fall back to a single unified group). You do not need ``--no-disable-"
+"hybrid-kv-cache-manager`` or any related flag."
+msgstr ""
+"因为 ``LMCacheMPConnector`` 向 vLLM 声明了混合支持，vLLM 为这些模型保持其混合 KV 缓存管理器 "
+"**启用**\\ （它不会回退到单一统一组）。您不需要 ``--no-disable-hybrid-kv-cache-manager`` "
+"或任何相关标志。"
+
+#: ../../source/mp/hybrid_models.rst:101
+msgid "Object-group separation"
+msgstr "对象组分离"
+
+#: ../../source/mp/hybrid_models.rst:103
+msgid ""
+"At KV-cache registration LMCache buckets a hybrid model's layers into "
+"**object groups** — the unit it stores and retrieves as one object. By "
+"default (``--separate-object-groups``, on) each distinct cross-chunk "
+"attention window becomes its own object group: full-attention layers form"
+" one group, and each sliding-window size (mamba / GDN included) forms "
+"another. Pass ``--no-separate-object-groups`` to keep every layer in a "
+"single full-attention object group instead (the previous behavior)."
+msgstr "在 KV-cache 注册时，LMCache 将混合模型的层分组为 **对象组** —— 它作为一个对象存储和检索的单位。默认情况下（``--separate-object-groups``，开启），每个不同的跨块注意力窗口会成为自己的对象组：全注意力层形成一个组，而每个滑动窗口大小（包括 mamba / GDN）形成另一个组。传递 ``--no-separate-object-groups`` 可以将每一层保留在一个单一的全注意力对象组中（之前的行为）。"
+
+#: ../../source/mp/hybrid_models.rst:119
+msgid ""
+"The flag is transparent to correctness — prefix caching and KV reuse "
+"behave the same either way, and a non-hybrid model (a single attention "
+"behavior) always resolves to one object group regardless of the setting. "
+"Separation organizes storage by attention window so that each group's "
+"cross-chunk window is tracked independently."
+msgstr "该标志对正确性是透明的——前缀缓存和 KV 重用在任何情况下的行为都是相同的，非混合模型（单一注意力行为）无论设置如何始终解析为一个对象组。分离通过注意力窗口组织存储，以便每个组的跨块窗口可以独立跟踪。"
+
+#: ../../source/mp/hybrid_models.rst:126
+msgid "Mamba / Linear-Attention Hybrids"
+msgstr "Mamba / Linear-Attention 混合模型"
+
+#: ../../source/mp/hybrid_models.rst:128
+msgid ""
+"Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention "
+"layers** with full attention — the Qwen3.5 and Qwen3.6 series "
+"(``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other "
+"GDN hybrids — are supported. Unlike a paged key/value cache, their "
+"linear-attention layers keep a recurrent **state cache** (a convolution +"
+" SSM state). LMCache reinterprets that state as an opaque page at "
+"registration time, so prefix caching and KV reuse work end to end without"
+" any model-specific transfer code."
+msgstr ""
+"将 **Mamba / Gated-DeltaNet (GDN) linear-attention layers** 与 full "
+"attention 交错的模型——Qwen3.5 和 Qwen3.6 系列（\\ ``Qwen/Qwen3.5-0.8B``, "
+"``Qwen/Qwen3.6-27B``, …）、Qwen3-Next 以及其他 GDN 混合模型——是受支持的。与分页键/值缓存不同，它们的 "
+"linear-attention layers 保持一个递归的 **状态缓存**\\ （一个卷积 + SSM 状态）。LMCache "
+"在注册时将该状态重新解释为一个不透明的页面，因此前缀缓存和 KV 重用可以端到端工作，而无需任何特定于模型的传输代码。"
+
+#: ../../source/mp/hybrid_models.rst:136
+msgid ""
+"This section is the **general procedure for any such model**. The only "
+"per-model variable is the *unified block size* ``N`` (step 1); everything"
+" else is identical across models."
+msgstr "本节是 **任何此类模型的一般过程**\\ 。唯一的每模型变量是统一块大小\\ ``N``\\ （步骤 1）；其他所有内容在模型之间是相同的。"
+
+#: ../../source/mp/hybrid_models.rst:143
+msgid "Step 1 — find the model's unified block size ``N``"
+msgstr "步骤 1 — 找到模型的统一块大小 ``N``"
+
+#: ../../source/mp/hybrid_models.rst:145
+msgid ""
+"``N`` is the **single number** that drives every other setting: the "
+"LMCache server's ``--chunk-size`` and vLLM's ``--max-num-batched-tokens``"
+" are both derived from it (step 2). Get it wrong and LMCache raises at "
+"engine startup."
+msgstr ""
+"``N`` 是驱动所有其他设置的 **单一数字**\\ ：LMCache 服务器的 ``--chunk-size`` 和 vLLM 的 "
+"``--max-num-batched-tokens`` 都源自它（步骤 2）。如果设置错误，LMCache 在引擎启动时会抛出错误。"
+
+#: ../../source/mp/hybrid_models.rst:149
+msgid ""
+"For a Mamba / GDN hybrid, vLLM forces **one** block size across all KV "
+"cache groups, chosen large enough that an attention page is at least as "
+"big as a Mamba state page. It depends on the model's head dimensions and "
+"GDN state size, so it is **model-specific — never assume a value, read it"
+" from the model**. vLLM prints it once at startup::"
+msgstr ""
+"对于 Mamba / GDN 混合模型，vLLM 强制所有 KV Cache 组使用 **一个** 块大小，选择足够大以确保注意力页面至少与 "
+"Mamba 状态页面一样大。它依赖于模型的头部维度和 GDN 状态大小，因此是 **模型特定的 — 切勿假设一个值，请从模型中读取**\\ "
+"。vLLM 在启动时打印一次："
+
+#: ../../source/mp/hybrid_models.rst:158
+msgid ""
+"You do not need LMCache, a full serving run, or the weights to be "
+"quantized to read it — just launch vLLM until the line appears, then "
+"stop. The snippet below does exactly that and prints ``N``:"
+msgstr ""
+"您不需要 LMCache、完整的服务运行或量化的权重来读取它——只需启动 vLLM，直到该行出现，然后停止。下面的代码片段正是这样做，并打印 "
+"``N``\\ ："
+
+#: ../../source/mp/hybrid_models.rst:181
+msgid ""
+"The number in ``to N tokens`` is your ``N``. Values grow with model size;"
+" for example:"
+msgstr "``to N tokens`` 中的数字就是您的 ``N``\\ 。随着模型大小的增加，值会增长；例如："
+
+#: ../../source/mp/hybrid_models.rst:189
+msgid "Unified block size ``N``"
+msgstr "统一块大小 ``N``"
+
+#: ../../source/mp/hybrid_models.rst:190
+msgid "GPUs"
+msgstr "GPU"
+
+#: ../../source/mp/hybrid_models.rst:191
+msgid "``Qwen/Qwen3.6-27B``"
+msgstr "``Qwen/Qwen3.6-27B``"
+
+#: ../../source/mp/hybrid_models.rst:192
+msgid "784"
+msgstr "784"
+
+#: ../../source/mp/hybrid_models.rst:193 ../../source/mp/hybrid_models.rst:196
+msgid "1"
+msgstr "1"
+
+#: ../../source/mp/hybrid_models.rst:194
+msgid "``Qwen/Qwen3.5-0.8B``"
+msgstr "``Qwen/Qwen3.5-0.8B``"
+
+#: ../../source/mp/hybrid_models.rst:195
+msgid "544"
+msgstr "544"
+
+#: ../../source/mp/hybrid_models.rst:199
+msgid "Step 2 — derive the three required flags from ``N``"
+msgstr "步骤 2 — 从 ``N`` 派生三个所需的标志"
+
+#: ../../source/mp/hybrid_models.rst:201
+msgid ""
+"**LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``). "
+"This is the rule the connector enforces: LMCache's chunk size must be a "
+"multiple of vLLM's unified block size, or registration fails::"
+msgstr ""
+"**LMCache 服务器** ``--chunk-size`` **= N**\\ （或任何 ``N`` "
+"的倍数）。这是连接器强制执行的规则：LMCache 的块大小必须是 vLLM 的统一块大小的倍数，否则注册将失败::"
+
+#: ../../source/mp/hybrid_models.rst:207
+msgid ""
+"**vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal "
+"to ``N`` is the simple, always-valid choice. Outside this range LMCache "
+"raises at engine startup. ``align`` mode snapshots the Mamba state only "
+"at the *end* of each scheduler step, so each prefill step must advance "
+"exactly one block; a larger budget would let a step skip block "
+"boundaries, leaving no snapshot for LMCache to store at those prefixes."
+msgstr ""
+"**vLLM** ``--max-num-batched-tokens`` **在 [N, 2·N)** — 将其设置为 ``N`` "
+"是简单且始终有效的选择。在此范围之外，LMCache 在引擎启动时会引发错误。\\ ``align`` 模式仅在每个调度器步骤的结束时快照 "
+"Mamba 状态，因此每个预填充步骤必须精确推进一个块；更大的预算将允许步骤跳过块边界，从而在这些前缀处没有快照可供 LMCache 存储。"
+
+#: ../../source/mp/hybrid_models.rst:214
+msgid ""
+"**vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align``"
+" is mandatory (GDN backends do not support the ``all`` mode)::"
+msgstr ""
+"**vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align``"
+" 是强制性的（GDN 后端不支持 ``all`` 模式）：:"
+
+#: ../../source/mp/hybrid_models.rst:223
+msgid ""
+"So for a freshly-probed model the whole derivation is just: read ``N`` "
+"(step 1), then pass ``--chunk-size N`` to the server and ``--max-num-"
+"batched-tokens N`` to vLLM."
+msgstr ""
+"因此，对于一个新探测的模型，整个推导过程就是：读取 ``N``\\ （步骤 1），然后将 ``--chunk-size N`` 传递给服务器，并将"
+" ``--max-num-batched-tokens N`` 传递给 vLLM。"
+
+#: ../../source/mp/hybrid_models.rst:227
+msgid ""
+"No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is "
+"needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-"
+"selects the GDN backend."
+msgstr ""
+"不需要 ``--no-disable-hybrid-kv-cache-manager`` 或 attention-backend 标志；\\ "
+"``LMCacheMPConnector`` 声明支持混合模型，vLLM 会自动选择 GDN 后端。"
+
+#: ../../source/mp/hybrid_models.rst:232
+msgid "Caveats"
+msgstr "注意事项"
+
+#: ../../source/mp/hybrid_models.rst:234
+msgid ""
+"Generation is **not bit-exact** between a cached and a fresh run: GDN "
+"backends do not support vLLM's batch-invariant mode. Validate with a "
+"**score-level** comparison (see `Verifying Correctness`_), not a token-"
+"level diff."
+msgstr ""
+"生成在缓存和新运行之间\\ **不是位精确**\\ 的：GDN 后端不支持 vLLM 的批量不变模式。请使用\\ **分数级**\\ "
+"比较进行验证（参见 `验证正确性`_），而不是 token 级差异。"
+
+#: ../../source/mp/hybrid_models.rst:238
+msgid ""
+"The cached pages are **byte-opaque**, so content-aware features (CacheGen"
+" compression, CacheBlend) do not apply, and cache entries must not be "
+"shared across engines with different attention backends or kernel block "
+"sizes."
+msgstr ""
+"缓存页面是 **字节不透明** 的，因此内容感知特性（CacheGen "
+"压缩、CacheBlend）不适用，并且缓存条目不得在具有不同注意力后端或内核块大小的引擎之间共享。"
+
+#: ../../source/mp/hybrid_models.rst:241
+msgid ""
+"Several of these models are **vision-language** (they load a vision "
+"tower). The validated, supported path is **text** KV caching; image/video"
+" KV caching is not validated."
+msgstr ""
+"这些模型中的几个是 **视觉-语言** 模型（它们加载一个视觉塔）。经过验证的支持路径是 **文本** KV 缓存；图像/视频 KV "
+"缓存尚未经过验证。"
+
+#: ../../source/mp/hybrid_models.rst:244
+msgid ""
+"vLLM's Mamba prefix caching in ``align`` mode is marked experimental "
+"upstream."
+msgstr "vLLM 的 Mamba 前缀缓存在 ``align`` 模式下被标记为实验性。"
+
+#: ../../source/mp/hybrid_models.rst:246
+msgid ""
+"See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the "
+"validated end-to-end commands and the per-model block sizes."
+msgstr ""
+"请参阅 :doc:`Qwen3.5 / Qwen3.6 配方 <../recipes/qwen3_5>` "
+"以获取经过验证的端到端命令和每个模型的块大小。"
+
+#: ../../source/mp/hybrid_models.rst:250
+msgid "What Is Not Supported Yet"
+msgstr "尚未支持的内容"
+
+#: ../../source/mp/hybrid_models.rst:252
+msgid ""
+"**DeepSeek-V4-style compressed / indexer caches** are not yet handled by "
+"the multiprocess connector."
+msgstr "**DeepSeek-V4 风格的压缩 / 索引器缓存** 暂不被多进程连接器支持。"
+
+#: ../../source/mp/hybrid_models.rst:256
+msgid "Verifying Correctness"
+msgstr "验证正确性"
+
+#: ../../source/mp/hybrid_models.rst:258
+msgid ""
+"To convince yourself that a hybrid model's KV is being cached and reused "
+"correctly, you can compare a cold run against a run served from LMCache:"
+msgstr "为了确保混合模型的 KV 被正确缓存和重用，您可以将冷启动与从 LMCache 提供的运行进行比较："
+
+#: ../../source/mp/hybrid_models.rst:261
+msgid ""
+"Run an evaluation (e.g. ``lm_eval`` on ``gsm8k``) against vLLM + LMCache."
+" This computes the KV cache and **stores** it in LMCache."
+msgstr ""
+"对 vLLM + LMCache 运行评估（例如在 ``gsm8k`` 上使用 ``lm_eval``\\ ）。这会计算 KV Cache 并 "
+"**存储** 在 LMCache 中。"
+
+#: ../../source/mp/hybrid_models.rst:263
+msgid ""
+"Reset *only* vLLM's local prefix cache, leaving the LMCache-managed cache"
+" intact (requires launching vLLM with ``VLLM_SERVER_DEV_MODE=1``)::"
+msgstr ""
+"仅重置 vLLM 的本地前缀缓存，保持 LMCache 管理的缓存不变（需要以 ``VLLM_SERVER_DEV_MODE=1`` 启动 "
+"vLLM）::"
+
+#: ../../source/mp/hybrid_models.rst:268
+msgid ""
+"Omit the ``reset_external=true`` query parameter so the LMCache cache is "
+"preserved."
+msgstr "省略 ``reset_external=true`` 查询参数，以便保留 LMCache 缓存。"
+
+#: ../../source/mp/hybrid_models.rst:270
+msgid ""
+"Re-run the same evaluation. vLLM now misses in its local cache, so the "
+"prefix KV is **retrieved** from LMCache. The score should match the first"
+" run."
+msgstr "重新运行相同的评估。vLLM 现在在其本地缓存中未命中，因此前缀 KV 从 LMCache 中 **检索**\\ 。得分应与第一次运行匹配。"
+
+#: ../../source/mp/hybrid_models.rst:273
+msgid ""
+"The project ships this as the ``hma_lm_eval`` continuous-integration test"
+" (see ``.buildkite/k3_tests/multiprocess``)."
+msgstr ""
+"该项目以 ``hma_lm_eval`` 持续集成测试的形式提供此验证（参见 "
+"``.buildkite/k3_tests/multiprocess``\\ ）。"
+
+#: ../../source/mp/hybrid_models.rst:277
+msgid "See Also"
+msgstr "另请参阅"
+
+#: ../../source/mp/hybrid_models.rst:279
+msgid ""
+":doc:`/getting_started/quickstart` — launching the LMCache server and a "
+"vLLM client."
+msgstr ":doc:`/getting_started/quickstart` — 启动 LMCache 服务器和 vLLM 客户端。"
+
+#: ../../source/mp/hybrid_models.rst:280
+msgid ""
+"Design notes on how groups are detected and addressed: "
+"``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` in the source "
+"tree."
+msgstr ""
+"关于如何检测和处理组的设计说明：\\ ``docs/design/integration/vllm/hybrid-kv-cache-"
+"groups.md`` 在源代码树中。"
+
+#~ msgid ""
+#~ "**Mamba / linear-attention hybrids** "
+#~ "(e.g. Qwen3-Next, Qwen3.5, and other "
+#~ "Gated-DeltaNet models). These layers keep"
+#~ " a recurrent *state cache* (a "
+#~ "convolution + SSM state) instead of "
+#~ "a paged key/value cache, which LMCache's"
+#~ " transfer path cannot represent today. "
+#~ "Such models will fail to register "
+#~ "with the LMCache server. Tracking "
+#~ "support is future work."
+#~ msgstr ""
+#~ "**Mamba / 线性注意力混合模型**（例如 Qwen3-Next、Qwen3.5 "
+#~ "和其他 Gated-DeltaNet 模型）。这些层保持一个递归的 *状态缓存*（一个卷积"
+#~ " + SSM 状态），而不是分页的键/值缓存，这在今天的 LMCache "
+#~ "传输路径中无法表示。这些模型将无法在 LMCache 服务器上注册。跟踪支持是未来的工作。"
+
+#~ msgid "Architecture"
+#~ msgstr "架构"
+
+#~ msgid "``Gemma3ForConditionalGeneration``"
+#~ msgstr "``Gemma3ForConditionalGeneration``"
+
+#~ msgid "``Gemma4ForConditionalGeneration``"
+#~ msgstr "``Gemma4ForConditionalGeneration``"
+
+#~ msgid "``GptOssForCausalLM``"
+#~ msgstr "``GptOssForCausalLM``"
+
+#~ msgid "``Qwen3_5ForConditionalGeneration``"
+#~ msgstr "``Qwen3_5ForConditionalGeneration``"
+

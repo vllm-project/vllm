@@ -1,0 +1,52 @@
+name: PR Full Build
+
+# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu129 wheel)
+# on PRs carrying the `full` label. The `full` label is added automatically
+# by automerge-labeler.yml when auto-merge is enabled on a code-change PR,
+# so this acts as a pre-merge sanity check that wheels still build.
+#
+# No tests, no code-quality checks, no publishing — those are covered by
+# test.yml / code_quality_checks.yml (per-PR) and publish.yml (on merge).
+
+on:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        types: [opened, synchronize, reopened, labeled]
+
+# Cancel older in-flight runs on the same PR. github.ref is
+# refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    # Each build runs independently — a failure in one does not skip the
+    # others, matching publish.yml's isolation model.
+
+    build-main:
+        name: Build main
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_main_artifacts.yml
+
+    build-cli:
+        name: Build CLI
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_cli_artifacts.yml
+
+    build-cpu:
+        name: Build CPU
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_cpu_artifacts.yml
+
+    build-cu129:
+        name: Build cu129
+        if: contains(github.event.pull_request.labels.*.name, 'full')
+        uses: ./.github/workflows/build_cu129_artifacts.yml
+        # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
+        # step in build_cu129_artifacts.yml guards on the token being non-empty.
+        secrets: inherit

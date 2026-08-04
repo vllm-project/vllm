@@ -1,0 +1,114 @@
+DETAILED DESCRIPTION
+       The transcoding process in ffmpeg for each output can be described by the following diagram:
+
+		_______ 	     ______________
+	       |       |	    |		   |
+	       | input |  demuxer   | encoded data |   decoder
+	       | file  | ---------> | packets	   | -----+
+	       |_______|	    |______________|	  |
+							  v
+						      _________
+						     |	       |
+						     | decoded |
+						     | frames  |
+						     |_________|
+		________	     ______________	  |
+	       |	|	    |		   |	  |
+	       | output | <-------- | encoded data | <----+
+	       | file	|   muxer   | packets	   |   encoder
+	       |________|	    |______________|
+
+       ffmpeg calls the libavformat library (containing demuxers) to read input files and get packets
+       containing encoded data from them. When there are multiple input files, ffmpeg tries to keep them
+       synchronized by tracking lowest timestamp on any active input stream.
+
+       Encoded packets are then passed to the decoder (unless streamcopy is selected for the stream, see
+       further for a description). The decoder produces uncompressed frames (raw video/PCM audio/...)
+       which can be processed further by filtering (see next section). After filtering, the frames are
+       passed to the encoder, which encodes them and outputs encoded packets. Finally those are passed to
+       the muxer, which writes the encoded packets to the output file.
+
+   Filtering
+       Before encoding, ffmpeg can process raw audio and video frames using filters from the libavfilter
+       library. Several chained filters form a filter graph. ffmpeg distinguishes between two types of
+       filtergraphs: simple and complex.
+
+       Simple filtergraphs
+
+       Simple filtergraphs are those that have exactly one input and output, both of the same type. In
+       the above diagram they can be represented by simply inserting an additional step between decoding
+       and encoding:
+
+		_________			 ______________
+	       |	 |			|	       |
+	       | decoded |			| encoded data |
+	       | frames  |\		      _ | packets      |
+	       |_________| \		      /||______________|
+			    \	__________   /
+		 simple     _\||	  | /  encoder
+		 filtergraph   | filtered |/
+			       | frames   |
+			       |__________|
+
+       Simple filtergraphs are configured with the per-stream -filter option (with -vf and -af aliases
+       for video and audio respectively).  A simple filtergraph for video can look for example like this:
+
+		_______        _____________	    _______	   ________
+	       |       |      | 	    |	   |	   |	  |	   |
+	       | input | ---> | deinterlace | ---> | scale | ---> | output |
+	       |_______|      |_____________|	   |_______|	  |________|
+
+       Note that some filters change frame properties but not frame contents. E.g. the "fps" filter in
+       the example above changes number of frames, but does not touch the frame contents. Another example
+       is the "setpts" filter, which only sets timestamps and otherwise passes the frames unchanged.
+
+       Complex filtergraphs
+
+       Complex filtergraphs are those which cannot be described as simply a linear processing chain
+       applied to one stream. This is the case, for example, when the graph has more than one input
+       and/or output, or when output stream type is different from input. They can be represented with
+       the following diagram:
+
+		_________
+	       |	 |
+	       | input 0 |\		       __________
+	       |_________| \		      | 	 |
+			    \	_________    /| output 0 |
+			     \ |	 |  / |__________|
+		_________     \| complex | /
+	       |	 |     |	 |/
+	       | input 1 |---->| filter  |\
+	       |_________|     |	 | \   __________
+			      /| graph	 |  \ | 	 |
+			     / |	 |   \| output 1 |
+		_________   /  |_________|    |__________|
+	       |	 | /
+	       | input 2 |/
+	       |_________|
+
+       Complex filtergraphs are configured with the -filter_complex option.  Note that this option is
+       global, since a complex filtergraph, by its nature, cannot be unambiguously associated with a
+       single stream or file.
+
+       The -lavfi option is equivalent to -filter_complex.
+
+       A trivial example of a complex filtergraph is the "overlay" filter, which has two video inputs and
+       one video output, containing one video overlaid on top of the other. Its audio counterpart is the
+       "amix" filter.
+
+   Stream copy
+       Stream copy is a mode selected by supplying the "copy" parameter to the -codec option. It makes
+       ffmpeg omit the decoding and encoding step for the specified stream, so it does only demuxing and
+       muxing. It is useful for changing the container format or modifying container-level metadata. The
+       diagram above will, in this case, simplify to this:
+
+		_______ 	     ______________	       ________
+	       |       |	    |		   |	      |        |
+	       | input |  demuxer   | encoded data |  muxer   | output |
+	       | file  | ---------> | packets	   | -------> | file   |
+	       |_______|	    |______________|	      |________|
+
+       Since there is no decoding or encoding, it is very fast and there is no quality loss. However, it
+       might not work in some cases because of many factors. Applying filters is obviously also
+       impossible, since filters work on uncompressed data.
+

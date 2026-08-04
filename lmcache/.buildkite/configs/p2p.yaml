@@ -1,0 +1,69 @@
+workload:
+  type: long_doc_qa
+  num-documents: 20
+  max-inflight-requests: 1
+  repeat-count: 1
+
+feature:
+  type: p2p
+
+docker1:
+  env:
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=60"
+    - "LMCACHE_ENABLE_ASYNC_LOADING=True"
+    - "LMCACHE_ENABLE_P2P=True"
+    - "LMCACHE_P2P_HOST=localhost"
+    - "LMCACHE_P2P_INIT_PORTS=8200"
+    - "LMCACHE_P2P_LOOKUP_PORTS=8201"
+    - "LMCACHE_TRANSFER_CHANNEL=nixl"
+    - "LMCACHE_ENABLE_CONTROLLER=True"
+    - "LMCACHE_LMCACHE_INSTANCE_ID=lmcache_instance_1"
+    - "LMCACHE_LMCACHE_WORKER_PORTS=8500"
+    - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
+    - "LMCACHE_SAVE_UNFULL_CHUNK=False"
+    - "PYTHONHASHSEED=123"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
+  pull-port: 8300
+  reply-port: 8400
+
+docker2:
+  env:
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=60"
+    - "LMCACHE_ENABLE_ASYNC_LOADING=True"
+    - "LMCACHE_ENABLE_P2P=True"
+    - "LMCACHE_P2P_HOST=localhost"
+    - "LMCACHE_P2P_INIT_PORTS=8202"
+    - "LMCACHE_P2P_LOOKUP_PORTS=8203"
+    - "LMCACHE_TRANSFER_CHANNEL=nixl"
+    - "LMCACHE_ENABLE_CONTROLLER=True"
+    - "LMCACHE_LMCACHE_INSTANCE_ID=lmcache_instance_2"
+    - "LMCACHE_LMCACHE_WORKER_PORTS=8501"
+    - "LMCACHE_EXTRA_CONFIG={\"lookup_backoff_time\": 0.001}"
+    - "LMCACHE_SAVE_UNFULL_CHUNK=False"
+    - "PYTHONHASHSEED=123"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
+  pull-port: 8300
+  reply-port: 8400
+
+vllm1:
+  model: "meta-llama/Llama-3.1-8B-Instruct"
+  args:
+    - "--load-format"
+    - "dummy"
+    - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+vllm2:
+  model: "meta-llama/Llama-3.1-8B-Instruct"
+  args:
+    - "--load-format"
+    - "dummy"
+    - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+checking-fields:
+  - warmup_round_time_per_prompt

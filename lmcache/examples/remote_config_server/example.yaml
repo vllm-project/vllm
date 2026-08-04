@@ -1,0 +1,15 @@
+# Example LMCache configuration with remote config server
+# See README.md for more details
+
+chunk_size: 256
+local_device: "cpu"
+local_cpu: true
+max_local_cpu_size: 10
+internal_api_server_enabled: true
+internal_api_server_port_start: 9899
+
+# Remote configuration settings
+# The remote config server URL - LMCache will fetch additional configs from here
+remote_config_url: "http://localhost:8088/config"
+# Application ID to identify this LMCache instance
+app_id: "test-app"

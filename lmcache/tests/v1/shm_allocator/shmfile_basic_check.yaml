@@ -1,0 +1,33 @@
+# LMCache ShmFile Connector - basic_check configuration
+#
+# Usage:
+#   Step 1: Build shm_file_worker (PIPE mode, same machine)
+#     mkdir -p tests/v1/csrc/build && cd tests/v1/csrc/build
+#     cmake .. && make shm_file_worker
+#
+#   Step 2: Run basic_check
+#     LMCACHE_CONFIG_FILE=configs/shmfile_basic_check.yaml \
+#       python -m lmcache.v1.basic_check \
+#         --mode test_storage_manager
+#
+# For IDC / TCP mode (worker on host, LMCache in container):
+#   On host:  ./shm_file_worker --listen 0.0.0.0:9800
+#   In container: set shmfs.worker_addr to HOST_IP:9800
+#   and run with: docker run --ipc=host ...
+#
+# ShmFileConnector is loaded via external:// adapter, so
+# no shmfile_adapter.py is needed in production code.
+
+chunk_size: 256
+local_cpu: False
+max_local_cpu_size: 0.5
+
+remote_url: "external://host:0/tests.v1.shm_allocator.shmfile_connector/?connector_name=ShmFileConnector"
+
+extra_config:
+  # shm_name for MixedMemoryAllocator
+  shm_name: "/lmcache_verify"
+  # shmfs.* keys for ShmFileConnector
+  shmfs.storage_dir: "/data1/tmp/shmfile_basic_check_data"
+  # For TCP mode, uncomment and set:
+  shmfs.worker_addr: "127.0.0.1:9800"

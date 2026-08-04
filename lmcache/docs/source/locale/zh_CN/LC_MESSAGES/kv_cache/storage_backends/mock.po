@@ -1,0 +1,116 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:2
+msgid "Mock"
+msgstr "模拟"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/l2_storage/index`。"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:9
+msgid ""
+"LMCache provides a mock remote connector that allows you to manually set "
+"the peeking latency, read throughput, and write throughput inside of the "
+"remote url. It will create copies of your KV cache in unmanaged local "
+"RAM."
+msgstr ""
+"LMCache 提供了一个模拟远程连接器，允许您手动设置远程 URL 中的预查看延迟、读取吞吐量和写入吞吐量。它将在未管理的本地 RAM "
+"中创建您的 KV Cache 的副本。"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:12
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:14
+msgid ""
+"Create a configuration file (e.g., ``mock.yaml``) with the following "
+"content:"
+msgstr "创建一个配置文件（例如，``mock.yaml``），内容如下："
+
+#: ../../source/kv_cache/storage_backends/mock.rst:23
+msgid ""
+"The ``remote_url`` format is "
+"``mock://SIZE/?peeking_latency=LATENCY&read_throughput=READ_GBPS&write_throughput=WRITE_GBPS``"
+" where:"
+msgstr ""
+"``remote_url`` 的格式为 "
+"``mock://SIZE/?peeking_latency=LATENCY&read_throughput=READ_GBPS&write_throughput=WRITE_GBPS``，其中："
+
+#: ../../source/kv_cache/storage_backends/mock.rst:25
+msgid "``SIZE``: Maximum storage size"
+msgstr "``SIZE``: 最大存储大小"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:26
+msgid "``peeking_latency``: Latency for peeking operations (in milliseconds)"
+msgstr "``peeking_latency``: 预取操作的延迟（以毫秒为单位）"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:27
+msgid "``read_throughput``: Read throughput (in GB/s)"
+msgstr "``read_throughput``: 读取吞吐量（以 GB/s 为单位）"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:28
+msgid "``write_throughput``: Write throughput (in GB/s)"
+msgstr "``write_throughput``: 写入吞吐量 (以 GB/s 为单位)"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:31
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:33
+msgid "Deploy a serving engine with the mock remote backend:"
+msgstr "使用模拟远程后端部署服务引擎："
+
+#: ../../source/kv_cache/storage_backends/mock.rst:42
+msgid ""
+"Check the retrieval (storing is async so the throughput there is "
+"meaningless) logs on the second query to confirm that the throughput is "
+"slightly lower than 2 GB/s (the CPU <-> GPU allocation/transfer also has "
+"overhead)."
+msgstr "检查第二个查询的检索（存储是异步的，因此吞吐量没有意义）日志，以确认吞吐量略低于 2 GB/s（CPU <-> GPU 分配/传输也有开销）。"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:45
+msgid "Example Query"
+msgstr "示例查询"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:47
+msgid "Send a test request:"
+msgstr "发送测试请求："
+
+#: ../../source/kv_cache/storage_backends/mock.rst:60
+msgid "Expected Logs"
+msgstr "预期日志"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:62
+msgid "You should see logs similar to the following:"
+msgstr "您应该看到类似于以下的日志："
+
+#: ../../source/kv_cache/storage_backends/mock.rst:69
+msgid ""
+"The logs confirm that the throughput is slightly lower than 2 GB/s due to"
+" CPU <-> GPU allocation/transfer overhead."
+msgstr "日志确认吞吐量略低于 2 GB/s，原因是 CPU <-> GPU 分配/传输开销。"
+

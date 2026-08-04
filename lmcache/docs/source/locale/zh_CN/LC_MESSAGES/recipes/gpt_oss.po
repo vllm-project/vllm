@@ -1,0 +1,145 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/gpt_oss.rst:4
+msgid "gpt-oss"
+msgstr "gpt-oss"
+
+#: ../../source/recipes/gpt_oss.rst:7
+msgid "Validated models"
+msgstr "验证过的模型"
+
+#: ../../source/recipes/gpt_oss.rst:9
+msgid "`openai/gpt-oss-120b <https://huggingface.co/openai/gpt-oss-120b>`_"
+msgstr "`openai/gpt-oss-120b <https://huggingface.co/openai/gpt-oss-120b>`_"
+
+#: ../../source/recipes/gpt_oss.rst:10
+msgid "`openai/gpt-oss-20b <https://huggingface.co/openai/gpt-oss-20b>`_"
+msgstr "`openai/gpt-oss-20b <https://huggingface.co/openai/gpt-oss-20b>`_"
+
+#: ../../source/recipes/gpt_oss.rst
+msgid "vLLM"
+msgstr "vLLM"
+
+#: ../../source/recipes/gpt_oss.rst:17
+msgid ""
+"**Engine documentation:** `GPT-OSS in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ (architecture ``GptOssForCausalLM``)."
+msgstr ""
+"**引擎文档：** `vLLM 支持的模型中的 GPT-OSS "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ （架构 ``GptOssForCausalLM``）。"
+
+#: ../../source/recipes/gpt_oss.rst:22
+msgid "**Status:** Validated with LMCache."
+msgstr "**状态:** 已通过 LMCache 验证。"
+
+#: ../../source/recipes/gpt_oss.rst:24
+msgid "Start the LMCache MP server:"
+msgstr "启动 LMCache MP 服务器："
+
+#: ../../source/recipes/gpt_oss.rst:32
+msgid "**gpt-oss-120b** (2 GPUs):"
+msgstr "**gpt-oss-120b** (2 GPUs):"
+
+#: ../../source/recipes/gpt_oss.rst:45
+msgid "**gpt-oss-20b** (1 GPU):"
+msgstr "**gpt-oss-20b** (1 GPU):"
+
+#: ../../source/recipes/gpt_oss.rst:57
+msgid ""
+"Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
+" LMCache + vLLM wiring (ports, remote hosts), see "
+":doc:`../getting_started/quickstart`."
+msgstr ""
+"调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见"
+" :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/gpt_oss.rst:61
+msgid ""
+"If there are any issues with vLLM setup, please refer to the `vLLM "
+"Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
+"for more details."
+msgstr ""
+"如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes "
+"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
+
+#: ../../source/recipes/gpt_oss.rst
+msgid "SGLang"
+msgstr "SGLang"
+
+#: ../../source/recipes/gpt_oss.rst:67
+msgid "**Status:** Not validated with LMCache."
+msgstr "**状态：** 未通过 LMCache 验证。"
+
+#: ../../source/recipes/gpt_oss.rst
+msgid "TRT-LLM"
+msgstr "TRT-LLM"
+
+#: ../../source/recipes/gpt_oss.rst:71
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/gpt_oss.rst:74
+msgid "CacheBlend support"
+msgstr "CacheBlend 支持"
+
+#: ../../source/recipes/gpt_oss.rst:77
+msgid "Compression support"
+msgstr "压缩支持"
+
+#: ../../source/recipes/gpt_oss.rst:83
+msgid "Method"
+msgstr "方法"
+
+#: ../../source/recipes/gpt_oss.rst:84
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/recipes/gpt_oss.rst:85
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/recipes/gpt_oss.rst:86
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+
+#: ../../source/recipes/gpt_oss.rst:87
+msgid "Not validated"
+msgstr "未验证"
+
+#: ../../source/recipes/gpt_oss.rst:91
+msgid "Caveats"
+msgstr "注意事项"
+
+#: ../../source/recipes/gpt_oss.rst:93
+msgid "None known."
+msgstr "没有已知的问题。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "GptOssForCausalLM"
+#~ msgstr "GptOssForCausalLM"
+

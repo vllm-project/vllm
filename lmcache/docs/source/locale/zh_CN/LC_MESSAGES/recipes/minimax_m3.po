@@ -1,0 +1,140 @@
+# Chinese translations for LMCache package
+# LMCache 软件包的简体中文翻译.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# Automatically generated, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-25 19:26-0700\n"
+"PO-Revision-Date: 2026-06-25 19:26-0700\n"
+"Last-Translator: Automatically generated\n"
+"Language-Team: none\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+
+#: ../../source/recipes/minimax_m3.rst:4
+msgid "MiniMax M3"
+msgstr "MiniMax M3"
+
+#: ../../source/recipes/minimax_m3.rst:7
+msgid "Validated models"
+msgstr "验证过的模型"
+
+#: ../../source/recipes/minimax_m3.rst:9
+msgid "`MiniMaxAI/MiniMax-M3 <https://huggingface.co/MiniMaxAI/MiniMax-M3>`_"
+msgstr "`MiniMaxAI/MiniMax-M3 <https://huggingface.co/MiniMaxAI/MiniMax-M3>`_"
+
+#: ../../source/recipes/minimax_m3.rst:0
+msgid "vLLM"
+msgstr "vLLM"
+
+#: ../../source/recipes/minimax_m3.rst:16
+msgid ""
+"**Engine documentation:** `MiniMax-M3 in vLLM supported models <https://"
+"docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ "
+"(architecture ``MiniMaxM3SparseForConditionalGeneration``)."
+msgstr "**引擎文档：** `vLLM 支持模型中的 MiniMax-M3 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_\\ （架构 ``MiniMaxM3SparseForConditionalGeneration``）。"
+
+#: ../../source/recipes/minimax_m3.rst:21
+msgid "**Status:** Validated with LMCache."
+msgstr "**状态:** 已通过 LMCache 验证。"
+
+#: ../../source/recipes/minimax_m3.rst:23
+msgid "Start the LMCache MP server:"
+msgstr "启动 LMCache MP 服务器："
+
+#: ../../source/recipes/minimax_m3.rst:31
+msgid "Start vLLM with the LMCache MP connector (8 GPUs):"
+msgstr "使用 LMCache MP 连接器（8 个 GPU）启动 vLLM："
+
+#: ../../source/recipes/minimax_m3.rst:44
+msgid ""
+"``--block-size 128`` is **required** for this model (see Caveats); the "
+"smaller defaults fail vLLM's KV-cache init. ``--trust-remote-code`` loads "
+"M3's custom architecture. Adjust ``--tensor-parallel-size`` to your hardware "
+"— M3's weights need eight 140 GB-class GPUs. For the generic LMCache + vLLM "
+"wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr "对于该模型，``--block-size 128`` 是\\ **必需的**\\ （参见注意事项）；更小的默认值会导致 vLLM 的 KV Cache 初始化失败。``--trust-remote-code`` 用于加载 M3 的自定义架构。请根据您的硬件调整 ``--tensor-parallel-size`` —— M3 的权重需要八块 140 GB 级别的 GPU。有关 LMCache + vLLM 的通用连接配置（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+
+#: ../../source/recipes/minimax_m3.rst:51
+msgid ""
+"If there are any issues with vLLM setup, please refer to the `vLLM Recipes "
+"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ for more "
+"details."
+msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
+
+#: ../../source/recipes/minimax_m3.rst:0
+msgid "SGLang"
+msgstr "SGLang"
+
+#: ../../source/recipes/minimax_m3.rst:57
+#: ../../source/recipes/minimax_m3.rst:61
+msgid "**Status:** Not validated with LMCache."
+msgstr "**状态：** 未通过 LMCache 验证。"
+
+#: ../../source/recipes/minimax_m3.rst:0
+msgid "TRT-LLM"
+msgstr "TRT-LLM"
+
+#: ../../source/recipes/minimax_m3.rst:64
+msgid "CacheBlend support"
+msgstr "CacheBlend 支持"
+
+#: ../../source/recipes/minimax_m3.rst:67
+msgid "Compression support"
+msgstr "压缩支持"
+
+#: ../../source/recipes/minimax_m3.rst:73
+msgid "Method"
+msgstr "方法"
+
+#: ../../source/recipes/minimax_m3.rst:74
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/recipes/minimax_m3.rst:75
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/recipes/minimax_m3.rst:76
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+
+#: ../../source/recipes/minimax_m3.rst:77
+msgid "Not validated"
+msgstr "未验证"
+
+#: ../../source/recipes/minimax_m3.rst:81
+msgid "Caveats"
+msgstr "注意事项"
+
+#: ../../source/recipes/minimax_m3.rst:83
+msgid ""
+"**Sparse attention with a lightning indexer.** M3 runs grouped-query full "
+"attention plus a DeepSeek-style sparse-attention indexer. Each sparse layer "
+"owns two paged caches — the main K/V (rank-5) and a key-only indexer cache "
+"(rank-3) — which vLLM places in a single ``UniformTypeKVCacheSpecs`` engine "
+"group. LMCache detects both layouts and stores/retrieves each as its own "
+"group; the indexer keys travel with the K/V because they cannot be "
+"recomputed from the cached K/V on a hit."
+msgstr "**基于 lightning indexer 的稀疏注意力。** M3 运行分组查询（grouped-query）全注意力，外加 DeepSeek 风格的稀疏注意力索引器。每个稀疏层拥有两个分页缓存——主 K/V（rank-5）和仅含 key 的索引器缓存（rank-3）——vLLM 将它们放在单个 ``UniformTypeKVCacheSpecs`` 引擎组中。LMCache 会检测这两种布局，并将每一种作为独立的组进行存储/检索；索引器的 key 会随 K/V 一起传输，因为命中时无法从已缓存的 K/V 重新计算出它们。"
+
+#: ../../source/recipes/minimax_m3.rst:90
+msgid ""
+"**``--block-size 128`` is required.** M3's indexer uses ``sparse_block_size "
+"= 128``; vLLM cannot reconcile the default block size (16) or 64 across the "
+"full-attention and sparse kernels and aborts KV-cache init with ``No common "
+"block size``. Use 128."
+msgstr "**``--block-size 128`` 是必需的。** M3 的索引器使用 ``sparse_block_size = 128``；vLLM 无法在全注意力内核与稀疏内核之间协调默认块大小（16）或 64，并会以 ``No common block size`` 中止 KV Cache 初始化。请使用 128。"
+
+#: ../../source/recipes/minimax_m3.rst:94
+msgid ""
+"**LMCache chunk size must be a multiple of the block size.** The default "
+"chunk size (256) already satisfies 128, so no extra flag is needed; if you "
+"pass ``--chunk-size`` to the server, keep it a multiple of 128."
+msgstr "**LMCache 的 chunk 大小必须是 block 大小的整数倍。** 默认的 chunk 大小（256）已满足 128，因此无需额外的标志；如果您向服务器传入 ``--chunk-size``，请保持它是 128 的整数倍。"

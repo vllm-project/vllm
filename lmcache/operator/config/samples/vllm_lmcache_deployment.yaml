@@ -1,0 +1,80 @@
+# Sample vLLM Deployment that OPTS IN to LMCacheEngine dependency injection.
+#
+# The webhook-injected alternative to vllm_deployment.yaml (which wires vLLM to
+# the engine by hand). You supply only the opt-in label + engine annotation and a
+# normal, args-only vLLM launch; at pod CREATE the webhook adds:
+#   - pod hostIPC=true (CUDA IPC with the node-local LMCache server);
+#   - --kv-transfer-config <inline JSON> on the vLLM container (read verbatim from
+#     the engine's <name>-connection ConfigMap — injected inline, no volume mount);
+#   - PYTHONHASHSEED=0 env (deterministic prefix hashing, set only if you didn't).
+#
+# If the LMCacheEngine sets spec.injection.payloadImage, the webhook ALSO stages
+# that lmcache build into this container — see
+# vllm_lmcache_injection_deployment.yaml.
+#
+# PREREQUISITES (else injection silently no-ops or the pod is rejected):
+#   1. An LMCacheEngine named below exists IN THIS NAMESPACE and is reconciled
+#      (its `<name>-connection` ConfigMap exists — the webhook reads it).
+#   2. The webhook is deployed: `make deploy` (not `make run`) + cert-manager.
+#   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
+#      (the injected hostIPC is rejected by baseline/restricted PSS).
+#   4. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
+#      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
+#      override makes the webhook SKIP injection (appended args can't reach
+#      `vllm serve`); it stamps lmcache.ai/lmcache-skip-reason=command-override.
+#
+# Verify after creation (the webhook mutates the POD, not the Deployment):
+#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
+# If nothing was injected, check lmcache.ai/lmcache-skip-reason on the pod
+# (command-override, kv-transfer-config-present, engine-not-found, or
+# target-container-not-found).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-lmcache
+  namespace: default # must match the LMCacheEngine's namespace + be PSS-privileged
+  labels:
+    app: vllm-lmcache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-lmcache
+  template:
+    metadata:
+      labels:
+        app: vllm-lmcache
+        # (1) OPT-IN — the webhook's objectSelector matches this label.
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        # (2) BIND — names the LMCacheEngine (same namespace) to inject for.
+        lmcache.ai/lmcache-engine: "my-cache"
+        # Optional: name the vLLM container if it is not the first one.
+        # lmcache.ai/lmcache-container: "vllm"
+    spec:
+      # Needed for GPU access unless `nvidia` is the default containerd runtime.
+      runtimeClassName: nvidia
+      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
+      # webhook injects hostIPC=true, which shares the host's /dev/shm for CUDA
+      # IPC; an emptyDir would shadow it and break cudaIpcOpenMemHandle.
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly # vLLM + lmcache
+          # Args-only launch (image ENTRYPOINT is ["vllm","serve"]). Put the
+          # model + your serving flags here; the webhook APPENDS --kv-transfer-config.
+          # Do NOT add --kv-transfer-config yourself (a user-supplied one makes the
+          # webhook skip it). --no-enable-prefix-caching keeps vLLM's APC from
+          # shadowing LMCache lookups.
+          args:
+            - "Qwen/Qwen3-4B-Instruct-2507"
+            - "--port"
+            - "8000"
+            - "--no-enable-prefix-caching"
+            - "--gpu-memory-utilization"
+            - "0.8"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1"

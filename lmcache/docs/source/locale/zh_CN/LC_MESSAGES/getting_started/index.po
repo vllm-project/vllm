@@ -1,0 +1,32 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/index.rst:2
+msgid "Getting Started"
+msgstr "入门指南"
+
+#: ../../source/getting_started/index.rst:4
+msgid ""
+"New to LMCache? Start here -- an overview of multiprocess mode, "
+"installation, a quickstart, the configuration reference, and tools for "
+"benchmarking and sizing the cache."
+msgstr "对 LMCache 不熟悉？从这里开始——了解 MP 模式（多进程）、安装、快速入门、配置参考以及用于基准测试和缓存大小评估的工具。"
+

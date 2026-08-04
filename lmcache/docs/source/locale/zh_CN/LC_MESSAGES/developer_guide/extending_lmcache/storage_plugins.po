@@ -1,0 +1,379 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:2
+msgid "Storage Plugins"
+msgstr "存储插件"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:4
+msgid ""
+"LMCache supports out of the box storage backends like Mooncake, S3 and "
+"NIXL. The LMCache storage plugin system provides the ability to add "
+"custom storage backends through dynamic loading or plug and play "
+"capability. In other words, extending cache storage capabilities without "
+"modifying core code."
+msgstr "LMCache 支持开箱即用的存储后端，如 Mooncake、S3 和 NIXL。LMCache 存储插件系统提供通过动态加载或即插即用能力添加自定义存储后端的功能。换句话说，可以在不修改核心代码的情况下扩展缓存存储能力。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:8
+msgid "Backend Definition Requirements"
+msgstr "后端定义要求"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:9
+msgid "Inherit from ``StoragePluginInterface``"
+msgstr "继承自 ``StoragePluginInterface``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:10
+msgid ""
+"Implement all the abstract methods of the parent interface of "
+"``StoragePluginInterface``- ``StorageBackendInterface``"
+msgstr "实现 ``StoragePluginInterface`` 的父接口 ``StorageBackendInterface`` 的所有抽象方法。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:11
+msgid "Package as an installable Python module"
+msgstr "打包为可安装的 Python 模块"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:15
+msgid ""
+"The interface constructor is the instantiation contract that the LMCache "
+"loading system will use when loading custom storage backends. If you wish"
+" to implement a constructor, it should have the same parameter signature "
+"and call the interface constructor."
+msgstr "接口构造函数是 LMCache 加载系统在加载自定义存储后端时使用的实例化契约。如果您希望实现一个构造函数，它应该具有相同的参数签名并调用接口构造函数。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:19
+msgid "How to Integrate the Backend with LMCache"
+msgstr "如何将后端与 LMCache 集成"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:20
+msgid "Install your backend package in the LMCache environment"
+msgstr "在 LMCache 环境中安装您的后端包"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:21
+msgid ""
+"Add ``storage_plugins`` and its related ``module_path`` and "
+"``class_name`` to ``extra_config`` section of LMCache configuration as "
+"follows:"
+msgstr "将 ``storage_plugins`` 及其相关的 ``module_path`` 和 ``class_name`` 添加到 LMCache 配置的 ``extra_config`` 部分，如下所示："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:33
+msgid "An example configuration for a logging backend is as follows:"
+msgstr "日志后端的示例配置如下："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:47
+msgid ""
+"Storage backends are initialized in order during LMCache startup - "
+"earlier backends have higher priority during cache lookups"
+msgstr "存储后端在 LMCache 启动时按顺序初始化 - 较早的后端在缓存查找中具有更高的优先级"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:48
+msgid ""
+"``storage_plugin.<backend_name>`` distinguishes the different dynamic "
+"loaded backends"
+msgstr "``storage_plugin.<backend_name>`` 区分不同的动态加载后端"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:51
+msgid "Backend Implementation Example"
+msgstr "后端实现示例"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:52
+msgid ""
+"A sample custom backend implementation can be viewed at "
+"https://github.com/opendataio/lmc_external_log_backend/"
+msgstr "可以在 https://github.com/opendataio/lmc_external_log_backend/ 查看一个示例自定义后端实现。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:56
+msgid "MP-Mode L2 Adapter Plugins (``plugin``)"
+msgstr "MP-模式 L2 适配器插件 (``plugin``)"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:60
+msgid ""
+"The storage plugin system described above applies to **non-MP mode** "
+"(single-process). For **MP mode** (multiprocess), LMCache provides the "
+"``plugin`` L2 adapter type, which dynamically loads a third-party "
+"``L2AdapterInterface`` implementation at runtime."
+msgstr "上述描述的存储插件系统适用于 **非 MP 模式**\\ （单进程）。对于 **MP 模式**\\ （多进程），LMCache 提供了 ``plugin`` L2 适配器类型，该类型在运行时动态加载第三方 ``L2AdapterInterface`` 实现。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:65
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:67
+msgid ""
+"The ``plugin`` adapter type lets you ship a full L2 adapter as a "
+"**separate, pip-installable package**. At startup, LMCache imports your "
+"module, instantiates your adapter class, and uses it just like a built-in"
+" adapter -- no LMCache source modifications required."
+msgstr "``plugin`` 适配器类型允许您将完整的 L2 适配器作为 **单独的、可通过 pip 安装的包** 进行发布。在启动时，LMCache 导入您的模块，实例化您的适配器类，并像使用内置适配器一样使用它 -- 无需对 LMCache 源代码进行修改。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:73
+msgid ""
+"If your storage backend is a native C++ connector (pybind-wrapped), "
+"consider using the ``native_plugin`` type instead (see "
+":doc:`native_connectors`). It reuses the built-in bridging logic so you "
+"only need to implement 6 connector methods rather than the full "
+"``L2AdapterInterface``."
+msgstr "如果您的存储后端是一个原生的 C++ 连接器（使用 pybind 封装），请考虑使用 ``native_plugin`` 类型（请参见 :doc:`native_connectors`）。它重用了内置的桥接逻辑，因此您只需实现 6 个连接器方法，而不是完整的 ``L2AdapterInterface``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:79
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:93
+msgid "``PluginL2AdapterConfig`` fields"
+msgstr "``PluginL2AdapterConfig`` 字段"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:97
+msgid "Field"
+msgstr "字段"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:98
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:99
+msgid "Required"
+msgstr "必需的"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:100
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:101
+msgid "``module_path``"
+msgstr "``module_path``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:102
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:106
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:114
+msgid "``str``"
+msgstr "``str``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:103
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:107
+msgid "yes"
+msgstr "是"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:104
+msgid "Dotted Python import path of the module containing the adapter class."
+msgstr "适配器类所在模块的点分 Python 导入路径。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:105
+msgid "``class_name``"
+msgstr "``class_name``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:108
+msgid ""
+"Name of the class inside ``module_path`` that implements "
+"``L2AdapterInterface``."
+msgstr "``module_path`` 中实现 ``L2AdapterInterface`` 的类的名称。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:109
+msgid "``adapter_params``"
+msgstr "``adapter_params``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:110
+msgid "``dict``"
+msgstr "``dict``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:111
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:115
+msgid "no"
+msgstr "不"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:112
+msgid ""
+"Forwarded to the adapter class constructor (as a typed config or raw "
+"dict)."
+msgstr "转发到适配器类构造函数（作为类型化配置或原始字典）。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:113
+msgid "``config_class_name``"
+msgstr "``config_class_name``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:116
+msgid "Explicit config class name; when omitted the factory auto-discovers it."
+msgstr "显式配置类名称；当省略时，工厂会自动发现它。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:119
+msgid "Config Class Auto-Discovery"
+msgstr "配置类自动发现"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:121
+msgid ""
+"The factory automatically resolves the adapter's config class using the "
+"following priority chain (first match wins):"
+msgstr "工厂会自动使用以下优先级链解析适配器的配置类（第一个匹配的优先）："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:124
+msgid "**Explicit** ``config_class_name`` field in JSON config."
+msgstr "**显式** ``config_class_name`` 字段在 JSON 配置中。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:125
+msgid ""
+"**Convention**: adapter class name + ``\"Config\"`` suffix (e.g. "
+"``MyL2Adapter`` looks for ``MyL2AdapterConfig``)."
+msgstr "**约定**\\ ：适配器类名 + ``\"Config\"`` 后缀（例如 ``MyL2Adapter`` 查找 ``MyL2AdapterConfig``\\ ）。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:127
+msgid ""
+"**Attribute**: ``config_class_name`` attribute on the adapter class "
+"itself."
+msgstr "**属性**: ``config_class_name`` 属性在适配器类本身上。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:128
+msgid "**Fallback**: no config class found -- pass raw ``adapter_params`` dict."
+msgstr "**后备**: 未找到配置类 -- 传递原始 ``adapter_params`` 字典。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:130
+msgid ""
+"Each candidate is looked up in the loaded module and validated as an "
+"``L2AdapterConfigBase`` subclass. This means most plugins that follow the"
+" naming convention will **automatically** receive a typed config instance"
+" without any extra configuration."
+msgstr "每个候选项都会在加载的模块中查找，并验证为 ``L2AdapterConfigBase`` 子类。这意味着大多数遵循命名约定的插件将 **自动** 接收一个类型化的配置实例，而无需任何额外的配置。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:135
+msgid "Plugin Contract"
+msgstr "插件合同"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:137
+msgid "A plugin adapter class **must**:"
+msgstr "插件适配器类 **必须**\\ ："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:139
+msgid ""
+"Subclass ``L2AdapterInterface`` from "
+"``lmcache.v1.distributed.l2_adapters.base``."
+msgstr "从 ``lmcache.v1.distributed.l2_adapters.base`` 子类化 ``L2AdapterInterface``\\ 。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:140
+msgid ""
+"Implement all abstract methods: ``submit_store_task``, "
+"``pop_completed_store_tasks``, ``submit_lookup_and_lock_task``, "
+"``query_lookup_and_lock_result``, ``submit_unlock``, "
+"``submit_load_task``, ``query_load_result``, ``close``, and all three "
+"event-fd getters."
+msgstr "实现所有抽象方法：\\ ``submit_store_task``\\ 、\\ ``pop_completed_store_tasks``\\ 、\\ ``submit_lookup_and_lock_task``\\ 、\\ ``query_lookup_and_lock_result``\\ 、\\ ``submit_unlock``\\ 、\\ ``submit_load_task``\\ 、\\ ``query_load_result``\\ 、\\ ``close``\\ ，以及所有三个事件文件描述符获取器。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:143
+msgid ""
+"Provide **three distinct event fds** (store / lookup / load). The "
+"controllers build ``fd -> adapter`` maps; duplicates will misroute "
+"events."
+msgstr "提供 **三个不同的事件 fd**\\ （存储 / 查找 / 加载）。控制器构建 ``fd -> 适配器`` 映射；重复会导致事件错误路由。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:145
+msgid ""
+"Be **thread-safe**: ``StoreController`` and ``PrefetchController`` call "
+"adapter methods from different threads concurrently."
+msgstr "确保 **线程安全**\\ ：\\ ``StoreController`` 和 ``PrefetchController`` 从不同线程并发调用适配器方法。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:147
+msgid "Accept ``**kwargs`` in ``__init__`` to stay forward-compatible."
+msgstr "在\\ ``__init__``\\ 中接受\\ ``**kwargs``\\ 以保持向前兼容。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:149
+msgid "A plugin adapter class **should**:"
+msgstr "插件适配器类 **应该**\\ ："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:151
+msgid ""
+"Create its own asyncio event loop and background thread if it needs async"
+" I/O."
+msgstr "如果需要异步 I/O，则应创建自己的 asyncio 事件循环和后台线程。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:152
+msgid ""
+"Use ``create_event_notifier()`` from ``lmcache.v1.platform`` for the "
+"three event fds (cross-platform: ``os.eventfd`` on Linux, ``os.pipe`` "
+"fallback elsewhere)."
+msgstr "使用 ``lmcache.v1.platform`` 中的 ``create_event_notifier()`` 来处理三个事件文件描述符（跨平台：在 Linux 上使用 ``os.eventfd``\\ ，在其他地方使用 ``os.pipe`` 作为后备）。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:154
+msgid "Clean up all resources (event fds, threads, connections) in ``close()``."
+msgstr "在 ``close()`` 中清理所有资源（事件文件描述符、线程、连接）。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:157
+msgid "Loading Flow"
+msgstr "加载流程"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:190
+msgid "Minimal Example"
+msgstr "最小示例"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:220
+msgid "Launch via CLI:"
+msgstr "通过 CLI 启动："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:232
+msgid "Reference Implementation"
+msgstr "参考实现"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:234
+msgid ""
+"See ``examples/lmc_external_l2_adapter/`` for a complete, pip-installable"
+" example plugin (``InMemoryL2Adapter``) that demonstrates:"
+msgstr "请参阅 ``examples/lmc_external_l2_adapter/`` 以获取完整的、可通过 pip 安装的示例插件 (``InMemoryL2Adapter``)，该插件演示了："
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:237
+msgid "FIFO eviction with configurable capacity."
+msgstr "可配置容量的 FIFO 逐出。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:238
+msgid "Simulated bandwidth delay for realistic testing."
+msgstr "用于现实测试的模拟带宽延迟。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:239
+msgid "Background asyncio event loop with proper shutdown."
+msgstr "后台 asyncio 事件循环及其正确关闭。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:240
+msgid ""
+"Full test suite covering store, lookup, load, batch operations, and "
+"eviction behavior."
+msgstr "全面的测试套件，涵盖存储、查找、加载、批量操作和逐出行为。"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:243
+msgid "Additional Resources"
+msgstr "附加资源"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:245
+msgid ""
+"Plugin adapter source: "
+"``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``"
+msgstr "插件适配器源代码：\\ ``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:246
+msgid ""
+"Native plugin adapter: "
+"``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``"
+msgstr "原生插件适配器: ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:247
+msgid ""
+"Design document: "
+"``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
+msgstr "设计文档：\\ ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
+
+#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:248
+msgid "L2 adapter base interface: ``lmcache/v1/distributed/l2_adapters/base.py``"
+msgstr "L2 适配器基础接口: ``lmcache/v1/distributed/l2_adapters/base.py``"
+

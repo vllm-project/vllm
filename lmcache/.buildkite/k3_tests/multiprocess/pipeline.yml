@@ -1,0 +1,334 @@
+# Multiprocess tests — one step per test, run in parallel.
+# Each step gets its own K8s pod with the exact GPU count it needs.
+# Tests are grouped by GPU requirement; the 2-GPU group is listed first so
+# these heavier jobs get scheduled before 1-GPU jobs.
+#   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
+#   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
+
+# Retry policy for known-flaky long-running multiprocess steps.
+# Note: exit_status "*" matches 1-255 only; -1 (agent lost) needs a separate rule.
+x-flaky-retry: &flaky-retry
+  automatic:
+    - exit_status: -1
+      limit: 2
+    - exit_status: "*"
+      limit: 2
+
+# Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
+# merged; engine_driven still needs its separate /dev/shm pod below.
+# Every pod mounts a 1Gi /dev/shm: the container runtime default is 64MB and
+# vLLM needs >160MB of shared memory. (The SHM-transport pods below mount a
+# much larger dshm volume instead.)
+x-pod-1gpu: &pod-1gpu
+  containers:
+    - name: container-0
+      image: lmcache/ci-base:latest
+      imagePullPolicy: Never
+      resources: { limits: { "nvidia.com/gpu": "1" } }
+      volumeMounts:
+        - { name: hf-cache, mountPath: /root/.cache/huggingface }
+        - { name: dshm, mountPath: /dev/shm }
+  volumes:
+    - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+
+steps:
+  - group: ":compression: Multiprocess (2-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    steps:
+      - label: ":compression: vllm_bench"
+        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-2gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "2" } }
+                    volumeMounts: &vol-mounts
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes: &vols
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: long_doc_qa"
+        command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: long_doc_qa_l2"
+        command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: deadlock"
+        command: .buildkite/k3_tests/multiprocess/run.sh deadlock
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+      # Two LMCache MP instances + two vLLM instances + one coordinator on a
+      # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
+      # KV from engine A over P2P.
+      - label: ":compression: p2p"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+      # Cross-TP-rank KV correctness for a hybrid MLA + linear-attention model.
+      # Launches Kimi-Linear with TP=2 (both GPUs) + LMCache, sends one long
+      # request to populate LMCache, restarts vLLM (LMCache server kept alive),
+      # re-sends the identical request now served by LMCache, and asserts the
+      # two outputs are byte-identical. A broken cross-rank restore (see
+      # utils.py::mla_only) hands non-zero ranks rank 0's mamba shard and
+      # diverges the output. Two 48B loads (cold + post-restart) need the long
+      # timeout.
+      - label: ":compression: kimi_linear_tp"
+        command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
+        timeout_in_minutes: 60
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+  - group: ":compression: Multiprocess (1-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    steps:
+      # Correctness coverage for both transfer modes. engine_driven requires
+      # SHM transport, so both matrix jobs use the existing dshm pod spec.
+      - label: ":compression: lm_eval_{{matrix.mode}}"
+        command: |
+          case "{{matrix.mode}}" in
+            lmcache_driven) ;;
+            engine_driven)
+              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+              export L1_USE_LAZY="false"
+              export CPU_BUFFER_SIZE="80"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        matrix:
+          setup:
+            mode:
+              - "lmcache_driven"
+              - "engine_driven"
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-1gpu-dshm
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
+        artifact_paths: ["*.log"]
+
+      # Preemption correctness: GPU_MEMORY_UTILIZATION=0.4 forces the KV cache
+      # pool small enough that vLLM preempts in-flight requests under concurrent
+      # lm_eval load. Both steps reuse the same run.sh lm_eval_preemption
+      # command; env vars select the transfer mode. Checks: no crash, score
+      # drift < 0.01, preemption actually occurred, score >= SCORE_MIN.
+      - label: ":compression: lm_eval_preemption / {{matrix.mode}}"
+        command: |
+          case "{{matrix.mode}}" in
+            lmcache_driven) ;;
+            engine_driven)
+              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+              export L1_USE_LAZY="false"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh lm_eval_preemption
+        matrix:
+          setup:
+            mode:
+              - "lmcache_driven"
+              - "engine_driven"
+        timeout_in_minutes: 30
+        env:
+          GPU_MEMORY_UTILIZATION: "0.4"
+          NUM_CONCURRENT: "256"
+          MAX_MODEL_LEN: "4096"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
+      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
+      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
+      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
+      # runs' scores match. Single GPU, no baseline.
+      - label: ":compression: hma_lm_eval_gemma4"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
+        timeout_in_minutes: 60
+        retry: *flaky-retry
+        env:
+          MODEL: "google/gemma-4-31B-it"
+          # Allow a small score difference between the two runs.
+          SCORE_TOLERANCE: "0.03"
+          ATTENTION_BACKEND: "auto"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
+          # above the 300s default.
+          MAX_WAIT_SECONDS: "600"
+          # Cap samples and enlarge the CPU pool so the retrieve run stays
+          # cache-served (31B's per-token KV is large).
+          LIMIT: "100"
+          CPU_BUFFER_SIZE: "200"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: fault_tolerance"
+        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: restart_recovery"
+        command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: cache_stats"
+        command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: http_api"
+        command: .buildkite/k3_tests/multiprocess/run.sh http_api
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: gds_smoke_test"
+        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: scratch, mountPath: /scratch }
+                      - { name: udev, mountPath: /run/udev, readOnly: true }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+        artifact_paths: ["*.log"]
+
+  - group: ":compression: Multiprocess (CPU-only)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    steps:
+      # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
+      # runner script, so an empty string ("") is meaningful and differs
+      # from unset. `__default__` is the sentinel meaning "shm mode".
+      - label: ":compression: cpu_e2e_validation ({{matrix.mode}})"
+        # matrix.adjustments does not support `env:` in Buildkite. Instead
+        # we branch on {{matrix.mode}} inside the command to set the
+        # per-mode env before invoking the shared runner script.
+        command: |
+          case "{{matrix.mode}}" in
+            shm) ;;  # rely on script defaults (engine-driven + shm transport)
+            pickle) export LMCACHE_SHM_NAME="" ;;
+            server_copy) export LMCACHE_MP_TRANSFER_MODE="lmcache_driven" ;;
+          esac
+          bash .github/scripts/run-cpu-e2e-validation.sh
+        matrix:
+          setup:
+            mode:
+              - "shm"
+              - "pickle"
+              - "server_copy"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+  # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
+  # above (each group's `if` evaluates to false) and instead runs a single
+  # vllm_bench step that proves the freshly-installed vLLM nightly works
+  # with LMCache. On success, the verified vllm wheel version is pushed to
+  # the `buildkite_latest_tested_vllm` branch so downstream builds can pin
+  # to a known-good nightly instead of resolving "latest" again.
+  - label: ":pushpin: Verify & pin vLLM nightly"
+    if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
+    command: |
+      .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+      bash .buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources: { limits: { "nvidia.com/gpu": "2" } }
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                  - { name: dshm, mountPath: /dev/shm }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+    artifact_paths: ["*.log"]

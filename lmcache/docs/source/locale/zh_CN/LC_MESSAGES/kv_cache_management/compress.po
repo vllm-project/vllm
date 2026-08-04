@@ -1,0 +1,103 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache_management/compress.rst:4
+msgid "Compress and Decompress the KV cache"
+msgstr "压缩和解压缩 KV Cache"
+
+#: ../../source/kv_cache_management/compress.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/kv_cache_management/compress.rst:11
+msgid "The ``compress`` interface is defined as the following:"
+msgstr "``compress`` 接口定义如下："
+
+#: ../../source/kv_cache_management/compress.rst:18
+msgid ""
+"These 2 functions compresses/decompresses the KV cache chunks specified "
+"by ``tokens`` using the given ``method`` in the storage ``location``. The"
+" controller returns an ``event_id`` and the number of tokens scheduled "
+"for compression or decompression."
+msgstr ""
+"这两个函数使用存储位置中的给定方法对由 ``tokens`` 指定的 KV Cache 块进行压缩/解压缩。控制器返回一个 "
+"``event_id`` 和计划进行压缩或解压缩的令牌数量。"
+
+#: ../../source/kv_cache_management/compress.rst:22
+msgid "Example usage:"
+msgstr "示例用法："
+
+#: ../../source/kv_cache_management/compress.rst:24
+msgid ""
+"First, we need a yaml file ``example.yaml`` to properly configure the "
+"lmcache instance:"
+msgstr "首先，我们需要一个 yaml 文件 ``example.yaml`` 来正确配置 lmcache 实例："
+
+#: ../../source/kv_cache_management/compress.rst:42
+msgid "Second, we need to start the vllm/lmcache instance at port 8000:"
+msgstr "第二，我们需要在 8000 端口启动 vllm/lmcache 实例："
+
+#: ../../source/kv_cache_management/compress.rst:48
+msgid ""
+"Third, we need to start the lmcache controller at port 9000 and the "
+"monitor at port 9001:"
+msgstr "第三，我们需要在 9000 端口启动 lmcache 控制器，在 9001 端口启动监视器："
+
+#: ../../source/kv_cache_management/compress.rst:54
+msgid "Then we can send a request to vllm to see if it works properly:"
+msgstr "然后我们可以向 vllm 发送请求，以查看它是否正常工作："
+
+#: ../../source/kv_cache_management/compress.rst:66
+msgid "Now we send a request to tokenize the prompt:"
+msgstr "现在我们发送请求以对提示进行标记化："
+
+#: ../../source/kv_cache_management/compress.rst:77
+msgid "We should be able to see token ids in response:"
+msgstr "我们应该能够在响应中看到令牌 ID："
+
+#: ../../source/kv_cache_management/compress.rst:83
+msgid "After all, we issue a ``compress`` request:"
+msgstr "毕竟，我们发出了一个 ``compress`` 请求："
+
+#: ../../source/kv_cache_management/compress.rst:96
+#: ../../source/kv_cache_management/compress.rst:117
+msgid "The controller responds with a message similar to:"
+msgstr "控制器会回复类似于以下内容的消息："
+
+#: ../../source/kv_cache_management/compress.rst:102
+msgid ""
+"This indicates that 12 tokens are being compressed. The ``event_id`` can "
+"be used to query the status of the operation."
+msgstr "这表明正在压缩 12 个 token。``event_id`` 可用于查询操作的状态。"
+
+#: ../../source/kv_cache_management/compress.rst:104
+msgid "Once the kv cache is compressed, we can use cachegen to decompress"
+msgstr "一旦 KV Cache 被压缩，我们可以使用 cachegen 进行解压。"
+
+#: ../../source/kv_cache_management/compress.rst:123
+msgid ""
+"This indicates that 12 tokens are being decompressed. The ``event_id`` "
+"can be used to query the status of the operation."
+msgstr "这表示正在解压缩 12 个令牌。``event_id`` 可用于查询操作的状态。"
+

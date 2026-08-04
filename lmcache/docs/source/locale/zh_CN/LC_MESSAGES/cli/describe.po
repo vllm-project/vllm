@@ -1,0 +1,244 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/describe.rst:2
+msgid "lmcache describe"
+msgstr "lmcache describe"
+
+#: ../../source/cli/describe.rst:4
+msgid ""
+"The ``lmcache describe`` command shows the detailed status of a running "
+"service. Two targets are supported:"
+msgstr "``lmcache describe`` 命令显示正在运行的服务的详细状态。支持两个目标："
+
+#: ../../source/cli/describe.rst:7
+msgid ""
+"``kvcache`` — the LMCache KV cache service (health, L1 storage, "
+"registered models, L2 adapters)."
+msgstr "``kvcache`` — LMCache KV Cache 服务（健康状况、L1 存储、注册的模型、L2 适配器）。"
+
+#: ../../source/cli/describe.rst:9
+msgid ""
+"``engine`` — the inference engine (vLLM) LMCache is paired with (model, "
+"context window, health, in-flight requests)."
+msgstr "``engine`` — 推理引擎 (vLLM) 与 LMCache 配对的 (模型、上下文窗口、健康状况、正在处理的请求)。"
+
+#: ../../source/cli/describe.rst:13
+msgid "KV Cache Service (``kvcache``)"
+msgstr "KV Cache 服务 (``kvcache``)"
+
+#: ../../source/cli/describe.rst:57 ../../source/cli/describe.rst:86
+msgid "The output shows:"
+msgstr "输出显示："
+
+#: ../../source/cli/describe.rst:59
+msgid "**Overview** — health status, engine type, chunk size."
+msgstr "**概述** — 健康状态、引擎类型、块大小。"
+
+#: ../../source/cli/describe.rst:60
+msgid "**L1 storage** — capacity, usage, eviction policy, cached object count."
+msgstr "**L1 存储** — 容量、使用情况、逐出策略、缓存对象数量。"
+
+#: ../../source/cli/describe.rst:61
+msgid ""
+"**Registered models** — per-model KV cache layout: a context-wide summary"
+" followed by one kernel group section per kernel group, each with the "
+"engine KV tensor shape (symbolic and concrete), attention backend, and "
+"group geometry."
+msgstr ""
+"**注册模型** — 每个模型的 KV Cache 布局：一个上下文范围的摘要，后面跟着每个内核组的一个内核组部分，每个部分都有引擎 KV "
+"张量形状（符号和具体）、注意力后端和组几何。"
+
+#: ../../source/cli/describe.rst:64
+msgid "**L2 adapters** — type, health, backend, stored objects, and utilization."
+msgstr "**L2 适配器** — 类型、健康状况、后端、存储对象和利用率。"
+
+#: ../../source/cli/describe.rst:67
+msgid "Inference Engine (``engine``)"
+msgstr "推理引擎 (``engine``)"
+
+#: ../../source/cli/describe.rst:69
+msgid ""
+"``describe engine`` inspects the vLLM inference engine instead of the "
+"LMCache service, reading only the engine's own HTTP endpoints "
+"(``/v1/models``, ``/health``, ``/metrics``)."
+msgstr "``describe engine`` 检查 vLLM 推理引擎，而不是 LMCache 服务，仅读取引擎自身的 HTTP 端点（``/v1/models``、``/health``、``/metrics``）。"
+
+#: ../../source/cli/describe.rst:88
+msgid ""
+"**Model** and **Max context** — the served model id and its maximum "
+"context length, from ``/v1/models``."
+msgstr "**模型** 和 **最大上下文** — 提供的模型 ID 及其最大上下文长度，来自 ``/v1/models``。"
+
+#: ../../source/cli/describe.rst:90
+msgid "**Status** — ``OK`` / ``UNHEALTHY`` from the engine's ``/health`` probe."
+msgstr "**状态** — ``OK`` / ``UNHEALTHY`` 来自引擎的 ``/health`` 探针。"
+
+#: ../../source/cli/describe.rst:91
+msgid ""
+"**Running requests** — in-flight requests, summed from the "
+"``vllm:num_requests_running`` metric. Shows ``N/A`` if metrics are "
+"disabled or unreachable."
+msgstr "**运行请求** — 正在进行的请求，从 ``vllm:num_requests_running`` 指标中汇总。如果指标被禁用或无法访问，则显示 ``N/A``。"
+
+#: ../../source/cli/describe.rst:95
+msgid ""
+"Only the ``/v1/models`` fetch is required: if ``/health`` or ``/metrics``"
+" is unavailable the command still reports what it can rather than "
+"failing."
+msgstr "仅需要 ``/v1/models`` 获取：如果 ``/health`` 或 ``/metrics`` 不可用，命令仍会报告它能提供的信息，而不是失败。"
+
+#: ../../source/cli/describe.rst:115
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/describe.rst:121
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/describe.rst:122
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/describe.rst:123
+msgid "``target``"
+msgstr "``target``"
+
+#: ../../source/cli/describe.rst:124
+msgid "What to describe (positional, required): ``kvcache`` or ``engine``."
+msgstr "描述内容（位置参数，必需）：``kvcache`` 或 ``engine``。"
+
+#: ../../source/cli/describe.rst:125
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/describe.rst:126
+msgid ""
+"Server URL. Defaults per target: ``http://localhost:8080`` for "
+"``kvcache``, ``http://localhost:8000`` for ``engine``."
+msgstr "服务器 URL。默认值根据目标而定：``kvcache`` 的默认值为 ``http://localhost:8080``，``engine`` 的默认值为 ``http://localhost:8000``。"
+
+#: ../../source/cli/describe.rst:128
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/describe.rst:129
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
+
+#: ../../source/cli/describe.rst:130
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/cli/describe.rst:131
+msgid "Save metrics to a file (format follows ``--format``)."
+msgstr "将指标保存到文件中（格式遵循 ``--format``\\ ）。"
+
+#: ../../source/cli/describe.rst:132
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/describe.rst:133
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/cli/describe.rst:136
+msgid "JSON Output"
+msgstr "JSON 输出"
+
+#: ../../source/cli/describe.rst:138
+msgid ""
+"Use ``--format json`` for machine-readable output. Models, kernel groups,"
+" and L2 adapters are collected into lists for easy programmatic access:"
+msgstr "使用 ``--format json`` 以机器可读的输出格式。模型、内核组和 L2 适配器被收集到列表中，以便于程序化访问："
+
+#: ../../source/cli/describe.rst:197
+msgid "Engine KV Shape Abbreviations"
+msgstr "引擎 KV 形状缩写"
+
+#: ../../source/cli/describe.rst:199
+msgid ""
+"The ``engine_kv_shape`` field uses short names from the "
+"``EngineKVFormat`` enum:"
+msgstr "``engine_kv_shape`` 字段使用来自 ``EngineKVFormat`` 枚举的短名称："
+
+#: ../../source/cli/describe.rst:205
+msgid "Abbrev"
+msgstr "缩写"
+
+#: ../../source/cli/describe.rst:206
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/describe.rst:207
+msgid "NB"
+msgstr "注意事项"
+
+#: ../../source/cli/describe.rst:208
+msgid "num_blocks"
+msgstr "num_blocks"
+
+#: ../../source/cli/describe.rst:209
+msgid "NL"
+msgstr "NL"
+
+#: ../../source/cli/describe.rst:210
+msgid "num_layers"
+msgstr "num_layers"
+
+#: ../../source/cli/describe.rst:211
+msgid "BS"
+msgstr "批量大小"
+
+#: ../../source/cli/describe.rst:212
+msgid "block_size"
+msgstr "块大小"
+
+#: ../../source/cli/describe.rst:213
+msgid "NH"
+msgstr "NH"
+
+#: ../../source/cli/describe.rst:214
+msgid "num_heads"
+msgstr "头数"
+
+#: ../../source/cli/describe.rst:215
+msgid "HS"
+msgstr "HS"
+
+#: ../../source/cli/describe.rst:216
+msgid "head_size"
+msgstr "头部大小"
+
+#: ../../source/cli/describe.rst:217
+msgid "PBS"
+msgstr "PBS"
+
+#: ../../source/cli/describe.rst:218
+msgid "page_buffer_size (NB × BS)"
+msgstr "页面缓冲区大小 (NB × BS)"
+
+#~ msgid "``kvcache``"
+#~ msgstr "``kvcache``"
+
+#~ msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
+#~ msgstr "LMCache HTTP 服务器 URL（默认：\\ ``http://localhost:8080``\\ ）。"
+

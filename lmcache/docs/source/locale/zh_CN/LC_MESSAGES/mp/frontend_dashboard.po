@@ -1,0 +1,354 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/frontend_dashboard.rst:2
+msgid "Frontend Dashboard"
+msgstr "前端仪表板"
+
+#: ../../source/mp/frontend_dashboard.rst:4
+msgid ""
+"The **LMCache Frontend Dashboard** is a lightweight web UI that lets you "
+"monitor and manage a fleet of LMCache multiprocess (MP) servers from a "
+"single browser tab.  It is shipped as part of the ``lmcache`` package and"
+" requires no extra infrastructure beyond a small discovery service."
+msgstr "**LMCache 前端仪表板**\\ 是一个轻量级的网页用户界面，允许您从一个浏览器标签页监控和管理一组 LMCache 多进程 (MP) 服务器。它作为 ``lmcache`` 包的一部分提供，不需要额外的基础设施，只需一个小型发现服务。"
+
+#: ../../source/mp/frontend_dashboard.rst:10
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/mp/frontend_dashboard.rst:12
+msgid "Architecture Diagram"
+msgstr "架构图"
+
+#: ../../source/mp/frontend_dashboard.rst:39
+msgid ""
+"Each LMCache MP server runs a **frontend plugin subprocess** that "
+"periodically sends a heartbeat to the discovery service.  The dashboard "
+"queries the discovery service to discover all live nodes and proxies "
+"their HTTP APIs through a built-in reverse proxy."
+msgstr "每个 LMCache MP 服务器运行一个 **前端插件子进程**\\ ，定期向发现服务发送心跳。仪表板查询发现服务以发现所有活动节点，并通过内置反向代理代理它们的 HTTP API。"
+
+#: ../../source/mp/frontend_dashboard.rst:45
+msgid "Components"
+msgstr "组件"
+
+#: ../../source/mp/frontend_dashboard.rst:51
+msgid "Component"
+msgstr "组件"
+
+#: ../../source/mp/frontend_dashboard.rst:52
+#: ../../source/mp/frontend_dashboard.rst:153
+#: ../../source/mp/frontend_dashboard.rst:193
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/frontend_dashboard.rst:53
+msgid "``lmcache.lmcache_frontend.app``"
+msgstr "``lmcache.lmcache_frontend.app``"
+
+#: ../../source/mp/frontend_dashboard.rst:54
+msgid ""
+"FastAPI application serving the web UI and a reverse proxy to every "
+"registered LMCache node.  Start with ``python -m "
+"lmcache.lmcache_frontend.app``."
+msgstr "FastAPI 应用程序提供 Web UI 和每个注册的 LMCache 节点的反向代理。使用 ``python -m lmcache.lmcache_frontend.app`` 启动。"
+
+#: ../../source/mp/frontend_dashboard.rst:57
+msgid "``lmcache_mp_frontend_plugin``"
+msgstr "``lmcache_mp_frontend_plugin``"
+
+#: ../../source/mp/frontend_dashboard.rst:58
+msgid ""
+"Runtime plugin subprocess launched by ``MPRuntimePluginLauncher``. Runs "
+"``HeartbeatService`` (``--no-http`` mode) to register the server with the"
+" discovery service."
+msgstr "由 ``MPRuntimePluginLauncher`` 启动的运行时插件子进程。运行 ``HeartbeatService``\\ （\\ ``--no-http`` 模式）以将服务器注册到发现服务。"
+
+#: ../../source/mp/frontend_dashboard.rst:61
+msgid "``lmcache.tools.simple_discover_service``"
+msgstr "``lmcache.tools.simple_discover_service``"
+
+#: ../../source/mp/frontend_dashboard.rst:62
+msgid ""
+"Reference Flask discovery service.  Accepts heartbeats at "
+"``/lmcache_heartbeat`` and exposes the node list at ``/lmcache_infos``.  "
+"Start with ``python -m lmcache.tools.simple_discover_service``."
+msgstr "参考 Flask 发现服务。接受 ``/lmcache_heartbeat`` 的心跳并在 ``/lmcache_infos`` 处公开节点列表。使用 ``python -m lmcache.tools.simple_discover_service`` 启动。"
+
+#: ../../source/mp/frontend_dashboard.rst:68
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/mp/frontend_dashboard.rst:70
+msgid "Install the extra dependencies used by the frontend and discovery service:"
+msgstr "安装前端和发现服务所需的额外依赖项："
+
+#: ../../source/mp/frontend_dashboard.rst:76
+msgid "These are not pulled in by the base ``lmcache`` install to keep it slim."
+msgstr "这些并不是通过基础的 ``lmcache`` 安装引入的，以保持其精简。"
+
+#: ../../source/mp/frontend_dashboard.rst:79
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/mp/frontend_dashboard.rst:81
+msgid "**Step 1 — Start the discovery service**"
+msgstr "**步骤 1 — 启动发现服务**"
+
+#: ../../source/mp/frontend_dashboard.rst:87
+msgid "The service listens on ``0.0.0.0:5000`` and exposes:"
+msgstr "该服务监听 ``0.0.0.0:5000`` 并暴露："
+
+#: ../../source/mp/frontend_dashboard.rst:89
+msgid "``GET /lmcache_heartbeat`` — record a heartbeat from an MP server."
+msgstr "``GET /lmcache_heartbeat`` — 记录来自 MP 服务器的心跳。"
+
+#: ../../source/mp/frontend_dashboard.rst:90
+msgid "``GET /lmcache_infos`` — return all registered nodes as JSON."
+msgstr "``GET /lmcache_infos`` — 以 JSON 格式返回所有注册的节点。"
+
+#: ../../source/mp/frontend_dashboard.rst:92
+msgid "**Step 2 — Start the LMCache MP server with the frontend plugin**"
+msgstr "**步骤 2 — 启动带有前端插件的 LMCache MP 服务器**"
+
+#: ../../source/mp/frontend_dashboard.rst:105
+msgid ""
+"The plugin subprocess will start sending heartbeats to the discovery "
+"service every 30 seconds (configurable via ``plugin.frontend.heartbeat-"
+"interval``)."
+msgstr "插件子进程将每 30 秒向发现服务发送一次心跳（可通过 ``plugin.frontend.heartbeat-interval`` 配置）。"
+
+#: ../../source/mp/frontend_dashboard.rst:109
+msgid "Alternatively, use the provided example script:"
+msgstr "或者，使用提供的示例脚本："
+
+#: ../../source/mp/frontend_dashboard.rst:115
+msgid "**Step 3 — Start the dashboard**"
+msgstr "**步骤 3 — 启动仪表板**"
+
+#: ../../source/mp/frontend_dashboard.rst:124
+msgid "Open ``http://localhost:8000`` in your browser."
+msgstr "在浏览器中打开 ``http://localhost:8000``\\ 。"
+
+#: ../../source/mp/frontend_dashboard.rst:127
+msgid ""
+"The dashboard auto-refreshes the node list from the supplier URL at most "
+"once every 30 seconds when the homepage is loaded."
+msgstr "仪表板在加载主页时，最多每 30 秒自动从供应商 URL 刷新一次节点列表。"
+
+#: ../../source/mp/frontend_dashboard.rst:131
+msgid "Dashboard Features"
+msgstr "仪表板功能"
+
+#: ../../source/mp/frontend_dashboard.rst:133
+msgid ""
+"**Node tree view** — shows all proxies and their child nodes in a "
+"collapsible tree."
+msgstr "**节点树视图** — 显示所有代理及其子节点，以可折叠的树形结构呈现。"
+
+#: ../../source/mp/frontend_dashboard.rst:135
+msgid ""
+"**Metrics aggregation** — ``GET /metrics`` on the dashboard aggregates "
+"Prometheus metrics from every leaf node."
+msgstr "**指标聚合** — ``GET /metrics`` 在仪表板上聚合来自每个叶节点的 Prometheus 指标。"
+
+#: ../../source/mp/frontend_dashboard.rst:137
+#, python-brace-format
+msgid ""
+"**Reverse proxy** — ``/proxy2/{node_name}/{path}`` forwards requests to "
+"the named node, enabling direct API access from the browser."
+msgstr "**反向代理** — ``/proxy2/{node_name}/{path}`` 将请求转发到指定节点，使浏览器能够直接访问 API。"
+
+#: ../../source/mp/frontend_dashboard.rst:139
+#, python-brace-format
+msgid ""
+"**Health endpoint** — ``GET /health`` returns ``{\"status\": "
+"\"healthy\"}``."
+msgstr "**健康端点** — ``GET /health`` 返回 ``{\"status\": \"healthy\"}``."
+
+#: ../../source/mp/frontend_dashboard.rst:142
+msgid "CLI Reference"
+msgstr "CLI 参考"
+
+#: ../../source/mp/frontend_dashboard.rst:145
+msgid "``python -m lmcache.lmcache_frontend.app``"
+msgstr "``python -m lmcache.lmcache_frontend.app``"
+
+#: ../../source/mp/frontend_dashboard.rst:151
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/mp/frontend_dashboard.rst:152
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/frontend_dashboard.rst:154
+msgid "``--host``"
+msgstr "``--host``"
+
+#: ../../source/mp/frontend_dashboard.rst:155
+msgid "``0.0.0.0``"
+msgstr "``0.0.0.0``"
+
+#: ../../source/mp/frontend_dashboard.rst:156
+msgid "Bind address for the dashboard HTTP server."
+msgstr "仪表板 HTTP 服务器的绑定地址。"
+
+#: ../../source/mp/frontend_dashboard.rst:157
+msgid "``--port``"
+msgstr "``--port``"
+
+#: ../../source/mp/frontend_dashboard.rst:158
+msgid "``8000``"
+msgstr "``8000``"
+
+#: ../../source/mp/frontend_dashboard.rst:159
+msgid "Port for the dashboard HTTP server."
+msgstr "仪表板 HTTP 服务器的端口。"
+
+#: ../../source/mp/frontend_dashboard.rst:160
+msgid "``--node-supplier-url``"
+msgstr "``--node-supplier-url``"
+
+#: ../../source/mp/frontend_dashboard.rst:161
+#: ../../source/mp/frontend_dashboard.rst:169
+#: ../../source/mp/frontend_dashboard.rst:173
+msgid "*(none)*"
+msgstr "(无)"
+
+#: ../../source/mp/frontend_dashboard.rst:162
+msgid ""
+"URL of the discovery service's node-list endpoint, e.g. "
+"``http://localhost:5000/lmcache_infos``."
+msgstr "发现服务的节点列表端点的 URL，例如 ``http://localhost:5000/lmcache_infos``\\ 。"
+
+#: ../../source/mp/frontend_dashboard.rst:164
+msgid "``--config``"
+msgstr "``--config``"
+
+#: ../../source/mp/frontend_dashboard.rst:165
+msgid "*(built-in)*"
+msgstr "(内置)"
+
+#: ../../source/mp/frontend_dashboard.rst:166
+msgid ""
+"Path to a JSON config file listing proxy nodes.  Used when ``--node-"
+"supplier-url`` is not set."
+msgstr "代理节点的 JSON 配置文件路径。当未设置 ``--node-supplier-url`` 时使用。"
+
+#: ../../source/mp/frontend_dashboard.rst:168
+msgid "``--nodes``"
+msgstr "``--nodes``"
+
+#: ../../source/mp/frontend_dashboard.rst:170
+#, python-brace-format
+msgid ""
+"Inline JSON array of node dicts, e.g. "
+"``'[{\"name\":\"n1\",\"host\":\"127.0.0.1\",\"port\":\"8085\"}]'``."
+msgstr "节点字典的内联 JSON 数组，例如 ``'[{\\\"name\\\":\\\"n1\\\",\\\"host\\\":\\\"127.0.0.1\\\",\\\"port\\\":\\\"8085\\\"}]'``\\ 。"
+
+#: ../../source/mp/frontend_dashboard.rst:172
+msgid "``--heartbeat-url``"
+msgstr "``--heartbeat-url``"
+
+#: ../../source/mp/frontend_dashboard.rst:174
+msgid "If set, the dashboard itself also sends heartbeats to this URL."
+msgstr "如果设置，仪表板本身也会向此 URL 发送心跳。"
+
+#: ../../source/mp/frontend_dashboard.rst:175
+msgid "``--log-level``"
+msgstr "``--log-level``"
+
+#: ../../source/mp/frontend_dashboard.rst:176
+msgid "``warning``"
+msgstr "``warning``"
+
+#: ../../source/mp/frontend_dashboard.rst:177
+msgid "Uvicorn log level (``debug``, ``info``, ``warning``, …)."
+msgstr "Uvicorn 日志级别 (``debug``, ``info``, ``warning``, …)。"
+
+#: ../../source/mp/frontend_dashboard.rst:178
+msgid "``--no-http``"
+msgstr "``--no-http``"
+
+#: ../../source/mp/frontend_dashboard.rst:179
+msgid "``false``"
+msgstr "``false``"
+
+#: ../../source/mp/frontend_dashboard.rst:180
+msgid ""
+"Disable the HTTP server; only the heartbeat loop runs.  Used internally "
+"by the MP plugin."
+msgstr "禁用 HTTP 服务器；仅运行心跳循环。由 MP 插件内部使用。"
+
+#: ../../source/mp/frontend_dashboard.rst:184
+msgid "Plugin Config Keys"
+msgstr "插件配置键"
+
+#: ../../source/mp/frontend_dashboard.rst:186
+msgid ""
+"Pass these inside ``--runtime-plugin-config`` when launching the MP "
+"server:"
+msgstr "在启动 MP 服务器时，将这些放在 ``--runtime-plugin-config`` 中："
+
+#: ../../source/mp/frontend_dashboard.rst:192
+msgid "Key"
+msgstr "键"
+
+#: ../../source/mp/frontend_dashboard.rst:194
+msgid "``plugin.frontend.heartbeat-url``"
+msgstr "``plugin.frontend.heartbeat-url``"
+
+#: ../../source/mp/frontend_dashboard.rst:195
+msgid "**(Required)** Heartbeat endpoint of the discovery service."
+msgstr "**（必需）** 发现服务的心跳端点。"
+
+#: ../../source/mp/frontend_dashboard.rst:196
+msgid "``plugin.frontend.heartbeat-interval``"
+msgstr "``plugin.frontend.heartbeat-interval``"
+
+#: ../../source/mp/frontend_dashboard.rst:197
+msgid "Heartbeat interval in seconds (default: ``30``)."
+msgstr "心跳间隔（单位：秒，默认值：\\ ``30``\\ ）。"
+
+#: ../../source/mp/frontend_dashboard.rst:198
+msgid "``plugin.frontend.heartbeat-initial-delay``"
+msgstr "``plugin.frontend.heartbeat-initial-delay``"
+
+#: ../../source/mp/frontend_dashboard.rst:199
+msgid "Seconds to wait before the first heartbeat (default: ``0``)."
+msgstr "在第一次心跳之前等待的秒数（默认值：\\ ``0``\\ ）。"
+
+#: ../../source/mp/frontend_dashboard.rst:202
+msgid "Using a Custom Discovery Service"
+msgstr "使用自定义发现服务"
+
+#: ../../source/mp/frontend_dashboard.rst:204
+msgid ""
+"The ``simple_discover_service`` is a reference implementation.  Any HTTP "
+"service that accepts the following GET request can be used:"
+msgstr "``simple_discover_service`` 是一个参考实现。任何接受以下 GET 请求的 HTTP 服务都可以使用："
+
+#: ../../source/mp/frontend_dashboard.rst:211
+msgid "And exposes a node-list endpoint that returns JSON in the shape:"
+msgstr "并暴露一个节点列表端点，该端点返回形状为 JSON 的数据："
+

@@ -1,0 +1,17 @@
+name: Label auto-merge PRs
+
+on:
+  pull_request_target:
+    types: [ auto_merge_enabled, auto_merge_disabled ]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  add_remove_labels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ubuntudroid/automerge-labeler@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          label: 'full'

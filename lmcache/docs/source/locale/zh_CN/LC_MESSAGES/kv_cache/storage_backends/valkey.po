@@ -1,0 +1,304 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:2
+msgid "Valkey"
+msgstr "Valkey"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:6
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/l2_storage/resp`."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/l2_storage/resp`。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:10
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:12
+msgid ""
+"Valkey is an open source (BSD) high-performance key/value datastore and "
+"is a supported option for remote KV Cache offloading in LMCache. Some "
+"other remote backends are :doc:`Mooncake <./mooncake>`, :doc:`Redis "
+"<./redis>`, and :doc:`InfiniStore <./infinistore>`."
+msgstr ""
+"Valkey 是一个开源（BSD）高性能键值数据存储，并且是 LMCache 中支持的远程 KV Cache 卸载选项之一。其他一些远程后端包括 "
+":doc:`Mooncake <./mooncake>`、:doc:`Redis <./redis>` 和 :doc:`InfiniStore "
+"<./infinistore>`。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:16
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:18
+msgid "To use this connector, you need valkey-glide 2.0 or higher."
+msgstr "要使用此连接器，您需要 valkey-glide 2.0 或更高版本。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:26
+msgid "Configuration Reference"
+msgstr "配置参考"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:28
+msgid "The following ``extra_config`` keys are supported:"
+msgstr "支持以下 ``extra_config`` 键："
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:34
+msgid "Key"
+msgstr "键"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:35
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:36
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:37
+msgid "``valkey_num_workers``"
+msgstr "``valkey_num_workers``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:38
+msgid "``8``"
+msgstr "``8``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:39
+msgid "Number of worker threads, each with its own GLIDE client connection."
+msgstr "每个 GLIDE 客户端连接的工作线程数量。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:40
+msgid "``valkey_mode``"
+msgstr "``valkey_mode``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:41
+msgid "``\"standalone\"``"
+msgstr "``\"standalone\"``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:42
+msgid ""
+"``\"standalone\"`` or ``\"cluster\"``. Cluster mode auto-discovers "
+"topology from a seed node."
+msgstr "``\"standalone\"`` 或 ``\"cluster\"``。集群模式从种子节点自动发现拓扑。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:43
+msgid "``tls_enable``"
+msgstr "``tls_enable``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:44
+#: ../../source/kv_cache/storage_backends/valkey.rst:56
+msgid "``false``"
+msgstr "``false``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:45
+msgid "Enable TLS. Required for ElastiCache Serverless."
+msgstr "启用 TLS。ElastiCache Serverless 需要此项。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:46
+msgid "``valkey_username``"
+msgstr "``valkey_username``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:47
+#: ../../source/kv_cache/storage_backends/valkey.rst:50
+msgid "``\"\"``"
+msgstr "``\"\"``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:48
+msgid "Authentication username."
+msgstr "认证用户名。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:49
+msgid "``valkey_password``"
+msgstr "``valkey_password``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:51
+msgid "Authentication password."
+msgstr "认证密码。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:52
+msgid "``valkey_database``"
+msgstr "``valkey_database``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:53
+msgid "None"
+msgstr "无"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:54
+msgid "Database ID (standalone mode only, ignored in cluster mode)."
+msgstr "数据库 ID（仅在独立模式下使用，在集群模式下被忽略）。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:55
+msgid "``valkey_enable_ttl``"
+msgstr "``valkey_enable_ttl``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:57
+msgid ""
+"Feature flag. When ``true``, every key is written with an expiry (see "
+"``valkey_ttl_sec``) so Valkey/Redis ``volatile-*`` eviction policies can "
+"reclaim L2 cache keys once the node reaches ``maxmemory``. When ``false``"
+" (default), keys are persisted without a TTL."
+msgstr ""
+"特性标志。当为 ``true`` 时，每个键都带有过期时间（参见 ``valkey_ttl_sec``），因此 Valkey/Redis 的 "
+"``volatile-*`` 逐出策略可以在节点达到 ``maxmemory`` 时回收 L2 缓存键。当为 "
+"``false``（默认值）时，键会被持久化而不带 TTL。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:58
+msgid "``valkey_ttl_sec``"
+msgstr "``valkey_ttl_sec``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:59
+msgid "``86400``"
+msgstr "``86400``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:60
+msgid ""
+"Key TTL in seconds, applied only when ``valkey_enable_ttl`` is ``true``. "
+"Must be a positive integer. If the flag is enabled but this key is "
+"omitted, it defaults to ``86400`` (24 hours)."
+msgstr ""
+"键的 TTL（生存时间），仅在 ``valkey_enable_ttl`` 为 ``true`` "
+"时应用。必须是正整数。如果启用该标志但未提供此键，则默认为 ``86400``（24 小时）。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:61
+msgid "``request_timeout``"
+msgstr "``request_timeout``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:62
+msgid "``5.0``"
+msgstr "``5.0``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:63
+msgid ""
+"GLIDE request timeout in seconds. Also used as the Python-side Future "
+"timeout."
+msgstr "GLIDE 请求超时时间（以秒为单位）。也用于 Python 端的 Future 超时。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:64
+msgid "``connection_timeout``"
+msgstr "``connection_timeout``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:65
+msgid "``10.0``"
+msgstr "``10.0``"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:66
+msgid "GLIDE connection timeout in seconds for initial client connections."
+msgstr "初始客户端连接的 GLIDE 连接超时时间（以秒为单位）。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:69
+msgid "Example Configurations"
+msgstr "示例配置"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:72
+msgid "Standalone-mode"
+msgstr "独立模式"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:75
+msgid "Basic Valkey Configuration (Standalone-mode)"
+msgstr "基本 Valkey 配置（独立模式）"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:87
+msgid "Standalone-mode Valkey Configuration with database"
+msgstr "带数据库的独立模式 Valkey 配置"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:100
+msgid "Standalone-mode Valkey Configuration with key TTL (volatile eviction)"
+msgstr "带有键 TTL（易失性逐出）的独立模式 Valkey 配置"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:102
+msgid ""
+"Enable a per-key TTL so a node configured with a ``volatile-lru`` / "
+"``volatile-lfu`` eviction policy can reclaim L2 cache keys once it "
+"reaches ``maxmemory``. Without a TTL such policies never evict the KV "
+"cache keys, which can choke the remote cache."
+msgstr ""
+"启用每个键的 TTL，以便配置为 ``volatile-lru`` / ``volatile-lfu`` 逐出策略的节点在达到 "
+"``maxmemory`` 后可以回收 L2 缓存键。如果没有 TTL，这些策略将永远不会逐出 KV 缓存键，这可能会导致远程缓存阻塞。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:119
+msgid "Cluster-mode"
+msgstr "集群模式"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:122
+msgid "Cluster-mode Valkey Configuration (Endpoint)"
+msgstr "集群模式 Valkey 配置（端点）"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:124
+msgid "For example, the configuration endpoint in ElastiCache is as follows:"
+msgstr "例如，ElastiCache 中的配置端点如下："
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:126
+msgid "<cache-name>.<identifier>.clustercfg.<region>.cache.amazonaws.com"
+msgstr "<cache-name>.<identifier>.clustercfg.<region>.cache.amazonaws.com"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:128
+msgid "You need to add this DNS name in the <your host>."
+msgstr "您需要在 <your host> 中添加此 DNS 名称。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:143
+msgid "Cluster-mode Valkey Configuration (Nodes)"
+msgstr "集群模式 Valkey 配置（节点）"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:145
+msgid ""
+"Nodes are deployed directly and configured in cluster mode without "
+"connecting them via DNS names (CNAME)."
+msgstr "节点直接部署并配置为集群模式，而无需通过 DNS 名称 (CNAME) 连接它们。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:147
+msgid "In this scenario, you simply input multiple IP hosts and ports."
+msgstr "在这种情况下，您只需输入多个 IP 主机和端口。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:149
+msgid "Example: 172.0.0.1:7001, 172.0.0.2:7002 ... 172.0.0.6:7006"
+msgstr "示例：172.0.0.1:7001, 172.0.0.2:7002 ... 172.0.0.6:7006"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:162
+msgid ""
+"Cluster-mode Valkey Configuration with numbered databases (Valkey 9.0+ "
+"and Valkey-GLIDE 2.1+)"
+msgstr "带编号数据库的集群模式 Valkey 配置（Valkey 9.0+ 和 Valkey-GLIDE 2.1+）"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:164
+msgid ""
+"Valkey connector supports numbered databases in both the Endpoint using "
+"DNS and the Nodes method using IP and port pairs."
+msgstr "Valkey 连接器支持在使用 DNS 的端点和使用 IP 和端口对的节点方法中使用编号数据库。"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:178
+msgid "TLS / ElastiCache Serverless"
+msgstr "TLS / ElastiCache Serverless"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:180
+msgid "ElastiCache Serverless requires TLS. Set ``tls_enable: true``:"
+msgstr "ElastiCache Serverless 需要 TLS。设置 ``tls_enable: true``："
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:193
+msgid "Performance Tuning"
+msgstr "性能调优"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:195
+msgid ""
+"For large models (e.g., 70B with TP=8), increase the worker count for "
+"higher throughput:"
+msgstr "对于大型模型（例如，70B，TP=8），增加工作线程数量以提高吞吐量："
+

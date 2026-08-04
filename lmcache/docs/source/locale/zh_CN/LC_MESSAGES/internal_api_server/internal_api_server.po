@@ -1,0 +1,128 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/internal_api_server.rst:4
+msgid "Internal API Server"
+msgstr "内部 API 服务器"
+
+#: ../../source/internal_api_server/internal_api_server.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance. For the MP mode equivalent of"
+" this page, see :doc:`/mp/http_api`."
+msgstr "本页面记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效内容，请参见 :doc:`/mp/http_api`。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:11
+msgid ""
+"The ``internal_api_server`` provides HTTP APIs for managing and "
+"inspecting the LMCache engine at runtime. APIs are organized into three "
+"categories:"
+msgstr "``internal_api_server`` 提供用于在运行时管理和检查 LMCache 引擎的 HTTP API。API 被组织为三个类别："
+
+#: ../../source/internal_api_server/internal_api_server.rst:14
+msgid ""
+"**Common APIs** — Available across all components (scheduler, worker, "
+"controller)."
+msgstr "**通用 API** — 在所有组件（调度器、工作线程、控制器）中可用。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:15
+msgid "**vLLM / Inference APIs** — Specific to vLLM inference workers."
+msgstr "**vLLM / 推理 API** — 特定于 vLLM 推理工作节点。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:16
+msgid "**Controller APIs** — Specific to the LMCache Controller."
+msgstr "**控制器 API** — 特定于 LMCache 控制器。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:27
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/internal_api_server/internal_api_server.rst:29
+msgid "The following parameters can be configured in the YAML file:"
+msgstr "以下参数可以在 YAML 文件中配置："
+
+#: ../../source/internal_api_server/internal_api_server.rst:51
+msgid "Port Assignment"
+msgstr "端口分配"
+
+#: ../../source/internal_api_server/internal_api_server.rst:53
+msgid "The port for each component is computed as:"
+msgstr "每个组件的端口计算公式为："
+
+#: ../../source/internal_api_server/internal_api_server.rst:59
+msgid "Where ``port_offset`` is:"
+msgstr "``port_offset`` 是："
+
+#: ../../source/internal_api_server/internal_api_server.rst:61
+msgid "``0`` for the Scheduler"
+msgstr "``0`` 用于调度器"
+
+#: ../../source/internal_api_server/internal_api_server.rst:62
+msgid ""
+"``1 + worker_id`` for Workers (e.g., Worker 0 → offset 1, Worker 1 → "
+"offset 2)"
+msgstr "``1 + worker_id`` 用于工作进程（例如，工作进程 0 → 偏移 1，工作进程 1 → 偏移 2）"
+
+#: ../../source/internal_api_server/internal_api_server.rst:66
+msgid "API Category & Route Discovery"
+msgstr "API 类别与路由发现"
+
+#: ../../source/internal_api_server/internal_api_server.rst:68
+#, python-brace-format
+msgid ""
+"The server uses ``APIRegistry`` to automatically discover and register "
+"API endpoint modules. Any file named ``*_api.py`` under "
+"``lmcache/v1/internal_api_server/{common,vllm,controller}/`` that exports"
+" a ``router = APIRouter()`` will be automatically included."
+msgstr ""
+"服务器使用 ``APIRegistry`` 自动发现和注册 API 端点模块。任何位于 "
+"``lmcache/v1/internal_api_server/{common,vllm,controller}/`` 下并导出 "
+"``router = APIRouter()`` 的文件，名称以 ``*_api.py`` 结尾，将会被自动包含。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:75
+msgid "Extending the Server"
+msgstr "扩展服务器"
+
+#: ../../source/internal_api_server/internal_api_server.rst:77
+msgid "To add a new API endpoint:"
+msgstr "要添加一个新的 API 端点："
+
+#: ../../source/internal_api_server/internal_api_server.rst:79
+msgid ""
+"Create a new file in the appropriate category directory (``common/``, "
+"``vllm/``, or ``controller/``)."
+msgstr "在适当的类别目录中创建一个新文件（``common/``、``vllm/`` 或 ``controller/``）。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:81
+msgid "Name the file with ``_api.py`` suffix (e.g., ``my_feature_api.py``)."
+msgstr "将文件命名为 ``_api.py`` 后缀（例如，``my_feature_api.py``）。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:82
+msgid "Define ``router = APIRouter()`` and add your endpoints."
+msgstr "定义 ``router = APIRouter()`` 并添加你的端点。"
+
+#: ../../source/internal_api_server/internal_api_server.rst:84
+msgid ""
+"The endpoint will be automatically discovered and registered on the next "
+"server startup."
+msgstr "该端点将在下次服务器启动时自动发现并注册。"
+

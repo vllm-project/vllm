@@ -1,0 +1,17 @@
+sphinx>=6,<9
+sphinx-rtd-theme==3.1.0
+sphinxcontrib-applehelp==2.0.0
+sphinxcontrib-devhelp==2.0.0
+sphinxcontrib-htmlhelp==2.1.0
+sphinxcontrib-jquery==4.1
+sphinxcontrib-jsmath==1.0.1
+sphinxcontrib-qthelp==2.0.0
+sphinxcontrib-serializinghtml==2.0.0
+sphinxawesome_theme==5.3.2
+sphinx-copybutton==0.5.2
+sphinxcontrib-mermaid==2.0.2
+sphinx-multiversion==0.2.4
+sphinx-intl==2.3.1
+sphinxcontrib-images
+msgspec
+sphinx-design

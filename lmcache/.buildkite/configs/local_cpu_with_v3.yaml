@@ -1,0 +1,25 @@
+workload:
+  type: long_doc_qa
+  max-inflight-requests: 20
+  expected-latency-gain: true
+
+docker:
+  env:
+    - "LMCACHE_CHUNK_SIZE=256"
+    - "LMCACHE_LOCAL_CPU=True"
+    - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
+    - "LMCACHE_USE_GPU_CONNECTOR_V3=True"
+    - "LMCACHE_INTERNAL_API_SERVER_ENABLED=True"
+    - "LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX=/tmp/lmcache_internal_api_server/socket"
+
+vllm:
+  model: "meta-llama/Llama-3.2-1B-Instruct"
+  args:
+    - "--load-format"
+    - "dummy"
+    - "--no-enable-prefix-caching"
+    - "--kv-transfer-config"
+    - "{\"kv_connector\":\"LMCacheConnectorV1\",\"kv_role\":\"kv_both\"}"
+
+checking-fields:
+  - query_round_time_per_prompt

@@ -1,0 +1,13 @@
+# Paste this into the Buildkite pipeline's "Steps" editor.
+# It uploads the real pipeline definition from the repo.
+agents:
+  queue: "k3-h200-local"
+
+env:
+  # Optional: unit tests run without it. Setting it unlocks one extra test
+  # (test_segment_token_database) that's gated on HF credentials.
+  HF_TOKEN: ""
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/unit/pipeline.yml

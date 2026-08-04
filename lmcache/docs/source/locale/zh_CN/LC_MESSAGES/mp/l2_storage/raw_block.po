@@ -1,0 +1,185 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/raw_block.rst:2
+msgid "Raw Block (Rust)"
+msgstr "原始块（Rust）"
+
+#: ../../source/mp/l2_storage/raw_block.rst:4
+msgid ""
+"A built-in L2 adapter that stores KV objects in fixed-size slots on a raw"
+" block device or pre-sized file using the Rust raw-device I/O bindings. "
+"It reuses the existing raw-block metadata checkpoint model and writes "
+"directly into the caller-provided load buffers during prefetch."
+msgstr "一个内置的 L2 适配器，通过 Rust 原始设备 I/O 接口将 KV 对象存储在原始块设备或预设大小文件的固定大小槽位中。它复用现有的原始块元数据检查点模型，并在预取期间直接写入调用方提供的加载缓冲区。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:9
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:11
+msgid "``device_path``: Raw device path or pre-sized file path."
+msgstr "``device_path``: 原始设备路径或预设大小的文件路径。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:12
+msgid ""
+"``slot_bytes``: Fixed slot size in bytes. Must be aligned to "
+"``block_align``."
+msgstr "``slot_bytes``: 固定的槽大小（以字节为单位）。必须与 ``block_align`` 对齐。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:14
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:16
+msgid ""
+"``capacity_bytes``: Optional cap on the usable device bytes. Default "
+"``0`` means use the full device/file size."
+msgstr "``capacity_bytes``\\ ：可用设备字节的可选上限。默认值 ``0`` 表示使用完整的设备/文件大小。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:18
+msgid "``use_odirect``: ``true`` or ``false`` (default ``true``)."
+msgstr "``use_odirect``: ``true`` 或 ``false``\\ （默认 ``true``\\ ）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:19
+msgid "``block_align``: Device alignment in bytes (default ``4096``)."
+msgstr "``block_align``: 设备对齐字节数（默认 ``4096``\\ ）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:20
+msgid "``header_bytes``: Per-slot header reservation (default ``4096``)."
+msgstr "``header_bytes``: 每个槽位的头部预留大小（默认 ``4096``\\ ）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:21
+msgid ""
+"``meta_total_bytes``: Reserved metadata checkpoint region (default "
+"``256MiB``)."
+msgstr "``meta_total_bytes``: 保留的元数据检查点区域（默认 ``256MiB``\\ ）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:22
+msgid ""
+"``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version "
+"knobs."
+msgstr "``meta_magic`` / ``meta_version``: 元数据检查点的标识符与版本号调节参数。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:23
+msgid ""
+"``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / "
+"``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and "
+"recovery controls carried over from the legacy raw-block backend."
+msgstr "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / ``meta_enable_periodic`` / ``meta_verify_on_load``: 从旧版原始块后端沿用的检查点与恢复控制参数。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:26
+msgid ""
+"``load_checkpoint_on_init``: Load an existing on-device metadata "
+"checkpoint during startup (default ``true``). Set to ``false`` to start "
+"with an empty in-memory index instead."
+msgstr "``load_checkpoint_on_init``: 在启动时加载现有的设备元数据检查点（默认值为 ``true``\\ ）。设置为 ``false`` 以从空的内存索引开始。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:29
+msgid "``enable_zero_copy``: Try aligned direct-buffer I/O when possible."
+msgstr "``enable_zero_copy``: 尽可能尝试对齐的直接缓冲区 I/O。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:30
+msgid ""
+"``io_engine``: Rust raw-block I/O engine. Valid values are ``\"posix\"`` "
+"(default synchronous ``pread``/``pwrite`` path), ``\"io_uring\"`` (direct"
+" Rust io_uring syscall path)."
+msgstr "``io_engine``: Rust 原始块 I/O 引擎。有效值为 ``\"posix\"``\\ （默认同步 ``pread``/``pwrite`` 路径），\\ ``\"io_uring\"``\\ （直接 Rust io_uring 系统调用路径）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:33
+msgid ""
+"``use_uring_cmd``: Enable NVMe passthrough via io_uring command interface"
+" for direct device access. Requires ``io_engine=\"io_uring\"`` and NVMe "
+"character device node (e.g., ``/dev/ng0n1``)."
+msgstr "``use_uring_cmd``: 通过 io_uring 命令接口启用 NVMe 直通以直接访问设备。需要 ``io_engine=\"io_uring\"`` 和 NVMe 字符设备节点（例如，\\ ``/dev/ng0n1``\\ ）。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:36
+msgid "``iouring_queue_depth``: Queue depth for ``io_engine=\"io_uring\"``."
+msgstr "``iouring_queue_depth``: ``io_engine=\"io_uring\"`` 的队列深度。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:37
+msgid ""
+"``max_data_transfer_size``: Maximum data transfer size for "
+"``use_uring_cmd=true``. Large transfers are split into smaller chunks "
+"that fit within device limits."
+msgstr "``max_data_transfer_size``: ``use_uring_cmd=true`` 的最大数据传输大小。大数据传输会被拆分成适合设备限制的小块。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:40
+msgid ""
+"``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: "
+"Worker-thread counts for each operation type."
+msgstr "``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: 每种操作类型的工作线程数量。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:43
+msgid "**Notes:**"
+msgstr "**注意：**"
+
+#: ../../source/mp/l2_storage/raw_block.rst:45
+msgid ""
+"``raw_block`` is a server-owned MP adapter. It does **not** support per-"
+"TP device-path mappings in MP mode."
+msgstr "``raw_block`` 是一个由服务端管理的 MP 适配器。它 **不** 支持 MP 模式下按 TP 粒度配置设备路径映射。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:47
+msgid ""
+"``raw_block`` remains ``\"type\": \"raw_block\"`` for all supported "
+"engines."
+msgstr "``raw_block`` 在所有支持的引擎中保持 ``\"type\": \"raw_block\"``\\ 。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:48
+msgid ""
+"``raw_block`` owns on-device slot allocation, checkpointing, and recovery"
+" through ``RawBlockCore``. Slot reclamation is driven by the "
+"shared/global L2 eviction controller or explicit ``delete()`` calls."
+msgstr "``raw_block`` 负责设备上的槽分配、检查点和通过 ``RawBlockCore`` 的恢复。槽回收由共享/全局 L2 逐出控制器或显式的 ``delete()`` 调用驱动。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:51
+msgid ""
+"If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should "
+"be at least ``block_align``."
+msgstr "如果启用了 ``use_odirect``\\ ，则服务器的 ``--l1-align-bytes`` 应至少为 ``block_align``\\ 。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:53
+msgid "``persist_enabled`` must remain ``true`` for this adapter."
+msgstr "``persist_enabled`` 对此适配器必须保持为 ``true``\\ 。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:54
+msgid ""
+"For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character "
+"device node (e.g., ``/dev/ng0n1``) instead of the block device node "
+"(``/dev/nvme0n1``). The character device provides direct NVMe command "
+"passthrough."
+msgstr "对于 ``use_uring_cmd=true``\\ ，\\ ``device_path`` 必须使用 NVMe 字符设备节点（例如，\\ ``/dev/ng0n1``\\ ），而不是块设备节点（\\ ``/dev/nvme0n1``\\ ）。字符设备提供直接的 NVMe 命令直通。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:58
+msgid "``use_uring_cmd`` requires ``io_engine=\"io_uring\"`` to be set."
+msgstr "``use_uring_cmd`` 需要设置 ``io_engine=\"io_uring\"``\\ 。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:59
+msgid ""
+"When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe "
+"namespace character devices."
+msgstr "当 ``use_uring_cmd=true`` 时，NVMe 命名空间字符设备将忽略 ``use_odirect``\\ 。"
+
+#: ../../source/mp/l2_storage/raw_block.rst:62
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+

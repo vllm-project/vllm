@@ -1,0 +1,10 @@
+include LICENSE
+include README.md
+include requirements/common.txt
+include requirements/cuda.txt
+include requirements/cuda12_core.txt
+include requirements/cuda13_core.txt
+include requirements/nixl.txt
+
+recursive-include csrc *
+recursive-include lmcache/lmcache_frontend *

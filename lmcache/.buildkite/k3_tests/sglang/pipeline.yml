@@ -1,0 +1,54 @@
+# SGLang + LMCache MP integration tests.
+# 1) Correctness: LMCache does not change output, and is actually exercised.
+# 2) Performance: LMCache makes TTFT smaller.
+
+steps:
+  - label: ":test_tube: SGLang+LMCache — Correctness"
+    command: .buildkite/k3_tests/sglang/run.sh correctness
+    timeout_in_minutes: 15
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "*.log"
+      - "*.json"
+
+  - label: ":zap: SGLang+LMCache — Performance"
+    command: .buildkite/k3_tests/sglang/run.sh perf
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+        - exit_status: 1
+          limit: 2
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths:
+      - "*.log"
+      - "*.json"

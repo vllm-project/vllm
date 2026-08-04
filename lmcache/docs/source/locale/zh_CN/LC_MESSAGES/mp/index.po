@@ -1,0 +1,1292 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/index.rst:2
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/mp/index.rst:4
+msgid ""
+"LMCache multiprocess (MP) mode runs LMCache as a **standalone service** "
+"that vLLM instances connect to over ZMQ.  One LMCache server per node can"
+" serve multiple vLLM pods, providing process isolation, shared caching, "
+"and independent resource scaling."
+msgstr ""
+"LMCache MP 模式（多进程）将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 ZMQ 连接到该服务。每个节点的 "
+"LMCache 服务器可以为多个 vLLM Pod 提供服务，提供进程隔离、共享缓存和独立资源扩展。"
+
+#: ../../source/mp/index.rst:14
+msgid "Key Benefits"
+msgstr "主要优势"
+
+#: ../../source/mp/index.rst:16
+msgid ""
+"**Process isolation** -- LMCache and vLLM run in separate processes (or "
+"containers), so a cache-related issue does not crash the inference "
+"engine."
+msgstr "**进程隔离** -- LMCache 和 vLLM 在独立的进程（或容器）中运行，因此与缓存相关的问题不会导致推理引擎崩溃。"
+
+#: ../../source/mp/index.rst:18
+msgid ""
+"**No GIL contention or Python overhead on the inference path** -- By "
+"running LMCache in a separate process, its Python GIL and CPU work "
+"(hashing, memory management, L2 I/O) do not compete with vLLM's inference"
+" threads."
+msgstr ""
+"**推理路径上没有 GIL 争用或 Python 开销** -- 通过在单独的进程中运行 LMCache，它的 Python GIL 和 CPU "
+"工作（哈希、内存管理、L2 I/O）不会与 vLLM 的推理线程竞争。"
+
+#: ../../source/mp/index.rst:21
+msgid ""
+"**Shared caching across pods** -- Multiple vLLM instances on the same "
+"node share a single L1 cache, maximizing KV reuse."
+msgstr "**跨 Pod 共享缓存** -- 同一节点上的多个 vLLM 实例共享一个 L1 缓存，最大化 KV 重用。"
+
+#: ../../source/mp/index.rst:23
+msgid ""
+"**Independent resource scaling** -- Allocate CPU memory for caching "
+"independently of GPU memory for inference."
+msgstr "**独立资源扩展** -- 为缓存分配 CPU 内存，与用于推理的 GPU 显存独立。"
+
+#: ../../source/mp/index.rst:25
+msgid ""
+"**Multi-tier storage (L1 + L2)** -- An L1 cache (in CPU DRAM, or an NVMe "
+"slab via GPUDirect Storage) backed by persistent L2 storage via NIXL "
+"(GDS, POSIX, HF3FS, and more)."
+msgstr ""
+"**多层存储 (L1 + L2)** -- L1 缓存（在 CPU DRAM 中，或通过 GPUDirect Storage 的 NVMe "
+"块），由通过 NIXL（GDS、POSIX、HF3FS 等）的持久化 L2 存储提供支撑。"
+
+#: ../../source/mp/index.rst:28
+msgid ""
+"**Built-in observability** -- Prometheus metrics and a telemetry event "
+"system out of the box."
+msgstr "**内置可观察性** -- 开箱即用的 Prometheus 指标和遥测事件系统。"
+
+#: ../../source/mp/index.rst:32
+msgid "Prerequisites"
+msgstr "前提条件"
+
+#: ../../source/mp/index.rst:34
+msgid "**vLLM** latest version is recommended for best compatibility"
+msgstr "**vLLM** 建议使用最新版本以获得最佳兼容性"
+
+#: ../../source/mp/index.rst:35
+msgid "**LMCache** latest dev branch"
+msgstr "**LMCache** 最新开发分支"
+
+#: ../../source/mp/index.rst:38
+msgid "Server Variants"
+msgstr "服务器变体"
+
+#: ../../source/mp/index.rst:40
+msgid "LMCache ships two server entry points:"
+msgstr "LMCache 提供两个服务器入口点："
+
+#: ../../source/mp/index.rst:46
+msgid "Entry Point"
+msgstr "入口点"
+
+#: ../../source/mp/index.rst:47 ../../source/mp/index.rst:155
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/index.rst:48
+msgid "``lmcache server``"
+msgstr "``lmcache server``"
+
+#: ../../source/mp/index.rst:49
+msgid "**Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`."
+msgstr "**推荐。** ZMQ + FastAPI HTTP 前端 — 参见 :doc:`http_api`。"
+
+#: ../../source/mp/index.rst:50
+msgid "``python3 -m lmcache.v1.multiprocess.server``"
+msgstr "``python3 -m lmcache.v1.multiprocess.server``"
+
+#: ../../source/mp/index.rst:51
+msgid ""
+"(Legacy) ZMQ-only server with no HTTP endpoints; same ``--engine-type`` /"
+" ``--supported-transfer-mode`` flags as ``lmcache server``. Prefer "
+"``lmcache server``."
+msgstr ""
+"（旧版）仅支持 ZMQ 的服务器，没有 HTTP 端点；与 ``lmcache server`` 相同的 ``--engine-type`` / "
+"``--supported-transfer-mode`` 标志。建议使用 ``lmcache server``\\ 。"
+
+#: ../../source/mp/index.rst:55
+msgid ""
+"The sections below describe LMCache MP internals -- useful if you want to"
+" understand, debug, or extend the system."
+msgstr "以下部分介绍 LMCache MP 模式的内部实现，适合希望了解、调试或扩展该系统的读者。"
+
+#: ../../source/mp/index.rst:59
+msgid "High-Level Architecture"
+msgstr "高层架构"
+
+#: ../../source/mp/index.rst:91
+msgid "Engine and Modules"
+msgstr "引擎和模块"
+
+#: ../../source/mp/index.rst:93
+msgid ""
+"All server entry points share the same ``MPCacheServer`` and "
+"``StorageManager`` core. ``MPCacheServer`` is now a thin compositor: it "
+"holds an ``MPCacheServerContext`` and a list of ``EngineModule`` "
+"instances assembled by ``_build_modules()`` (in ``server.py``) based on "
+"``--engine-type`` and ``--supported-transfer-mode``."
+msgstr ""
+"所有服务器入口点共享相同的 ``MPCacheServer`` 和 ``StorageManager`` 核心。``MPCacheServer``"
+" 现在是一个轻量级合成器：它持有一个 ``MPCacheServerContext`` 和一个由 ``_build_modules()``\\ "
+"（在 ``server.py`` 中）基于 ``--engine-type`` 和 ``--supported-transfer-mode`` "
+"组装的 ``EngineModule`` 实例列表。"
+
+#: ../../source/mp/index.rst:99
+msgid ""
+"**``server.py``** -- The default ZMQ-only server.  Creates an "
+"``MPCacheServer``, assembles the engine modules (``LookupModule`` + "
+"``ManagementModule`` + ``LMCacheDrivenTransferModule`` and/or "
+"``EngineDrivenTransferModule`` depending on ``--supported-transfer-mode``"
+" — ``lmcache_driven`` or ``engine_driven`` loads just one, ``auto`` "
+"(default) loads both — plus a CacheBlend module when ``--engine-type`` is"
+" set: ``blend`` appends ``BlendV3Module`` (the current paged-aware "
+"implementation), and ``blend_legacy`` appends ``BlendModule`` (the "
+"original)). Starts a ``MessageQueueServer``, registers handlers for every"
+" ``RequestType`` exposed by the loaded modules, and blocks in a keep-"
+"alive loop."
+msgstr ""
+"**``server.py``** -- 默认的纯 ZMQ 服务器。创建 ``MPCacheServer``\\ ，组装引擎模块（\\ "
+"``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``"
+" 和/或 ``EngineDrivenTransferModule``\\ ，具体取决于 ``--supported-transfer-"
+"mode`` — ``lmcache_driven`` 或 ``engine_driven`` 仅加载其中一个，\\ ``auto``\\ "
+"（默认）两者均加载 — 当设置了 ``--engine-type`` 时，还会附加 CacheBlend 模块：\\ ``blend`` 附加 "
+"``BlendV3Module``\\ （当前的分页感知实现），\\ ``blend_legacy`` 附加 ``BlendModule``\\ "
+"（原始实现））。启动 ``MessageQueueServer``\\ ，为已加载模块暴露的每个 ``RequestType`` "
+"注册处理程序，并在保活循环中阻塞。"
+
+#: ../../source/mp/index.rst:112
+msgid ""
+"**``modules/blend.py``** -- Defines ``BlendModule`` and "
+"``BlendEngineV2``, which add the original CacheBlend operations "
+"(``CB_REGISTER_KV_CACHE``, ``CB_LOOKUP_PRE_COMPUTED``, "
+"``CB_STORE_PRE_COMPUTED``, ``CB_RETRIEVE_PRE_COMPUTED``, "
+"``CB_STORE_FINAL`` and their V2 variants). Enables non-prefix KV cache "
+"reuse across document paragraphs. Selected by passing ``--engine-type "
+"blend_legacy`` to ``lmcache server``."
+msgstr ""
+"**``modules/blend.py``** -- 定义了 ``BlendModule`` 和 ``BlendEngineV2``\\ "
+"，它们添加了原始的 CacheBlend 操作（\\ ``CB_REGISTER_KV_CACHE``, "
+"``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``, "
+"``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` 及其 V2 变体）。启用跨文档段落的非前缀 KV"
+" Cache 重用。通过将 ``--engine-type blend_legacy`` 传递给 ``lmcache server`` 进行选择。"
+
+#: ../../source/mp/index.rst:120
+msgid ""
+"**``modules/blend_v3.py``** -- Defines ``BlendV3Module``, the paged-aware"
+" CacheBlend V3 pipeline that runs on the sparse-prefetch path. Adds the "
+"V3 RPCs (``CB_REGISTER_ROPE_V3``, ``CB_UNREGISTER_ROPE_V3``, "
+"``CB_RETRIEVE_PRE_COMPUTED_V3``, ``CB_UNIFIED_LOOKUP``) and reuses the "
+"existing ``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected "
+"by passing ``--engine-type blend`` to ``lmcache server``."
+msgstr ""
+"**``modules/blend_v3.py``** -- 定义了 ``BlendV3Module``\\ ，这是一个分页感知的 "
+"CacheBlend V3 流水线，运行在稀疏预取路径上。新增了 V3 RPC（\\ ``CB_REGISTER_ROPE_V3``\\ 、\\ "
+"``CB_UNREGISTER_ROPE_V3``\\ 、\\ ``CB_RETRIEVE_PRE_COMPUTED_V3``\\ 、\\ "
+"``CB_UNIFIED_LOOKUP``\\ ），并复用现有的 ``LMCacheDrivenTransferModule`` 和 "
+"``LookupModule``\\ 。通过向 ``lmcache server`` 传递 ``--engine-type blend`` "
+"来启用。"
+
+#: ../../source/mp/index.rst:129
+msgid ""
+"Both blend variants require ``--supported-transfer-mode`` to be "
+"``lmcache_driven`` or ``auto`` and will refuse to load when it is "
+"``engine_driven``."
+msgstr ""
+"两种 blend 变体都要求 ``--supported-transfer-mode`` 为 ``lmcache_driven`` 或 "
+"``auto``\\ ，当其为 ``engine_driven`` 时将拒绝加载。"
+
+#: ../../source/mp/index.rst:133
+msgid ""
+"**``http_server.py``** -- Wraps ``run_cache_server()`` (from "
+"``server.py``) inside a FastAPI application.  Endpoints are contributed "
+"by modules under ``http_apis/`` and auto-registered via "
+"``HTTPAPIRegistry``: ``GET /`` (basic liveness), ``GET /healthcheck`` for"
+" Kubernetes probes, ``POST /cache/clear`` for clearing all KV cache data "
+"in L1 (CPU) memory, and ``GET /status`` for inspecting detailed internal "
+"state.  The ZMQ server runs as part of the same process, and any "
+"configured runtime plugins are spawned by ``MPRuntimePluginLauncher`` "
+"during FastAPI startup."
+msgstr "**``http_server.py``** -- 将 ``run_cache_server()``（来自 ``server.py``）封装在 FastAPI 应用程序中。端点由 ``http_apis/`` 下的模块贡献，并通过 ``HTTPAPIRegistry`` 自动注册：``GET /``（基本存活检查）、``GET /healthcheck`` 用于 Kubernetes 探针、``POST /cache/clear`` 用于清除 L1（CPU）内存中的所有 KV Cache 数据，以及 ``GET /status`` 用于检查详细的内部状态。ZMQ 服务器作为同一进程的一部分运行，任何配置的运行时插件在 FastAPI 启动期间由 ``MPRuntimePluginLauncher`` 生成。"
+
+#: ../../source/mp/index.rst:143
+msgid "ZMQ Protocol"
+msgstr "ZMQ 协议"
+
+#: ../../source/mp/index.rst:145
+msgid "Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern)."
+msgstr "vLLM 和 LMCache 之间的通信使用 ZMQ（DEALER/ROUTER 模式）。"
+
+#: ../../source/mp/index.rst:147
+msgid "**RequestType enum** (defined in ``protocols/base.py``):"
+msgstr "**RequestType 枚举**\\ （在 ``protocols/base.py`` 中定义）："
+
+#: ../../source/mp/index.rst:153
+msgid "Request Type"
+msgstr "请求类型"
+
+#: ../../source/mp/index.rst:154
+msgid "Handler Type"
+msgstr "处理程序类型"
+
+#: ../../source/mp/index.rst:156
+msgid "``REGISTER_KV_CACHE``"
+msgstr "``REGISTER_KV_CACHE``"
+
+#: ../../source/mp/index.rst:157 ../../source/mp/index.rst:160
+#: ../../source/mp/index.rst:163 ../../source/mp/index.rst:171
+#: ../../source/mp/index.rst:233 ../../source/mp/index.rst:243
+#: ../../source/mp/index.rst:246 ../../source/mp/index.rst:249
+#: ../../source/mp/index.rst:273 ../../source/mp/index.rst:277
+msgid "SYNC"
+msgstr "同步"
+
+#: ../../source/mp/index.rst:158
+msgid "Register GPU KV cache tensors for a vLLM instance."
+msgstr "为 vLLM 实例注册 GPU KV Cache 张量。"
+
+#: ../../source/mp/index.rst:159
+msgid "``UNREGISTER_KV_CACHE``"
+msgstr "``UNREGISTER_KV_CACHE``"
+
+#: ../../source/mp/index.rst:161
+msgid "Unregister KV cache tensors."
+msgstr "注销 KV Cache 张量。"
+
+#: ../../source/mp/index.rst:162
+msgid "``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``"
+msgstr "``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``"
+
+#: ../../source/mp/index.rst:164
+msgid ""
+"Register an engine-driven KV cache context (CPU/accelerator workers using"
+" the PREPARE/COMMIT transfer path). Loaded only when ``--supported-"
+"transfer-mode`` is ``engine_driven`` or ``auto``. Returns a "
+"``RegisterEngineDrivenContextResponse`` carrying the SHM segment name and"
+" pool size when the SHM path is in use (empty for the pickle path)."
+msgstr ""
+"注册一个引擎驱动的 KV Cache 上下文（使用 PREPARE/COMMIT 传输路径的 CPU/加速器工作线程）。仅在 "
+"``--supported-transfer-mode`` 为 ``engine_driven`` 或 ``auto`` 时加载。当使用 SHM "
+"路径时，返回一个 ``RegisterEngineDrivenContextResponse``\\ ，携带 SHM 段名称和池大小（对于 "
+"pickle 路径为空）。"
+
+#: ../../source/mp/index.rst:170
+msgid "``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``"
+msgstr "``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``"
+
+#: ../../source/mp/index.rst:172
+msgid "Unregister an engine-driven KV cache context."
+msgstr "注销引擎驱动的 KV Cache 上下文。"
+
+#: ../../source/mp/index.rst:173
+msgid "``STORE``"
+msgstr "``STORE``"
+
+#: ../../source/mp/index.rst:174 ../../source/mp/index.rst:179
+#: ../../source/mp/index.rst:184 ../../source/mp/index.rst:189
+#: ../../source/mp/index.rst:194 ../../source/mp/index.rst:200
+#: ../../source/mp/index.rst:205 ../../source/mp/index.rst:209
+#: ../../source/mp/index.rst:213 ../../source/mp/index.rst:218
+#: ../../source/mp/index.rst:223 ../../source/mp/index.rst:227
+#: ../../source/mp/index.rst:230 ../../source/mp/index.rst:236
+#: ../../source/mp/index.rst:239 ../../source/mp/index.rst:252
+#: ../../source/mp/index.rst:255 ../../source/mp/index.rst:258
+#: ../../source/mp/index.rst:261 ../../source/mp/index.rst:264
+#: ../../source/mp/index.rst:269 ../../source/mp/index.rst:281
+#: ../../source/mp/index.rst:285 ../../source/mp/index.rst:291
+#: ../../source/mp/index.rst:300 ../../source/mp/index.rst:306
+msgid "BLOCKING"
+msgstr "阻塞"
+
+#: ../../source/mp/index.rst:175
+msgid ""
+"Store KV cache chunks from GPU to L1 (CPU). LMCache-driven transfer path "
+"(CUDA IPC); loaded only when ``--supported-transfer-mode`` is "
+"``lmcache_driven`` or ``auto``."
+msgstr ""
+"将 KV Cache 块从 GPU 存储到 L1 (CPU)。基于 LMCache 的传输路径 (CUDA IPC)；仅在 "
+"``--supported-transfer-mode`` 为 ``lmcache_driven`` 或 ``auto`` 时加载。"
+
+#: ../../source/mp/index.rst:178
+msgid "``RETRIEVE``"
+msgstr "``RETRIEVE``"
+
+#: ../../source/mp/index.rst:180
+msgid ""
+"Copy KV cache chunks from L1 (CPU) back to GPU. LMCache-driven transfer "
+"path (CUDA IPC); loaded only when ``--supported-transfer-mode`` is "
+"``lmcache_driven`` or ``auto``."
+msgstr ""
+"将 KV Cache 块从 L1 (CPU) 复制回 GPU。由 LMCache 驱动的传输路径 (CUDA IPC)；仅在 "
+"``--supported-transfer-mode`` 为 ``lmcache_driven`` 或 ``auto`` 时加载。"
+
+#: ../../source/mp/index.rst:183
+msgid "``PREPARE_STORE``"
+msgstr "``PREPARE_STORE``"
+
+#: ../../source/mp/index.rst:185
+msgid ""
+"(Engine-driven path) Worker asks the server to prepare store-side "
+"transfer state for a key. Loaded when ``--supported-transfer-mode`` is "
+"``engine_driven`` or ``auto``."
+msgstr ""
+"（引擎驱动路径）工作线程请求服务器为一个键准备存储端传输状态。当 ``--supported-transfer-mode`` 设置为 "
+"``engine_driven`` 或 ``auto`` 时加载。"
+
+#: ../../source/mp/index.rst:188
+msgid "``COMMIT_STORE``"
+msgstr "``COMMIT_STORE``"
+
+#: ../../source/mp/index.rst:190
+msgid ""
+"(Engine-driven path) Worker commits the chunk's serialized bytes (pickle "
+"path) or releases the prepared SHM slot (SHM path) so the server can "
+"persist into L1 storage."
+msgstr "（引擎驱动路径）工作线程提交块的序列化字节（pickle 路径），或释放已准备好的共享内存槽（SHM 路径），以便服务器将数据持久化到 L1 存储。"
+
+#: ../../source/mp/index.rst:193
+msgid "``PREPARE_RETRIEVE``"
+msgstr "``PREPARE_RETRIEVE``"
+
+#: ../../source/mp/index.rst:195
+msgid ""
+"(Engine-driven path) Worker asks the server to prepare the retrieval "
+"payload for a key. The pickle path returns the bytes inline; the SHM path"
+" returns slot info so the worker can read from shared memory."
+msgstr "（引擎驱动路径）工作线程请求服务器为指定键准备检索负载。pickle 路径直接内联返回字节；SHM 路径返回槽位信息，供工作线程从共享内存中读取。"
+
+#: ../../source/mp/index.rst:199
+msgid "``COMMIT_RETRIEVE``"
+msgstr "``COMMIT_RETRIEVE``"
+
+#: ../../source/mp/index.rst:201
+msgid ""
+"(Engine-driven path) Worker acknowledges retrieval completion so the "
+"server can release the underlying read locks and reclaim any transport "
+"state."
+msgstr "（引擎驱动路径）工作线程确认检索完成，服务器随即释放底层读取锁并回收相关传输状态。"
+
+#: ../../source/mp/index.rst:204
+msgid "``LOOKUP``"
+msgstr "``LOOKUP``"
+
+#: ../../source/mp/index.rst:206
+msgid ""
+"Submit a prefix lookup; the prefetch job is tracked server-side by "
+"request_id."
+msgstr "提交前缀查找；预取任务由 request_id 在服务器端跟踪。"
+
+#: ../../source/mp/index.rst:208
+msgid "``QUERY_PREFETCH_STATUS``"
+msgstr "``QUERY_PREFETCH_STATUS``"
+
+#: ../../source/mp/index.rst:210
+msgid ""
+"Poll a prefetch job by request_id. Returns the loaded chunk count when "
+"done, or ``None`` while the prefetch is still in progress."
+msgstr "通过 request_id 查询预取作业。当完成时返回已加载的块数，预取仍在进行中时返回 ``None``\\ 。"
+
+#: ../../source/mp/index.rst:212
+msgid "``WAIT_PREFETCH_STATUS``"
+msgstr "``WAIT_PREFETCH_STATUS``"
+
+#: ../../source/mp/index.rst:214
+msgid ""
+"(SGLang only) Block until a prefetch job completes, then return its "
+"loaded chunk count, or ``None`` on timeout. The blocking alternative to "
+"polling ``QUERY_PREFETCH_STATUS``."
+msgstr ""
+"（仅限 SGLang）阻塞直到预取作业完成，然后返回其加载的块数，超时则返回 ``None``。这是轮询 "
+"``QUERY_PREFETCH_STATUS`` 的阻塞替代方案。"
+
+#: ../../source/mp/index.rst:217
+msgid "``QUERY_PREFETCH_LOOKUP_HITS``"
+msgstr "``QUERY_PREFETCH_LOOKUP_HITS``"
+
+#: ../../source/mp/index.rst:219
+msgid ""
+"Query the lookup-phase hit chunk count by request_id, before the prefetch"
+" finishes. Returns ``None`` while the lookup is still running."
+msgstr "在预取完成之前，通过 request_id 查询查找阶段的命中块计数。当查找仍在运行时返回 ``None``\\ 。"
+
+#: ../../source/mp/index.rst:222
+msgid "``FREE_LOOKUP_LOCKS``"
+msgstr "``FREE_LOOKUP_LOCKS``"
+
+#: ../../source/mp/index.rst:224
+msgid "Release read locks from a cancelled lookup without doing a full RETRIEVE."
+msgstr "从取消的查找中释放读取锁，而无需执行完整的检索。"
+
+#: ../../source/mp/index.rst:226
+msgid "``END_SESSION``"
+msgstr "``END_SESSION``"
+
+#: ../../source/mp/index.rst:228
+msgid "Remove session state for a finished request."
+msgstr "移除已完成请求的会话状态。"
+
+#: ../../source/mp/index.rst:229
+msgid "``CLEAR``"
+msgstr "``CLEAR``"
+
+#: ../../source/mp/index.rst:231
+msgid "Clear all cached data."
+msgstr "清除所有缓存数据。"
+
+#: ../../source/mp/index.rst:232
+msgid "``GET_CHUNK_SIZE``"
+msgstr "``GET_CHUNK_SIZE``"
+
+#: ../../source/mp/index.rst:234
+msgid "Return the server's chunk size."
+msgstr "返回服务器的块大小。"
+
+#: ../../source/mp/index.rst:235
+msgid "``PING``"
+msgstr "``PING``"
+
+#: ../../source/mp/index.rst:237
+msgid "Liveness ping; the handler always returns ``True``."
+msgstr "存活 ping；处理程序始终返回 ``True``\\ 。"
+
+#: ../../source/mp/index.rst:238
+msgid "``REPORT_BLOCK_ALLOCATION``"
+msgstr "``REPORT_BLOCK_ALLOCATION``"
+
+#: ../../source/mp/index.rst:240
+msgid ""
+"Fire-and-forget channel for the vLLM scheduler to report GPU block "
+"allocation events to the observability subsystem."
+msgstr "vLLM 调度器的即发即忘通道，用于向可观察性子系统上报 GPU 块分配事件。"
+
+#: ../../source/mp/index.rst:242
+msgid "``NOOP``"
+msgstr "``NOOP``"
+
+#: ../../source/mp/index.rst:244
+msgid "Debug heartbeat -- returns a confirmation string."
+msgstr "调试心跳 -- 返回确认字符串。"
+
+#: ../../source/mp/index.rst:245
+msgid "``CB_REGISTER_KV_CACHE``"
+msgstr "``CB_REGISTER_KV_CACHE``"
+
+#: ../../source/mp/index.rst:247
+msgid "(Blend) Register CacheBlend KV buffer."
+msgstr "(Blend) 注册 CacheBlend KV 缓冲区。"
+
+#: ../../source/mp/index.rst:248
+msgid "``CB_UNREGISTER_KV_CACHE``"
+msgstr "``CB_UNREGISTER_KV_CACHE``"
+
+#: ../../source/mp/index.rst:250
+msgid "(Blend) Unregister CacheBlend KV buffer."
+msgstr "(Blend) 取消注册 CacheBlend KV 缓冲区。"
+
+#: ../../source/mp/index.rst:251
+msgid "``CB_STORE_PRE_COMPUTED``"
+msgstr "``CB_STORE_PRE_COMPUTED``"
+
+#: ../../source/mp/index.rst:253
+msgid "(Blend) Store pre-computed paragraph chunks."
+msgstr "（Blend）存储预计算的段落块。"
+
+#: ../../source/mp/index.rst:254
+msgid "``CB_LOOKUP_PRE_COMPUTED``"
+msgstr "``CB_LOOKUP_PRE_COMPUTED``"
+
+#: ../../source/mp/index.rst:256
+msgid "(Blend) Lookup pre-computed paragraph chunks."
+msgstr "(Blend) 查找预计算段块。"
+
+#: ../../source/mp/index.rst:257
+msgid "``CB_RETRIEVE_PRE_COMPUTED``"
+msgstr "``CB_RETRIEVE_PRE_COMPUTED``"
+
+#: ../../source/mp/index.rst:259
+msgid "(Blend) Retrieve pre-computed paragraph chunks to GPU."
+msgstr "(Blend) 将预计算的段落块检索到 GPU。"
+
+#: ../../source/mp/index.rst:260
+msgid "``CB_STORE_FINAL``"
+msgstr "``CB_STORE_FINAL``"
+
+#: ../../source/mp/index.rst:262
+msgid "(Blend) Store final blended chunks."
+msgstr "(Blend) 存储最终混合块。"
+
+#: ../../source/mp/index.rst:263
+msgid "``CB_LOOKUP_PRE_COMPUTED_V2``"
+msgstr "``CB_LOOKUP_PRE_COMPUTED_V2``"
+
+#: ../../source/mp/index.rst:265
+msgid ""
+"(Blend V2) Lookup pre-computed chunks; returns ``CBMatchResult`` entries "
+"(with old/cur ranges and per-chunk hashes) so the retrieve step can skip "
+"re-hashing."
+msgstr "（Blend V2）查找预计算块；返回 ``CBMatchResult`` 条目（包含旧范围/当前范围和每块哈希），以便检索步骤可以跳过重新哈希。"
+
+#: ../../source/mp/index.rst:268
+msgid "``CB_RETRIEVE_PRE_COMPUTED_V2``"
+msgstr "``CB_RETRIEVE_PRE_COMPUTED_V2``"
+
+#: ../../source/mp/index.rst:270
+msgid ""
+"(Blend V2) Retrieve pre-computed chunks using the ``CBMatchResult`` list "
+"returned by ``CB_LOOKUP_PRE_COMPUTED_V2``."
+msgstr ""
+"（Blend V2）使用 ``CB_LOOKUP_PRE_COMPUTED_V2`` 返回的 ``CBMatchResult`` "
+"列表检索预计算的块。"
+
+#: ../../source/mp/index.rst:272
+msgid "``CB_REGISTER_ROPE_V3``"
+msgstr "``CB_REGISTER_ROPE_V3``"
+
+#: ../../source/mp/index.rst:274
+msgid ""
+"(Blend V3) Share the RoPE cos/sin cache onto a context already registered"
+" via ``REGISTER_KV_CACHE``."
+msgstr "(Blend V3) 将 RoPE cos/sin 缓存共享到已经通过 ``REGISTER_KV_CACHE`` 注册的上下文中。"
+
+#: ../../source/mp/index.rst:276
+msgid "``CB_UNREGISTER_ROPE_V3``"
+msgstr "``CB_UNREGISTER_ROPE_V3``"
+
+#: ../../source/mp/index.rst:278
+msgid ""
+"(Blend V3) Drop the RoPE state (paged KV cache lives on; use "
+"``UNREGISTER_KV_CACHE`` to release that)."
+msgstr "(Blend V3) 丢弃 RoPE 状态（分页 KV Cache 仍然存在；使用 ``UNREGISTER_KV_CACHE`` 来释放它）。"
+
+#: ../../source/mp/index.rst:280
+msgid "``CB_RETRIEVE_PRE_COMPUTED_V3``"
+msgstr "``CB_RETRIEVE_PRE_COMPUTED_V3``"
+
+#: ../../source/mp/index.rst:282
+msgid ""
+"(Blend V3) Scatter all matched chunks (prefix- and non-prefix-hit) into "
+"paged KV by per-token block ID; re-RoPE only the shifted subset."
+msgstr "（Blend V3）将所有匹配的块（前缀命中和非前缀命中）按各 token 块 ID 分散写入分页 KV；仅对发生偏移的子集重新应用 RoPE。"
+
+#: ../../source/mp/index.rst:284
+msgid "``CB_UNIFIED_LOOKUP``"
+msgstr "``CB_UNIFIED_LOOKUP``"
+
+#: ../../source/mp/index.rst:286
+msgid ""
+"(Blend V3) Sole live lookup path: one RPC runs prefix + non-prefix match,"
+" reconciles, issues one sparse-coalesced prefetch, and classifies per-TP-"
+"rank. Returns ``CBUnifiedLookupResult`` (or ``None`` while the prefetch "
+"is still in flight)."
+msgstr ""
+"（Blend V3）唯一的实时查找路径：单次 RPC 同时执行前缀匹配和非前缀匹配，完成协调后发起一次稀疏合并预取，并按 TP rank "
+"进行分类。返回 ``CBUnifiedLookupResult``\\ （预取仍在进行时返回 ``None``\\ ）。"
+
+#: ../../source/mp/index.rst:290
+msgid "``P2P_LOOKUP_AND_LOCK``"
+msgstr "``P2P_LOOKUP_AND_LOCK``"
+
+#: ../../source/mp/index.rst:292
+msgid ""
+"(P2P) Look up the given keys and read-lock the locally cached prefix. "
+"Returns a task id which the caller passes to ``P2P_QUERY_LOOKUP_RESULTS``"
+" to poll for the transfer addresses. Served by ``P2PController`` (loaded "
+"unconditionally by ``_build_modules()``); whether this server also acts "
+"as a P2P client is controlled by ``--p2p-advertise-url`` -- see "
+":doc:`p2p`."
+msgstr "（P2P）查找给定的键并对本地缓存的前缀进行读锁。返回一个任务 ID，调用者将其传递给 ``P2P_QUERY_LOOKUP_RESULTS`` 以轮询传输地址。由 ``P2PController`` 提供服务（由 ``_build_modules()`` 无条件加载）；该服务器是否还充当 P2P 客户端由 ``--p2p-advertise-url`` 控制 -- 参见 :doc:`p2p`。"
+
+#: ../../source/mp/index.rst:299
+msgid "``P2P_QUERY_LOOKUP_RESULTS``"
+msgstr "``P2P_QUERY_LOOKUP_RESULTS``"
+
+#: ../../source/mp/index.rst:301
+msgid ""
+"(P2P) Poll the transfer addresses for a lookup task. Returns a list of "
+"``TransferChannelAddress`` once the lookup is complete, or ``None`` while"
+" the lookup is still in progress or its results have already been "
+"consumed."
+msgstr ""
+"(P2P) 查询查找任务的传输地址。查找完成后返回一个 ``TransferChannelAddress`` "
+"列表，或者在查找仍在进行中或其结果已被消费时返回 ``None``。"
+
+#: ../../source/mp/index.rst:305
+msgid "``P2P_UNLOCK_OBJECTS``"
+msgstr "``P2P_UNLOCK_OBJECTS``"
+
+#: ../../source/mp/index.rst:307
+msgid ""
+"(P2P) Release the read locks previously taken by ``P2P_LOOKUP_AND_LOCK`` "
+"on the given keys."
+msgstr "(P2P) 释放之前由 ``P2P_LOOKUP_AND_LOCK`` 在给定键上获取的读锁。"
+
+#: ../../source/mp/index.rst:310
+msgid "**Handler types:**"
+msgstr "**处理程序类型:**"
+
+#: ../../source/mp/index.rst:312
+msgid "**SYNC** -- Runs directly in the ZMQ main loop (fast, non-blocking)."
+msgstr "**SYNC** -- 直接在 ZMQ 主循环中运行（快速，非阻塞）。"
+
+#: ../../source/mp/index.rst:313
+msgid ""
+"**BLOCKING** -- Dispatched to a thread pool (may involve GPU copies or "
+"I/O)."
+msgstr "**BLOCKING** -- 分发到线程池执行（可能涉及 GPU 拷贝或 I/O）。"
+
+#: ../../source/mp/index.rst:316
+msgid "Config System"
+msgstr "配置系统"
+
+#: ../../source/mp/index.rst:318
+msgid "Each config module exposes a composable triple:"
+msgstr "每个配置模块都暴露一个可组合的三元组："
+
+#: ../../source/mp/index.rst:324
+msgid "``server.py:parse_args()`` composes them:"
+msgstr "``server.py:parse_args()`` 组合它们："
+
+#: ../../source/mp/index.rst:337
+msgid ""
+"``http_server.py`` reuses this pattern, adding "
+"``add_http_frontend_args()`` and ``add_coordinator_args()`` for the "
+"``lmcache server`` CLI. CacheBlend is no longer a separate entry point — "
+"it is opted into at runtime by passing ``--engine-type`` to ``server.py``"
+" (or ``lmcache server``). ``--engine-type blend`` appends "
+"``BlendV3Module`` (the current paged-aware implementation), while "
+"``--engine-type blend_legacy`` appends ``BlendModule`` (the original)."
+msgstr ""
+"``http_server.py`` 复用该模式，为 ``lmcache server`` CLI 额外添加了 "
+"``add_http_frontend_args()`` 和 ``add_coordinator_args()``\\ 。CacheBlend "
+"不再作为独立入口点，而是在运行时通过向 ``server.py``\\ （或 ``lmcache server``\\ ）传递 "
+"``--engine-type`` 来启用：\\ ``--engine-type blend`` 附加 ``BlendV3Module``\\ "
+"（当前的分页感知实现），\\ ``--engine-type blend_legacy`` 附加 ``BlendModule``\\ "
+"（原始实现）。"
+
+#: ../../source/mp/index.rst:346
+msgid "Distributed Storage"
+msgstr "分布式存储"
+
+#: ../../source/mp/index.rst:349
+msgid "StorageManager"
+msgstr "StorageManager"
+
+#: ../../source/mp/index.rst:351 ../../source/mp/index.rst:615
+msgid "``lmcache/v1/distributed/storage_manager.py``"
+msgstr "``lmcache/v1/distributed/storage_manager.py``"
+
+#: ../../source/mp/index.rst:353
+msgid ""
+"The top-level manager that wires together L1, L2, and all controllers.  "
+"Key methods:"
+msgstr "将 L1、L2 和所有控制器连接在一起的顶级管理器。关键方法："
+
+#: ../../source/mp/index.rst:356
+msgid "``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1."
+msgstr "``reserve_write()`` / ``finish_write()`` -- 对 L1 的两阶段写入。"
+
+#: ../../source/mp/index.rst:357
+msgid ""
+"``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup "
+"+ L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns "
+"``None`` while the L2 prefetch is still in flight."
+msgstr "``submit_prefetch_task()`` / ``query_prefetch_status()`` -- 异步查找 + L2 预取。 ``query_prefetch_status()`` 是非阻塞的，并在 L2 预取仍在进行时返回 ``None``。"
+
+#: ../../source/mp/index.rst:360
+msgid ""
+"``wait_prefetch_status()`` -- Blocking alternative to polling "
+"``query_prefetch_status()``: waits on a controller condition variable "
+"until the prefetch result is published (or a timeout expires). L1-only "
+"prefetches return immediately. Used by the ``WAIT_PREFETCH_STATUS`` RPC "
+"to avoid busy-polling on the load path."
+msgstr "``wait_prefetch_status()`` -- 轮询 ``query_prefetch_status()`` 的阻塞替代方案：在预取结果发布（或超时到期）之前，等待控制器条件变量。仅 L1 的预取会立即返回。由 ``WAIT_PREFETCH_STATUS`` RPC 使用，以避免在加载路径上进行忙等待。"
+
+#: ../../source/mp/index.rst:365
+msgid ""
+"``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read "
+"prefetched data from L1 with automatic lock management."
+msgstr ""
+"``read_prefetched_results()`` / ``finish_read_prefetched()`` -- 从 L1 "
+"读取预取的数据，并自动管理锁。"
+
+#: ../../source/mp/index.rst:369
+msgid "L1Manager"
+msgstr "L1Manager"
+
+#: ../../source/mp/index.rst:371 ../../source/mp/index.rst:619
+msgid "``lmcache/v1/distributed/l1_manager.py``"
+msgstr "``lmcache/v1/distributed/l1_manager.py``"
+
+#: ../../source/mp/index.rst:373
+msgid "Manages objects in CPU memory with a state machine:"
+msgstr "在 CPU 内存中使用状态机管理对象："
+
+#: ../../source/mp/index.rst:383
+msgid ""
+"Each object has two ``TTLLock`` instances (read and write) with "
+"configurable timeouts to prevent deadlocks from crashed clients."
+msgstr "每个对象都有两个 ``TTLLock`` 实例（读和写），并具有可配置的超时，以防止因崩溃的客户端导致的死锁。"
+
+#: ../../source/mp/index.rst:386
+msgid ""
+"The underlying memory allocation is handled by one of two interchangeable"
+" tiers selected at startup (both satisfy ``L1ManagerProtocol``):"
+msgstr "底层内存分配由在启动时选择的两个可互换层之一处理（两者都满足 ``L1ManagerProtocol``\\ ）："
+
+#: ../../source/mp/index.rst:389
+msgid ""
+"``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to "
+"``--l1-size-gb``."
+msgstr "``L1MemoryManager``\\ （默认）-- 固定 CPU DRAM，按需惰性增长至 ``--l1-size-gb``\\ 。"
+
+#: ../../source/mp/index.rst:391
+msgid ""
+"``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is "
+"set. The bytes live on disk; reads/writes DMA directly between the GPU "
+"staging buffer and the slab, driven by the process-global ``GDSContext`` "
+"(``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The "
+"DMA backend is selected by platform via ``gpu_connector/_gds_async.py`` "
+"-- cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on"
+" AMD ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the "
+"vendor-specific requirements. The CPU tier is disabled in this mode."
+msgstr "``GDSL1MemoryManager`` -- 当设置了 ``--gds-l1-path`` 时，使用 NVMe 块文件。字节存储在磁盘上；读/写通过 DMA 直接在 GPU 暂存缓冲区和块之间进行，由进程全局的 ``GDSContext``（``gpu_connector/gds_context.py``）驱动，并从 ``gpu_ops`` 派发。DMA 后端由平台通过 ``gpu_connector/_gds_async.py`` 选择 -- NVIDIA 使用 cuFile（``libcufile.so``），AMD ROCm 使用 hipFile（``libhipfile.so``）；有关特定于供应商的要求，请参见 :doc:`configuration` 的 *GDS L1 Tier* 部分。在此模式下，CPU 层被禁用。"
+
+#: ../../source/mp/index.rst:401
+msgid "L2 Adapters"
+msgstr "L2 适配器"
+
+#: ../../source/mp/index.rst:403
+msgid "``lmcache/v1/distributed/l2_adapters/``"
+msgstr "``lmcache/v1/distributed/l2_adapters/``"
+
+#: ../../source/mp/index.rst:405
+msgid ""
+"The ``L2AdapterInterface`` (in ``base.py``) defines three async task "
+"methods:"
+msgstr "``L2AdapterInterface``\\ （在 ``base.py`` 中）定义了三个异步任务方法："
+
+#: ../../source/mp/index.rst:407
+msgid "``submit_store_task(key, data)`` -- Push data to L2."
+msgstr "``submit_store_task(key, data)`` -- 将数据推送到 L2。"
+
+#: ../../source/mp/index.rst:408
+msgid "``submit_lookup_and_lock_task(keys)`` -- Check if keys exist in L2."
+msgstr "``submit_lookup_and_lock_task(keys)`` -- 检查键是否存在于 L2 中。"
+
+#: ../../source/mp/index.rst:409
+msgid "``submit_load_task(keys, layout_desc)`` -- Load data from L2 into L1."
+msgstr "``submit_load_task(keys, layout_desc)`` -- 从 L2 加载数据到 L1。"
+
+#: ../../source/mp/index.rst:411
+msgid ""
+"The factory function ``create_l2_adapter()`` (in ``__init__.py``) uses "
+"``isinstance()`` on the config type to instantiate the correct adapter."
+msgstr ""
+"工厂函数 ``create_l2_adapter()``\\ （位于 ``__init__.py``\\ ）通过对配置类型执行 "
+"``isinstance()`` 检查，实例化对应的适配器。"
+
+#: ../../source/mp/index.rst:414
+msgid ""
+"New adapter types are registered via ``register_l2_adapter_type()`` in "
+"``config.py``."
+msgstr "新适配器类型通过 ``register_l2_adapter_type()`` 在 ``config.py`` 中注册。"
+
+#: ../../source/mp/index.rst:418
+msgid "Controllers"
+msgstr "控制器"
+
+#: ../../source/mp/index.rst:420
+msgid ""
+"**StoreController** (``storage_controllers/store_controller.py``): Event-"
+"driven background thread that uses ``select.poll()`` on listener eventfd "
+"and adapter store eventfds.  When new objects appear in L1 (signaled via "
+"``StoreListener``), it submits async store tasks to each L2 adapter based"
+" on the ``StorePolicy``."
+msgstr ""
+"**StoreController** "
+"(``storage_controllers/store_controller.py``)：事件驱动的后台线程，使用 "
+"``select.poll()`` 监听 listener eventfd 和各适配器的存储 eventfd。当 L1 中出现新对象（通过 "
+"``StoreListener`` 发信号）时，根据 ``StorePolicy`` 向每个 L2 适配器提交异步存储任务。"
+
+#: ../../source/mp/index.rst:426
+msgid ""
+"**EvictionController** (``storage_controllers/eviction_controller.py``): "
+"Periodically checks L1 memory usage against the watermark threshold.  "
+"When triggered, evicts objects using the configured policy (``LRU``, "
+"``IsolatedLRU``, or ``noop``) until usage drops below the target. "
+"``IsolatedLRU`` evicts per ``cache_salt`` against limits registered "
+"through the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`."
+msgstr ""
+"**EvictionController** "
+"(``storage_controllers/eviction_controller.py``)：定期将 L1 "
+"内存用量与水位线阈值进行比较。触发后，使用配置的策略（\\ ``LRU``\\ 、\\ ``IsolatedLRU`` 或 ``noop``\\ "
+"）逐出对象，直至用量降到目标以下。\\ ``IsolatedLRU`` 按 ``cache_salt`` 维度逐出，配额上限由 "
+"``/quota`` HTTP 端点注册；参见 :ref:`mp-http-quota-api`。"
+
+#: ../../source/mp/index.rst:433
+msgid ""
+"**PrefetchController** (``storage_controllers/prefetch_controller.py``): "
+"Handles L2 lookup and load requests submitted by ``StorageManager`` "
+"during ``LOOKUP`` RPCs.  When keys are not in L1, it queries L2 adapters "
+"and loads found data back into L1."
+msgstr ""
+"**PrefetchController** "
+"(``storage_controllers/prefetch_controller.py``)：处理 ``StorageManager`` 在 "
+"``LOOKUP`` RPC 期间提交的 L2 查找和加载请求。当键不在 L1 中时，查询 L2 适配器并将命中的数据加载回 L1。"
+
+#: ../../source/mp/index.rst:439
+msgid "Request Flows"
+msgstr "请求流"
+
+#: ../../source/mp/index.rst:442
+msgid "LOOKUP Flow"
+msgstr "查找流程"
+
+#: ../../source/mp/index.rst:460
+msgid "STORE Flow"
+msgstr "存储流程"
+
+#: ../../source/mp/index.rst:479
+msgid "RETRIEVE Flow"
+msgstr "获取流程"
+
+#: ../../source/mp/index.rst:495
+msgid "Observability Internals"
+msgstr "可观察性内部实现"
+
+#: ../../source/mp/index.rst:497
+msgid ""
+"**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global "
+"singleton initialized at server startup by ``init_observability()``. "
+"Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event`` "
+"objects to a bounded queue (``--event-bus-queue-size``, default 10000, "
+"tail-drop on overflow).  A background drain thread dispatches each event "
+"to all registered subscribers."
+msgstr ""
+"**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) "
+"是一个全局单例，在服务器启动时由 ``init_observability()`` "
+"初始化。生产者（L1Manager、StorageManager、MPCacheServer）将 ``Event`` 对象发布到有界队列（\\ "
+"``--event-bus-queue-size``\\ ，默认 10000，溢出时尾部丢弃）。一个后台排空线程（drain "
+"thread）将每个事件分发给所有已注册的订阅者。"
+
+#: ../../source/mp/index.rst:504
+msgid ""
+"**Subscribers** live under ``lmcache/v1/mp_observability/subscribers/`` "
+"and are grouped by concern: ``metrics/`` (OTel counters and lifecycle "
+"histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL), "
+"and ``tracing/`` (OTel spans built from START/END event pairs). "
+"``init_observability()`` registers the set selected by CLI flags "
+"(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``)."
+msgstr ""
+"**订阅者** 位于 ``lmcache/v1/mp_observability/subscribers/`` 下，按关注点分组：\\ "
+"``metrics/``\\ （OTel 计数器和生命周期直方图）、\\ ``logging/``\\ （Python 日志处理器、查找哈希 "
+"JSONL）以及 ``tracing/``\\ （由 START/END 事件对构建的 OTel span）。\\ "
+"``init_observability()`` 根据 CLI 标志（\\ ``--disable-metrics``\\ 、\\ "
+"``--disable-logging``\\ 、\\ ``--enable-tracing``\\ ）注册相应的订阅者集合。"
+
+#: ../../source/mp/index.rst:511
+msgid ""
+"**OTel providers** are set up via ``otel_init.py`` before subscribers are"
+" constructed, so module-level ``get_meter()`` / ``get_tracer()`` calls "
+"bind to the real provider. Metrics are exported both to an in-process "
+"Prometheus ``/metrics`` endpoint (``--prometheus-port``, default 9090) "
+"and, when ``--otlp-endpoint`` is set, pushed to an OTel collector."
+msgstr ""
+"**OTel 提供者**\\ 在构造订阅者之前通过 ``otel_init.py`` 完成初始化，确保模块级的 ``get_meter()`` /"
+" ``get_tracer()`` 调用绑定到真实的提供者。指标同时导出到进程内的 Prometheus ``/metrics`` 端点（\\ "
+"``--prometheus-port``\\ ，默认 9090），并在设置了 ``--otlp-endpoint`` 时推送到 OTel "
+"收集器。"
+
+#: ../../source/mp/index.rst:519
+msgid "How to Extend"
+msgstr "如何扩展"
+
+#: ../../source/mp/index.rst:522
+msgid "Adding a new L2 adapter"
+msgstr "添加新的 L2 适配器"
+
+#: ../../source/mp/index.rst:524
+msgid ""
+"Create a new ``*_l2_adapter.py`` module under "
+"``lmcache/v1/distributed/l2_adapters/`` — ``__init__.py`` auto-discovers "
+"modules matching that suffix via ``pkgutil`` and imports them lazily on "
+"first use, so no other files need to be modified."
+msgstr ""
+"在 ``lmcache/v1/distributed/l2_adapters/`` 下创建一个新的 ``*_l2_adapter.py`` 模块 "
+"— ``__init__.py`` 会通过 ``pkgutil`` 自动发现匹配该后缀的模块，并在首次使用时惰性导入，无需修改其他文件。"
+
+#: ../../source/mp/index.rst:529
+msgid ""
+"Create a config class subclassing ``L2AdapterConfigBase`` with "
+"``from_dict()`` and ``help()`` methods."
+msgstr ""
+"创建一个配置类，继承自 ``L2AdapterConfigBase``\\ ，并实现 ``from_dict()`` 和 ``help()`` "
+"方法。"
+
+#: ../../source/mp/index.rst:531
+msgid ""
+"Create an adapter class implementing ``L2AdapterInterface``, and a small "
+"factory function ``(config, l1_memory_desc) -> L2AdapterInterface``."
+msgstr ""
+"创建一个实现 ``L2AdapterInterface`` 的适配器类，以及一个小型工厂函数 ``(config, l1_memory_desc)"
+" -> L2AdapterInterface``\\ 。"
+
+#: ../../source/mp/index.rst:534
+msgid "At module level, self-register both the config and the factory:"
+msgstr "在模块级别，自注册配置和工厂："
+
+#: ../../source/mp/index.rst:541
+msgid ""
+"See ``mock_l2_adapter.py`` or ``s3_l2_adapter.py`` for reference "
+"implementations."
+msgstr "请参阅 ``mock_l2_adapter.py`` 或 ``s3_l2_adapter.py`` 以获取参考实现。"
+
+#: ../../source/mp/index.rst:545
+msgid "Adding an observability subscriber"
+msgstr "添加可观察性订阅者"
+
+#: ../../source/mp/index.rst:547
+#, python-brace-format
+msgid ""
+"Create a subscriber class subclassing ``EventSubscriber`` (defined in "
+"``lmcache/v1/mp_observability/event_bus.py``): implement "
+"``get_subscriptions()`` to return an ``{EventType: callback}`` mapping; "
+"optionally override ``shutdown()`` for cleanup."
+msgstr ""
+"创建一个继承自 ``EventSubscriber`` 的订阅者类（定义在 "
+"``lmcache/v1/mp_observability/event_bus.py`` 中）：实现 "
+"``get_subscriptions()`` 以返回 ``{EventType: callback}`` 映射；可选地重写 "
+"``shutdown()`` 以进行清理。"
+
+#: ../../source/mp/index.rst:551
+msgid ""
+"Place the class under the appropriate concern group "
+"(``subscribers/metrics/``, ``subscribers/logging/``, or "
+"``subscribers/tracing/``) and export it from that package's "
+"``__init__.py``."
+msgstr ""
+"将类放置在对应的关注组（\\ ``subscribers/metrics/``\\ 、\\ ``subscribers/logging/`` 或 "
+"``subscribers/tracing/``\\ ）下，并从该包的 ``__init__.py`` 中导出。"
+
+#: ../../source/mp/index.rst:555
+msgid ""
+"Register the subscriber in ``init_observability()`` "
+"(``lmcache/v1/mp_observability/config.py``) via "
+"``bus.register_subscriber(...)`` inside the branch matching its concern "
+"(metrics / logging / tracing), gated on the corresponding CLI flag if "
+"needed."
+msgstr ""
+"在 ``init_observability()``\\ （\\ "
+"``lmcache/v1/mp_observability/config.py``\\ ）中，通过 "
+"``bus.register_subscriber(...)`` 在与其关注点（metrics / logging / "
+"tracing）匹配的分支内注册订阅者，如有需要可受相应 CLI 标志控制。"
+
+#: ../../source/mp/index.rst:562
+msgid "Adding a new request type"
+msgstr "添加新的请求类型"
+
+#: ../../source/mp/index.rst:564
+msgid "Add a new member to ``RequestType`` in ``protocols/base.py``."
+msgstr "在 ``protocols/base.py`` 中向 ``RequestType`` 添加一个新成员。"
+
+#: ../../source/mp/index.rst:565
+msgid ""
+"Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` "
+"file (``engine``, ``controller``, ``observability``, ``debug``, "
+"``blend``, ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request "
+"name to that module's ``REQUEST_NAMES``."
+msgstr "在适当的 ``protocols/*.py`` 文件（``engine``、``controller``、``observability``、``debug``、``blend``、``blend_v2``、``blend_v3`` 或 ``p2p``）中创建一个 ``ProtocolDefinition``，并将请求名称添加到该模块的 ``REQUEST_NAMES`` 中。"
+
+#: ../../source/mp/index.rst:569
+msgid ""
+"Implement the handler method on the appropriate ``EngineModule`` (e.g. "
+"``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and"
+" expose it as a ``HandlerSpec`` from that module's ``get_handlers()``."
+msgstr ""
+"在适当的 ``EngineModule`` 上实现处理程序方法（例如 ``LookupModule``\\ 、\\ "
+"``LMCacheDrivenTransferModule``\\ 、\\ ``BlendV3Module``\\ ），并将其作为该模块的 "
+"``get_handlers()`` 中的 ``HandlerSpec`` 公开。"
+
+#: ../../source/mp/index.rst:572
+msgid ""
+"``run_cache_server()`` registers every ``HandlerSpec`` returned by the "
+"loaded modules via ``add_handler_helper()`` — no manual registration step"
+" is needed."
+msgstr ""
+"``run_cache_server()`` 通过 ``add_handler_helper()`` 注册各已加载模块返回的每一个 "
+"``HandlerSpec``\\ ，无需手动注册。"
+
+#: ../../source/mp/index.rst:577
+msgid "Key Source Files"
+msgstr "关键源文件"
+
+#: ../../source/mp/index.rst:583
+msgid "File"
+msgstr "文件"
+
+#: ../../source/mp/index.rst:584
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/mp/index.rst:585
+msgid "``lmcache/v1/multiprocess/server.py``"
+msgstr "``lmcache/v1/multiprocess/server.py``"
+
+#: ../../source/mp/index.rst:586
+msgid "MPCacheServer + ZMQ server entry point"
+msgstr "MPCacheServer + ZMQ 服务器入口点"
+
+#: ../../source/mp/index.rst:587
+msgid "``lmcache/v1/multiprocess/config.py``"
+msgstr "``lmcache/v1/multiprocess/config.py``"
+
+#: ../../source/mp/index.rst:588
+msgid "MPServerConfig, HTTPFrontendConfig"
+msgstr "MPServerConfig, HTTPFrontendConfig"
+
+#: ../../source/mp/index.rst:589
+msgid "``lmcache/v1/multiprocess/engine_context.py``"
+msgstr "``lmcache/v1/multiprocess/engine_context.py``"
+
+#: ../../source/mp/index.rst:590
+msgid "MPCacheServerContext (shared state passed to every EngineModule)"
+msgstr "MPCacheServerContext（传递给每个 EngineModule 的共享状态）"
+
+#: ../../source/mp/index.rst:591
+msgid "``lmcache/v1/multiprocess/engine_module.py``"
+msgstr "``lmcache/v1/multiprocess/engine_module.py``"
+
+#: ../../source/mp/index.rst:592
+msgid ""
+"``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType`` (per-"
+"module handler registration)"
+msgstr ""
+"``EngineModule`` 协议， ``HandlerSpec``\\ ， ``ThreadPoolType``\\ "
+"（每个模块的处理程序注册）"
+
+#: ../../source/mp/index.rst:594
+msgid "``lmcache/v1/multiprocess/modules/``"
+msgstr "``lmcache/v1/multiprocess/modules/``"
+
+#: ../../source/mp/index.rst:595
+msgid ""
+"Engine module implementations: ``lookup.py`` (``LookupModule``), "
+"``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py`` "
+"(``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py`` "
+"(``EngineDrivenTransferModule``), ``blend.py`` (``BlendModule`` / "
+"``BlendEngineV2``, selected by ``--engine-type blend_legacy``), and "
+"``blend_v3.py`` (``BlendV3Module``, the paged-aware CacheBlend V3 "
+"pipeline selected by ``--engine-type blend``)."
+msgstr ""
+"引擎模块实现：\\ ``lookup.py`` (``LookupModule``)、\\ ``management.py`` "
+"(``ManagementModule``)、\\ ``lmcache_driven_transfer.py`` "
+"(``LMCacheDrivenTransferModule``)、\\ ``engine_driven_transfer.py`` "
+"(``EngineDrivenTransferModule``)、\\ ``blend.py``\\ （\\ ``BlendModule`` / "
+"``BlendEngineV2``\\ ，由 ``--engine-type blend_legacy`` 选择），以及 "
+"``blend_v3.py``\\ （\\ ``BlendV3Module``\\ ，由 ``--engine-type blend`` "
+"选择的分页感知 CacheBlend V3 流水线）。"
+
+#: ../../source/mp/index.rst:603
+msgid "``lmcache/v1/multiprocess/http_server.py``"
+msgstr "``lmcache/v1/multiprocess/http_server.py``"
+
+#: ../../source/mp/index.rst:604
+msgid "FastAPI wrapper with health check and many other useful APIs"
+msgstr "带健康检查和许多其他有用 API 的 FastAPI 包装器"
+
+#: ../../source/mp/index.rst:605
+msgid "``lmcache/v1/multiprocess/http_api_registry.py``"
+msgstr "``lmcache/v1/multiprocess/http_api_registry.py``"
+
+#: ../../source/mp/index.rst:606
+msgid "``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``"
+msgstr "``HTTPAPIRegistry`` 会自动发现 ``http_apis/`` 中的路由器"
+
+#: ../../source/mp/index.rst:607
+msgid "``lmcache/v1/multiprocess/http_apis/``"
+msgstr "``lmcache/v1/multiprocess/http_apis/``"
+
+#: ../../source/mp/index.rst:608
+msgid ""
+"Extensible HTTP endpoints (``/``, ``/healthcheck``, ``/cache/clear``, "
+"``/status``)"
+msgstr "可扩展的 HTTP 端点 (``/``, ``/healthcheck``, ``/cache/clear``, ``/status``)"
+
+#: ../../source/mp/index.rst:610
+msgid "``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``"
+msgstr "``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``"
+
+#: ../../source/mp/index.rst:611
+msgid ""
+"``MPRuntimePluginLauncher`` that spawns runtime plugins with the full "
+"server config serialized into environment variables"
+msgstr "``MPRuntimePluginLauncher`` 通过将完整的服务器配置序列化为环境变量来生成运行时插件"
+
+#: ../../source/mp/index.rst:613
+msgid "``lmcache/v1/multiprocess/protocols/base.py``"
+msgstr "``lmcache/v1/multiprocess/protocols/base.py``"
+
+#: ../../source/mp/index.rst:614
+msgid "RequestType, HandlerType, ProtocolDefinition"
+msgstr "请求类型，处理程序类型，协议定义"
+
+#: ../../source/mp/index.rst:616
+msgid "StorageManager (top-level manager)"
+msgstr "存储管理器（顶级管理器）"
+
+#: ../../source/mp/index.rst:617
+msgid "``lmcache/v1/distributed/config.py``"
+msgstr "``lmcache/v1/distributed/config.py``"
+
+#: ../../source/mp/index.rst:618
+msgid "StorageManagerConfig hierarchy"
+msgstr "StorageManagerConfig 层次结构"
+
+#: ../../source/mp/index.rst:620
+msgid "L1Manager (object state machine)"
+msgstr "L1Manager（对象状态机）"
+
+#: ../../source/mp/index.rst:621
+msgid "``lmcache/v1/distributed/l2_adapters/config.py``"
+msgstr "``lmcache/v1/distributed/l2_adapters/config.py``"
+
+#: ../../source/mp/index.rst:622
+msgid "L2 adapter config registry"
+msgstr "L2 适配器配置注册表"
+
+#: ../../source/mp/index.rst:623
+msgid "``lmcache/v1/distributed/l2_adapters/base.py``"
+msgstr "``lmcache/v1/distributed/l2_adapters/base.py``"
+
+#: ../../source/mp/index.rst:624
+msgid "L2AdapterInterface"
+msgstr "L2AdapterInterface"
+
+#: ../../source/mp/index.rst:625
+msgid "``lmcache/v1/distributed/storage_controllers/store_controller.py``"
+msgstr "``lmcache/v1/distributed/storage_controllers/store_controller.py``"
+
+#: ../../source/mp/index.rst:626
+msgid "StoreController (event-driven L1->L2)"
+msgstr "StoreController（事件驱动 L1->L2）"
+
+#: ../../source/mp/index.rst:627
+msgid "``lmcache/v1/distributed/storage_controllers/eviction_controller.py``"
+msgstr "``lmcache/v1/distributed/storage_controllers/eviction_controller.py``"
+
+#: ../../source/mp/index.rst:628
+msgid "EvictionController (watermark-triggered)"
+msgstr "逐出控制器（基于水印触发）"
+
+#: ../../source/mp/index.rst:629
+msgid "``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``"
+msgstr "``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``"
+
+#: ../../source/mp/index.rst:630
+msgid "PrefetchController (L2->L1 on miss)"
+msgstr "PrefetchController (L2->L1 未命中时)"
+
+#: ../../source/mp/index.rst:631
+msgid "``lmcache/v1/mp_observability/config.py``"
+msgstr "``lmcache/v1/mp_observability/config.py``"
+
+#: ../../source/mp/index.rst:632
+msgid "ObservabilityConfig + ``init_observability()`` entry point"
+msgstr "可观察性配置 + ``init_observability()`` 入口点"
+
+#: ../../source/mp/index.rst:633
+msgid "``lmcache/v1/mp_observability/event_bus.py``"
+msgstr "``lmcache/v1/mp_observability/event_bus.py``"
+
+#: ../../source/mp/index.rst:634
+msgid "EventBus singleton and ``EventSubscriber`` base class"
+msgstr "事件总线单例和 ``EventSubscriber`` 基类"
+
+#: ../../source/mp/index.rst:635
+msgid "``lmcache/v1/mp_observability/event.py``"
+msgstr "``lmcache/v1/mp_observability/event.py``"
+
+#: ../../source/mp/index.rst:636
+msgid "``Event`` / ``EventType`` definitions"
+msgstr "``Event`` / ``EventType`` 定义"
+
+#: ../../source/mp/index.rst:637
+msgid "``lmcache/v1/mp_observability/otel_init.py``"
+msgstr "``lmcache/v1/mp_observability/otel_init.py``"
+
+#: ../../source/mp/index.rst:638
+msgid "OTel metrics / tracing provider setup"
+msgstr "OTel 指标 / 跟踪提供程序设置"
+
+#: ../../source/mp/index.rst:639
+msgid "``lmcache/v1/mp_observability/subscribers/``"
+msgstr "``lmcache/v1/mp_observability/subscribers/``"
+
+#: ../../source/mp/index.rst:640
+msgid "Metrics, logging, and tracing subscribers"
+msgstr "指标、日志和追踪订阅者"
+
+#: ../../source/mp/index.rst:641
+msgid "``lmcache/v1/mp_observability/trace/``"
+msgstr "``lmcache/v1/mp_observability/trace/``"
+
+#: ../../source/mp/index.rst:642
+msgid "Trace recording (``--trace-level storage``) capture stack"
+msgstr "追踪记录 (``--trace-level storage``) 捕获堆栈"
+
+#~ msgid ""
+#~ "**Recommended.** ZMQ + FastAPI HTTP "
+#~ "frontend (adds ``/healthcheck`` for K8s "
+#~ "probes, ``/clear-cache``, ``/status`` — "
+#~ "see :doc:`http_api`). Use ``--engine-type "
+#~ "blend`` to enable BlendEngineV2 for "
+#~ "cross-request KV reuse."
+#~ msgstr ""
+#~ "**推荐。** ZMQ + FastAPI HTTP 前端（为 "
+#~ "K8s 探针添加 ``/healthcheck``、``/clear-"
+#~ "cache``、``/status`` — 参见 :doc:`http_api`）。使用 "
+#~ "``--engine-type blend`` 启用 BlendEngineV2 "
+#~ "以实现跨请求的 KV 重用。"
+
+#~ msgid ""
+#~ "(Legacy) ZMQ-only server using "
+#~ "MPCacheEngine (no HTTP endpoints). Prefer "
+#~ "``lmcache server``."
+#~ msgstr "(遗留) 仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
+
+#~ msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+#~ msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+
+#~ msgid ""
+#~ "(Legacy) CacheBlend-enabled server. Prefer "
+#~ "``lmcache server --engine-type blend``."
+#~ msgstr "（遗留）启用 CacheBlend 的服务器。建议使用 ``lmcache server --engine-type blend``。"
+
+#~ msgid "Multiprocess Mode"
+#~ msgstr "多进程模式"
+

@@ -1,0 +1,16 @@
+steps:
+  - label: ":rocket: vLLM correctness"
+    key: "correctness"
+    timeout_in_minutes: 60
+    commands:
+      - |
+        set -euo pipefail
+
+        echo "[INFO] HOME: $HOME"
+        echo "[INFO] PWD: $PWD"
+
+        chmod +x .buildkite/scripts/vllm-correctness.sh
+        BUILD_ID="${BUILDKITE_BUILD_ID}" .buildkite/scripts/vllm-correctness.sh
+
+    artifact_paths:
+      - "build_${BUILDKITE_BUILD_ID}.log"

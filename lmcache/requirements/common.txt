@@ -1,0 +1,50 @@
+aiofile
+aiofiles
+blake3
+aiohttp
+awscrt
+cryptography
+cufile-python
+fastapi
+httpx
+huggingface_hub>=1.5.0
+msgspec
+# nixl uses numba which requires numpy<=2.2.6
+numpy<=2.2.6
+numba
+nvtx
+opentelemetry-api >= 1.20.0, <= 1.40.0
+opentelemetry-sdk >= 1.20.0
+opentelemetry-exporter-otlp >= 1.20.0
+opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0
+prometheus_client >= 0.18.0, <= 0.24.1
+psutil
+py-cpuinfo
+# cupy.testing._random unconditionally imports pytest at module level;
+# torch._dynamo triggers this via inspect.getmodule() during compilation.
+pytest
+pyyaml
+pyzmq >= 25.0.0
+redis
+safetensors
+setuptools>=77.0.3,<81.0.0
+setuptools_scm>=8
+sortedcontainers
+# 1. avoid pinning torch version in the runtime dependencies so that 
+# installing lmcache (from source or from pypi) will not override
+# the user's preexisting torch version 
+# 2. this keeps lmcache torch version flexible for many serving engines
+# and versions of those serving engines
+# if NO pre-existing torch version is installed, `pip install lmcache` or 
+# `pip install -e . --no-build-isolation` will install the latest torch version
+# 3. the extra benefit of not pinning is so that when vllm releases their docker
+# image (which has lmcache as a dependency), we will never forcefully collide with
+# whatever torch version that they have
+# 4. this torch version may also be overridden inside of LMCache/docker/Dockerfile
+torch
+transformers >= 5.4
+uvicorn
+httptools
+cachetools
+google-api-core
+google-cloud-bigtable

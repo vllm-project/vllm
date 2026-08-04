@@ -1,0 +1,32 @@
+div.highlight pre {
+    overflow-x: auto;
+    white-space: pre;
+}
+
+/* Wide CSV / docutils tables: horizontal scroll in HTML */
+.compat-table-scroll {
+    overflow-x: auto;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+}
+
+.compat-table-scroll table {
+    width: max-content;
+    min-width: 100%;
+    max-width: none;
+}
+
+/* Keep wide content tables and long inline strings from overflowing the
+   content column into the right-hand "On this page" ToC. Wide tables scroll
+   horizontally within the column instead of pushing into the ToC. */
+#content {
+    min-width: 0;
+    overflow-wrap: break-word;
+}
+
+#content table.docutils {
+    display: block;
+    width: fit-content;
+    max-width: 100%;
+    overflow-x: auto;
+}

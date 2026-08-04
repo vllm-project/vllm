@@ -1,0 +1,383 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:4
+msgid "Standalone Starter"
+msgstr "独立启动器"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:8
+msgid ""
+"This page documents the behavior of LMCache's in-process mode "
+"(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
+"for better feature support and performance."
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:11
+msgid ""
+"The LMCache Standalone Starter allows you to run LMCacheEngine as a "
+"standalone service without vLLM or GPU dependencies. This is particularly"
+" useful for:"
+msgstr "LMCache 独立启动器允许您将 LMCacheEngine 作为独立服务运行，而无需 vLLM 或 GPU 依赖。这对于以下情况特别有用："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:13
+msgid "Testing and development environments"
+msgstr "测试和开发环境"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:14
+msgid "CPU-only or P2P backend deployments"
+msgstr "仅 CPU 或 P2P 后端部署"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:17
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:20
+msgid "Basic Usage"
+msgstr "基本用法"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:35
+msgid "CPU-Only Mode"
+msgstr "CPU-Only 模式"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:46
+msgid "Remote P2P Mode"
+msgstr "远程 P2P 模式"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:47
+msgid "TO be added"
+msgstr "待添加"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:50
+msgid "Configuration Section"
+msgstr "配置部分"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:52
+msgid ""
+"The standalone starter supports multiple configuration sources with the "
+"following priority order:"
+msgstr "独立启动器支持多个配置源，优先级顺序如下："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:54
+msgid "**Command-line arguments** (highest priority)"
+msgstr "**命令行参数**\\ （最高优先级）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:55
+msgid ""
+"**Configuration file** (specified by ``--config`` or "
+"``LMCACHE_CONFIG_FILE``)"
+msgstr "**配置文件**\\ （由 ``--config`` 或 ``LMCACHE_CONFIG_FILE`` 指定）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:56
+msgid "**Environment variables** (e.g., ``LMCACHE_CHUNK_SIZE=512``)"
+msgstr "**环境变量**\\ （例如，\\ ``LMCACHE_CHUNK_SIZE=512``\\ ）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:57
+msgid "**Default values** (lowest priority)"
+msgstr "**默认值**\\ （最低优先级）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:60
+msgid "Parameter Details"
+msgstr "参数详细信息"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:62
+msgid "**KV Cache Shape Specification**"
+msgstr "**KV Cache 形状规范**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:64
+msgid ""
+"The ``--kvcache_shape_spec`` parameter supports multi-layer group "
+"configurations:"
+msgstr "``--kvcache_shape_spec`` 参数支持多层组配置："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:66
+msgid "Format: ``(shape_string):dtype:layer_count;[...]``"
+msgstr "格式: ``(shape_string):dtype:layer_count;[...]``"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:67
+msgid "shape_string: comma-separated shape (e.g., '2,2,256,4,16')"
+msgstr "shape_string: 以逗号分隔的形状（例如，'2,2,256,4,16'）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:68
+msgid ""
+"Examples: - Single group: ``(2,2,256,4,16):float16:2`` - Multiple groups:"
+" ``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
+msgstr ""
+"示例： - 单个组：\\ ``(2,2,256,4,16):float16:2`` - 多个组：\\ "
+"``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:72
+msgid "**Device Support**"
+msgstr "**设备支持**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:74
+msgid "``--device=cpu``: CPU-only mode (default)"
+msgstr "``--device=cpu``: 仅 CPU 模式（默认）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:75
+msgid "``--device=cuda``: CUDA GPU acceleration"
+msgstr "``--device=cuda``: CUDA GPU 加速"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:76
+msgid "``--device=xpu``: XPU GPU acceleration"
+msgstr "``--device=xpu``: XPU GPU 加速"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:78
+msgid "**MLA (Multi-Level Attention)**"
+msgstr "**多级注意力 (MLA)**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:80
+msgid "``--use_mla``: Enable MLA for improved attention performance"
+msgstr "``--use_mla``: 启用 MLA 以提高注意力性能"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:81
+msgid "Requires compatible model and configuration"
+msgstr "需要兼容的模型和配置"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:83
+msgid "**Cache Formats**"
+msgstr "**缓存格式**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:85
+msgid "``--fmt=vllm``: vLLM-compatible format (default)"
+msgstr "``--fmt=vllm``: vLLM 兼容格式（默认）"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:86
+msgid "Supports other formats for different inference engines"
+msgstr "支持其他格式以适应不同的推理引擎"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:89
+msgid "Command-Line Parameters"
+msgstr "命令行参数"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:92
+msgid "Basic Parameters"
+msgstr "基本参数"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:109
+msgid "Usage Examples"
+msgstr "使用示例"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:112
+msgid "Custom Configuration"
+msgstr "自定义配置"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:123
+msgid "Multi-Layer Group Configuration"
+msgstr "多层组配置"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:135
+msgid "GPU device"
+msgstr "GPU 设备"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:149
+msgid "MLA Configuration"
+msgstr "MLA 配置"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:162
+msgid "Internal API Server"
+msgstr "内部 API 服务器"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:164
+msgid ""
+"The standalone starter includes an internal API server for monitoring and"
+" management:"
+msgstr "独立启动器包括一个用于监控和管理的内部 API 服务器："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:177
+msgid "Troubleshooting"
+msgstr "故障排除"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:180
+msgid "Common Issues"
+msgstr "常见问题"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:182
+msgid ""
+"**Issue**: \"No config file specified\" **Solution**: Set "
+"``LMCACHE_CONFIG_FILE`` or use ``--config`` parameter"
+msgstr "**问题**: “未指定配置文件” **解决方案**: 设置 ``LMCACHE_CONFIG_FILE`` 或使用 ``--config`` 参数"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:185
+msgid ""
+"**Issue**: \"Failed to connect to controller\" **Solution**: Start "
+"controller first: ``python -m lmcache.v1.api_server``"
+msgstr "**问题**: “无法连接到控制器” **解决方案**: 首先启动控制器: ``python -m lmcache.v1.api_server``"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:188
+msgid ""
+"**Issue**: \"Invalid KV shape specification\" **Solution**: Check format:"
+" ``(shape):dtype:layer_count``, e.g., ``(2,2,256,4,16):float16:2``"
+msgstr ""
+"**问题**: \\\"无效的 KV 形状规范\\\" **解决方案**: 检查格式: "
+"``(shape):dtype:layer_count``\\ ，例如，\\ ``(2,2,256,4,16):float16:2``"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:191
+msgid ""
+"**Issue**: \"Device not available\" **Solution**: Verify device support: "
+"use ``--device=cpu`` if GPU not available"
+msgstr "**问题**: \"设备不可用\" **解决方案**: 验证设备支持: 如果 GPU 不可用，请使用 ``--device=cpu``"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:194
+msgid ""
+"**Issue**: \"MLA configuration error\" **Solution**: Ensure compatible "
+"model and check ``--use_mla`` parameter"
+msgstr "**问题**: \"MLA 配置错误\" **解决方案**: 确保模型兼容并检查 ``--use_mla`` 参数"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:198
+msgid "Debug Mode"
+msgstr "调试模式"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:200
+msgid "Enable debug logging for troubleshooting:"
+msgstr "启用调试日志以进行故障排除："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:208
+msgid "Advanced Debugging"
+msgstr "高级调试"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:210
+msgid "For detailed layer group information:"
+msgstr "有关详细的层组信息："
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:220
+msgid "Performance Tuning"
+msgstr "性能调优"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:223
+msgid "Memory Configuration"
+msgstr "内存配置"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:234
+msgid "Layer Group Optimization"
+msgstr "层组优化"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:245
+msgid "GPU Acceleration"
+msgstr "GPU 加速"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:256
+msgid "MLA Performance"
+msgstr "MLA 性能"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:268
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:270
+msgid "**Use configuration files** for production deployments"
+msgstr "**在生产环境中使用配置文件**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:271
+msgid "**Set appropriate cache sizes** based on available memory"
+msgstr "**根据可用内存设置适当的缓存大小**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:272
+msgid "**Enable internal API** for monitoring and management"
+msgstr "**启用内部 API** 以进行监控和管理"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:273
+msgid "**Monitor logs** for performance and error tracking"
+msgstr "**监控日志**\\ 以进行性能和错误跟踪"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:274
+msgid "**Use multi-layer group configurations** for complex model architectures"
+msgstr "**使用多层组配置** 以支持复杂的模型架构"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:275
+msgid "**Enable MLA** for improved attention performance on supported hardware"
+msgstr "**启用 MLA** 以在支持的硬件上提高注意力性能"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:276
+msgid "**Choose appropriate device** based on available resources (CPU/GPU/XPU)"
+msgstr "**根据可用资源（CPU/GPU/XPU）选择合适的设备**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:277
+msgid "**Validate KV shape specifications** before deployment"
+msgstr "**在部署之前** 验证 KV 形状规范"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:278
+msgid "**Test with debug logging** when configuring new layer groups"
+msgstr "**在配置新层组时**\\ 进行调试日志测试"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:279
+msgid "**Optimize chunk sizes** for specific hardware configurations"
+msgstr "**为特定硬件配置优化块大小**"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:282
+msgid "Multi-Layer Group Best Practices"
+msgstr "多层组最佳实践"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:284
+msgid "Use consistent chunk sizes across layer groups for optimal performance"
+msgstr "在层组之间使用一致的块大小以获得最佳性能"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:285
+msgid "Group layers with similar precision requirements together"
+msgstr "将具有相似精度要求的层分组在一起"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:286
+msgid "Validate shape specifications in development environment first"
+msgstr "首先在开发环境中验证形状规范"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:287
+msgid "Monitor memory usage when using multiple layer groups"
+msgstr "在使用多个层组时监控内存使用情况"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:290
+msgid "MLA Configuration Tips"
+msgstr "MLA 配置提示"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:292
+msgid "Enable MLA only on supported hardware configurations"
+msgstr "仅在支持的硬件配置上启用 MLA"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:293
+msgid "Use bfloat16 or float16 precision for best MLA performance"
+msgstr "使用 bfloat16 或 float16 精度以获得最佳 MLA 性能"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:294
+msgid "Test MLA performance impact before production deployment"
+msgstr "在生产部署之前测试 MLA 性能影响"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:295
+msgid "Monitor attention performance metrics with MLA enabled"
+msgstr "启用 MLA 后监控注意力性能指标"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:298
+msgid "Related Documentation"
+msgstr "相关文档"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:300
+msgid ":doc:`../quickstart`"
+msgstr ":doc:`../quickstart`"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:301
+msgid ":doc:`../../api_reference/configurations`"
+msgstr ":doc:`../../api_reference/configurations`"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:302
+msgid ":doc:`../../kv_cache/storage_backends/index`"
+msgstr ":doc:`../../kv_cache/storage_backends/index`"
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:303
+msgid ":doc:`../../kv_cache_management/index`"
+msgstr ":doc:`../../kv_cache_management/index`"
+

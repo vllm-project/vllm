@@ -1,0 +1,94 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: CacheBlendEngine
+metadata:
+  name: my-cacheblend
+  namespace: default
+spec:
+  # -- Container image (the LMCache blend_v3 ENGINE image) --
+  # The engine runs `lmcache server --engine-type blend`. If this image lives
+  # in a PRIVATE registry, set imagePullSecrets (the Secret must exist in this
+  # namespace).
+  image:
+    repository: lmcache/vllm-openai # default
+    tag: latest-nightly # default
+    pullPolicy: IfNotPresent # Always | Never | IfNotPresent
+  # imagePullSecrets:
+  #   - name: my-registry-secret
+
+  # -- Server config --
+  # server:
+  #   port: 6566                  # MP port the CB connector dials (default 6566)
+  #   httpPort: 8080              # HTTP frontend port (health, admin)
+  #   chunkSize: 256              # FIXED at 256 (must equal vLLM --block-size * 4)
+  #   maxWorkers: 1               # default, worker threads
+  #   hashAlgorithm: blake3       # builtin | sha256_cbor | blake3
+
+  # -- L1 cache (REQUIRED) --
+  l1:
+    sizeGB: 60
+
+  # -- CacheBlend tunables (injected into the vLLM connector config) --
+  # blend:
+  #   checkLayer: 1               # default, cb.check_layer
+  #   recompRatio: 0.15           # default, cb.recomp_ratio
+
+  # -- Injection: how the webhook injects the plugin into annotated vLLM pods --
+  injection:
+    # payloadImage is the PRIVATE cacheblend-plugin init-container image (not
+    # open-source) — repository/tag/pullPolicy, like spec.image. Set repository
+    # to YOUR cacheblend-plugin image and pin the tag to the target vLLM/lmcache
+    # window. The webhook injects it as an init container into vLLM pods.
+    payloadImage:
+      repository: lmcache/cacheblend-plugin
+      tag: latest
+      pullPolicy: IfNotPresent             # Always | Never | IfNotPresent
+    # imagePullSecrets pulls the PRIVATE payload image. The webhook appends these
+    # to the vLLM pod's spec.imagePullSecrets — the Secret(s) must exist in the
+    # vLLM pod's namespace.
+    # imagePullSecrets:
+    #   - name: my-registry-secret
+    # targetContainer: ""          # default: first container; name the vLLM container
+    # cudagraph: eager             # eager | piecewise | full_decode_only (never full)
+
+  # -- Eviction --
+  # eviction:
+  #   policy: LRU                 # default (only supported value)
+  #   triggerWatermark: 0.8       # default, range (0.0, 1.0]
+  #   evictionRatio: 0.2          # default, range (0.0, 1.0]
+
+  # -- Prometheus monitoring --
+  # prometheus:
+  #   enabled: true               # default
+  #   port: 9090                  # default
+  #   serviceMonitor:
+  #     enabled: false            # default, requires Prometheus Operator
+
+  # -- Scheduling (place one engine per GPU node; vLLM pods must land on these nodes) --
+  # nodeSelector:
+  #   nvidia.com/gpu.present: "true"
+
+  # -- Logging --
+  # logLevel: INFO                # DEBUG | INFO | WARNING | ERROR
+
+  # -- Security --
+  # Run the engine container in privileged mode. Defaults to false. Set to true
+  # only on clusters where the engine cannot see the node GPUs otherwise
+  # (runtimeClassName: nvidia + NVIDIA_VISIBLE_DEVICES=all is enough on most).
+  # privileged: false
+
+# ---------------------------------------------------------------------------
+# To enable CacheBlend on a vLLM pod, label it for the webhook and annotate it
+# with this engine's name. The pod (and this engine) must run in a namespace
+# labeled `pod-security.kubernetes.io/enforce=privileged` (hostIPC is injected).
+#
+#   metadata:
+#     labels:
+#       lmcache.ai/cacheblend-inject: "true"
+#     annotations:
+#       lmcache.ai/cacheblend-engine: "my-cacheblend"
+#       # lmcache.ai/cacheblend-container: "vllm"          # optional
+#       # lmcache.ai/cacheblend-image-pull-secrets: "..."  # optional override
+#
+# The vLLM container must launch via the image ENTRYPOINT (args-only) — a
+# `command: ["/bin/sh","-c", ...]` wrapper is skipped (injection cannot reach it).
+# ---------------------------------------------------------------------------

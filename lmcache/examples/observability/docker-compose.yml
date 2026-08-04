@@ -1,0 +1,70 @@
+services:
+
+  # OTel Collector — receives OTLP from LMCache, fans out to Tempo + Prometheus
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: obs_otel_collector
+    volumes:
+      - ./otel-collector.yml:/etc/otel-collector.yml:ro
+    command: ["--config=/etc/otel-collector.yml"]
+    ports:
+      - "4320:4317"   # OTLP gRPC (LMCache sends here)
+      - "8889:8889"   # Prometheus scrape endpoint
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - tempo
+    restart: unless-stopped
+
+  # Tempo — trace storage
+  tempo:
+    image: grafana/tempo:2.7.2
+    container_name: obs_tempo
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml:ro
+      - tempo_data:/var/tempo
+    command: ["-config.file=/etc/tempo.yml"]
+    ports:
+      - "3200:3200"
+    restart: unless-stopped
+
+  # Prometheus — metrics storage
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: obs_prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+  # Grafana — UI (anonymous access, no login required)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: obs_grafana
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    depends_on:
+      - prometheus
+      - tempo
+    restart: unless-stopped
+
+volumes:
+  tempo_data:
+  prometheus_data:
+  grafana_data:

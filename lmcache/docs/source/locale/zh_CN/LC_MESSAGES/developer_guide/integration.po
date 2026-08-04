@@ -1,0 +1,114 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/integration.rst:2
+msgid "Integration"
+msgstr "集成"
+
+#: ../../source/developer_guide/integration.rst:4
+msgid ""
+"LMCache acts as a caching middleware that sits between LLM inference "
+"engines and storage systems, enabling:"
+msgstr "LMCache充当一个缓存中间件，位于LLM推理引擎和存储系统之间，支持："
+
+#: ../../source/developer_guide/integration.rst:6
+msgid ""
+"**Transparent Cache Reuse**: Automatic detection and reuse of previously "
+"computed KV caches"
+msgstr "**透明缓存重用**\\ ：自动检测和重用先前计算的 KV 缓存"
+
+#: ../../source/developer_guide/integration.rst:7
+msgid ""
+"**Performance Optimization**: 3×–10× reduction in time-to-first-token "
+"(TTFT) for multi-round conversation and RAG."
+msgstr "**性能优化**\\ ：在多轮对话和 RAG 中，首次令牌的时间（TTFT）减少 3 倍至 10 倍。"
+
+#: ../../source/developer_guide/integration.rst:8
+msgid "**Resource Efficiency**: Significant GPU cycle savings through cache reuse"
+msgstr "**资源效率**\\ ：通过缓存重用显著节省显存周期"
+
+#: ../../source/developer_guide/integration.rst:9
+msgid ""
+"**Scalable Architecture**: Support for single-node and multi-node "
+"deployments"
+msgstr "**可扩展架构**\\ ：支持单节点和多节点部署"
+
+#: ../../source/developer_guide/integration.rst:12
+msgid "Supported Engines"
+msgstr "支持的引擎"
+
+#: ../../source/developer_guide/integration.rst:14
+msgid "LMCache currently supports integration with:"
+msgstr "LMCache 目前支持与以下内容集成："
+
+#: ../../source/developer_guide/integration.rst:16
+msgid "**vLLM**"
+msgstr "**vLLM**"
+
+#: ../../source/developer_guide/integration.rst:17
+msgid "**SGLang**"
+msgstr "**SGLang**"
+
+#: ../../source/developer_guide/integration.rst:18
+msgid "**TRT-LLM** (coming soon)"
+msgstr "**TRT-LLM**\\ （即将推出）"
+
+#: ../../source/developer_guide/integration.rst:21
+msgid "Integration with vLLM"
+msgstr "与 vLLM 的集成"
+
+#: ../../source/developer_guide/integration.rst:23
+msgid ""
+"When LMCache is integrated with vLLM, the inference pipeline is augmented"
+" to lookup and inject cached KV chunks for any reused input content. The "
+"sequence diagram below shows how a prompt request flows through vLLM with"
+" LMCache:"
+msgstr "当 LMCache 与 vLLM 集成时，推理管道会增强以查找并注入缓存的 KV 块，以便处理任何重复使用的输入内容。下面的序列图展示了提示请求如何通过 vLLM 和 LMCache 流动："
+
+#: ../../source/developer_guide/integration.rst:44
+msgid ""
+"**Cache Lookup**: Upon receiving a new prompt, vLLM (via the LMCache "
+"connector) computes identifiers (e.g. hashes of token sequences) and "
+"queries LMCache for matching KV cache chunks. If a cache hit occurs, "
+"LMCache retrieves the KV chunk (potentially from CPU or disk) and returns"
+" it to vLLM. vLLM then injects these KV tensors into the model's "
+"attention cache instead of recomputing them from scratch."
+msgstr "**缓存查找**\\ ：在接收到新的提示后，vLLM（通过 LMCache 连接器）计算标识符（例如，令牌序列的哈希值）并查询 LMCache 以获取匹配的 KV 缓存块。如果发生缓存命中，LMCache 将检索 KV 块（可能来自 CPU 或磁盘）并将其返回给 vLLM。然后，vLLM 将这些 KV 张量注入到模型的注意力缓存中，而不是从头开始重新计算它们。"
+
+#: ../../source/developer_guide/integration.rst:46
+msgid ""
+"**Inference with Cache**: vLLM proceeds with inference. For any parts of "
+"the prompt where no cache was available (cache miss), the model computes "
+"new KV values as usual. Cached segments (e.g. previously seen text) are "
+"skipped in computation, significantly reducing the time-to-first-token "
+"(TTFT) and saving GPU cycles."
+msgstr "**使用缓存的推理**\\ ：vLLM 继续进行推理。对于没有可用缓存的提示部分（缓存未命中），模型会像往常一样计算新的 KV 值。缓存的片段（例如，之前见过的文本）在计算中被跳过，显著减少了首次令牌时间（TTFT），并节省了显存周期。"
+
+#: ../../source/developer_guide/integration.rst:48
+msgid ""
+"**Async Cache Write**: After processing the prompt, any newly generated "
+"KV cache chunks (corresponding to this prompt's content) are handed off "
+"to LMCache for storage. This put operation is done asynchronously (in the"
+" background) so it doesn't delay the response. The response is returned "
+"to the user promptly, and LMCache's background tasks will offload the new"
+" KV data to CPU, disk, or other backends for future reuse."
+msgstr "**异步缓存写入**\\ ：在处理完提示后，任何新生成的 KV 缓存块（对应于该提示的内容）都被交给 LMCache 进行存储。此放置操作是异步进行的（在后台），因此不会延迟响应。响应会及时返回给用户，而 LMCache 的后台任务将把新的 KV 数据卸载到 CPU、磁盘或其他后端以供将来重用。"
+

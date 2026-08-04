@@ -1,0 +1,127 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:2
+msgid "Fault Inject"
+msgstr "故障注入"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:4
+msgid ""
+"A **test/diagnostic-only** adapter that wraps a real inner adapter and "
+"deterministically drops keys on the load read, simulating partial L2 "
+"retrieve failures.  It exercises CacheBlend's **segmented-prefix** "
+"recovery path — a gapped found-set (hit … miss … hit) that a healthy "
+"cache never produces — without needing an actual faulty backend."
+msgstr "一个 **仅用于测试/诊断** 的适配器，它包装了一个真实的内部适配器，并在加载读取时确定性地丢弃键，模拟部分 L2 检索失败。它测试了 CacheBlend 的 **分段前缀** 恢复路径——一个健康缓存从未产生的间隙找到集（命中 … 未命中 … 命中）——而无需实际故障的后端。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:12
+msgid ""
+"Never enable in production.  It silently makes reads fail, so any KV it "
+"serves is intentionally incomplete."
+msgstr "切勿在生产环境中启用。它会悄无声息地使读取失败，因此它提供的任何 KV 都是故意不完整的。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:15
+msgid ""
+"The wrapped backend is given as a full adapter spec under ``inner`` (any "
+"registered ``type``), so it keeps its own configuration, eviction, "
+"persist, and serde settings.  Faulting applies to the load read only: a "
+"dropped key is reported *present at lookup* but its *load fails* (the "
+"faithful \"L2 retrieve error\"); the prefetch controller releases the "
+"load-failed locks via the trim mask.  Everything else (store, lookup, "
+"unlock, delete, usage) passes straight through to the inner adapter."
+msgstr "包装的后端作为完整的适配器规范在 ``inner`` 下提供（任何注册的 ``type``），因此它保留自己的配置、逐出、持久化和序列化设置。故障仅适用于加载读取：丢失的键在查找时被报告为存在，但其加载失败（忠实的“L2 检索错误”）；预取控制器通过修剪掩码释放加载失败的锁。其他所有操作（存储、查找、解锁、删除、使用）都直接传递给内部适配器。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:23
+msgid "**Fields:**"
+msgstr "**字段：**"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:25
+#, python-brace-format
+msgid ""
+"``inner`` (required): full adapter spec for the wrapped backend, e.g. "
+"``{\"type\": \"fs_native\", \"base_path\": \"/dev/shm/l2\"}``."
+msgstr "``inner``\\ （必需）：用于包装后端的完整适配器规范，例如 ``{\"type\": \"fs_native\", \"base_path\": \"/dev/shm/l2\"}``。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:27
+msgid ""
+"``gap_tail_ratios``: positions to always drop, given as distance-from-"
+"tail fractions of the load length in ``[0, 1]`` (``0.0`` = last chunk, "
+"``0.5`` = middle, ``1.0`` = first).  Workload-agnostic and self-scaling "
+"across context lengths.  Default ``[]``."
+msgstr "``gap_tail_ratios``: 始终丢弃的位置，以负载长度的尾部距离比例给出，范围在 ``[0, 1]`` 之间（``0.0`` = 最后一个块，``0.5`` = 中间，``1.0`` = 第一个）。与工作负载无关，并且在上下文长度上自我缩放。默认 ``[]``。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:31
+msgid ""
+"``gap_indices``: exact head-relative task-positions to always drop. "
+"Default ``[]``."
+msgstr "``gap_indices``: 始终丢弃的精确头相对任务位置。默认 ``[]``。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:33
+msgid ""
+"``rate``: per-key drop probability in ``[0, 1]`` via a stable seeded hash"
+" of the key.  Default ``0.0`` (pass-through)."
+msgstr "``rate``: 每个键的丢弃概率在 ``[0, 1]`` 范围内，通过键的稳定种子哈希计算。默认值为 ``0.0``\\ （直通）。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:35
+msgid ""
+"``seed``: seed for the ``rate`` hash (deterministic given the seed). "
+"Default ``0``."
+msgstr "``seed``: ``rate`` 哈希的种子（给定种子时是确定性的）。默认值为 ``0``。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:38
+msgid ""
+"Defaults are pass-through; set at least one of ``gap_tail_ratios``, "
+"``gap_indices``, or ``rate`` to drop anything."
+msgstr "默认值是直接传递的；至少设置 ``gap_tail_ratios``、``gap_indices`` 或 ``rate`` 之一以丢弃任何内容。"
+
+#: ../../source/mp/l2_storage/fault_inject.rst:41
+msgid ""
+"Drop a stable mid-prefix gap (the CacheBlend segmented-prefix repro), "
+"wrapping an ``fs_native`` backend:"
+msgstr "丢弃一个稳定的中间前缀间隙（CacheBlend 分段前缀重现），包装一个 ``fs_native`` 后端："
+
+#: ../../source/mp/l2_storage/fault_inject.rst:48
+msgid ""
+"To actually exercise CacheBlend's **segmented-prefix recovery**, pair the"
+" gap with the server flag ``--enable-segmented-prefix`` (CacheBlend only "
+"— ``--engine-type blend``). The dropped mid chunk produces a gapped "
+"found-set; with segmented-prefix enabled the prefix leg **retains the "
+"post-gap chunks** (loads prefix + tail) and recomputes **only the dropped"
+" gap**, instead of truncating the prefix at the gap:"
+msgstr "要实际测试 CacheBlend 的 **分段前缀恢复**，将间隙与服务器标志 ``--enable-segmented-prefix`` 配对（仅适用于 CacheBlend — ``--engine-type blend``）。丢弃的中间块会产生一个带间隙的查找集；启用分段前缀后，前缀部分 **保留间隙后的块**\\ （加载前缀 + 尾部）并仅重计算 **丢弃的间隙**，而不是在间隙处截断前缀："
+
+#: ../../source/mp/l2_storage/fault_inject.rst:61
+#, python-format
+msgid "Randomly drop ~10% of loads (deterministic given the seed):"
+msgstr "随机丢弃约 10% 的加载（根据种子确定）："
+
+#: ../../source/mp/l2_storage/fault_inject.rst:67
+msgid "Drop an exact load position (precise single-gap repro):"
+msgstr "丢弃一个确切的加载位置（精确的单缺口重现）："
+
+#: ../../source/mp/l2_storage/fault_inject.rst:73
+msgid ""
+"At startup the adapter logs ``FaultInjectL2Adapter ACTIVE (rate=… seed=… "
+"gap_indices=… gap_tail_ratios=[…]) wrapping <inner> -- test/diagnostic "
+"use only.``, and ``report_status()`` reports the active fault config "
+"under a ``fault_inject`` sub-dict."
+msgstr "在启动时，适配器记录 ``FaultInjectL2Adapter ACTIVE (rate=… seed=… gap_indices=… gap_tail_ratios=[…]) wrapping <inner> -- 仅用于测试/诊断。``，并且 ``report_status()`` 在 ``fault_inject`` 子字典下报告活动故障配置。"
+

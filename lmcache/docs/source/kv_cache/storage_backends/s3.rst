@@ -1,0 +1,155 @@
+S3 Backend
+==========
+
+Example Configurations
+----------------------
+
+Basic S3 Configuration
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   save_unfull_chunk: False
+   remote_url: "s3://your-bucket-name"
+   remote_serde: "naive"
+   blocking_timeout_secs: 10
+   extra_config:
+     s3_region: "us-east-1"
+     s3_num_io_threads: 64
+     save_chunk_meta: False
+
+S3 Express One Zone
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   save_unfull_chunk: False
+   remote_url: "s3://{BUCKET_NAME}.s3express-{AZ_ID}.{REGION}.amazonaws.com"
+   remote_serde: "naive"
+   blocking_timeout_secs: 10
+   extra_config:
+     save_chunk_meta: False
+     s3_num_io_threads: 64
+     s3_prefer_http2: True
+     s3_region: "{REGION}"
+     s3_enable_s3express: True
+
+CoreWeave (S3-compatible)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   local_cpu: False
+   max_local_cpu_size: 50
+   save_unfull_chunk: False
+   enable_async_loading: True
+   remote_url: "s3://test-127.cwlota.com"
+   remote_serde: "naive"
+   blocking_timeout_secs: 10
+   extra_config:
+     s3_num_io_threads: 320
+     s3_prefer_http2: False
+     s3_region: "US-WEST-04A"
+     s3_enable_s3express: False
+     save_chunk_meta: False
+     disable_tls: True
+     aws_access_key_id: "your-access-key-id"
+     aws_secret_access_key: "your-secret-access-key"
+
+**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that caches for GPU locality. You can set `disable_tls: True` for non-AWS services.
+
+Check out the blog post between LMCache, Cohere, and CoreWeave: https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/
+
+
+Configuration Parameters
+------------------------
+
+* **remote_url**: S3 bucket URL (`s3://bucket-name`)
+* **save_unfull_chunk**: Save partial chunks (default: False, **must be False for S3**)
+* **enable_async_loading**: Async loading (default: False)
+* **blocking_timeout_secs**: Timeout seconds (default: 10)
+
+S3-Specific (in extra_config)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **s3_region**: AWS region for S3 client (required)
+* **s3_num_io_threads**: Number of IO threads for the AWS CRT client to spawn. Benefits taper out after exceeding the number of CPU cores. This is also a way to restrict the number of outgoing requests in case your S3-compatible object store has a rate-limiting gateway.
+* **s3_prefer_http2**: Enable HTTP/2 with ALPN negotiation (["h2", "http/1.1"])
+* **s3_enable_s3express**: Enable S3 Express One Zone support in AWS CRT client
+* **save_chunk_meta**: Whether to save chunk metadata in the object store along with your data (False required for S3)
+* **aws_access_key_id**: AWS access key ID (or log in with `aws configure` in your environment)
+* **aws_secret_access_key**: AWS secret access key (or log in with `aws configure` in your environment)
+
+**Tips:**::
+
+- Use same region for compute and S3
+
+- Consider S3 Express One Zone for less redundancy but better performance
+
+
+MP Mode Configuration
+---------------------
+
+In multi-process (MP) mode, S3 is configured as an L2 adapter via a JSON
+spec passed to the LMCache server, rather than through ``remote_url`` +
+``extra_config``. Each ``--l2-adapter`` argument takes a JSON object
+whose ``"type": "s3"`` field selects the S3 adapter.
+
+.. code-block:: json
+
+   {
+     "type": "s3",
+     "s3_endpoint": "s3://my-bucket",
+     "s3_region": "us-east-1",
+     "s3_num_io_threads": 64,
+     "s3_prefer_http2": true,
+     "s3_enable_s3express": false,
+     "disable_tls": false,
+     "max_capacity_gb": 500,
+     "eviction": {
+       "eviction_policy": "LRU",
+       "trigger_watermark": 0.85,
+       "eviction_ratio": 0.2
+     }
+   }
+
+S3 L2 Adapter Fields
+~~~~~~~~~~~~~~~~~~~~
+
+* **type** (required): must be ``"s3"``.
+* **s3_endpoint** (required): bucket URL. Accepts either ``s3://bucket`` or
+  the bare host form (e.g. ``bucket.s3.us-east-1.amazonaws.com``).
+* **s3_region** (required): AWS region for the S3 client.
+* **s3_num_io_threads**: number of CRT IO threads (default ``64``).
+* **s3_prefer_http2**: attempt HTTP/2 via ALPN negotiation (default ``true``).
+* **s3_enable_s3express**: enable S3 Express One Zone signing (default ``false``).
+* **disable_tls**: bypass TLS, for non-AWS HTTP endpoints (default ``false``).
+* **aws_access_key_id**, **aws_secret_access_key**: optional static credentials.
+  When omitted the adapter uses the AWS default credentials chain
+  (``aws configure``, environment variables, IRSA, etc.).
+* **max_capacity_gb**: capacity used by ``get_usage()`` for watermark-based
+  L2 eviction. Set to ``0`` (default) to disable usage tracking — ``get_usage()``
+  then returns ``(-1.0, -1.0)`` and no automatic eviction is triggered.
+* **eviction**: optional sub-dict enabling the L2 eviction controller for
+  this adapter. See :class:`L2AdapterConfigBase` ``_parse_eviction_config``
+  for the full schema. When present, keys that are currently being loaded
+  (reference-counted by the lookup-and-lock path) are skipped by
+  ``delete()``.
+
+Differences vs Non-MP S3
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* The MP adapter honors first-class eviction: it implements ``delete()``
+  (real S3 ``DeleteObject``), refcounted ``submit_unlock``, and
+  ``get_usage()`` driven by ``max_capacity_gb``.
+* Keys are identified by ``ObjectKey`` (``model_name`` + ``kv_rank`` +
+  ``chunk_hash``) rather than ``CacheEngineKey``. The wire-format object
+  name is ``<model>@<kv_rank_hex>@<chunk_hash_hex>``, which is **not**
+  compatible with the non-MP naming. A bucket populated by non-MP LMCache
+  cannot be read directly by MP LMCache and vice versa.
+* Unfull chunks are rejected (same constraint as non-MP).
