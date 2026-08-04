@@ -462,7 +462,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # path (for example max_dcp_context_kv_len), and those Python-side
         # fields are not refreshed in-place between graph replays. Keep the
         # fused path disabled until DCP gets a full replay-safe refresh model.
-        self.supports_fused_decode_graph = self.dcp_world_size == 1
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -802,7 +802,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata.slot_mapping = slot_mapping
         return new_metadata
 
-    def refresh_meta_for_draft_decodes(self, metadata: FlashAttentionMetadata) -> None:
+    def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
         if not self.aot_schedule:
             return
 

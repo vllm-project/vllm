@@ -45,7 +45,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.use_fused_decode_graph = False
+        self.use_fused_multi_step_decode = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -96,11 +96,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
-        self._configure_fused_decode_graph()
+        self._configure_fused_multi_step_decode()
 
-    def _configure_fused_decode_graph(self) -> None:
+    def _configure_fused_multi_step_decode(self) -> None:
         if self.num_speculative_steps == 1:
-            self.use_fused_decode_graph = False
+            self.use_fused_multi_step_decode = False
+            return
+
+        if not self.advance_draft_positions:
+            self.use_fused_multi_step_decode = True
             return
 
         unsupported_backends = sorted(
@@ -108,13 +112,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 attn_group.backend.get_name()
                 for attn_groups in self.attn_groups
                 for attn_group in attn_groups
-                if not attn_group.supports_fused_decode_graph
+                if not attn_group.supports_draft_decode_metadata_update
             }
         )
-        self.use_fused_decode_graph = not unsupported_backends
+        self.use_fused_multi_step_decode = not unsupported_backends
         if unsupported_backends:
             logger.info_once(
-                "Fused draft decode graph is not supported by attention "
+                "Fused multi-step draft decode is not supported by attention "
                 "backend(s) %s; falling back to rebuilding attention metadata "
                 "between draft steps.",
                 ", ".join(unsupported_backends),
@@ -181,7 +185,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         assert self.decode_cudagraph_manager is not None
         decode_fn = (
             self._generate_fused_drafts
-            if self.use_fused_decode_graph
+            if self.use_fused_multi_step_decode
             else self._generate_draft
         )
         self.decode_cudagraph_manager.capture(
@@ -339,7 +343,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         decode_fn = (
             self._fused_multi_step_decode
-            if self.use_fused_decode_graph
+            if self.use_fused_multi_step_decode
             else self._multi_step_decode
         )
         decode_fn(
@@ -589,7 +593,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_tokens_padded,
                 )
                 for attn_group in attn_groups:
-                    attn_group.refresh_meta_for_draft_decodes(attn_metadata)
+                    attn_group.update_draft_decode_metadata(attn_metadata)
 
     def _generate_draft(
         self,
