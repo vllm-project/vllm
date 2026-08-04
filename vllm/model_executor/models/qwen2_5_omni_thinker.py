@@ -508,6 +508,20 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
+        elif (
+            mm_kwargs.get("use_audio_in_video")
+            and "audio" not in mm_data
+            and mm_data.get("videos")
+        ):
+            # A subclass (e.g. Qwen3-Omni) may have already popped "audios"
+            # and populated mm_data["audio"] itself before delegating here,
+            # in which case this isn't a genuine "no audio" case. Likewise,
+            # mm_data can be empty on a multimodal-processor-cache hit, where
+            # there's nothing to (re-)process this call and the real result
+            # comes from the cache — not a genuine "no audio" case either.
+            raise ValueError(
+                "Video doesn't have audio track with `audio_in_video=True`"
+            )
 
         merged = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
         if mm_data.get("videos") and (
@@ -911,7 +925,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         if use_audio_in_video and "video" in mm_counts:
-            assert "audio" in mm_counts
+            if mm_counts.get("audio", 0) < mm_counts["video"]:
+                raise ValueError(
+                    "Video doesn't have audio track with `audio_in_video=True`"
+                )
             mm_counts["audio"] -= mm_counts["video"]
 
         _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
