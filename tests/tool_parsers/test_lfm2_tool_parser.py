@@ -59,6 +59,11 @@ SET_ARG_FUNCTION_CALL = FunctionCall(
     name="label",
     arguments='{"tags": ["urgent", "bug"]}',
 )
+LEADING_ZERO_FUNCTION_OUTPUT = "set_date(month=07, day=05)"
+LEADING_ZERO_FUNCTION_CALL = FunctionCall(
+    name="set_date",
+    arguments='{"month": 7, "day": 5}',
+)
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"
 )
@@ -299,6 +304,21 @@ TEST_CASES = [
         [SET_ARG_FUNCTION_CALL],
         None,
         id="set_arg_nonstreaming",
+    ),
+    # Zero-padded integer arguments (SyntaxError: leading zeros)
+    pytest.param(
+        True,
+        _wrap(LEADING_ZERO_FUNCTION_OUTPUT),
+        [LEADING_ZERO_FUNCTION_CALL],
+        None,
+        id="leading_zero_int_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(LEADING_ZERO_FUNCTION_OUTPUT),
+        [LEADING_ZERO_FUNCTION_CALL],
+        None,
+        id="leading_zero_int_nonstreaming",
     ),
     # NUL byte in a string argument (ValueError from ast.parse, not
     # SyntaxError)

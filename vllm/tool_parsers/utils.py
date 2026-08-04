@@ -694,6 +694,68 @@ def restore_reserved_kwarg_names(arguments: dict) -> dict:
     return restored
 
 
+def normalize_leading_zero_ints(text: str) -> str:
+    """Strip leading zeros from decimal integer literals so the text parses.
+
+    Models emit zero-padded integers (``month=07``), which Python rejects
+    ("leading zeros in decimal integer literals are not permitted"), so the
+    whole call would be dropped. Rewrite ``07`` to ``7`` outside string
+    literals only. Tokens that are already valid Python are left alone:
+    all-zero literals (``00``), floats and fractional parts (``07.5``,
+    ``1.07``), exponents (``1e07``, consumed as a name run), and ``0x``/
+    ``0o``/``0b`` prefixes (the digit run stops at the prefix letter).
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            out.append(text[index:end])
+            index = end
+            continue
+        if char.isdigit():
+            end = index
+            while end < length and (text[end].isdigit() or text[end] == "_"):
+                end += 1
+            token = text[index:end]
+            digits = token.replace("_", "")
+            follower = text[end] if end < length else ""
+            preceded_by_dot = index > 0 and text[index - 1] == "."
+            if (
+                digits[0] == "0"
+                and digits.strip("0")
+                and not preceded_by_dot
+                and follower not in {".", "e", "E", "j", "J"}
+            ):
+                out.append(str(int(digits)))
+            else:
+                out.append(token)
+            index = end
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _is_escaped(text: str, index: int) -> bool:
     """Whether the character at ``index`` is backslash-escaped.
 

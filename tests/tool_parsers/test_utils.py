@@ -14,6 +14,7 @@ from vllm.tool_parsers.utils import (
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
+    normalize_leading_zero_ints,
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
 )
@@ -516,6 +517,49 @@ class TestGetParameterValueTuple:
         call = _first_call("[resize(size=(800, 600))]")
         tool = handle_single_tool(call)
         assert json.loads(tool.function.arguments) == {"size": [800, 600]}
+
+
+class TestNormalizeLeadingZeroInts:
+    # Zero-padded ints (month=07) are a SyntaxError no other recovery path
+    # handles; the rewrite must strip the padding without touching tokens
+    # that are already valid Python.
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("[f(month=07)]", "[f(month=7)]"),
+            ("[f(x=007, y=05)]", "[f(x=7, y=5)]"),
+            ("[f(x=0_7)]", "[f(x=7)]"),
+            ("[f(x=-07)]", "[f(x=-7)]"),
+        ],
+    )
+    def test_leading_zeros_stripped(self, text, expected):
+        assert normalize_leading_zero_ints(text) == expected
+        assert ast.parse(expected)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[f(x=0)]",
+            "[f(x=00)]",
+            "[f(x=0.5)]",
+            "[f(x=07.5)]",
+            "[f(x=1.07)]",
+            "[f(x=1e07)]",
+            "[f(x=0x1F)]",
+            "[f(x=0o17)]",
+            "[f(x=0b101)]",
+            "[f(s='id 007')]",
+            '[f(s="v0.07")]',
+        ],
+    )
+    def test_valid_tokens_and_strings_untouched(self, text):
+        assert normalize_leading_zero_ints(text) == text
+
+    def test_end_to_end(self):
+        normalized = normalize_leading_zero_ints("[set_date(month=07, day=05)]")
+        call = ast.parse(normalized).body[0].value.elts[0]
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"month": 7, "day": 5}
 
 
 class TestRenameReservedKwargs:

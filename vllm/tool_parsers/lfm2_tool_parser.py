@@ -28,6 +28,7 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
+    normalize_leading_zero_ints,
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
 )
@@ -191,8 +192,11 @@ class Lfm2ToolParser(ToolParser):
                 # A raw newline/tab inside a string argument (e.g. a multi-line
                 # shell command) is invalid Python, and a NUL byte anywhere is
                 # a ValueError; escape control chars inside string literals and
-                # retry instead of dropping the call.
-                escaped = escape_ctrl_chars_in_strings(tool_text)
+                # strip leading zeros from int literals (month=07), then retry
+                # instead of dropping the call.
+                escaped = escape_ctrl_chars_in_strings(
+                    normalize_leading_zero_ints(tool_text)
+                )
                 try:
                     module = ast.parse(escaped)
                 except (SyntaxError, ValueError):
@@ -314,12 +318,14 @@ class Lfm2ToolParser(ToolParser):
             # A raw control char inside a string argument would make every
             # completion candidate a SyntaxError; escape them here rather than
             # inside make_valid_python so the shared helper keeps its upstream
-            # behavior for the other pythonic parsers. A parameter named after
-            # a Python keyword (`from=1`) can never parse; rename complete
-            # `keyword=` tokens as well. Both rewrites are deterministic, so
-            # successive chunks stay consistent; names are restored after
-            # decoding.
-            tool_text = escape_ctrl_chars_in_strings(tool_text)
+            # behavior for the other pythonic parsers. Leading zeros in int
+            # literals (month=07) and parameters named after Python keywords
+            # (`from=1`) can never parse; rewrite those too. All rewrites are
+            # deterministic, so successive chunks stay consistent; keyword
+            # names are restored after decoding.
+            tool_text = escape_ctrl_chars_in_strings(
+                normalize_leading_zero_ints(tool_text)
+            )
             renamed_tool_text, kw_renamed = rename_reserved_kwargs(tool_text)
             if kw_renamed:
                 tool_text = renamed_tool_text
