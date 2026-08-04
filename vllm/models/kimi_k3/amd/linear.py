@@ -61,7 +61,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.ops.attn_res import attn_res, attn_res_rmsnorm
+from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -141,18 +142,35 @@ def _apply_attn_res(
     proj: ReplicatedLinear,
     norm: RMSNorm,
     num_valid_blocks: int,
+    following_norm: RMSNorm | None = None,
 ) -> torch.Tensor:
-    if num_valid_blocks <= 0:
-        return prefix_sum
+    if following_norm is not None and on_gfx950():
+        return attn_res_rmsnorm(
+            prefix_sum,
+            block_residual,
+            norm.weight,
+            proj.weight.squeeze(0),
+            following_norm.weight,
+            num_valid_blocks,
+            norm.variance_epsilon,
+            following_norm.variance_epsilon,
+        )
 
-    return attn_res(
-        prefix_sum,
-        block_residual,
-        norm.weight,
-        proj.weight.squeeze(0),
-        num_valid_blocks,
-        norm.variance_epsilon,
-    )
+    if num_valid_blocks <= 0:
+        hidden_states = prefix_sum
+    else:
+        hidden_states = attn_res(
+            prefix_sum,
+            block_residual,
+            norm.weight,
+            proj.weight.squeeze(0),
+            num_valid_blocks,
+            norm.variance_epsilon,
+        )
+
+    if following_norm is not None:
+        hidden_states = following_norm(hidden_states)
+    return hidden_states
 
 
 class KimiMoE(nn.Module):
@@ -610,13 +628,13 @@ class KimiDecoderLayer(nn.Module):
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            self.input_layernorm,
         )
 
         if self.is_block_write_layer:
             block_residual[:, self.block_write_idx, :].copy_(prefix_sum)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self._run_self_attn(positions, hidden_states)
 
         if prefix_sum is not None:
@@ -633,9 +651,9 @@ class KimiDecoderLayer(nn.Module):
             self.mlp_res_proj,
             self.mlp_res_norm,
             mlp_valid_blocks,
+            self.post_attention_layernorm,
         )
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         prefix_sum = prefix_sum + hidden_states
         return prefix_sum, block_residual
