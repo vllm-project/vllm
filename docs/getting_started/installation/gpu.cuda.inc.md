@@ -262,6 +262,13 @@ uv pip install -e .
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
+!!! note
+    Docker Hub's tag list is the source of truth for published image tags.
+    Model-specific or CUDA-variant tags mentioned by recipes may not exist for
+    every model and CUDA version. If a recipe tag is unavailable, use a published
+    generic tag such as `latest`, `nightly`, or a released `vX.Y.Z` tag, and pass
+    the target model with `--model`.
+
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
