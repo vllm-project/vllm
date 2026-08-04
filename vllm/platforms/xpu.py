@@ -285,7 +285,10 @@ class XPUPlatform(Platform):
             compilation_config.compile_sizes = []
 
         # lazy import to avoid circular import
-        from vllm.utils.torch_utils import supports_xpu_graph
+        from vllm.utils.torch_utils import (
+            supports_xpu_fa_in_graph,
+            supports_xpu_graph,
+        )
 
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -300,15 +303,55 @@ class XPUPlatform(Platform):
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
         else:
+            fa_in_graph_ok = supports_xpu_fa_in_graph()
             logger.warning_once(
                 "XPU Graph support is experimental and has known limitations: "
                 "(1) only single-GPU execution is supported; "
-                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
-                "for FULL mode; "
+                "(2) capturing FlashAttention into a full graph requires an "
+                "oneAPI 2026.0+ runtime (work-group scratch memory in SYCL "
+                "Graph); on older runtimes use PIECEWISE or TRITON_ATTN for "
+                "FULL mode; "
                 "(3) XPU Graph may increase device memory usage, "
                 "potentially causing OOM errors or leaving less memory "
                 "for the KV cache and reducing performance."
             )
+            mode = compilation_config.cudagraph_mode
+            wants_full = mode is not None and mode.has_full_cudagraphs()
+            if wants_full and envs.VLLM_XPU_GRAPH_FORCE_PIECEWISE:
+                # Default-on safety clamp (feature 01): keep FlashAttention
+                # outside the captured graph.
+                logger.warning_once(
+                    "VLLM_XPU_GRAPH_FORCE_PIECEWISE=1: overriding "
+                    "cudagraph_mode from %s to PIECEWISE so FlashAttention "
+                    "stays outside the XPU Graph. Set "
+                    "VLLM_XPU_GRAPH_FORCE_PIECEWISE=0 to capture FlashAttention "
+                    "in a full graph (needs oneAPI 2026.0+).",
+                    mode.name,
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif wants_full and not fa_in_graph_ok:
+                # Fail-closed: operator opted out of the clamp but the runtime
+                # cannot capture FA scratch kernels into a SYCL Graph. Capturing
+                # would raise the work_group_scratch_memory RuntimeError, so
+                # re-clamp instead of crashing at model warmup.
+                logger.warning_once(
+                    "VLLM_XPU_GRAPH_FORCE_PIECEWISE=0 requested full graph "
+                    "mode %s, but this runtime cannot capture FlashAttention "
+                    "into a SYCL Graph (needs oneAPI 2026.0+; "
+                    "torch.version.xpu=%s). Falling back to PIECEWISE to avoid "
+                    "the work_group_scratch_memory SYCL Graph error. Upgrade "
+                    "the base image or use TRITON_ATTN for FULL mode.",
+                    mode.name,
+                    getattr(torch.version, "xpu", None),
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif wants_full:
+                logger.info_once(
+                    "FlashAttention-in-graph enabled: capturing full XPU "
+                    "Graph (mode %s) including FlashAttention on oneAPI 2026.0+ "
+                    "runtime.",
+                    mode.name,
+                )
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode

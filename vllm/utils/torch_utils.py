@@ -894,6 +894,25 @@ def supports_xpu_graph() -> bool:
     return is_torch_equal_or_newer("2.11.0.dev")
 
 
+def supports_xpu_fa_in_graph() -> bool:
+    """Whether FlashAttention SYCL kernels can be captured into an XPU Graph.
+
+    FA kernels use ``sycl_ext_oneapi_work_group_scratch_memory``, which only
+    became capturable by the SYCL Graph extension on oneAPI 2026.0+ runtimes
+    (``torch.version.xpu >= 20260000``). On older runtimes capturing FA into a
+    full graph raises the ``work_group_scratch_memory ... not yet available for
+    use with the SYCL Graph extension`` RuntimeError, so full graph modes must
+    keep attention outside the capture (PIECEWISE).
+    """
+    if not supports_xpu_graph():
+        return False
+    xpu_ver = getattr(torch.version, "xpu", None)
+    try:
+        return xpu_ver is not None and int(xpu_ver) >= 20260000
+    except (TypeError, ValueError):
+        return False
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 

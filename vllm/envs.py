@@ -294,6 +294,11 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    # When XPU graphs are enabled, clamp full graph modes to PIECEWISE so
+    # FlashAttention SYCL kernels with work_group_scratch_memory stay outside
+    # the captured graph. Set to 0 to allow FULL / FULL_AND_PIECEWISE (e.g.
+    # TRITON_ATTN experiments).
+    VLLM_XPU_GRAPH_FORCE_PIECEWISE: bool = True
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
@@ -2017,6 +2022,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # When XPU graphs are on, force cudagraph_mode down to PIECEWISE if the
+    # configured mode still has full graphs. Default on (safe canary). Set
+    # VLLM_XPU_GRAPH_FORCE_PIECEWISE=0 to keep FULL / FULL_AND_PIECEWISE.
+    "VLLM_XPU_GRAPH_FORCE_PIECEWISE": lambda: bool(
+        int(os.getenv("VLLM_XPU_GRAPH_FORCE_PIECEWISE", "1"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
