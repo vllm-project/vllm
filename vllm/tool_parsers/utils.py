@@ -471,6 +471,10 @@ def get_parameter_value(val: ast.expr) -> Any:
         # is treated as a list so it round-trips through ``json.dumps``.
         # Without this the whole call is dropped.
         return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Set):
+        # JSON has no set type either; a set argument (e.g.
+        # ``tags={'a', 'b'}``) is treated as a list, preserving source order.
+        return [get_parameter_value(v) for v in val.elts]
     elif isinstance(val, ast.JoinedStr) and all(
         isinstance(part, ast.Constant) for part in val.values
     ):
@@ -783,21 +787,23 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
     #      syntactically invalid mixed dict/set.
     #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
-    #      Python but a *set* literal, which downstream tool-call AST
-    #      handling rejects.
-    # Validate the candidate parses, has a body, and contains no Set
-    # nodes (pythonic tool calls always use dicts for `{...}`). Callers
-    # whose models emit raw control chars inside string arguments must
-    # escape them (see escape_ctrl_chars_in_strings) before calling.
+    #      Python but a *set* literal that is really a truncated dict.
+    # Validate the candidate parses and has a body, and treat Set nodes as
+    # incomplete — but only when this completion added a `}` itself; a set
+    # already closed in the model text is a genuine set argument, not an
+    # artifact. Callers whose models emit raw control chars inside string
+    # arguments must escape them (see escape_ctrl_chars_in_strings) before
+    # calling.
     try:
         module = ast.parse(candidate)
     except SyntaxError:
         return None
     if not module.body:
         return None
-    for node in ast.walk(module):
-        if isinstance(node, ast.Set):
-            return None
+    if "}" in added_text:
+        for node in ast.walk(module):
+            if isinstance(node, ast.Set):
+                return None
 
     return candidate, added_text
 

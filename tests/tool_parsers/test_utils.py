@@ -446,6 +446,37 @@ class TestHandleSingleToolNegativeNumbers:
         assert json.loads(tool.function.arguments) == {"quantity_delta": -20}
 
 
+class TestGetParameterValueSet:
+    # JSON has no set type; a set argument is decoded as a list (preserving
+    # source order) instead of dropping the whole call, mirroring the tuple
+    # handling.
+    def test_set_becomes_list(self):
+        assert _value_of("{'a', 'b'}") == ["a", "b"]
+
+    def test_set_of_numbers(self):
+        assert _value_of("{1, 2, 3}") == [1, 2, 3]
+
+    def test_set_nested_in_dict(self):
+        assert _value_of("{'tags': {'x', 'y'}}") == {"tags": ["x", "y"]}
+
+    def test_set_end_to_end(self):
+        call = _first_call("[label(tags={'urgent', 'bug'})]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"tags": ["urgent", "bug"]}
+
+
+class TestMakeValidPythonSets:
+    def test_complete_set_in_model_text_accepted(self):
+        # A set the model wrote and closed itself is a genuine argument.
+        text = "[label(tags={'urgent', 'bug'})]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_truncated_dict_completed_to_set_still_rejected(self):
+        # `{"k` closes to `{"k"}` — a truncated dict, not a set the model
+        # wrote. The completion added the `}`, so it must keep waiting.
+        assert make_valid_python('[f(x={"k') is None
+
+
 class TestGetParameterValueFString:
     # A placeholder-free f-string is a plain string constant, but ast parses
     # it as JoinedStr; it must not drop the call. Real placeholders are not

@@ -54,6 +54,11 @@ EMPTY_LIST_FUNCTION_CALL = FunctionCall(
     name="do_something_cool",
     arguments='{"steps": []}',
 )
+SET_ARG_FUNCTION_OUTPUT = "label(tags={'urgent', 'bug'})"
+SET_ARG_FUNCTION_CALL = FunctionCall(
+    name="label",
+    arguments='{"tags": ["urgent", "bug"]}',
+)
 ESCAPED_STRING_FUNCTION_OUTPUT = (
     r"get_weather(city='Martha\'s Vineyard', metric='\"cool units\"')"
 )
@@ -279,6 +284,21 @@ TEST_CASES = [
         [MULTILINE_FUNCTION_CALL],
         None,
         id="multiline_string_arg_nonstreaming",
+    ),
+    # Set argument decoded as a list (JSON has no set type)
+    pytest.param(
+        True,
+        _wrap(SET_ARG_FUNCTION_OUTPUT),
+        [SET_ARG_FUNCTION_CALL],
+        None,
+        id="set_arg_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(SET_ARG_FUNCTION_OUTPUT),
+        [SET_ARG_FUNCTION_CALL],
+        None,
+        id="set_arg_nonstreaming",
     ),
     # NUL byte in a string argument (ValueError from ast.parse, not
     # SyntaxError)
