@@ -11,7 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.multimodal.audio import resample_audio_pyav
+from vllm.multimodal.audio import reduce_channels_to_mono, resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
@@ -149,7 +149,7 @@ def load_audio_pyav(
 
     audio = np.concatenate(chunks, axis=-1).astype(np.float32)
     if mono and audio.ndim > 1:
-        audio = np.mean(audio, axis=0)
+        audio = reduce_channels_to_mono(audio)
 
     return audio, sr
 
@@ -177,7 +177,7 @@ def load_audio_soundfile(
         y = f.read(dtype="float32", always_2d=False).T
 
     if mono and y.ndim > 1:
-        y = np.mean(y, axis=tuple(range(y.ndim - 1)))
+        y = reduce_channels_to_mono(y)
 
     if sr is not None and sr != native_sr:
         y = resample_audio_pyav(y, orig_sr=native_sr, target_sr=sr)
