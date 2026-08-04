@@ -271,6 +271,21 @@ def has_flashinfer_msa_packed_kv() -> bool:
 
 
 @functools.cache
+def has_flashinfer_msa_per_token_topk() -> bool:
+    """Return ``True`` if ``flashinfer.msa_ops.msa_topk_select`` accepts a
+    per-token ``num_valid_pages`` tensor. Detected from the parameter's type
+    annotation, since flashinfer exposes no capability flag for it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_topk_select
+
+    ann = inspect.signature(msa_topk_select).parameters["num_valid_pages"].annotation
+    return "Tensor" in str(ann)
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (

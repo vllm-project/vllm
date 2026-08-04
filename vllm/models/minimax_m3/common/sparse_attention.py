@@ -27,7 +27,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_msa_packed_kv
+from vllm.utils.flashinfer import (
+    has_flashinfer_msa_packed_kv,
+    has_flashinfer_msa_per_token_topk,
+)
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
 # every other platform uses the generic common.ops implementation.
@@ -475,6 +478,9 @@ def minimax_m3_use_flashinfer_msa(
         and num_heads % num_kv_heads == 0
         and num_heads // num_kv_heads <= 16
         and has_flashinfer_msa_packed_kv()
+        # The indexer passes num_valid_pages per token, which older flashinfer
+        # builds reject at runtime.
+        and has_flashinfer_msa_per_token_topk()
     )
 
 
