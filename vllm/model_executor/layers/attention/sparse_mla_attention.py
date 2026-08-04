@@ -155,8 +155,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        # Chunks pack whole requests, so one page is enough (see
-        # `MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size`).
         return max(workspace_size, cache_config.block_size)
 
     def _build_req_id_per_token(
@@ -675,8 +673,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             chunk_k_pe = workspace[:toks, self.kv_lora_rank :].unsqueeze(1)
             k, v = self._project_kv(chunk_kv_c, chunk_k_pe)
             if dense_mask is not None:
-                # The shared mask indexes rows by the kernel's batch index, so
-                # it has to be narrowed to the chunk's requests.
                 chunk_mask: torch.Tensor | None = dense_mask[requests]
                 chunk_topk = topk_per_req[requests]
                 key_starts: torch.Tensor | None = chunk.starts

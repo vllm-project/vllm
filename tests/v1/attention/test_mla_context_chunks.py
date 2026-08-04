@@ -16,6 +16,7 @@ import torch
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     build_mla_chunked_context_metadata,
+    reorg_kvcache,
 )
 
 BLOCK_SIZE = 16
@@ -201,6 +202,61 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
     for request, length in enumerate(context_lens):
         padded_local = -(-length // virtual_block_size) * interleave
         assert local_cursor[request] == padded_local
+
+
+def test_dcp_reorg_uses_each_chunks_local_starts():
+    """Reorganization drops DCP padding at each request's own chunk offset."""
+    dcp_world_size, interleave, workspace_size = 2, 64, 1024
+    metadata = build_chunked_context(
+        [3000, 200, 200],
+        [4, 4, 4],
+        workspace_size,
+        block_size=128,
+        dcp_world_size=dcp_world_size,
+        dcp_local_block_size=interleave,
+    )
+    assert metadata is not None
+
+    for chunk in metadata.chunks:
+        assert chunk.padded_local_seq_lens is not None
+        assert chunk.local_context_lens_allranks is not None
+        assert chunk.local_starts is not None
+
+        toks = chunk.num_local_context_tokens
+        rank_buffers = [torch.full((toks, 1, 1), -1) for _ in range(dcp_world_size)]
+        expected = []
+        src_token_idx = 0
+        for request, (padded_len, local_lens, local_start) in enumerate(
+            zip(
+                chunk.padded_local_seq_lens,
+                chunk.local_context_lens_allranks,
+                chunk.local_starts,
+            )
+        ):
+            for rank, local_len in enumerate(local_lens):
+                actual_len = min(max(0, local_len - local_start), padded_len)
+                values = (
+                    request * 100_000
+                    + rank * 10_000
+                    + torch.arange(local_start, local_start + actual_len)
+                ).view(-1, 1, 1)
+                rank_buffers[rank][src_token_idx : src_token_idx + actual_len] = values
+                expected.append(values)
+            src_token_idx += padded_len
+
+        allgathered = torch.cat(rank_buffers)
+        reorganized, _ = reorg_kvcache(
+            allgathered,
+            allgathered,
+            padded_local_chunk_seq_lens_lst=chunk.padded_local_seq_lens,
+            local_context_lens_allranks=chunk.local_context_lens_allranks,
+            local_starts=chunk.local_starts,
+            sum_seq_len=chunk.num_context_tokens,
+            max_seq_len=chunk.max_seq_len,
+            toks=toks,
+        )
+
+        torch.testing.assert_close(reorganized, torch.cat(expected))
 
 
 @pytest.mark.parametrize("max_num_seqs", [1, 32, 256])
