@@ -116,6 +116,9 @@ class SharedOffloadRegion:
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
         self.is_pinned: bool = False
+        # (offset, size) of every successful cudaHostRegister call; each one
+        # must be released at the pointer it was registered with.
+        self.pinned_chunks: list[tuple[int, int]] = []
 
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -174,13 +177,18 @@ class SharedOffloadRegion:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
                 base_ptr = self._base.data_ptr()
-                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-                if result.value != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
-                    )
+                cudart = torch.cuda.cudart()
+                for offset, _ in self.pinned_chunks:
+                    result = cudart.cudaHostUnregister(base_ptr + offset)
+                    if result.value != 0:
+                        logger.warning(
+                            "cudaHostUnregister failed for rank=%d at offset "
+                            "%d (code=%d)",
+                            self.rank,
+                            offset,
+                            result,
+                        )
+            self.pinned_chunks.clear()
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

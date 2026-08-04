@@ -8,10 +8,12 @@ import os
 import threading
 import time
 import uuid
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import gpu_worker, shared_offload_region
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -610,3 +612,89 @@ def test_wait_for_file_size_timeout(tmp_path):
             _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
+
+
+# ── host registration ────────────────────────────────────────────────────────
+
+
+def _fake_cudart(fail_at: int | None = None) -> tuple[MagicMock, list]:
+    """Record every cudaHostRegister call, optionally failing the fail_at-th."""
+    calls: list[tuple[int, int]] = []
+
+    def register(ptr, size, flags):
+        calls.append((ptr, size))
+        result = MagicMock()
+        result.value = 2 if fail_at is not None and len(calls) > fail_at else 0
+        return result
+
+    success = MagicMock()
+    success.value = 0
+    cudart = MagicMock()
+    cudart.cudaHostRegister.side_effect = register
+    cudart.cudaHostUnregister.return_value = success
+    return cudart, calls
+
+
+@pytest.fixture
+def _cuda_pinning(monkeypatch):
+    """Pretend we are on CUDA and cap chunks at two block rows."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(
+        shared_offload_region.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 2 * PAGE_SIZE)
+
+
+def test_pin_mmap_region_registers_row_aligned_chunks(_cuda_pinning):
+    """A region larger than the chunk cap is registered in contiguous pieces,
+    and cleanup releases each piece at the pointer it was registered with."""
+    with _region(str(uuid.uuid4()), num_blocks=5) as region:
+        cudart, calls = _fake_cudart()
+        with patch("torch.cuda.cudart", return_value=cudart):
+            gpu_worker.pin_mmap_region(region)
+
+            base = region._base.data_ptr()
+            assert calls == [
+                (base, 2 * PAGE_SIZE),
+                (base + 2 * PAGE_SIZE, 2 * PAGE_SIZE),
+                (base + 4 * PAGE_SIZE, PAGE_SIZE),
+            ]
+            assert region.is_pinned
+
+            region.cleanup()
+            assert [c.args[0] for c in cudart.cudaHostUnregister.call_args_list] == [
+                base,
+                base + 2 * PAGE_SIZE,
+                base + 4 * PAGE_SIZE,
+            ]
+
+
+def test_pin_mmap_region_keeps_what_it_registered_before_a_failure(_cuda_pinning):
+    """A failure part way through leaves the earlier chunks pinned, and only
+    those are unregistered."""
+    with _region(str(uuid.uuid4()), num_blocks=5) as region:
+        cudart, calls = _fake_cudart(fail_at=1)
+        with patch("torch.cuda.cudart", return_value=cudart):
+            gpu_worker.pin_mmap_region(region)
+
+            assert len(calls) == 2  # stopped after the first failure
+            assert region.is_pinned
+            assert region.pinned_chunks == [(0, 2 * PAGE_SIZE)]
+
+            base = region._base.data_ptr()
+            region.cleanup()
+            cudart.cudaHostUnregister.assert_called_once_with(base)
+
+
+def test_pin_mmap_region_failed_registration_is_not_unregistered(_cuda_pinning):
+    """Nothing is released when the very first registration fails."""
+    with _region(str(uuid.uuid4()), num_blocks=2) as region:
+        cudart, _ = _fake_cudart(fail_at=0)
+        with patch("torch.cuda.cudart", return_value=cudart):
+            gpu_worker.pin_mmap_region(region)
+
+            assert not region.is_pinned
+            assert region.pinned_chunks == []
+
+            region.cleanup()
+            cudart.cudaHostUnregister.assert_not_called()
