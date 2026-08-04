@@ -85,37 +85,19 @@ def _copy_mamba_state_block(
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+        per_row_bytes = (conv_width - token_bias).to(tl.int64) * state_elem_size
+        bias_bytes = token_bias.to(tl.int64) * state_elem_size
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
-
-        # Copy one logical conv position at a time from low to high while
-        # parallelizing over dimension rows. A row stays on the same lane at
-        # every position, so same-block shifts have memmove ordering without a
-        # barrier. The same layout also avoids serializing rows for copies
-        # between distinct blocks.
-        num_dst_tokens = conv_width - token_bias
-        for token_idx in range(0, num_dst_tokens):
-            for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
-                rows = row_base + offsets
-                mask = rows < dim_rows
-                src_byte_addr = (
-                    src_block_addr
-                    + rows * row_stride
-                    + (token_idx + token_bias) * state_elem_size
-                )
-                dst_byte_addr = (
-                    dst_addr + rows * row_stride + token_idx * state_elem_size
-                )
-                if state_elem_size == 2:
-                    src_u16 = src_byte_addr.to(tl.pointer_type(tl.uint16))
-                    dst_u16 = dst_byte_addr.to(tl.pointer_type(tl.uint16))
-                    data_u16 = tl.load(src_u16, mask=mask)
-                    tl.store(dst_u16, data_u16, mask=mask)
-                else:
-                    src_u32 = src_byte_addr.to(tl.pointer_type(tl.uint32))
-                    dst_u32 = dst_byte_addr.to(tl.pointer_type(tl.uint32))
-                    data_u32 = tl.load(src_u32, mask=mask)
-                    tl.store(dst_u32, data_u32, mask=mask)
+        for d in range(0, dim_rows):
+            row_src = src_block_addr + d * row_stride + bias_bytes
+            row_dst = dst_addr + d * row_stride
+            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < per_row_bytes
+                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
+                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
+                data = tl.load(curr_src, mask=mask)
+                tl.store(curr_dst, data, mask=mask)
         return
 
     if is_conv_state:
@@ -133,11 +115,6 @@ def _copy_mamba_state_block(
             curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
             curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
             data = tl.load(curr_src, mask=mask)
-            # Same-block conv shifts are overlapping left copies. Without a
-            # workgroup barrier, one wave can overwrite bytes before another
-            # wave has loaded them.
-            if src_block_id == dest_block_id and token_bias > 0:
-                tl.debug_barrier()
             tl.store(curr_dst, data, mask=mask)
         return
 
@@ -270,12 +247,9 @@ def postprocess_mamba_fused_kernel(
     dest_block_idx = aligned_new_computed // block_size - 1
 
     # Update accepted-token count before early exits (per-request, so only
-    # state_idx == 0 writes). V2 updates in place; V1 writes the _out buffer.
+    # state_idx == 0 writes).
     if src_block_idx == dest_block_idx and state_idx == 0:
-        if HAS_IDX_MAPPING:
-            tl.store(num_accepted_tokens_ptr + req_idx, 1)
-        else:
-            tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
 
     # Skip no-op self-copy.
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
@@ -444,13 +418,6 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
-        # Mamba conv-state postprocessing can shift a window left within the
-        # same allocation. Synchronize the load before the overlapping store
-        # so this fallback/reference path has memmove rather than memcpy
-        # semantics. The branch is uniform within each Triton program.
-        is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
-        if is_left_overlap:
-            tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
 
 
@@ -697,16 +664,8 @@ class MambaSpecDecodeGPUContext:
                         block_stride_elems * state.element_size()
                     )
 
-                    # The public Mamba/model dtype contracts permit fp16,
-                    # bf16, and fp32. Validate that invariant here so the DS
-                    # device copy only needs an efficient two-way typed branch.
-                    state_elem_size = state.element_size()
-                    if state_elem_size not in (2, 4):
-                        raise ValueError(
-                            "Mamba state copies support only 2-byte and 4-byte "
-                            f"elements, got dtype={state.dtype}"
-                        )
-                    self.state_elem_sizes[idx] = state_elem_size
+                    # Element size
+                    self.state_elem_sizes[idx] = state.element_size()
 
                     copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (
@@ -893,17 +852,25 @@ class MambaSpecDecodeGPUContext:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
 
-        ``num_accepted_tokens_gpu`` is updated in place (reset to 1 when the
-        accepted position stays in the running block); ``new_num_computed_tokens``
-        already holds the post-step computed count (PRECOMPUTED_NEW_COMPUTED).
+        ``num_accepted_tokens_gpu`` is updated in place while the kernel reads
+        from a snapshot to avoid cross-program races when the accepted position
+        stays in the running block and the count is reset to 1.
+        ``new_num_computed_tokens`` already holds the post-step computed count
+        (PRECOMPUTED_NEW_COMPUTED).
         ``idx_mapping`` maps batch row -> req-state slot (HAS_IDX_MAPPING).
         """
         if num_reqs == 0 or not self.is_initialized:
             return
+
+        # V2 reads non-contiguous idx_mapping positions, so snapshot the whole
+        # decision buffer rather than only [:num_reqs].
+        num_accepted_tokens_snapshot = self.num_accepted_tokens_out
+        num_accepted_tokens_snapshot.copy_(num_accepted_tokens_gpu)
+
         total_states = self.num_layers * self.num_state_types
         grid = (num_reqs, total_states)
         postprocess_mamba_fused_kernel[grid](
-            num_accepted_tokens_gpu,
+            num_accepted_tokens_snapshot,
             state_idx_gpu,
             None,  # num_scheduled: unused under PRECOMPUTED_NEW_COMPUTED
             new_num_computed_tokens_gpu,
@@ -918,7 +885,7 @@ class MambaSpecDecodeGPUContext:
             self.state_group_indices,
             self.state_dim_row_count,
             self.state_dim_row_stride,
-            None,  # num_accepted_out: V2 updates num_accepted in place
+            num_accepted_tokens_gpu,
             idx_mapping,
             num_reqs,
             block_size=self.block_size,
@@ -1276,66 +1243,6 @@ def postprocess_mamba_align_gpu(
     )
 
 
-def stage_postprocess_metadata_to_gpu(
-    scheduler_output: SchedulerOutput,
-    req_ids: list[str],
-    num_reqs: int,
-    requests: dict[str, CachedRequestState],
-    num_scheduled_tokens_buf: CpuGpuBuffer,
-    num_computed_tokens_buf: CpuGpuBuffer,
-    num_draft_tokens_buf: CpuGpuBuffer,
-) -> None:
-    """Stage per-request postprocess metadata into GPU buffers (non-blocking).
-
-    Walks ``req_ids[:num_reqs]`` in batch order and writes each request's
-    scheduled/computed/draft token counts into the matching pinned numpy
-    views, then issues three non-blocking H→D copies. These values don't
-    change between ``_prepare_inputs`` and ``_update_states_after_model_execute``.
-    The fused postprocess kernel indexes the resulting GPU tensors
-    by ``req_idx``.
-    """
-    scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-    num_scheduled = scheduler_output.num_scheduled_tokens
-    scheduled_np = num_scheduled_tokens_buf.np
-    computed_np = num_computed_tokens_buf.np
-    draft_np = num_draft_tokens_buf.np
-    for i in range(num_reqs):
-        req_id = req_ids[i]
-        scheduled_np[i] = num_scheduled[req_id]
-        computed_np[i] = requests[req_id].num_computed_tokens
-        draft_np[i] = len(scheduled_spec_tokens.get(req_id, []))
-    num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
-    num_computed_tokens_buf.copy_to_gpu(num_reqs)
-    num_draft_tokens_buf.copy_to_gpu(num_reqs)
-
-
-def stage_mamba_state_idx_to_gpu(
-    mamba_state_idx: dict[str, int],
-    req_ids: list[str],
-    num_reqs: int,
-    gpu_buf: CpuGpuBuffer,
-) -> None:
-    """Materialize ``mamba_state_idx`` into ``gpu_buf`` and copy to GPU.
-
-    Walks ``req_ids[:num_reqs]`` in batch order, writing each request's block
-    index into the buffer's pinned numpy view, then issues a non-blocking H→D
-    copy. The fused kernel indexes the resulting GPU tensor by ``req_idx``.
-
-    Invariant: ``preprocess_mamba`` must have run first for the same batch so
-    that every ``req_ids[i]`` has an entry in ``mamba_state_idx``.
-    """
-    np_view = gpu_buf.np
-    for i in range(num_reqs):
-        req_id = req_ids[i]
-        state_idx = mamba_state_idx.get(req_id)
-        assert state_idx is not None, (
-            f"mamba_state_idx missing entry for {req_id!r}; "
-            "preprocess_mamba must run before stage_mamba_state_idx_to_gpu"
-        )
-        np_view[i] = state_idx
-    gpu_buf.copy_to_gpu(num_reqs)
-
-
 def stage_postprocess_inputs_to_gpu(
     ctx: MambaSpecDecodeGPUContext,
     scheduler_output: SchedulerOutput,
@@ -1346,27 +1253,40 @@ def stage_postprocess_inputs_to_gpu(
 ) -> None:
     """Stage all per-request inputs the fused mamba postprocess kernel reads.
 
-    Bundles ``stage_mamba_state_idx_to_gpu`` and
-    ``stage_postprocess_metadata_to_gpu`` into a single call so the runner
-    has one entry point for postprocess staging. Buffers live on ``ctx``
+    Walks ``req_ids[:num_reqs]`` once, writing each request's mamba block
+    index and scheduled/computed/draft token counts into the matching pinned
+    numpy views, then issues four non-blocking H→D copies. The fused kernel
+    indexes the resulting GPU tensors by ``req_idx``. Buffers live on ``ctx``
     and only exist when the postprocess kernel is enabled.
+
+    Invariant: ``preprocess_mamba`` must have run first for the same batch so
+    that every ``req_ids[i]`` has an entry in ``mamba_state_idx``.
     """
     assert ctx.mamba_state_idx_buf is not None
     assert ctx.num_scheduled_tokens_buf is not None
     assert ctx.num_computed_tokens_buf is not None
     assert ctx.num_draft_tokens_buf is not None
-    stage_mamba_state_idx_to_gpu(
-        mamba_state_idx,
-        req_ids,
-        num_reqs,
-        ctx.mamba_state_idx_buf,
-    )
-    stage_postprocess_metadata_to_gpu(
-        scheduler_output,
-        req_ids,
-        num_reqs,
-        requests,
-        ctx.num_scheduled_tokens_buf,
-        ctx.num_computed_tokens_buf,
-        ctx.num_draft_tokens_buf,
-    )
+
+    scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    num_scheduled = scheduler_output.num_scheduled_tokens
+    state_idx_np = ctx.mamba_state_idx_buf.np
+    scheduled_np = ctx.num_scheduled_tokens_buf.np
+    computed_np = ctx.num_computed_tokens_buf.np
+    draft_np = ctx.num_draft_tokens_buf.np
+
+    for i in range(num_reqs):
+        req_id = req_ids[i]
+        state_idx = mamba_state_idx.get(req_id)
+        assert state_idx is not None, (
+            f"mamba_state_idx missing entry for {req_id!r}; "
+            "preprocess_mamba must run before stage_postprocess_inputs_to_gpu"
+        )
+        state_idx_np[i] = state_idx
+        scheduled_np[i] = num_scheduled[req_id]
+        computed_np[i] = requests[req_id].num_computed_tokens
+        draft_np[i] = len(scheduled_spec_tokens.get(req_id, []))
+
+    ctx.mamba_state_idx_buf.copy_to_gpu(num_reqs)
+    ctx.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
+    ctx.num_computed_tokens_buf.copy_to_gpu(num_reqs)
+    ctx.num_draft_tokens_buf.copy_to_gpu(num_reqs)
