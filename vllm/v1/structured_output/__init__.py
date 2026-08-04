@@ -211,6 +211,70 @@ class StructuredOutputManager:
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
+    def _fill_undetermined_reasoning_bitmask(
+        self,
+        grammar: StructuredOutputGrammar,
+        index: int,
+        request_id: str,
+        reasoner: "ReasoningParser",
+        output_token_ids: Sequence[int],
+    ) -> None:
+        """Allow grammar tokens plus tokens that can continue a marker."""
+        assert self._grammar_bitmask is not None
+        marker_sequences = getattr(reasoner, "reasoning_marker_token_ids", ())
+        if not marker_sequences:
+            self._grammar_bitmask[index].fill_(self._full_mask)
+            return
+
+        output_prefix = tuple(output_token_ids)
+        if any(
+            len(output_prefix) >= len(marker) and output_prefix[: len(marker)] == marker
+            for marker in marker_sequences
+        ):
+            # A complete marker means generated reasoning has started (or a
+            # leading closer is being discarded). Leave reasoning unconstrained.
+            self._grammar_bitmask[index].fill_(self._full_mask)
+            return
+
+        next_marker_token_ids = {
+            marker[len(output_prefix)]
+            for marker in marker_sequences
+            if len(output_prefix) < len(marker)
+            and output_prefix == marker[: len(output_prefix)]
+        }
+
+        row = self._grammar_bitmask[index]
+        grammar_advanced = 0
+        grammar_prefix_is_valid = not output_prefix
+        if output_prefix:
+            prefix = list(output_prefix)
+            grammar_prefix_is_valid = grammar.validate_tokens(prefix) == prefix
+            if grammar_prefix_is_valid and grammar.accept_tokens(request_id, prefix):
+                grammar_advanced = len(prefix)
+            else:
+                grammar_prefix_is_valid = False
+
+        try:
+            if grammar_prefix_is_valid:
+                if grammar.is_terminated():
+                    row.fill_(self._full_mask)
+                else:
+                    grammar.fill_bitmask(self._grammar_bitmask, index)
+            else:
+                row.zero_()
+
+            for token_id in next_marker_token_ids:
+                if token_id < 0 or token_id >= row.numel() * 32:
+                    continue
+                word_index, bit_index = divmod(token_id, 32)
+                bit = 1 << bit_index
+                if bit_index == 31:
+                    bit = -(1 << 31)
+                row[word_index] |= bit
+        finally:
+            if grammar_advanced:
+                grammar.rollback(grammar_advanced)
+
     @staticmethod
     def _output_start_index(request: "Request") -> int:
         return min(request.num_prompt_tokens, len(request.all_token_ids))
@@ -278,7 +342,25 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 apply_bitmask = self.should_fill_bitmask(request)
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                structured_req = request.structured_output_request
+                reasoner = self._get_reasoner(request)
+                if (
+                    not apply_bitmask
+                    and reasoner is not None
+                    and structured_req is not None
+                    and structured_req.reasoning_ended is None
+                    and not self.enable_in_reasoning
+                ):
+                    output_start = self._output_start_index(request)
+                    self._fill_undetermined_reasoning_bitmask(
+                        grammar,
+                        cumulative_index,
+                        req_id,
+                        reasoner,
+                        request.all_token_ids[output_start:],
+                    )
+                else:
+                    batch.append((grammar, cumulative_index, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -319,7 +401,31 @@ class StructuredOutputManager:
                 post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for i, token in enumerate(req_tokens):
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    if (
+                        not apply_bitmask
+                        and detect_reasoning_end
+                        and reasoning_was_undetermined
+                        and reasoner is not None
+                    ):
+                        if simulated_buf is None:
+                            output_start = self._output_start_index(request)
+                            history = list(request.all_token_ids[output_start:])
+                            history_len = len(history)
+                            simulated_buf = history + list(req_tokens)
+                        simulated_prefix = history + [
+                            draft for draft in req_tokens[:i] if draft != -1
+                        ]
+                        self._fill_undetermined_reasoning_bitmask(
+                            grammar,
+                            cumulative_index,
+                            req_id,
+                            reasoner,
+                            simulated_prefix,
+                        )
+                    else:
+                        self._fill_bitmasks(
+                            ((grammar, cumulative_index, apply_bitmask),)
+                        )
                     advance_grammar = apply_bitmask
                     if token == -1:
                         apply_bitmask = False
@@ -379,7 +485,27 @@ class StructuredOutputManager:
                     #   reasoning_ended is only persisted later by
                     #   should_advance.
                     bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
-                    self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
+                    if (
+                        not bonus_apply
+                        and detect_reasoning_end
+                        and reasoning_was_undetermined
+                        and reasoner is not None
+                    ):
+                        if simulated_buf is None:
+                            output_start = self._output_start_index(request)
+                            history = list(request.all_token_ids[output_start:])
+                        bonus_prefix = history + [
+                            draft for draft in req_tokens if draft != -1
+                        ]
+                        self._fill_undetermined_reasoning_bitmask(
+                            grammar,
+                            cumulative_index,
+                            req_id,
+                            reasoner,
+                            bonus_prefix,
+                        )
+                    else:
+                        self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)

@@ -22,6 +22,15 @@ class MockReasoner:
         self.extract_content_ids = Mock(return_value=[])
 
 
+class AdaptiveMarkerReasoner(MockReasoner):
+    reasoning_marker_token_ids = ((5, 6), (7, 8))
+
+
+def _bitmask_allows(bitmask, token_id: int) -> bool:
+    word_index, bit_index = divmod(token_id, 32)
+    return bool((int(bitmask[word_index]) >> bit_index) & 1)
+
+
 class TestReasoningStructuredOutput:
     """Test reasoning-aware structured output functionality."""
 
@@ -150,6 +159,82 @@ class TestReasoningStructuredOutput:
         assert structured_req.reasoning_ended is None
         reasoner.is_reasoning_end_from_prompt.assert_called_once_with([1, 2, 3, 4, 5])
         reasoner.is_reasoning_end.assert_not_called()
+
+    def test_adaptive_initial_bitmask_unions_grammar_and_reasoning_markers(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Illegal direct tokens are masked before adaptive mode is resolved."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        reasoner = AdaptiveMarkerReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        structured_req.reasoner = reasoner
+        structured_req.reasoning_ended = None
+
+        prompt_token_ids = [1, 2, 3]
+        mock_request_with_structured_output.prompt_token_ids = prompt_token_ids
+        mock_request_with_structured_output.num_prompt_tokens = len(prompt_token_ids)
+        mock_request_with_structured_output.all_token_ids = prompt_token_ids
+
+        grammar_token = 10
+        structured_req.grammar.fill_bitmask.side_effect = lambda bitmask, index: (
+            bitmask[index, 0].bitwise_or_(1 << grammar_token)
+        )
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 0
+        manager_with_reasoner.vllm_config.model_config.is_diffusion = False
+        manager_with_reasoner.backend = Mock()
+        manager_with_reasoner.backend.allocate_token_bitmask.return_value = torch.zeros(
+            (1, 2), dtype=torch.int32
+        )
+
+        request_id = mock_request_with_structured_output.request_id
+        (bitmask,) = manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={},
+        )
+
+        assert _bitmask_allows(bitmask, grammar_token)
+        assert _bitmask_allows(bitmask, 5)
+        assert _bitmask_allows(bitmask, 7)
+        assert not _bitmask_allows(bitmask, 11)
+
+    def test_adaptive_invalid_grammar_prefix_only_allows_marker_continuation(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """A grammar-invalid marker prefix cannot branch into direct content."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        reasoner = AdaptiveMarkerReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        structured_req.reasoner = reasoner
+        structured_req.reasoning_ended = None
+        structured_req.grammar.validate_tokens.return_value = []
+
+        prompt_token_ids = [1, 2, 3]
+        mock_request_with_structured_output.prompt_token_ids = prompt_token_ids
+        mock_request_with_structured_output.num_prompt_tokens = len(prompt_token_ids)
+        mock_request_with_structured_output.all_token_ids = [*prompt_token_ids, 5]
+
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 0
+        manager_with_reasoner.vllm_config.model_config.is_diffusion = False
+        manager_with_reasoner.backend = Mock()
+        manager_with_reasoner.backend.allocate_token_bitmask.return_value = torch.zeros(
+            (1, 2), dtype=torch.int32
+        )
+
+        request_id = mock_request_with_structured_output.request_id
+        (bitmask,) = manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={},
+        )
+
+        assert _bitmask_allows(bitmask, 6)
+        assert not _bitmask_allows(bitmask, 10)
+        structured_req.grammar.fill_bitmask.assert_not_called()
 
     def test_should_fill_bitmask_initializes_forwarded_open_state(
         self,

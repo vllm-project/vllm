@@ -673,6 +673,15 @@ def test_token_id_helpers():
     assert parser.count_reasoning_tokens(output_ids) == len(tokenizer.encode("abc"))
 
 
+def test_reasoning_marker_token_ids():
+    parser, tokenizer = make_parser()
+
+    assert parser.reasoning_marker_token_ids == (
+        tuple(tokenizer.encode("<mm:think>")),
+        tuple(tokenizer.encode("</mm:think>")),
+    )
+
+
 def test_token_id_helpers_enabled_mode():
     parser, tokenizer = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
     output_ids = tokenizer.encode("abc</mm:think>def", add_special_tokens=False)

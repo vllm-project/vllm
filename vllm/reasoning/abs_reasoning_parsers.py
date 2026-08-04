@@ -59,6 +59,23 @@ class ReasoningParser:
         """
         return None
 
+    @cached_property
+    def reasoning_marker_token_ids(self) -> tuple[tuple[int, ...], ...]:
+        """Token sequences that may open or close a reasoning block."""
+        marker_ids: list[tuple[int, ...]] = []
+        for marker in (self.reasoning_start_str, self.reasoning_end_str):
+            if not marker:
+                continue
+            try:
+                token_ids = tuple(
+                    self.model_tokenizer.encode(marker, add_special_tokens=False)
+                )
+            except TypeError:
+                token_ids = tuple(self.model_tokenizer.encode(marker))
+            if token_ids and token_ids not in marker_ids:
+                marker_ids.append(token_ids)
+        return tuple(marker_ids)
+
     def has_engine_confirmed_reasoning_end(self) -> bool:
         """Whether the engine has confirmed the reasoning end transition.
 
