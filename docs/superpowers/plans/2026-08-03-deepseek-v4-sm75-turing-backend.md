@@ -671,9 +671,26 @@ git commit -m "feat(deepseek_v4): force torch/Triton MHC fallback with FP16 on S
 
 ### Task 9: FP16 dtype gate + min-capability bypass
 
+> **RESOLVED (no code change needed).** Verified 2026-08-04 on GPU 2 (SM75):
+> - `vllm/platforms/cuda.py:612` `check_if_supports_dtype`: fp16 passes, bf16
+>   is rejected with the "use float16 instead ... --dtype=half" message (the
+>   gate is `has_device_capability(80)`, a lexicographic `>=`).
+> - Min-capability gate (`vllm/config/vllm.py:720`, `capability <
+>   get_min_capability()`): `DeviceCapability.to_int()` is `major*10+minor`
+>   (SM75 → 75). `DeepseekV4FP8Config` inherits `Fp8Config.get_min_capability()`
+>   = 75, so `75 < 75` is False → passes. The standalone MXFP4 min cap of 80 is
+>   only used when `mxfp4` is selected; DSv4 dispatch uses `Mxfp4MoEMethod` via
+>   `deepseek_v4_fp8` (min cap 75), so it is not gated.
+> - DSv4 is not in `_FLOAT16_NOT_SUPPORTED_MODELS`, so fp16 is a valid dtype.
+> - `_get_and_verify_dtype` with `--dtype auto` picks the checkpoint's bf16 and
+>   later trips the (helpful) bf16 gate; `--dtype half` is required on SM75.
+> The `DeepseekV4ForCausalLM.__init__` dtype assertion from Step 2 below was
+> folded into Task 10's model port instead (no assertion needed — the gate
+> already enforces it).
+
 **Files:**
-- Modify: `vllm/platforms/cuda.py` (BF16 gate)
-- Modify: `vllm/models/deepseek_v4/turing/model.py` (force FP16)
+- Modify: `vllm/platforms/cuda.py` (BF16 gate) — **not needed, gate already correct**
+- Modify: `vllm/models/deepseek_v4/turing/model.py` (force FP16) — **done in Task 10**
 
 Goal: allow the Turing backend to run FP16 without tripping the SM80 BF16 gate or the MXFP4 min-capability=80 check.
 
