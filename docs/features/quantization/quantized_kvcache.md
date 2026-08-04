@@ -6,6 +6,8 @@ Efficient memory usage is crucial for working with large language models. Quanti
 
 > **Note:** When using the Flash Attention 3 backend with FP8 KV cache, attention operations are also performed in the quantized (FP8) domain. In this configuration, queries are quantized to FP8 in addition to keys and values.
 
+> **Warning:** Currently does not work on any sm_120 (e.g. RTX 5090) with toolkit < 12.9. For more details see [#50705](https://github.com/vllm-project/vllm/issues/50705).
+
 ### Supported FP8 KV-Cache Quantization Schemes
 
 vLLM supports two main quantization strategies for the FP8 KV-cache:
@@ -20,7 +22,7 @@ vLLM supports two main quantization strategies for the FP8 KV-cache:
 
 ### Scale Calibration Approaches
 
-You can configure how the quantization scales are computed in vLLM using three different approaches:
+You can configure how the quantization scales are computed in vLLM using two different approaches:
 
 1. **No calibration (default scales):**  
    All quantization scales are set to `1.0`.  
