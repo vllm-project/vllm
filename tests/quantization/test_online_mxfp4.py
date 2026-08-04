@@ -14,14 +14,19 @@ from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
 )
+from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
+    QuarkOCP_MX,
+)
 from vllm.model_executor.layers.quantization.quark.utils import (
     quark_quantize_weight_to_mxfp4,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -259,6 +264,107 @@ def test_online_mxfp4_moe_matches_quark(
         # NOTE: AMD Quark checkpoints use exclusively **positive** zeros,
         # while other mxfp4_quantize implementations from mxfp4_utils.py may not.
         if key in ("w13_weight", "w2_weight"):
+            checkpoint_tensor = fix_negative_zeros(checkpoint_tensor)
+            online_tensor = fix_negative_zeros(online_tensor)
+
+        assert checkpoint_tensor.shape == online_tensor.shape
+        assert checkpoint_tensor.dtype == online_tensor.dtype
+        num_mismatched = (checkpoint_tensor != online_tensor).sum().item()
+        total = checkpoint_tensor.numel()
+        print(
+            f"{key}: {num_mismatched}/{total} "
+            f"({100 * num_mismatched / total:.4f}%) mismatched bytes"
+        )
+
+        assert torch.equal(checkpoint_tensor, online_tensor)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only compared against a ROCm/AITER build."
+)
+def test_online_mxfp4_dense_matches_quark(default_vllm_config, dist_init):
+    """
+    Ensures `Mxfp4OnlineLinearMethod` (online quantization)
+    and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
+    with the same linear kernel used.
+    """
+    if not current_platform.supports_mx():
+        pytest.skip(
+            "Without native MXFP4 support, `QuarkOCP_MX` falls back to "
+            "emulation and skips the kernel weight post-processing that "
+            "`Mxfp4OnlineLinearMethod` always runs, so the two layouts are "
+            "not comparable."
+        )
+
+    default_vllm_config.model_config = ModelConfig()
+
+    input_size = 256
+    output_size = 128
+    device = current_platform.device_type
+
+    # `create_weights` implementations use plain `torch.empty` with no explicit
+    # device, so without this context they would default to CPU and diverge
+    # from the (GPU) tensors produced by `mxfp4_quantize`/`replace_parameter`.
+    with torch.device(device):
+        checkpoint_layer = torch.nn.Module()
+        online_layer = torch.nn.Module()
+
+        weight = torch.randn(output_size, input_size, dtype=torch.bfloat16)
+
+        scalings = [2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]
+        for i in range(input_size // 32):
+            weight[:, i * 32 : (i + 1) * 32] *= scalings[i % len(scalings)]
+
+        # Checkpoint path: pre-quantize the source weight to MXFP4 with the
+        # ~same RTN recipe as a real Quark checkpoint, then feed the
+        # already-packed tensors into `QuarkOCP_MX`.
+        checkpoint_weight, checkpoint_weight_scale = quark_quantize_weight_to_mxfp4(
+            weight
+        )
+
+        checkpoint_scheme = QuarkOCP_MX(
+            weight_quant_spec={"qscheme": "per_group", "dtype": "fp4"},
+            input_quant_spec={"dtype": "fp4", "is_dynamic": True},
+        )
+        checkpoint_scheme.create_weights(
+            layer=checkpoint_layer,
+            output_partition_sizes=[output_size],
+            input_size_per_partition=input_size,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+        checkpoint_layer.weight.data.copy_(checkpoint_weight)
+        checkpoint_layer.weight_scale.data.copy_(checkpoint_weight_scale)
+        checkpoint_scheme.process_weights_after_loading(checkpoint_layer)
+
+        # Online path: feed the *same* raw bf16 source weight and let
+        # `Mxfp4OnlineLinearMethod` quantize it during
+        # `process_weights_after_loading`.
+        online_method = Mxfp4OnlineLinearMethod()
+        online_method.create_weights(
+            layer=online_layer,
+            input_size_per_partition=input_size,
+            output_partition_sizes=[output_size],
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+        replace_parameter(online_layer, "weight", weight.clone())
+        online_method.process_weights_after_loading(online_layer)
+
+    assert type(checkpoint_scheme.ocp_mx_linear) is type(online_method.kernel)
+
+    for key in ("weight", "weight_scale"):
+        checkpoint_tensor = getattr(checkpoint_layer, key)
+        online_tensor = getattr(online_layer, key)
+
+        checkpoint_tensor = checkpoint_tensor.view(torch.uint8)
+        online_tensor = online_tensor.view(torch.uint8)
+
+        # NOTE: AMD Quark checkpoints use exclusively **positive** zeros,
+        # while other mxfp4_quantize implementations from mxfp4_utils.py may not.
+        if key == "weight":
             checkpoint_tensor = fix_negative_zeros(checkpoint_tensor)
             online_tensor = fix_negative_zeros(online_tensor)
 
