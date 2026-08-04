@@ -296,12 +296,14 @@ class MooncakeStoreECConnector(ECConnectorBase):
                 identifier,
             )
             return
+        tensor = encoder_cache[identifier]
         pool_key = self.worker.make_pool_key(identifier)
         self.worker.enqueue_save(
             EmbeddingSaveRequest(
                 pool_key=pool_key,
-                tensor=encoder_cache[identifier],
+                tensor=tensor,
                 with_soft_pin=self._should_soft_pin(item),
+                ready_event=_record_tensor_ready_event(tensor),
             )
         )
 
@@ -375,3 +377,11 @@ def build_embedding_key_metadata(vllm_config: VllmConfig) -> EmbeddingKeyMetadat
         parallel=parallel,
         tensor_layout=EMBEDDING_TENSOR_LAYOUT,
     )
+
+
+def _record_tensor_ready_event(tensor: torch.Tensor) -> torch.Event | None:
+    if not tensor.is_cuda:
+        return None
+    event = torch.Event()
+    event.record()
+    return event

@@ -215,6 +215,8 @@ class EmbeddingStoreWorker:
         stored_tensor = tensor if tensor.is_contiguous() else tensor.contiguous()
         used_staging = stored_tensor is not tensor
         tensor_meta = build_tensor_meta(pool_key, stored_tensor)
+        staging_event = _record_tensor_ready_event(stored_tensor)
+        _wait_tensor_ready_event(staging_event)
         try:
             self.store_client.put_tensor(
                 pool_key,
@@ -350,6 +352,19 @@ def _resolve_torch_dtype(dtype: str) -> torch.dtype:
     raise EmbeddingStoreLoadError(f"unsupported embedding tensor dtype: {dtype}")
 
 
+def _record_tensor_ready_event(tensor: torch.Tensor) -> torch.Event | None:
+    if not tensor.is_cuda:
+        return None
+    event = torch.Event()
+    event.record()
+    return event
+
+
+def _wait_tensor_ready_event(event: torch.Event | None) -> None:
+    if event is not None:
+        event.synchronize()
+
+
 class EmbeddingStoreSendingThread(threading.Thread):
     """Background thread for storing embedding tensors to the store."""
 
@@ -404,6 +419,7 @@ class EmbeddingStoreSendingThread(threading.Thread):
             try:
                 if request is None:
                     return
+                _wait_tensor_ready_event(request.ready_event)
                 self.store_worker.save_tensor(
                     request.pool_key,
                     request.tensor,
