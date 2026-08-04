@@ -11,6 +11,10 @@ import pytest
 import torch
 
 from vllm.config.model import ModelConfig
+from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
+from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+    AiterMxfp4LinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
@@ -26,9 +30,14 @@ from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     quark_quantize_weight_to_mxfp4,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    downcast_to_mxfp,
+    mxfp4_quantize,
+    quant_dequant_mxfp4,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.platforms import PlatformEnum, current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
@@ -112,16 +121,8 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
         x[:, i * 32 : (i + 1) * 32] *= scalings[i % len(scalings)]
 
     if backend == "triton":
-        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-            downcast_to_mxfp,
-        )
-
         x_fp4, x_scale, _ = downcast_to_mxfp(x, axis=-1)
     elif backend == "aiter":
-        from vllm.model_executor.layers.quantization.quark.utils import (
-            quark_quantize_weight_to_mxfp4,
-        )
-
         x_fp4, x_scale = quark_quantize_weight_to_mxfp4(x)
     elif backend == "xpu":
         # TODO: enable this test on XPU
@@ -132,10 +133,6 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
 
         # x_fp4, x_scale = xpu_mxfp4_quantize(x)
     elif backend == "quark":
-        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-            quant_dequant_mxfp4,
-        )
-
         result = quant_dequant_mxfp4(x, scale_calculation_mode="even")
     else:
         raise ValueError(f"Unknown backend {backend}")
@@ -148,7 +145,7 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="Only compared against a ROCm/AITER build."
+    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
 @pytest.mark.parametrize("moe_backend", ["aiter", "emulation"])
 def test_online_mxfp4_moe_matches_quark(
@@ -165,6 +162,12 @@ def test_online_mxfp4_moe_matches_quark(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
         rocm_aiter_ops.refresh_env_variables()
+
+        if current_platform.is_cuda():
+            pytest.skip(
+                "mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4 requires "
+                "rocm_aiter_ops in weight conversion, not compatible on cuda"
+            )
 
     default_vllm_config.model_config = ModelConfig()
 
@@ -214,10 +217,8 @@ def test_online_mxfp4_moe_matches_quark(
         # Checkpoint path: pre-quantize the source weights to MXFP4 with the
         # ~same RTN recipe a real Quark checkpoint, then feed the
         # already-packed tensors into `QuarkOCP_MX_MoEMethod`.
-        checkpoint_w13, checkpoint_w13_scale = quark_quantize_weight_to_mxfp4(
-            w13_weight
-        )
-        checkpoint_w2, checkpoint_w2_scale = quark_quantize_weight_to_mxfp4(w2_weight)
+        checkpoint_w13, checkpoint_w13_scale = mxfp4_quantize(w13_weight)
+        checkpoint_w2, checkpoint_w2_scale = mxfp4_quantize(w2_weight)
 
         checkpoint_method = QuarkOCP_MX_MoEMethod(
             weight_config={"qscheme": "per_group", "dtype": "fp4"},
@@ -279,28 +280,44 @@ def test_online_mxfp4_moe_matches_quark(
         assert torch.equal(checkpoint_tensor, online_tensor)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
+)
 @pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
 def test_online_mxfp4_dense_matches_quark(
-    linear_backend: str, default_vllm_config, dist_init
+    linear_backend: str, default_vllm_config, dist_init, monkeypatch
 ):
     """
     Ensures `Mxfp4OnlineLinearMethod` (online quantization)
     and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
     with same linear backend used.
     """
-    # The reference checkpoint weights come from `quark_quantize_weight_to_mxfp4`,
-    # which needs AITER regardless of the linear backend under test.
-    skip_reason = _skip_reason_if_unavailable("aiter", torch.bfloat16)
-    if skip_reason is not None:
-        pytest.skip(skip_reason)
-
     if linear_backend == "marlin" and not current_platform.is_cuda():
-        # `MarlinMxFp4LinearKernel` is registered only for CUDA in
-        # `_POSSIBLE_MXFP4_KERNELS`, and its repack ops are not built on ROCm.
-        pytest.skip("The Marlin MXFP4 linear kernel is CUDA-only.")
+        # `MarlinMxFp4LinearKernel.process_weights_after_loading` is CUDA-only
+        pytest.skip(
+            "MarlinMxFp4LinearKernel.process_weights_after_loading is CUDA-only."
+        )
 
-    if linear_backend == "aiter" and not current_platform.supports_mx():
-        pytest.skip("The AITER MXFP4 linear kernel requires native MXFP4 support.")
+    if linear_backend == "aiter":
+        # `AiterMxfp4LinearKernel` is registered only for ROCm in
+        # `_POSSIBLE_MXFP4_KERNELS`, and `is_supported` gates on
+        # `current_platform.supports_mx()`. Force it onto the CUDA
+        # kernel list and bypass the platform gate so this backend can
+        # be exercised on CUDA hosts too.
+
+        monkeypatch.setattr(
+            AiterMxfp4LinearKernel,
+            "is_supported",
+            classmethod(lambda cls, compute_capability=None: (True, None)),
+        )
+        monkeypatch.setitem(
+            _POSSIBLE_MXFP4_KERNELS,
+            PlatformEnum.CUDA,
+            [
+                AiterMxfp4LinearKernel,
+                *_POSSIBLE_MXFP4_KERNELS.get(PlatformEnum.CUDA, []),
+            ],
+        )
 
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.linear_backend = linear_backend
@@ -315,6 +332,16 @@ def test_online_mxfp4_dense_matches_quark(
     with torch.device(device):
         checkpoint_layer = torch.nn.Module()
         online_layer = torch.nn.Module()
+        for layer in (checkpoint_layer, online_layer):
+            # `LinearBase` subclasses normally set these attributes on the
+            # layer before `create_weights` is called; the marlin kernel's
+            # `process_weights_after_loading` reads them directly off the
+            # layer, so a bare `torch.nn.Module` needs them set explicitly.
+            layer.input_size = input_size
+            layer.output_size = output_size
+            layer.input_size_per_partition = input_size
+            layer.output_size_per_partition = output_size
+            layer.params_dtype = torch.bfloat16
 
         weight = torch.randn(output_size, input_size, dtype=torch.bfloat16)
 
@@ -325,9 +352,7 @@ def test_online_mxfp4_dense_matches_quark(
         # Checkpoint path: pre-quantize the source weight to MXFP4 with the
         # ~same RTN recipe as a real Quark checkpoint, then feed the
         # already-packed tensors into `QuarkOCP_MX`.
-        checkpoint_weight, checkpoint_weight_scale = quark_quantize_weight_to_mxfp4(
-            weight
-        )
+        checkpoint_weight, checkpoint_weight_scale = mxfp4_quantize(weight)
 
         checkpoint_scheme = QuarkOCP_MX(
             weight_quant_spec={"qscheme": "per_group", "dtype": "fp4"},
