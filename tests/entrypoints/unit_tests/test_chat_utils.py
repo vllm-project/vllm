@@ -15,6 +15,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
     _postprocess_messages,
@@ -707,6 +708,29 @@ def test_parse_chat_messages_empty_system(
         {"role": "system", "content": [{"type": "text", "text": ""}]},
         {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_only_chat_does_not_initialize_media_connector(
+    mistral_model_config,
+    monkeypatch,
+):
+    load_connector = MagicMock()
+    monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
+    messages = [{"role": "user", "content": "Who are you?"}]
+
+    parse_chat_messages(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+    await parse_chat_messages_async(
+        messages,
+        mistral_model_config,
+        content_format="string",
+    )
+
+    load_connector.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2068,7 +2092,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match=r"Found more '<|image_1|>' placeholders in input prompt "
         "than actual multimodal data items.",
     ):
