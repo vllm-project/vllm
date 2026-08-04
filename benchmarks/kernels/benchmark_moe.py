@@ -182,10 +182,7 @@ def benchmark_config(
             dtype=dtype,
         )
         # On AMD RDNA the fused MoE kernel unpacks int4 weights with
-        # tl.interleave, which needs N-packed int32 weights and per-N scales.
-        # Mirror the runtime repack so tuning targets the kernel that runs.
-        # w1 and w2 feed separate kernel launches, so each is repacked
-        # independently and only when its N % 8 == 0.
+        # tl.interleave, which needs the input packed differently.
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_rdna
 

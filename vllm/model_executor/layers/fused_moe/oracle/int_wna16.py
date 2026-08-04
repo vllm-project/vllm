@@ -1659,14 +1659,12 @@ def convert_to_wna16_moe_kernel_format(
             w13_uint8 = w13.view(torch.uint8)
             w2_uint8 = w2.view(torch.uint8)
 
-        # On RDNA (gfx11/gfx12), repack int4 weights from N-first uint8
+        # On AMD RDNA, repack int4 weights from N-first uint8
         # [E, N, K//2] to N-packed int32 [E, K, N//8] so the Triton kernel
         # unpacks them with tl.interleave (far fewer VGPRs than per-element
-        # shifts). Only the MoeWNA16 (AWQ/GPTQ) and compressed-tensors sources
-        # are handled; AutoGPTQ keeps its scalar-shift path. w13 and w2 feed
-        # separate kernel launches and dispatch per-tensor on dtype, so each is
-        # repacked independently and only when its N % 8 == 0 (else that weight
-        # keeps the uint8 layout and the kernel falls back to scalar shifts).
+        # shifts); AutoGPTQ keeps its scalar-shift path as fallback. w13 and w2
+        # feed separate kernel launches and dispatch per-tensor on dtype, so
+        # each is repacked independently and only when its N % 8 == 0.
         if isinstance(quant_config, MoeWNA16Config):
             num_bits = quant_config.weight_bits
         elif isinstance(quant_config, QuantizationArgs):
@@ -1682,8 +1680,6 @@ def convert_to_wna16_moe_kernel_format(
                 unpack_zp_int4_to_fp16,
             )
 
-            # Zero points exist only for AWQ (compressed-tensors int4 is
-            # symmetric); unpack the uint8 [E, N//2, Kg] layout to fp16.
             if w13_uint8.shape[1] % 8 == 0:
                 w13_uint8 = repack_int4_to_int32(w13_uint8)
                 w13_scale = w13_scale.permute(0, 2, 1).contiguous()
