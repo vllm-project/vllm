@@ -439,8 +439,33 @@ class ModelCudaGraphManager(CudaGraphManager):
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
+        self.aux_hidden_state_leading_dims: dict[
+            BatchExecutionDescriptor, tuple[int, ...]
+        ] = {}
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+
+    def _copy_aux_hidden_state_outputs(
+        self,
+        desc: BatchExecutionDescriptor,
+        aux_hidden_states: list[torch.Tensor],
+    ) -> None:
+        leading_dims = tuple(x.shape[0] for x in aux_hidden_states)
+        previous_leading_dims = self.aux_hidden_state_leading_dims.setdefault(
+            desc, leading_dims
+        )
+        assert previous_leading_dims == leading_dims
+
+        if not self.aux_hidden_states:
+            # capture() starts with the largest PIECEWISE descriptor, then processes
+            # each mode largest-first, so this follows self.hidden_states' capacity
+            # contract. The assertions below fail closed if that ordering changes.
+            self.aux_hidden_states = [torch.empty_like(x) for x in aux_hidden_states]
+        assert len(self.aux_hidden_states) == len(aux_hidden_states)
+        for output, aux in zip(self.aux_hidden_states, aux_hidden_states, strict=True):
+            assert output.shape[0] >= aux.shape[0]
+            assert output.shape[1:] == aux.shape[1:]
+            output[: aux.shape[0]] = aux
 
     def capture(
         self,
@@ -544,12 +569,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                     if self.hidden_states is None:
                         self.hidden_states = torch.empty_like(hidden_states)
                     self.hidden_states[:num_tokens] = hidden_states
-                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
-                        self.aux_hidden_states = [
-                            torch.empty_like(x) for x in aux_hidden_states
-                        ]
-                    for i, aux in enumerate(aux_hidden_states):
-                        self.aux_hidden_states[i][:num_tokens] = aux
+                    if self.use_aux_hidden_state_outputs:
+                        self._copy_aux_hidden_state_outputs(desc, aux_hidden_states)
                 else:
                     # Non-last PP rank.
                     assert isinstance(model_output, IntermediateTensors)
@@ -578,7 +599,11 @@ class ModelCudaGraphManager(CudaGraphManager):
         hidden_states = self.hidden_states[: desc.num_tokens]
         if not self.use_aux_hidden_state_outputs:
             return hidden_states
-        return hidden_states, [x[: desc.num_tokens] for x in self.aux_hidden_states]
+        leading_dims = self.aux_hidden_state_leading_dims[desc]
+        return hidden_states, [
+            x[:num_rows]
+            for x, num_rows in zip(self.aux_hidden_states, leading_dims, strict=True)
+        ]
 
 
 def prepare_inputs_to_capture(

@@ -109,3 +109,57 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+
+
+def test_fullgraph_aux_outputs_use_per_descriptor_leading_dims(monkeypatch):
+    large_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=8,
+        num_reqs=8,
+        uniform_token_count=1,
+    )
+    small_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=4,
+        uniform_token_count=1,
+    )
+
+    manager = object.__new__(gpu_cudagraph_utils.ModelCudaGraphManager)
+    manager.aux_hidden_states = []
+    manager.aux_hidden_state_leading_dims = {}
+
+    large_aux = [
+        torch.full((4, 2), 1.0),
+        torch.full((3, 3), 2.0),
+    ]
+    manager._copy_aux_hidden_state_outputs(large_desc, large_aux)
+    small_aux = [
+        torch.full((2, 2), 3.0),
+        torch.full((1, 3), 4.0),
+    ]
+    manager._copy_aux_hidden_state_outputs(small_desc, small_aux)
+
+    assert manager.aux_hidden_state_leading_dims == {
+        large_desc: (4, 3),
+        small_desc: (2, 1),
+    }
+    assert [x.shape[0] for x in manager.aux_hidden_states] == [4, 3]
+    torch.testing.assert_close(manager.aux_hidden_states[0][:2], small_aux[0])
+    torch.testing.assert_close(manager.aux_hidden_states[1][:1], small_aux[1])
+
+    manager.is_last_pp_rank = True
+    manager.use_aux_hidden_state_outputs = True
+    manager.hidden_states = torch.arange(16, dtype=torch.float32).view(8, 2)
+    graph = MagicMock()
+    manager.graphs = {small_desc: graph}
+    offloader = MagicMock()
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: offloader)
+
+    hidden_states, aux_hidden_states = manager.run_fullgraph(small_desc)
+
+    torch.testing.assert_close(hidden_states, manager.hidden_states[:4])
+    assert [x.shape[0] for x in aux_hidden_states] == [2, 1]
+    torch.testing.assert_close(aux_hidden_states[0], small_aux[0])
+    torch.testing.assert_close(aux_hidden_states[1], small_aux[1])
+    graph.replay.assert_called_once_with()

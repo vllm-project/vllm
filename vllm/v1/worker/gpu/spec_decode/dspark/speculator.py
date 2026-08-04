@@ -23,7 +23,8 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 
@@ -32,6 +33,15 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+
+@runtime_checkable
+class _SequenceShardedRawAuxHiddenStateTarget(Protocol):
+    def enable_sequence_sharded_raw_aux_hidden_states(self) -> bool: ...
+
+    def gather_sequence_sharded_aux_hidden_states(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor: ...
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -72,6 +82,9 @@ class DSparkSpeculator(DFlashSpeculator):
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
+        self._sequence_sharded_aux_gather: (
+            Callable[[torch.Tensor], torch.Tensor] | None
+        ) = None
 
     def load_draft_model(
         self,
@@ -79,6 +92,20 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
+        target_language_model = (
+            target_model.get_language_model()
+            if hasattr(target_model, "get_language_model")
+            else target_model
+        )
+        target_inner = target_language_model.model
+        if (
+            isinstance(target_inner, _SequenceShardedRawAuxHiddenStateTarget)
+            and target_inner.enable_sequence_sharded_raw_aux_hidden_states()
+        ):
+            self._sequence_sharded_aux_gather = (
+                target_inner.gather_sequence_sharded_aux_hidden_states
+            )
+
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
@@ -96,6 +123,25 @@ class DSparkSpeculator(DFlashSpeculator):
                 device=self.device,
             )
         return model
+
+    def _prepare_target_hidden_states(
+        self,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_target_tokens: int,
+    ) -> torch.Tensor:
+        if not aux_hidden_states or self._sequence_sharded_aux_gather is None:
+            return super()._prepare_target_hidden_states(
+                last_hidden_states,
+                aux_hidden_states,
+                num_target_tokens,
+            )
+
+        local_hidden_states = self.model.combine_hidden_states(
+            torch.cat(aux_hidden_states, dim=-1)
+        )
+        hidden_states = self._sequence_sharded_aux_gather(local_hidden_states)
+        return hidden_states[:num_target_tokens]
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
