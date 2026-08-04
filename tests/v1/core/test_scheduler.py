@@ -8319,6 +8319,7 @@ def test_nan_fault_tolerance_chunked_prefill():
     """NaN abort fires during chunked prefill intermediate chunks."""
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
+        max_num_seqs=15,
         enable_chunked_prefill=True,
     )
     scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
@@ -8350,8 +8351,7 @@ def test_nan_fault_tolerance_implies_detect():
     """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
     from vllm.engine.arg_utils import EngineArgs
 
-    args = EngineArgs(model="facebook/opt-125m",
-                      enable_nan_fault_tolerance=True)
+    args = EngineArgs(model="facebook/opt-125m", enable_nan_fault_tolerance=True)
     assert args.enable_detect_nans_in_logits is True
     assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
 
