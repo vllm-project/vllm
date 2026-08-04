@@ -966,7 +966,7 @@ class RoutedExperts(PluggableLayer):
                     # TP-sharded BLOCK parameters. Other quant formats may use
                     # transposed storage or replicated/full axes, for which
                     # shard_id alone does not describe the target layout.
-                    can_match_block_target = (
+                    use_block_scale_shape_fallback = (
                         getattr(param, "quant_method", None)
                         == FusedMoeWeightScaleSupported.BLOCK.value
                         and not getattr(param, "is_transposed", False)
@@ -979,7 +979,9 @@ class RoutedExperts(PluggableLayer):
                         loaded_weight,
                         shard_id,
                         unpadded_hidden,
-                        target_shape=param.shape if can_match_block_target else None,
+                        target_shape=(
+                            param.shape if use_block_scale_shape_fallback else None
+                        ),
                         tp_size=self.moe_config.tp_size,
                     )
                     if shard_id in {"w1", "w3"}:
