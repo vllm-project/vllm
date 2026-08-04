@@ -17,7 +17,6 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
-    _get_open_port,
     get_distributed_init_method,
     get_open_port,
 )
@@ -106,7 +105,6 @@ class RayWorkerProc(WorkerProc):
         self,
         vllm_config: VllmConfig,
         rank: int,
-        distributed_init_method: str,
         input_shm_handle: Handle,
         is_driver_worker: bool,
         is_driver_node: bool = False,
@@ -116,11 +114,14 @@ class RayWorkerProc(WorkerProc):
         self._init_kwargs = dict(
             vllm_config=vllm_config,
             rank=rank,
-            distributed_init_method=distributed_init_method,
             input_shm_handle=input_shm_handle,
             shared_worker_lock=None,
             is_driver_worker=is_driver_worker,
         )
+
+    def get_dist_init_port(self) -> int:
+        """Probe a free TCPStore port on this actor's node (the bind host)."""
+        return get_open_port()
 
     def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
         """Return (node_id, physical_gpu_ids) assigned to this actor by Ray."""
@@ -140,6 +141,7 @@ class RayWorkerProc(WorkerProc):
         self,
         local_rank: int,
         env_vars: dict[str, str],
+        distributed_init_method: str,
         driver_env_vars: dict[str, str] | None = None,
         assigned_physical_gpu_ids: list[int] | None = None,
     ) -> None:
@@ -163,6 +165,7 @@ class RayWorkerProc(WorkerProc):
                 assigned_physical_gpu_ids
             )
 
+        self._init_kwargs["distributed_init_method"] = distributed_init_method
         self.local_rank = local_rank
         super().__init__(
             local_rank=local_rank,
@@ -260,25 +263,6 @@ class RayExecutorV2(MultiprocExecutor):
             return {"num_gpus": num_devices}
         return {"num_gpus": 0, "resources": {device_key: num_devices}}
 
-    @staticmethod
-    def _select_tcpstore_port(local_dp_rank: int | None, master_port: int) -> int:
-        """Pick the torch.distributed TCPStore port for this engine.
-
-        Co-located DP engines choosing this port with a shared random search
-        collide intermittently. Seeding by node-local DP rank gives each a
-        disjoint window. Non-DP engines and full windows fall back to a
-        random port.
-        """
-        if local_dp_rank is None:
-            return get_open_port()
-        # Offset past the DP master port reserved range, one window per rank.
-        window = 32
-        start_port = master_port + 100 + local_dp_rank * window
-        try:
-            return _get_open_port(start_port=start_port, max_attempts=window)
-        except RuntimeError:
-            return get_open_port()
-
     def _init_executor(self) -> None:
         """Initialize the RayExecutorV2 executor."""
         self._finalizer = weakref.finalize(self, self.shutdown)
@@ -328,12 +312,6 @@ class RayExecutorV2(MultiprocExecutor):
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
-        parallel_config = self.vllm_config.parallel_config
-        port = self._select_tcpstore_port(
-            parallel_config.data_parallel_rank_local,
-            parallel_config.data_parallel_master_port,
-        )
-        distributed_init_method = get_distributed_init_method(dist_ip, port)
 
         # Step 4: Create broadcast MessageQueue.
         # Workers on the driver node use shared memory; the rest use TCP.
@@ -387,7 +365,6 @@ class RayExecutorV2(MultiprocExecutor):
                 .remote(
                     vllm_config=self.vllm_config,
                     rank=bundle["rank"],
-                    distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
                     is_driver_worker=is_driver_worker,
                     is_driver_node=is_driver_node,
@@ -424,6 +401,8 @@ class RayExecutorV2(MultiprocExecutor):
 
         # Step 7: Initialize workers with local logical ranks and the
         # logical-to-physical GPU mapping discovered from Ray placement.
+        port = ray.get(self.ray_worker_handles[0].actor.get_dist_init_port.remote())
+        distributed_init_method = get_distributed_init_method(dist_ip, port)
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(i)
@@ -434,6 +413,7 @@ class RayExecutorV2(MultiprocExecutor):
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
                     local_rank,
                     worker_env_vars,
+                    distributed_init_method,
                     self.driver_env_vars,
                     assigned_physical_gpu_ids=assigned_physical_gpu_ids,
                 )
