@@ -155,9 +155,7 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q_fp8.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
-            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(
-                k_view, v_view, layer_name
-            )
+            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(k_view, v_view)
             return kv_cache_dummy, q_view, k_view, v_view
 
         def replacement(qkv, positions, cos_sin_cache, q_scale, layer_name):
@@ -213,7 +211,7 @@ class RopeStaticQQuantKVCachePattern:
             q_view = q_fp8.view(-1, self.num_heads, self.head_size)
             k_view = k.view(-1, self.num_kv_heads, self.head_size)
             v_view = v.view(-1, self.num_kv_heads, self.head_size_v)
-            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(k_view, v_view, _ln)
+            kv_cache_dummy = torch.ops.vllm.unified_kv_cache_update(k_view, v_view)
             return kv_cache_dummy, q_view, k_view, v_view
 
         def replacement(qkv, positions, cos_sin_cache, q_scale):
@@ -334,7 +332,7 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            return torch.ops.vllm.unified_kv_cache_update(k, v, layer_name), q, k, v
+            return torch.ops.vllm.unified_kv_cache_update(k, v), q, k, v
 
         def replacement(qkv, positions, cos_sin_cache, layer_name):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
@@ -364,7 +362,7 @@ class RopeReshapeKVCachePattern:
             q = q.view(-1, self.num_heads, self.head_size)
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            return torch.ops.vllm.unified_kv_cache_update(k, v, _ln), q, k, v
+            return torch.ops.vllm.unified_kv_cache_update(k, v), q, k, v
 
         def replacement(qkv, positions, cos_sin_cache):
             q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)

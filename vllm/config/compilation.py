@@ -759,6 +759,9 @@ class CompilationConfig:
     """The names of all the MOE layers in the model
     """
 
+    static_all_kv_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the attention KV layers in the model"""
+
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
@@ -1180,7 +1183,7 @@ class CompilationConfig:
                             "to enable QK-Norm+RoPE+KV cache fusion."
                         )
                         self.pass_config.fuse_qk_norm_rope_kvcache = False
-                    self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    # self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:

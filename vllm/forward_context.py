@@ -185,6 +185,11 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # For torch.compile cold start times, avoid hard-coding layer name strings
+    # in unified_kv_cache_update. See https://github.com/vllm-project/vllm/issues/33267
+    all_kv_layers: list[str] | None = None
+    kv_layer_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -226,9 +231,12 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    all_kv_layers = vllm_config.compilation_config.static_all_kv_layers
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
+        all_kv_layers=all_kv_layers,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,

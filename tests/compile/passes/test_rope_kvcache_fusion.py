@@ -32,7 +32,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention import attention as attention_module
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -48,11 +47,15 @@ def test_kv_cache_update_ops_fake_tensor_metadata(monkeypatch: pytest.MonkeyPatc
     query = torch.empty(1, dtype=torch.bfloat16)
     kv_cache = torch.empty(1, dtype=torch.uint8)
     context = (None, None, kv_cache, None)
-    monkeypatch.setattr(attention_module, "get_attention_context", lambda _: context)
-    monkeypatch.setattr(rope_kvcache_fusion, "get_attention_context", lambda _: context)
+    monkeypatch.setattr(
+        attention_module, "get_attention_context", lambda *args, **kwargs: context
+    )
+    monkeypatch.setattr(
+        rope_kvcache_fusion, "get_attention_context", lambda *args, **kwargs: context
+    )
 
-    runtime_output = attention_module.unified_kv_cache_update(query, query, "layer")
-    fake_output = attention_module.unified_kv_cache_update_fake(query, query, "layer")
+    runtime_output = attention_module.unified_kv_cache_update(query, query)
+    fake_output = attention_module.unified_kv_cache_update_fake(query, query)
     assert runtime_output.shape == fake_output.shape
     assert runtime_output.dtype == fake_output.dtype
     assert runtime_output.device == fake_output.device
@@ -212,9 +215,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         q = q.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
-        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-            k, v, _encode_layer_name(self.layer_name)
-        )
+        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(k, v)
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
@@ -257,9 +258,7 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
         q = q_fp8.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
-        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-            k, v, _encode_layer_name(self.layer_name)
-        )
+        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(k, v)
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
