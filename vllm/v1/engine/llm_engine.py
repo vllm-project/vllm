@@ -225,6 +225,7 @@ class LLMEngine:
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        session_id: str | None = None,
         prompt_text: str | None = None,
     ) -> str:
         # Validate the request_id type.
@@ -257,6 +258,7 @@ class LLMEngine:
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -424,6 +426,13 @@ class LLMEngine:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+
+    def set_weight_version(self, weight_version: str) -> None:
+        self.engine_core.set_weight_version(weight_version)
+
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return self.engine_core.get_weight_version()
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
