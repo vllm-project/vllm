@@ -184,6 +184,15 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
+        if self.use_adaptive_verification:
+            torch.sigmoid(
+                self.model.compute_confidence(
+                    sample_hidden,
+                    torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+                ).view(num_reqs, n_spec),
+                out=self.draft_token_confidence_probs[:num_reqs],
+            )
+
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         """Apply the sequential Markov head only to top-k base-logit candidates.
 
@@ -205,10 +214,13 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits.fill_(float("-inf"))
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        confidence_markov_embeds = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
+            if self.use_adaptive_verification:
+                confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
                 base_logits[:, i],
