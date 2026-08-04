@@ -9,6 +9,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
@@ -23,6 +24,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -46,6 +48,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/executor/
       - vllm/worker/worker_base.py
@@ -63,6 +66,7 @@ steps:
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -85,6 +89,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -108,6 +113,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
   - examples/rl/
@@ -140,6 +146,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
@@ -161,6 +168,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
@@ -186,6 +194,7 @@ steps:
   - examples/features/torchrun/torchrun_dp_example_offline.py
   - vllm/config/parallel.py
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/v1/engine/llm_engine.py
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
@@ -204,6 +213,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   commands:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
@@ -251,6 +261,7 @@ steps:
   optional: true # TODO: revert once infra issue solved
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
@@ -266,6 +277,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
