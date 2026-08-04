@@ -524,7 +524,8 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
+    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", False)
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
