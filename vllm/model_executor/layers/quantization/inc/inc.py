@@ -35,7 +35,7 @@ class INCConfig(QuantizationConfig):
     """
 
     SUPPORTED_BITS = {2, 3, 4, 8}
-    SUPPORTED_DTYPES = {"int", "mx_fp"}
+    SUPPORTED_DTYPES = {"int", "mx_fp", "nv_fp"}
     SUPPORTED_FORMATS = {
         "auto_round:auto_gptq",
         "auto_round:auto_awq",
@@ -54,6 +54,10 @@ class INCConfig(QuantizationConfig):
     MXFP8_DATA_TYPE = "mx_fp"
     MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
     MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
+    NVFP4_BITS = 4
+    NVFP4_GROUP_SIZE = 16
+    NVFP4_ACT_DATA_TYPE = "nv_fp4_with_static_gs"
+    NVFP4_PACKING_FORMAT = "auto_round:llm_compressor"
 
     def __init__(
         self,
@@ -72,10 +76,9 @@ class INCConfig(QuantizationConfig):
                 f"Unsupported weight_bits: {weight_bits}, "
                 f"currently only support {self.SUPPORTED_BITS}."
             )
-        # auto-round mxfp data_type is e.g. "mx_fp4" / "mx_fp4e2m1"; match the
-        # "mx_fp" family by substring like auto_round.compressors.is_mx_fp.
         is_mxfp = "mx_fp" in data_type
-        if data_type not in self.SUPPORTED_DTYPES and not is_mxfp:
+        is_nvfp = "nv_fp" in data_type
+        if data_type not in self.SUPPORTED_DTYPES and not (is_mxfp or is_nvfp):
             raise ValueError(
                 f"Unsupported data_type: {data_type}, "
                 f"currently only support {self.SUPPORTED_DTYPES}."
@@ -125,6 +128,10 @@ class INCConfig(QuantizationConfig):
         # MXFP4 and MXFP8 share data_type "mx_fp" and differ only by bit width.
         return self.is_mxfp and self.weight_bits == self.MXFP8_BITS
 
+    @property
+    def is_nvfp4(self) -> bool:
+        return "nv_fp" in self.data_type and self.weight_bits == self.NVFP4_BITS
+
     def _validate_supported_quantization(self) -> None:
         if self.is_mxfp8:
             assert self.group_size == self.MXFP8_GROUP_SIZE, (
@@ -141,29 +148,57 @@ class INCConfig(QuantizationConfig):
                 "INC MXFP8 only supports backend='auto', "
                 f"but found backend={self.backend!r}."
             )
-        elif self.packing_format == self.MXFP8_PACKING_FORMAT and not self.is_mxfp:
+        elif self.is_nvfp4:
+            assert self.group_size == self.NVFP4_GROUP_SIZE, (
+                "INC NVFP4 only supports group_size=16, "
+                f"but found group_size={self.group_size}."
+            )
+            assert self.sym, "INC NVFP4 only supports symmetric weights."
+            assert self.packing_format == self.NVFP4_PACKING_FORMAT, (
+                "INC NVFP4 only supports "
+                f"packing_format={self.NVFP4_PACKING_FORMAT!r}, "
+                f"but found {self.packing_format!r}."
+            )
+            assert self.backend == "auto", (
+                "INC NVFP4 only supports backend='auto', "
+                f"but found backend={self.backend!r}."
+            )
+        elif self.packing_format == self.MXFP8_PACKING_FORMAT and not (
+            self.is_mxfp or self.is_nvfp4
+        ):
             raise ValueError(
                 f"packing_format={self.MXFP8_PACKING_FORMAT!r} requires "
-                f"an {self.MXFP8_DATA_TYPE!r} data_type."
+                "an MXFP or NVFP data type."
             )
 
     def _validate_raw_config(self, config: dict[str, Any]) -> None:
-        if not self.is_mxfp8:
+        if self.is_nvfp4:
+            expected_fields = {
+                "act_bits": self.NVFP4_BITS,
+                "act_data_type": self.NVFP4_ACT_DATA_TYPE,
+                "act_group_size": self.NVFP4_GROUP_SIZE,
+                "act_sym": True,
+                "act_dynamic": True,
+                "enable_quanted_input": False,
+            }
+            error_prefix = "INC NVFP4 only supports "
+        elif self.is_mxfp8:
+            expected_fields = {
+                "act_bits": self.MXFP8_BITS,
+                "act_data_type": self.MXFP8_DATA_TYPE,
+                "act_group_size": self.MXFP8_GROUP_SIZE,
+                "act_sym": True,
+                "act_dynamic": True,
+                "enable_quanted_input": False,
+            }
+            error_prefix = "INC MXFP8 only supports "
+        else:
             return
 
-        expected_fields = {
-            "act_bits": self.MXFP8_BITS,
-            "act_data_type": self.MXFP8_DATA_TYPE,
-            "act_group_size": self.MXFP8_GROUP_SIZE,
-            "act_sym": True,
-            "act_dynamic": True,
-            "enable_quanted_input": False,
-        }
         for field_name, expected_value in expected_fields.items():
             actual_value = self.get_from_keys_or(config, [field_name], expected_value)
             assert actual_value == expected_value, (
-                "INC MXFP8 only supports "
-                f"{field_name}={expected_value!r}, "
+                error_prefix + f"{field_name}={expected_value!r}, "
                 f"but found {field_name}={actual_value!r}."
             )
 

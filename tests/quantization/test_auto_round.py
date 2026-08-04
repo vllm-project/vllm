@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMeth
 from vllm.model_executor.layers.quantization.inc.schemes import (
     INCMxfp4Scheme,
     INCMxfp8Scheme,
+    INCNvfp4Scheme,
     INCWna16Scheme,
     resolve_scheme,
 )
@@ -450,6 +451,16 @@ def test_inc_layer_config_mx_fp_helpers() -> None:
     assert layer_config.is_mxfp8 is False
 
 
+def test_inc_layer_config_nv_fp_helpers() -> None:
+    layer_config = make_layer_config(
+        group_size=16,
+        data_type="nv_fp4_with_static_gs",
+    )
+
+    assert layer_config.is_nvfp4 is True
+    assert layer_config.is_mxfp4 is False
+
+
 def test_inc_resolve_scheme_selects_wna16() -> None:
     layer_config = INCLayerConfig(
         bits=4,
@@ -485,6 +496,95 @@ def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
     assert config.sym is True
     assert layer_config.is_mxfp4 is True
     assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
+
+
+def test_inc_config_accepts_nvfp4_family_llm_compressor() -> None:
+    config = INCConfig.from_config(
+        {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 16,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "nv_fp",
+            "act_bits": 4,
+            "act_group_size": 16,
+            "act_data_type": "nv_fp4_with_static_gs",
+            "act_dynamic": True,
+        }
+    )
+
+    layer_config = config.config_parser.resolve(
+        DummyLayer(), "model.layers.0.mlp.down_proj"
+    )
+
+    assert config.is_nvfp4 is True
+    assert layer_config.is_nvfp4 is True
+    assert isinstance(resolve_scheme(layer_config), INCNvfp4Scheme)
+
+
+def test_inc_nvfp4_linear_method_registers_and_processes_weights(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class DummyKernel:
+        def input_quant_key(self):
+            return None
+
+        def process_weights_after_loading(self, layer) -> None:
+            captured["processed_layer"] = layer
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_nvfp4_linear.init_nvfp4_linear_kernel",
+        lambda: DummyKernel(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_nvfp4_linear import (  # noqa: E501
+        INCNvfp4LinearMethod,
+    )
+
+    layer = torch.nn.Module()
+    method = INCNvfp4LinearMethod(make_layer_config(group_size=16, data_type="nv_fp"))
+    method.create_weights(
+        layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[16, 32],
+        input_size=64,
+        output_size=48,
+        params_dtype=torch.bfloat16,
+    )
+
+    assert layer.weight_packed.shape == (48, 32)
+    assert layer.weight_packed.dtype is torch.uint8
+    assert layer.weight_scale.shape == (48, 4)
+    assert layer.weight_scale.dtype is torch.float8_e4m3fn
+    assert layer.weight_global_scale.shape == (2,)
+    assert layer.input_global_scale.shape == (2,)
+    assert layer.weight_global_scale.needs_scalar_to_array is True
+    assert layer.input_global_scale.needs_scalar_to_array is True
+
+    layer.weight_global_scale.data.copy_(torch.tensor([0.25, 0.25]))
+    layer.input_global_scale.data.copy_(torch.tensor([0.5, 0.5]))
+    packed_data = layer.weight_packed.data
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.data.data_ptr() == packed_data.data_ptr()
+    assert not hasattr(layer, "weight_packed")
+    torch.testing.assert_close(layer.weight_global_scale, torch.tensor(4.0))
+    torch.testing.assert_close(layer.input_global_scale, torch.tensor(2.0))
+    torch.testing.assert_close(layer.alpha, torch.tensor(8.0))
+    torch.testing.assert_close(layer.input_global_scale_inv, torch.tensor(0.5))
+    assert captured["processed_layer"] is layer
 
 
 def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
