@@ -298,12 +298,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         hf_inputs: "BatchFeature",
         mm_fields: dict[str, MultiModalFieldConfig],
     ) -> None:
-        sizes = hf_inputs.get(f"num_{modality}_placeholders")
+        # Drop the placeholder counts so they aren't an mm field
+        sizes = hf_inputs.pop(f"num_{modality}_placeholders", None)
         if sizes is None:
             return
-        mm_fields[f"num_{modality}_placeholders"] = MultiModalFieldConfig.batched(
-            modality, keep_on_cpu=True
-        )
         mm_fields[f"{modality}_placeholder_ids"] = (
             MultiModalFieldConfig.flat_from_sizes(modality, sizes, keep_on_cpu=True)
         )
@@ -622,7 +620,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def embed_multimodal(self, **kwargs):
         for modality in ("image", "audio"):
             kwargs.pop(f"{modality}_placeholder_ids", None)
-            kwargs.pop(f"num_{modality}_placeholders", None)
             kwargs.pop(f"{modality}_target_ids", None)
 
         embeddings: tuple[torch.Tensor, ...] = ()
