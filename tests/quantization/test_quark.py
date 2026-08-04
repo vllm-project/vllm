@@ -770,7 +770,10 @@ class TestQuarkInt4Format:
             )
 
     def test_quark_int4_moe_uses_native_moe_method(self):
-        quant_config = QuarkConfig.from_config(_quark_int4_config())
+        # Asymmetric (uint4) experts take the fused_experts fallback, so the
+        # constructor does not touch the WNA16 oracle backend and a lightweight
+        # moe_config is sufficient here.
+        quant_config = QuarkConfig.from_config(_quark_int4_config(symmetric=False))
         moe_config = type("MoeConfig", (), {})()
         moe_config.has_bias = False
 
@@ -782,6 +785,7 @@ class TestQuarkInt4Format:
 
         assert method.group_size == 128
         assert method.pack_reorder
+        assert not method.use_wna16_backend
 
     def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config())

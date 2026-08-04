@@ -41,6 +41,12 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    convert_to_wna16_moe_kernel_format,
+    make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
+    select_wna16_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -70,6 +76,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
     kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -128,6 +136,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 quant_config.pack_method,
                 module.moe_config,
                 input_config=input_config,
+                quant_config=quant_config,
             )
         elif quant_config._is_nvfp4(weight_config, input_config):
             return QuarkNvfp4MoEMethod(
@@ -158,6 +167,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         pack_method: str,
         moe: FusedMoEConfig,
         input_config: dict[str, Any] | None = None,
+        quant_config: "QuarkConfig | None" = None,  # type: ignore # noqa F821
     ):
         super().__init__(moe)
         if input_config is not None:
@@ -176,11 +186,28 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
                 "quantization."
             )
         self.weight_quant = weight_config
+        self.quant_config = quant_config
         self.group_size, self.is_symmetric = parse_w4a16_int4_weight_config(
             weight_config
         )
         self.bit8_pack_factor = 2
         self.pack_reorder = pack_method == "reorder"
+
+        # Symmetric int4 experts run through the shared WNA16 MoE backend
+        # abstraction. The Triton WNA16 experts only support symmetric int4
+        # (see TritonWNA16Experts._supports_quant_scheme), so asymmetric
+        # (uint4) experts fall back to the fused_experts path below.
+        self.use_wna16_backend = self.is_symmetric
+        self.wna16_backend = None
+        if self.use_wna16_backend:
+            weight_key = kInt4Static32 if self.group_size == 32 else kInt4Static
+            self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
+                config=self.moe,
+                weight_key=weight_key,
+                quant_config=self.quant_config,
+                may_have_zp=False,
+                may_have_bias=False,
+            )
 
     def create_weights(
         self,
@@ -282,15 +309,84 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_weight_zero_point", w2_weight_zero_point)
         set_weight_attrs(w2_weight_zero_point, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if not self.use_wna16_backend:
+            # Asymmetric (uint4) experts use the fused_experts path, which
+            # consumes the loaded uint8 weights directly. No conversion needed.
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            return
+
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=None,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_qzeros=None,
+            w2_qzeros=None,
+        )
+
+        if converted is None:
+            # Backend rewrote the layer's params in place (e.g. Humming).
+            self._setup_kernel(layer)
+            return
+
+        (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            _,
+            _,
+            _,
+            _,
+            _,  # w13_qzeros
+            _,  # w2_qzeros
+            _,  # w13_input_global_scale
+            _,  # w2_input_global_scale
+            _,  # w13_bias
+            _,  # w2_bias
+        ) = converted
+
+        replace_parameter(layer, "w13_weight", w13_qweight)
+        replace_parameter(layer, "w2_weight", w2_qweight)
+        replace_parameter(layer, "w13_weight_scale", w13_scales)
+        replace_parameter(layer, "w2_weight_scale", w2_scales)
+
+        self._setup_kernel(layer)
+
+    def _setup_kernel(self, layer: RoutedExperts) -> None:
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            backend=self.wna16_backend,
+            layer=layer,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        return int4_w4a16_moe_quant_config(
+        if not self.use_wna16_backend:
+            return int4_w4a16_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                w1_zp=layer.w13_weight_zero_point,
+                w2_zp=layer.w2_weight_zero_point,
+                block_shape=[0, layer.group_size],
+            )
+        return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=layer.w13_weight_zero_point,
-            w2_zp=layer.w2_weight_zero_point,
-            block_shape=[0, layer.group_size],
+            group_size=layer.group_size,
+            num_bits=4,
         )
 
     def apply(
@@ -302,19 +398,35 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_experts
+        if not self.use_wna16_backend:
+            from vllm.model_executor.layers.fused_moe import fused_experts
 
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                quant_config=self.moe_quant_config,
+            )
+
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
-            quant_config=self.moe_quant_config,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
 
     def get_weight_loader(self, layer: RoutedExperts, weight_loader):
