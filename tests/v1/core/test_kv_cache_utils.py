@@ -2124,7 +2124,9 @@ def test_mixed_precision_kv_cache_with_uniform_type_specs():
     assert scheduler_config.needs_kv_cache_zeroing
 
 
-def new_mla_spec(cache_dtype_str=None, block_size=16):
+def new_mla_spec(
+    cache_dtype_str=None, block_size=16, non_causal_multi_token_decode=False
+):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=block_size,
@@ -2132,6 +2134,7 @@ def new_mla_spec(cache_dtype_str=None, block_size=16):
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
+        non_causal_multi_token_decode=non_causal_multi_token_decode,
     )
 
 
@@ -2415,6 +2418,38 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+def test_merge_mla_spec_rejects_mixed_non_causal_multi_token_decode():
+    """A draft group and a causal target group must not share a KV cache group.
+
+    non_causal_multi_token_decode selects the attention semantics of the whole
+    group, so combining it with any() would hand a causal group the draft's
+    raised reorder_batch_threshold and admit causal multi-token blocks into a
+    decode path that assumes they are non-causal.
+    """
+    for specs in (
+        [new_mla_spec(non_causal_multi_token_decode=True), new_mla_spec()],
+        [new_mla_spec(), new_mla_spec(non_causal_multi_token_decode=True)],
+    ):
+        with pytest.raises(AssertionError, match="non_causal_multi_token_decode"):
+            specs[0].merge(specs)
+
+    # Agreeing specs still merge, and the flag survives.
+    for flag in (False, True):
+        specs = [new_mla_spec(non_causal_multi_token_decode=flag)] * 2
+        assert specs[0].merge(specs).non_causal_multi_token_decode is flag
+
+
+def test_mixed_non_causal_multi_token_decode_specs_are_not_uniform():
+    """is_kv_cache_spec_uniform relies on merge() raising, and the grouping in
+    _get_kv_cache_groups_uniform_page_size catches it to bucket separately."""
+    assert not is_kv_cache_spec_uniform(
+        {
+            "draft": new_mla_spec(non_causal_multi_token_decode=True),
+            "target": new_mla_spec(),
+        }
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -430,6 +430,15 @@ class MLAAttentionSpec(FullAttentionSpec):
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
+        # Not a reconcilable layout property: it changes attention semantics.
+        # any() would hand a causal group the draft's raised
+        # reorder_batch_threshold, admitting causal multi-token blocks into the
+        # decode path. Callers catch this and bucket the specs separately.
+        if len(set(spec.non_causal_multi_token_decode for spec in specs)) != 1:
+            raise AssertionError(
+                "Cannot merge MLAAttentionSpecs with differing "
+                "non_causal_multi_token_decode."
+            )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
