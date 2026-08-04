@@ -1012,7 +1012,13 @@ class Worker(WorkerBase):
                     ")",
                 ]
             )
-        return self.profiler.annotate_context_manager(annotation)
+        metrics = {
+            "num_context_requests": iteration_details.num_ctx_requests,
+            "num_context_tokens": iteration_details.num_ctx_tokens,
+            "num_generation_requests": iteration_details.num_generation_requests,
+            "num_generation_tokens": iteration_details.num_generation_tokens,
+        }
+        return self.profiler.annotate_context_manager(annotation, metrics=metrics)
 
     @torch.inference_mode()
     @with_gpu_sync_check
