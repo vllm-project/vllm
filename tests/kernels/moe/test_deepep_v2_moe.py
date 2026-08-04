@@ -591,3 +591,48 @@ def test_deep_ep_v2_moe_cudagraph(
         None,
         None,
     )
+
+
+@requires_deep_ep_v2
+@pytest.mark.parametrize(
+    "quant_dtype,is_scale_swizzled,block_shape,expected",
+    [
+        (torch.float8_e4m3fn, True, [128, 128], torch.float8_e4m3fn),
+        ("mxfp8", False, None, "mxfp8"),
+        # Swizzled MX scales tile across tokens: cannot be permuted per token.
+        ("mxfp8", True, None, None),
+        (None, True, None, None),
+    ],
+)
+def test_dispatch_quant_dtype(quant_dtype, is_scale_swizzled, block_shape, expected):
+    """Only per-token scale layouts may be quantized before dispatch."""
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        dispatch_quant_dtype,
+    )
+
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype,
+        block_shape=block_shape,
+        is_scale_swizzled=is_scale_swizzled,
+    )
+    assert dispatch_quant_dtype(quant_config, defer_input_quant=False) == expected
+    assert dispatch_quant_dtype(quant_config, defer_input_quant=True) is None
+
+
+@requires_deep_ep_v2
+def test_pack_mx_scales_roundtrip():
+    """Packing UE8M0 scales into sf_pack_t must preserve each token's row."""
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        _pack_mx_scales,
+    )
+
+    hidden_size = 1024
+    scales = torch.randint(
+        0, 255, (7, hidden_size // 32), dtype=torch.uint8, device="cpu"
+    )
+
+    packed = _pack_mx_scales(scales)
+    assert packed.dtype == torch.int32
+    assert packed.shape == (7, hidden_size // 128)
+
+    torch.testing.assert_close(packed.view(torch.uint8), scales)

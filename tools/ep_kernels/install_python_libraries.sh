@@ -76,11 +76,11 @@ mkdir -p "$WHEEL_DIR"
 pushd "$WORKSPACE"
 
 # install dependencies if not installed
-if [ -z "$VIRTUAL_ENV" ]; then
-  uv pip install --system cmake torch ninja
-else
-  uv pip install cmake torch ninja
-fi
+# if [ -z "$VIRTUAL_ENV" ]; then
+#   uv pip install --system cmake torch ninja
+# else
+#   uv pip install cmake torch ninja
+# fi
 
 # fetch nvshmem
 ARCH=$(uname -m)
