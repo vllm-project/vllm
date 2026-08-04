@@ -84,10 +84,13 @@ class SecondaryTierFactory:
                 f"Supported types: {list(cls._registry)}. "
                 "For an out-of-tree tier, also set 'module_path'."
             )
-        logger.warning(
-            "Loading out-of-tree secondary tier '%s' from '%s'. This "
-            "API is experimental and subject to change in the future "
-            "as we iterate the design.",
+        logger.warning_once(
+            "Loading out-of-tree secondary tier. This API is "
+            "experimental and subject to change in the future "
+            "as we iterate the design."
+        )
+        logger.info(
+            "Loading out-of-tree secondary tier '%s' from '%s'.",
             tier_type,
             module_path,
         )
