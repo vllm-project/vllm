@@ -163,7 +163,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         if input_config is not None:
             raise NotImplementedError(
                 "QuarkW4A16Int4MoEMethod does not support activation "
-                "quantization; input_tensors must be null."
+                f"quantization; input_tensors must be None, got {input_config}."
             )
         if weight_config.get("qscheme", "per_group") != "per_group":
             raise NotImplementedError(

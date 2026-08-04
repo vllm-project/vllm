@@ -777,6 +777,7 @@ def choose_mp_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
+            logger.info_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
             failure_reasons.append(

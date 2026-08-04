@@ -710,7 +710,8 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale_mapper(self) -> "WeightsMapper":
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
         orig_to_new_suffix = {
             ".k_proj.output_scale": ".attn.k_scale",
