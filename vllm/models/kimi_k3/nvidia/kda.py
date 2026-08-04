@@ -167,13 +167,19 @@ def is_flashkda_supported(
     if not current_platform.is_cuda():
         return False
     capability = current_platform.get_device_capability()
-    return (
+    if not (
         capability is not None
         and capability.major in (9, 10, 12)
         and head_dim == 128
         and dtype == torch.bfloat16
         and lower_bound is not None
-    )
+    ):
+        return False
+    try:
+        import vllm._flashkda_C  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops._flashkda_C, "fwd")
 
 
 def _flashkda_prefill(

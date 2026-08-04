@@ -6,6 +6,8 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+import sys
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -682,6 +684,15 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
         input_dtype=torch.bfloat16,
         conv_state_dtype=torch.bfloat16,
     )
+
+
+def test_is_flashkda_supported_rejects_missing_extension(monkeypatch):
+    capability = torch.cuda.get_device_capability()
+    if capability[0] not in (9, 10, 12):
+        pytest.skip("Requires a FlashKDA-capable CUDA device")
+
+    monkeypatch.setitem(sys.modules, "vllm._flashkda_C", None)
+    assert not is_flashkda_supported(128, torch.bfloat16, -3.0)
 
 
 @torch.inference_mode()
