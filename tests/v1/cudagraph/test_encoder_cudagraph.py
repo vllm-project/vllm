@@ -97,6 +97,49 @@ class _MockModel(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return (self._min_budget, self._max_budget)
 
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        return []
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ) -> EncoderCudaGraphCaptureInputs:
+        return EncoderCudaGraphCaptureInputs(values={})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(values={})
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        return {}
+
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
@@ -864,7 +907,7 @@ class TestInitInvariantValidation:
         vllm_config = _MockVllmConfig(token_budgets, max_mm_items)
         model = _MockModel(min_budget, max_budget)
         return EncoderCudaGraphManager(
-            vllm_config=vllm_config,
+            vllm_config=vllm_config,  # type: ignore[arg-type]
             device=torch.device("cpu"),
             dtype=torch.float32,
             model=model,

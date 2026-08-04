@@ -268,7 +268,8 @@ def test_external_process_monitoring(api_server_args):
         def run_with_exception_capture():
             try:
                 wait_for_completion_or_failure(
-                    api_server_manager=manager, coordinator=mock_coordinator
+                    api_server_manager=manager,
+                    coordinator=mock_coordinator,  # type: ignore[arg-type]
                 )
             except Exception as e:
                 result["exception"] = e
@@ -337,7 +338,7 @@ def test_gather_actual_addresses_end_to_end():
     manager = APIServerProcessManager(
         listen_address=f"tcp://{host}:0",
         sock=sock,
-        args="test_args",
+        args="test_args",  # type: ignore[arg-type]
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
@@ -384,7 +385,7 @@ def test_gather_actual_addresses_child_crash_before_report():
     manager = APIServerProcessManager(
         listen_address=f"tcp://{host}:0",
         sock=sock,
-        args="test_args",
+        args="test_args",  # type: ignore[arg-type]
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,

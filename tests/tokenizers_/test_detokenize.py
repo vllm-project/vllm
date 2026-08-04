@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Generator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
@@ -10,6 +10,7 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (
     FastIncrementalDetokenizer,
@@ -283,9 +284,26 @@ class _MockTokenizer:
         return "".join(self._decoded[tid] for tid in ids)
 
 
+def _mock_tokenizer(
+    raw_tokens: dict[int, str],
+    decoded_tokens: dict[int, str],
+    pre_tokenizer_type: str = "Metaspace",
+    replacement: str | None = "▁",
+) -> TokenizerLike:
+    return cast(
+        TokenizerLike,
+        _MockTokenizer(
+            raw_tokens=raw_tokens,
+            decoded_tokens=decoded_tokens,
+            pre_tokenizer_type=pre_tokenizer_type,
+            replacement=replacement,
+        ),
+    )
+
+
 def test_sentencepiece_leading_space_preserved():
     """▁true and true must produce distinct strings."""
-    tok = _MockTokenizer(
+    tok = _mock_tokenizer(
         raw_tokens={0: "▁true", 1: "true", 2: "▁false", 3: "false"},
         decoded_tokens={0: "true", 1: "true", 2: "false", 3: "false"},
     )
@@ -299,7 +317,7 @@ def test_sentencepiece_leading_space_preserved():
 
 def test_whitespace_run_tokens_stay_distinct():
     """▁, ▁▁, ▁▁▁ must produce different-length space strings."""
-    tok = _MockTokenizer(
+    tok = _mock_tokenizer(
         raw_tokens={0: "▁", 1: "▁▁", 2: "▁▁▁"},
         decoded_tokens={0: "", 1: " ", 2: "  "},
     )
@@ -309,7 +327,7 @@ def test_whitespace_run_tokens_stay_distinct():
 
 def test_bpe_leading_space_already_preserved():
     """GPT-2 BPE: Ġtrue already decodes to ' true', no fix needed."""
-    tok = _MockTokenizer(
+    tok = _mock_tokenizer(
         raw_tokens={0: "Ġtrue", 1: "true"},
         decoded_tokens={0: " true", 1: "true"},
         pre_tokenizer_type="ByteLevel",
@@ -321,7 +339,7 @@ def test_bpe_leading_space_already_preserved():
 
 def test_logprobs_count_stable_across_k():
     """logprobs=4 and logprobs=10 must return 4 and 10 entries."""
-    tok = _MockTokenizer(
+    tok = _mock_tokenizer(
         raw_tokens={
             0: "▁true",
             1: "a",

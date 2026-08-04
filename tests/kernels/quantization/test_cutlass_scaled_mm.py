@@ -62,7 +62,9 @@ PER_TOKEN_GROUP_SHAPE = (1, -1)
 PER_OUT_CH_GROUP_SHAPE = (-1, 1)
 
 capability = current_platform.get_device_capability()
-capability = capability[0] * 10 + capability[1]
+# test_cutlass_support_opcheck has no skip guard, so an unknown capability
+# deliberately falls back to 0 rather than failing at import time.
+capability_int = (capability[0] * 10 + capability[1]) if capability is not None else 0
 
 
 def rand_int8(shape: tuple, device: str = "cuda"):
@@ -628,7 +630,7 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
 
 def test_cutlass_support_opcheck():
-    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability,))
+    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability_int,))
 
 
 @pytest.mark.parametrize("num_experts", [8, 64])

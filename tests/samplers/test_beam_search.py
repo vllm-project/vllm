@@ -251,7 +251,7 @@ def test_beam_search_structured_output(
 
     llm = LLM(
         model=model,
-        dtype=dtype,
+        dtype=dtype,  # type: ignore[arg-type]
         max_model_len=512,
         structured_outputs_config=dict(
             backend="xgrammar",
@@ -270,7 +270,7 @@ def test_beam_search_structured_output(
         "Generate a JSON object for a person with name and age:",
     ]
 
-    outputs = llm.beam_search(prompts, params)
+    outputs = llm.beam_search(prompts, params)  # type: ignore[arg-type]
 
     assert len(outputs) == len(prompts)
     for output in outputs:

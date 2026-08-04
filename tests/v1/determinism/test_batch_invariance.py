@@ -160,7 +160,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
         if llm is not None:
             with contextlib.suppress(Exception):
-                llm.shutdown()
+                llm.shutdown()  # type: ignore[attr-defined]
 
 
 @skip_unsupported
@@ -447,7 +447,7 @@ def test_simple_generation(backend):
 
     finally:
         with contextlib.suppress(Exception):
-            llm.shutdown()
+            llm.shutdown()  # type: ignore[attr-defined]
 
 
 @skip_unsupported
@@ -773,8 +773,8 @@ def test_decode_logprobs_match_prefill_logprobs(
                     max_tokens=token_idx,
                     logprobs=1,
                 )
-                prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]
-                prefix_prompt = prompt + prefix_output.outputs[0].text
+                prefix_output = llm.generate([prompt], prefix_sp, use_tqdm=False)[0]  # type: ignore[assignment]
+                prefix_prompt = prompt + prefix_output.outputs[0].text  # type: ignore[attr-defined]
 
             # Now run prefill with max_tokens=1 to get the logprob of the next token
             prefill_sp = SamplingParams(

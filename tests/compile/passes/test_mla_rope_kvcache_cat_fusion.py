@@ -283,7 +283,7 @@ def test_mla_rope_kvcache_cat_fusion(
         ),
         cache_config=CacheConfig(
             block_size=block_size,
-            cache_dtype=kv_cache_dtype,
+            cache_dtype=kv_cache_dtype,  # type: ignore[arg-type]
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,

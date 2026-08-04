@@ -79,7 +79,7 @@ class TestReasoningStructuredOutput:
     @pytest.fixture
     def manager_with_reasoner(self, mock_vllm_config):
         manager = StructuredOutputManager(mock_vllm_config)
-        manager.reasoner_cls = MockReasoner
+        manager.reasoner_cls = MockReasoner  # type: ignore[assignment]
         manager.tokenizer = Mock()
         return manager
 
@@ -141,7 +141,7 @@ class TestReasoningStructuredOutput:
                 return not self.chat_template_kwargs.get("enable_thinking", False)
 
         manager = StructuredOutputManager(mock_vllm_config)
-        manager.reasoner_cls = KwargReasoner
+        manager.reasoner_cls = KwargReasoner  # type: ignore[assignment]
         manager.tokenizer = Mock()
 
         structured_req = mock_request_with_structured_output.structured_output_request

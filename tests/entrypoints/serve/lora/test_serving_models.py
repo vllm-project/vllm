@@ -110,8 +110,8 @@ async def test_unload_lora_adapter_success():
     response = await serving_models.load_lora_adapter(request)
     assert len(serving_models.lora_requests) == 1
 
-    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
-    response = await serving_models.unload_lora_adapter(request)
+    unload_request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(unload_request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
 

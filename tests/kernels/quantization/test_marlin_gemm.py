@@ -376,7 +376,7 @@ def marlin_generate_valid_test_cases():
             [quant_test_config["b_type"]],
             quant_test_config.get("c_type", f16_types),
             quant_test_config["group_blocks"],
-        )
+        )  # type: ignore[call-overload]
 
         for sub_case in inner_combinations:
             if (

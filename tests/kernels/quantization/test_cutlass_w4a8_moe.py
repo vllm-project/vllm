@@ -19,8 +19,9 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.torch_utils import set_random_seed
 
+capability = current_platform.get_device_capability()
 IS_SUPPORTED_BY_GPU = (
-    current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
+    current_platform.is_cuda() and capability is not None and capability[0] >= 9
 )
 
 

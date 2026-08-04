@@ -51,8 +51,8 @@ class _EngineClient:
 
 
 class _Serving(BeamSearchOnlineMixin):
-    renderer = _Renderer()
-    engine_client = _EngineClient()
+    renderer = _Renderer()  # type: ignore[assignment]
+    engine_client = _EngineClient()  # type: ignore[assignment]
 
 
 @pytest.mark.asyncio
@@ -65,7 +65,8 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     params = BeamSearchParams(beam_width=2, max_tokens=1)
 
     outputs = [
-        output async for output in _Serving().beam_search(prompt, "request", params)
+        output
+        async for output in _Serving().beam_search(prompt, "request", params)  # type: ignore[arg-type]
     ]
 
     assert len(outputs) == 1

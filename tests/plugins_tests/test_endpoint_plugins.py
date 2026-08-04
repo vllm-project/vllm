@@ -172,7 +172,7 @@ async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     state = State()
-    await _init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())
+    await _init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())  # type: ignore[arg-type]
 
     assert not hasattr(state, "dummy_engine_client")
 
@@ -223,7 +223,7 @@ async def test_endpoint_plugin_end_to_end(monkeypatch: pytest.MonkeyPatch):
     )
 
     fake_engine_client = _FakeEngineClient(rpc_result=["cfg-a", "cfg-b"])
-    await _init_endpoint_plugins_state(fake_engine_client, app.state, args)
+    await _init_endpoint_plugins_state(fake_engine_client, app.state, args)  # type: ignore[arg-type]
 
     assert app.state.dummy_engine_client is fake_engine_client
 

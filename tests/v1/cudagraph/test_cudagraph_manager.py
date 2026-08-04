@@ -31,7 +31,7 @@ def _reset_graph_pool_id():
 
 def _create_vllm_config() -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL",
+        cudagraph_mode="FULL",  # type: ignore[arg-type]
         cudagraph_capture_sizes=[4],
     )
     compilation_config.max_cudagraph_capture_size = 4

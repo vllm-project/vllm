@@ -325,7 +325,7 @@ def test_rope_kvcache_fusion(
         model_config=ModelConfig(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
-            cache_dtype=kv_cache_dtype,
+            cache_dtype=kv_cache_dtype,  # type: ignore[arg-type]
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -469,7 +469,7 @@ def test_rope_static_qquant_kvcache_fusion(
         model_config=ModelConfig(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
-            cache_dtype=kv_cache_dtype,
+            cache_dtype=kv_cache_dtype,  # type: ignore[arg-type]
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,

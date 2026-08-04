@@ -132,7 +132,7 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
                 side_effect=lambda tokenizer: tokenizer,
             ),
         ):
-            tokenizer = cached_tokenizer_from_config(model_config)
+            tokenizer = cached_tokenizer_from_config(model_config)  # type: ignore[arg-type]
 
         assert tokenizer.is_fast is True
     finally:

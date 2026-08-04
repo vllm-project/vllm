@@ -29,7 +29,7 @@ def _make_params(
     use_activation: bool | None = None,
 ) -> list[PoolingParams]:
     return [
-        PoolingParams(task=task, dimensions=dimensions, use_activation=use_activation)
+        PoolingParams(task=task, dimensions=dimensions, use_activation=use_activation)  # type: ignore[arg-type]
         for _ in range(n)
     ]
 
@@ -320,6 +320,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed")
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.dtype == torch.float16
 
     def test_projector(self):
@@ -328,6 +329,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed")
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.shape == (5, 8)
         assert torch.allclose(out, proj(x))
 
@@ -336,6 +338,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed", dimensions=4)
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.shape == (5, 4)
         assert torch.equal(out, x[..., :4])
 
@@ -360,6 +363,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed", dimensions=4)
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.shape == (5, 4)
         assert torch.equal(out, proj(x)[..., :4])
 
@@ -368,6 +372,7 @@ class TestTokenEmbeddingPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_embed", dimensions=4, use_activation=True)
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.shape == (5, 4)
         norms = torch.linalg.norm(out, dim=-1)
         assert torch.allclose(norms, torch.ones(5), atol=1e-5)
@@ -416,6 +421,7 @@ class TestTokenClassifierPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_classify")
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.dtype == torch.float16
 
     def test_classifier(self):
@@ -424,6 +430,7 @@ class TestTokenClassifierPoolerHead:
         x = torch.randn(5, _HIDDEN)
         param = PoolingParams(task="token_classify")
         out = head.forward_chunk(x, param)
+        assert out is not None
         assert out.shape == (5, 3)
         assert torch.allclose(out, clf(x))
 

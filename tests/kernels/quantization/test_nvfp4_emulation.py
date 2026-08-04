@@ -194,7 +194,7 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
         in_dtype=torch.bfloat16,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
-        **config_kwargs,
+        **config_kwargs,  # type: ignore[arg-type]
     )
 
     supported, reason = Nvfp4QuantizationEmulationTritonExperts.is_supported_config(
