@@ -42,6 +42,7 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
 
 vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
     --quantization-config '{"linear":{"activation":null,"weight":null}}'
+```
 
 ## Supported Schemes
 
