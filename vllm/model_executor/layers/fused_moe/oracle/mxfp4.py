@@ -1583,16 +1583,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        # No additional transformation needed for emulation backend
-        return (
-            w13_weight,
-            w2_weight,
-            w13_weight_scale,
-            w2_weight_scale,
-            w13_bias,
-            w2_bias,
-        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
