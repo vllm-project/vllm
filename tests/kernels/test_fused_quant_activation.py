@@ -178,7 +178,8 @@ def test_maybe_fused_act_quant_fp8_dynamic_block(
         linear = MockLinearFp8Dynamic64()
         expected_key = kFp8Dynamic64Sym
 
-    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device)
+    scale = 1 / hidden_size
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
     result = maybe_fused_act_quant(act_fn, x, linear)
 
     assert isinstance(result, QuantizedActivation)
