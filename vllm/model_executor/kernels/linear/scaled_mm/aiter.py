@@ -374,9 +374,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         super().__init__(config)
         n, k = config.weight_shape
 
-        self.use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        _on_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            _on_gfx1250 = on_gfx1250()
+
+        self.use_triton = not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -392,10 +397,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def is_supported(cls, compute_capability=None):
+        if (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_rdna_linear_enabled()
+        ):
+            return True, None
         return (
-            rocm_aiter_ops.is_linear_enabled(),
-            "Only supported on ROCm platform \
-                with aiter package installed.",
+            False,
+            "Only supported on ROCm platform with aiter package installed.",
         )
 
     @classmethod
@@ -411,6 +420,17 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
+        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
+        # through to the generic backend.
+        if rocm_aiter_ops.is_rdna_linear_enabled():
+            n, k = config.weight_shape
+            if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+                return (
+                    False,
+                    f"(N={n}, K={k}) is not in the aiter Triton blockscale tuned list.",
+                )
         return True, None
 
     def apply_block_scaled_mm(
