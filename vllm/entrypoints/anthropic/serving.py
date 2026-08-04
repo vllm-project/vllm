@@ -432,10 +432,17 @@ class AnthropicServingMessages(OpenAIServingChat):
                         # dropped it, leaving the client with a
                         # ``stop_reason: tool_use`` and no tool_use block. Only
                         # skip when there is genuinely nothing left to emit.
+                        # The same applies to the iquest_coder parser, which
+                        # streams arguments incrementally: there the dropped
+                        # payload is the closing "}", so clients accumulated
+                        # '{"file_path": "..."' and rejected it as
+                        # __unparsedToolInput.
                         if origin_chunk.choices[0].finish_reason is not None:
                             finish_reason = origin_chunk.choices[0].finish_reason
 
                         delta = origin_chunk.choices[0].delta
+                        if delta is None:
+                            continue
                         reasoning_delta = getattr(delta, "reasoning", None)
 
                         if (

@@ -484,3 +484,210 @@ def test_reset_clears_streamed_args(iquest_tool_parser, sample_tools):
         pass
     # Exactly one tool's worth of args, not accumulated across both streams.
     assert len(iquest_tool_parser.streamed_args_for_tool) == 1
+
+
+# --------------------------------------------------------------------------
+# Chunk-size invariance.
+#
+# Speculative decoding (MTP) emits several tokens per step, so one streaming
+# delta can carry a whole tool call. The inherited qwen3_coder implementation
+# reacted to delta_text and tracked flags across calls, which made its output
+# depend on how the text happened to be chunked: with
+# num_speculative_tokens=2 arguments came out truncated -- even a
+# single-parameter call arrived as '{"file_path": "/x/main.py"' with no closing
+# brace, which clients reject as __unparsedToolInput. These tests pin the
+# invariant that the emitted arguments depend only on the text, never on the
+# delta boundaries.
+# --------------------------------------------------------------------------
+
+_SINGLE_PARAM_CALL = (
+    "<tool_call>\n"
+    "<function=get_current_weather>\n"
+    "<parameter=city>\nDallas\n</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+_TWO_PARAM_CALL = (
+    "<tool_call>\n"
+    "<function=get_current_weather>\n"
+    "<parameter=city>\nDallas\n</parameter>\n"
+    "<parameter=state>\nTX\n</parameter>\n"
+    "</function>\n"
+    "</tool_call>"
+)
+
+
+def _chunk(text: str, size: int | None) -> list[str]:
+    """Split text into fixed-size chunks; size=None means one giant chunk."""
+    if size is None:
+        return [text]
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _collect_streamed(parser, text: str, size: int | None, request):
+    """Feed `text` in `size`-sized chunks, returning (args_by_index, content).
+
+    Also asserts the wire invariant that a single delta never carries two
+    entries for the same tool index -- clients keep only one of them, so
+    emitting the header and the first argument fragment separately under one
+    index silently drops the opening brace.
+    """
+    args: dict[int, str] = {}
+    names: dict[int, str] = {}
+    content = ""
+    for delta_message in _feed_deltas(parser, _chunk(text, size), request):
+        if delta_message.content:
+            content += delta_message.content
+        seen_indices = set()
+        for tool_call in delta_message.tool_calls or []:
+            assert tool_call.index not in seen_indices, (
+                f"two entries for tool index {tool_call.index} in one delta"
+            )
+            seen_indices.add(tool_call.index)
+            if tool_call.function and tool_call.function.name:
+                names[tool_call.index] = tool_call.function.name
+            if tool_call.function and tool_call.function.arguments:
+                args.setdefault(tool_call.index, "")
+                args[tool_call.index] += tool_call.function.arguments
+    return args, names, content
+
+
+@pytest.mark.parametrize("size", [None, 1, 3, 7, 40, 250])
+def test_streaming_chunk_size_invariance_single_call(
+    iquest_tokenizer, sample_tools, size
+):
+    """One call's arguments are identical no matter how the text is chunked."""
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    args, names, content = _collect_streamed(parser, _TWO_PARAM_CALL, size, request)
+
+    assert names == {0: "get_current_weather"}
+    assert json.loads(args[0]) == {"city": "Dallas", "state": "TX"}
+    assert content == ""
+
+
+@pytest.mark.parametrize("size", [None, 1, 3, 7, 40, 250])
+def test_streaming_single_param_call_is_closed(iquest_tokenizer, sample_tools, size):
+    """A one-parameter call must still emit its closing brace.
+
+    Regression: this is the exact shape that broke under MTP -- the arguments
+    arrived as '{"city": "Dallas"' and clients reported
+    "input that could not be parsed as JSON".
+    """
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    args, _, _ = _collect_streamed(parser, _SINGLE_PARAM_CALL, size, request)
+
+    assert args[0].endswith("}"), f"unterminated arguments: {args[0]!r}"
+    assert json.loads(args[0]) == {"city": "Dallas"}
+
+
+@pytest.mark.parametrize("size", [None, 1, 5, 60, 250])
+def test_streaming_repeated_same_name_calls(iquest_tokenizer, sample_tools, size):
+    """Three calls to the SAME tool must stay three distinct calls.
+
+    prev_tool_call_arr used to be de-duplicated by function name, which
+    collapsed repeated calls into one entry; the serving layer then flushed the
+    last call's arguments onto the first ('{"city": "A"}{"city": "C"}') and left
+    the last one unterminated.
+    """
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    text = "\n".join(
+        "<tool_call>\n"
+        "<function=get_current_weather>\n"
+        f"<parameter=city>\n{city}\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+        for city in ("Dallas", "Orlando", "Boston")
+    )
+
+    args, _, content = _collect_streamed(parser, text, size, request)
+
+    assert sorted(args) == [0, 1, 2]
+    assert [json.loads(args[i])["city"] for i in (0, 1, 2)] == [
+        "Dallas",
+        "Orlando",
+        "Boston",
+    ]
+    assert content == ""
+
+
+@pytest.mark.parametrize("size", [None, 1, 3, 40])
+def test_streaming_partial_start_token_not_leaked_as_content(
+    iquest_tokenizer, sample_tools, size
+):
+    """A partial "<tool_call" prefix must be buffered, not emitted as content."""
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    text = "Let me check the weather.\n" + _SINGLE_PARAM_CALL
+    _, _, content = _collect_streamed(parser, text, size, request)
+
+    assert "<tool_call" not in content
+    assert content.strip() == "Let me check the weather."
+
+
+@pytest.mark.parametrize("size", [None, 1, 4, 60])
+def test_streaming_plain_content_without_tool_calls(
+    iquest_tokenizer, sample_tools, size
+):
+    """Text with no tool call streams through unchanged at any chunk size."""
+    parser = IquestCoderToolParser(iquest_tokenizer)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    text = "No tool needed here, just a plain answer."
+    args, _, content = _collect_streamed(parser, text, size, request)
+
+    assert args == {}
+    assert content == text
+
+
+def test_adjust_request_keeps_special_tokens_with_tools(
+    iquest_tool_parser, sample_tools
+):
+    """Tool requests must decode with special tokens intact.
+
+    ``<tool_call>`` / ``</tool_call>`` are *special* tokens on the iQuest
+    tokenizers, so under the default ``skip_special_tokens=True`` they are
+    stripped before the parser sees the text and no tool call is recognised --
+    the whole ``<function=...>`` body streams out as plain content. This lives
+    on IquestCoderToolParser rather than the shared qwen3_coder base so the
+    base parser's behaviour is untouched.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    adjusted = iquest_tool_parser.adjust_request(request)
+    assert adjusted.skip_special_tokens is False
+
+
+def test_adjust_request_untouched_without_tools(iquest_tool_parser):
+    """Without tools there is nothing to parse, so leave the request alone."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    before = request.skip_special_tokens
+    adjusted = iquest_tool_parser.adjust_request(request)
+    assert adjusted.skip_special_tokens == before
+
+
+def test_adjust_request_untouched_when_tool_choice_none(
+    iquest_tool_parser, sample_tools
+):
+    """tool_choice="none" means the model will not emit tool calls."""
+    request = ChatCompletionRequest(
+        model=MODEL, messages=[], tools=sample_tools, tool_choice="none"
+    )
+    before = request.skip_special_tokens
+    adjusted = iquest_tool_parser.adjust_request(request)
+    assert adjusted.skip_special_tokens == before
+
+
+def test_qwen3_coder_base_left_unmodified(iquest_tokenizer):
+    """The shared base parser must not inherit the iQuest-only adjustment."""
+    base = Qwen3CoderToolParser(iquest_tokenizer)
+    assert "adjust_request" not in Qwen3CoderToolParser.__dict__
+    assert "adjust_request" in IquestCoderToolParser.__dict__
+    # And the base still does not populate streamed_args_for_tool itself.
+    assert base.streamed_args_for_tool == []
