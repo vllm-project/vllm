@@ -222,6 +222,14 @@ def test_online_mxfp4_moe_matches_quark(
                 "mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4 requires "
                 "rocm_aiter_ops in weight conversion, not compatible on cuda"
             )
+    elif moe_backend == "emulation":
+        # `OCP_MXQuantizationEmulationTritonExperts.is_supported_config` gates
+        # on `has_quark()`, but its weight processing does not require it.
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.experts."
+            "ocp_mx_emulation_moe.has_quark",
+            lambda: True,
+        )
 
     default_vllm_config.model_config = ModelConfig()
 
@@ -424,6 +432,13 @@ def test_online_mxfp4_dense_matches_quark(
                 AiterMxfp4LinearKernel,
                 *_POSSIBLE_MXFP4_KERNELS.get(PlatformEnum.CUDA, []),
             ],
+        )
+    elif linear_backend == "emulation":
+        # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
+        # EmulationMxfp4LinearKernel.process_weights_after_loading does not require it.
+        monkeypatch.setattr(
+            "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+            lambda: True,
         )
 
     default_vllm_config.model_config = ModelConfig()
