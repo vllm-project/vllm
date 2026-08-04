@@ -28,6 +28,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
+    from vllm.model_executor.models.utils import get_draft_quant_config
 
     draft_vllm_config = replace(
         vllm_config,
@@ -45,6 +46,9 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             else vllm_config.cache_config
         ),
     )
+    # VllmConfig post-init restores the target's quant config because the target
+    # config is retained for DSpark's target-layer metadata, so we must override it.
+    draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(
@@ -134,6 +138,7 @@ def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
             f"on the last stage, but no *embed_tokens.weight was found in "
             f"{model_dir}"
         )
+    assert shard_path is not None
 
     with torch.device(current_platform.current_device()):
         embed = VocabParallelEmbedding(
