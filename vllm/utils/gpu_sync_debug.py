@@ -36,6 +36,23 @@ def enable_gpu_sync_check() -> None:
 _compile_time_suppressors_installed: bool = False
 
 
+def _suppressing(fn):
+    """Wrap `fn` so the sync check is off for its duration."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        prev_mode = torch.cuda.get_sync_debug_mode()
+        if not prev_mode:
+            return fn(*args, **kwargs)
+        torch.cuda.set_sync_debug_mode(0)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            torch.cuda.set_sync_debug_mode(prev_mode)
+
+    return wrapper
+
+
 def _install_compile_time_sync_suppressors() -> None:
     """Wrap torch inductor/aot_autograd compile entry points so the
     synchronizing ops those passes perform don't trip the
@@ -54,17 +71,7 @@ def _install_compile_time_sync_suppressors() -> None:
         from torch._inductor.fx_passes import joint_graph as _jg
 
         _orig_joint = _jg.joint_graph_passes
-
-        @functools.wraps(_orig_joint)
-        def _wrapped_joint(*args, **kwargs):
-            prev_mode = torch.cuda.get_sync_debug_mode()
-            if not prev_mode:
-                return _orig_joint(*args, **kwargs)
-            torch.cuda.set_sync_debug_mode(0)
-            try:
-                return _orig_joint(*args, **kwargs)
-            finally:
-                torch.cuda.set_sync_debug_mode(prev_mode)
+        _wrapped_joint = _suppressing(_orig_joint)
 
         # `compile_fx` does `from .fx_passes.joint_graph import
         # joint_graph_passes`, which binds the *function object* at import
@@ -85,6 +92,19 @@ def _install_compile_time_sync_suppressors() -> None:
                 continue
             if getattr(_mod, "joint_graph_passes", None) is _orig_joint:
                 setattr(_mod, "joint_graph_passes", _wrapped_joint)  # noqa: B010
+    except Exception:  # pragma: no cover
+        pass
+
+    try:  # noqa: BLE001
+        # Inductor sets up its cudagraph tree lazily, so the first
+        # post-warmup call of a partitioned graph runs
+        # `deferred_cudagraphify` inside `execute_model`, and the
+        # `cudaStreamSynchronize` in `CUDAGraph.capture_begin` trips the
+        # check. `deferred_cudagraphify` resolves `cudagraphify` as a module
+        # global at call time, so patching the attribute is enough.
+        from torch._inductor import cudagraph_trees as _ct
+
+        _ct.cudagraphify = _suppressing(_ct.cudagraphify)
     except Exception:  # pragma: no cover
         pass
 
