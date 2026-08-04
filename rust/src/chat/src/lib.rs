@@ -33,7 +33,8 @@ pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, RenderedPrompt, RendererSelection,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
+    RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -167,6 +168,7 @@ impl ChatRequestProcessor {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            session_id: request.session_id,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
@@ -255,6 +257,33 @@ impl ChatLlm {
         self.text.engine_core_client()
     }
 
+    /// Whether the loaded backend has a registered multimodal processor.
+    pub fn supports_multimodal(&self) -> bool {
+        self.processor.backend.multimodal_model_info().is_some()
+    }
+
+    /// Effective tool-call parser name for this model, if parsing is enabled.
+    pub fn tool_call_parser_name(&self) -> Option<&str> {
+        match &self.tool_call_parser {
+            ParserSelection::Auto => {
+                ToolParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
+    /// Effective reasoning parser name for this model, if parsing is enabled.
+    pub fn reasoning_parser_name(&self) -> Option<&str> {
+        match &self.reasoning_parser {
+            ParserSelection::Auto => {
+                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         let (text_request, output_processor) = self
@@ -327,6 +356,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_parser_overrides_accepts_explicit_kimi_k3() {
+        let selection = ParserSelection::Explicit("kimi_k3".to_string());
+        validate_parser_overrides(&selection, &selection).unwrap();
+    }
+
+    #[test]
     fn validate_parser_overrides_accepts_auto_and_none() {
         validate_parser_overrides(&ParserSelection::Auto, &ParserSelection::None).unwrap();
     }
@@ -339,7 +374,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -350,6 +385,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

@@ -51,6 +51,7 @@ MTPModelTypes = Literal[
     "minimax_m3_mtp",
     "bailing_hybrid_mtp",
     "mtp",
+    "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
@@ -353,6 +354,16 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
+
+        if hf_config.model_type == "kimi_k3":
+            # Kimi-K3 keeps the text-model fields (incl. the MTP layer count)
+            # nested under ``text_config`` (a KimiLinearConfig).
+            text_config = getattr(hf_config, "text_config", hf_config)
+            n_predict = getattr(text_config, "num_nextn_predict_layers", None)
+            hf_config.model_type = "kimi_k3_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["KimiK3MTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
@@ -910,6 +921,15 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
+                if self.method in ("eagle", "eagle3"):
+                    # EAGLE drafts share the target's positional space; a
+                    # draft checkpoint with a smaller max_position_embeddings
+                    # than the target under-sizes its rotary cache (#48894).
+                    SpeculativeConfig._maybe_override_draft_max_position_embeddings(
+                        self.draft_model_config.hf_config,
+                        self.target_model_config.max_model_len,
+                    )
+
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -934,6 +954,7 @@ class SpeculativeConfig:
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
+                    and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
@@ -962,6 +983,16 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
+
+                if (
+                    self.method == "dspark"
+                    and "K3DSparkModel" in self.draft_model_config.architectures
+                    and self.target_parallel_config.decode_context_parallel_size > 1
+                ):
+                    raise ValueError(
+                        "MLA DSpark does not currently support decode context "
+                        "parallelism; set decode_context_parallel_size=1."
+                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
@@ -1000,31 +1031,6 @@ class SpeculativeConfig:
                     raise ValueError(
                         "Inkling MTP currently supports exactly one speculative token"
                     )
-
-                if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
@@ -1129,6 +1135,40 @@ class SpeculativeConfig:
                 result,
             )
         return result
+
+    @staticmethod
+    def _maybe_override_draft_max_position_embeddings(
+        draft_hf_config: PretrainedConfig,
+        target_max_model_len: int,
+    ) -> None:
+        """Raise an EAGLE draft's max_position_embeddings up to the target's.
+
+        The proposer feeds the draft positions up to the target's
+        max_model_len, while max_position_embeddings sizes the draft's
+        rotary cos_sin_cache. A smaller checkpoint value (e.g. 2048 for
+        yuhuili/EAGLE3-LLaMA3.1-Instruct-8B) makes that cache gather go
+        out of bounds (#48894).
+
+        Args:
+            draft_hf_config: The draft model's HF config, mutated in place.
+            target_max_model_len: The target model's max_model_len.
+        """
+        draft_max_position_embeddings = getattr(
+            draft_hf_config, "max_position_embeddings", None
+        )
+        if (
+            draft_max_position_embeddings is None
+            or draft_max_position_embeddings >= target_max_model_len
+        ):
+            return
+        logger.info(
+            "Overriding draft model max_position_embeddings from %d to the "
+            "target model's max_model_len (%d); EAGLE drafts share the "
+            "target's positional space.",
+            draft_max_position_embeddings,
+            target_max_model_len,
+        )
+        draft_hf_config.max_position_embeddings = target_max_model_len
 
     @staticmethod
     def _verify_and_get_draft_tp(
@@ -1344,6 +1384,14 @@ class SpeculativeConfig:
 
     def use_ngram_gpu(self) -> bool:
         return self.method == "ngram_gpu"
+
+    def use_multi_module_mtp(self) -> bool:
+        if self.method != "mtp" or self.draft_model_config is None:
+            return False
+        num_mtp_layers = getattr(
+            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
+        )
+        return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
         method = self.method

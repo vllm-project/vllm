@@ -18,6 +18,7 @@
 
 from typing import TYPE_CHECKING
 
+import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.model_executor.models.transformers.base import Base
@@ -59,9 +60,22 @@ def vllm_attention_forward(
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
     hidden = query.shape[-2]
+    head_dim_qk = query.shape[-1]
+    head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(query, key, value), None
+    # Pad `value` up to the query/key head size when it is smaller (expanded
+    # MLA). A larger last dim just means `value` isn't split per head, e.g.
+    # packed grouped/multi-query projections, and needs no padding.
+    pad_value = head_dim_v < head_dim_qk
+    if pad_value:
+        value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
+        value = value.reshape(hidden, -1)
+    attn_output = self_attn.forward(query, key, value)
+    if pad_value:
+        attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
+        attn_output = attn_output.reshape(hidden, -1)
+    return attn_output, None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
