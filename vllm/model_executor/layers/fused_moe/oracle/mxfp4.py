@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -646,10 +647,20 @@ def select_deepseek_v4_mxfp4_moe_backend(
 
 
 def mxfp4_round_up_hidden_size_and_intermediate_size(
-    backend: Mxfp4MoeBackend, hidden_size: int, intermediate_size: int
+    backend: Mxfp4MoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+    activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
-    if backend == Mxfp4MoeBackend.EMULATION:
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SITU:
+        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
+        # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
+        # which would inflate weights and OOM.
+        intermediate_size = round_up(intermediate_size, 128)
+        hidden_size = round_up(hidden_size, 128)
+    elif backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).

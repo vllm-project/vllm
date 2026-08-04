@@ -1202,8 +1202,8 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": False,
     },
     "AITER_MXFP4_BF16": {
-        "activation": "SILU",
-        "rtol": 1.0,
+        "activation": "SWIGLUOAI",
+        "rtol": 0.1,
         "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
@@ -1348,6 +1348,13 @@ def test_rocm_mxfp4_moe_oracle(
     w2_quant = w2_quant_2d.reshape(num_experts, hidden_size, -1)
     w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1)
 
+    # AITER conversion mutates checkpoint-format weights and scales in place.
+    # Preserve their original layout for the reference calculation below.
+    w13_quant_ref = w13_quant.clone()
+    w13_scale_ref = w13_scale.clone()
+    w2_quant_ref = w2_quant.clone()
+    w2_scale_ref = w2_scale.clone()
+
     w13_bias = torch.randn(
         num_experts, 2 * intermediate_size, dtype=dtype, device=device
     )
@@ -1464,10 +1471,10 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Dequantize weights for reference computation
     w13_dq = upcast_from_mxfp(
-        w13_quant.view(torch.uint8), w13_scale, torch.bfloat16, axis=-1
+        w13_quant_ref.view(torch.uint8), w13_scale_ref, torch.bfloat16, axis=-1
     )
     w2_dq = upcast_from_mxfp(
-        w2_quant.view(torch.uint8), w2_scale, torch.bfloat16, axis=-1
+        w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
     )
 
     # Determine activation type and layout
