@@ -75,18 +75,6 @@ def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
     return value is not None and peel(value) is not node
 
 
-def _declared_hidden_size(module: nn.Module) -> int | None:
-    """Hidden size a weightless norm declares on itself, or `None`."""
-    for attr in ("normalized_shape", "hidden_size", "dim"):
-        value = getattr(module, attr, None)
-        if isinstance(value, (tuple, list)):
-            if value:
-                return int(value[-1])
-        elif isinstance(value, int) and value > 0:
-            return value
-    return None
-
-
 class TPAwareNormMixin(nn.Module):
     """Mixin for RMSNorms that reconstructs a TP-sharded input before normalizing."""
 
@@ -202,25 +190,17 @@ class RMSNormFuser(BaseFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
-        model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
-        if weight is not None:
-            hidden_size = weight.size(0)
-        else:
-            hidden_size = _declared_hidden_size(module)
-            if hidden_size is None:
-                # Last resort: the LM hidden size is wrong for norms on a
-                # sub-dimension (e.g. a vision encoder's head-dim norm).
-                hidden_size = model_config.get_hidden_size()
+        has_weight = weight is not None
+        hidden_size = weight.size(0) if has_weight else 0
         graph = trace(module)
         eps = self._eps_from_graph(graph) if graph is not None else None
         if eps is None:
             # If eps not in graph, match torch behaviour.
-            dtype = weight.dtype if weight is not None else model_config.dtype
+            dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
             return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        has_weight = weight is not None
         return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,
