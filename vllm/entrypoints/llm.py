@@ -437,6 +437,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
+                Seeded params use a seed derived from the seed and the
+                prompt content, so that sampling noise is independent
+                across prompts and a prompt's result depends only on the
+                (seed, prompt) pair, not on batch composition or order.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -642,6 +646,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 is a single value, it is applied to every prompt. When it
                 is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
+                Seeded params use a seed derived from the seed and the
+                conversation content, so that sampling noise is independent
+                across prompts and a prompt's result depends only on the
+                (seed, prompt) pair, not on batch composition or order.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
