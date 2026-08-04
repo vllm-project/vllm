@@ -77,7 +77,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -707,6 +707,7 @@ class EngineArgs:
     use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -961,6 +962,9 @@ class EngineArgs:
             description=MambaConfig.__doc__,
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
             **mamba_kwargs["enable_stochastic_rounding"],
@@ -2356,6 +2360,8 @@ class EngineArgs:
             mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
         else:
             mamba_config.backend = self.mamba_backend
+        if self.mamba_ssu_algorithm is not None:
+            mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2364,6 +2370,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        mamba_config.validate_ssu_algorithm()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -2587,11 +2594,7 @@ class EngineArgs:
         self, model_config: ModelConfig
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
-        # Hybrid models support prefix caching but keep it opt-in for now
-        # while the feature matures.
-        default_prefix_caching = (
-            model_config.is_prefix_caching_supported and not model_config.is_hybrid
-        )
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
