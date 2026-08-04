@@ -11,7 +11,6 @@ import torch
 
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .eplb_utils import CpuGpuEvent
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
@@ -95,7 +94,7 @@ def transfer_run_periodically(
 
             # Snapshot the physical_to_logical_map (synchronized with
             # rearrange_event) and copy it to CPU
-            with torch.cuda.stream(cuda_stream), gpu_sync_allowed():
+            with torch.cuda.stream(cuda_stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
             new_physical_to_logical_map = run_rebalance_experts(
@@ -141,8 +140,7 @@ def transfer_run_periodically(
 
                 # Wait until all writes to expert_buffer have finished before making the
                 # AsyncEplbLayerResult visible to the main thread.
-                with gpu_sync_allowed():
-                    cuda_stream.synchronize()
+                cuda_stream.synchronize()
 
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed

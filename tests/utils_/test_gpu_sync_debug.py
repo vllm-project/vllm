@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+
 import pytest
 import torch
 
@@ -36,7 +38,9 @@ def _causes_sync():
 @create_new_process_for_each_test()
 def test_with_env_set(monkeypatch, mode):
     # Env set + gate flipped on: the unguarded sync is detected.
-    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", mode)
+    # `_SYNC_CHECK_MODE` is read from the env once at import, so patch the
+    # module attribute rather than the environment.
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", mode)
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
     # Guarded syncs always pass.
@@ -52,9 +56,62 @@ def test_with_env_set(monkeypatch, mode):
 
 
 @create_new_process_for_each_test()
+def test_other_threads_are_not_policed(monkeypatch):
+    """A background thread that syncs deliberately must not be broken by the
+    check being armed on the thread running the decorated function."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+
+    def sync_on_worker():
+        failure: list[BaseException] = []
+
+        def worker():
+            try:
+                torch.ones(4, device="cuda").cpu()
+            except BaseException as exc:  # pragma: no cover - failure path
+                failure.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        assert not failure, f"background thread raised: {failure[0]!r}"
+
+    with_gpu_sync_check(sync_on_worker)()
+
+
+@create_new_process_for_each_test()
+def test_allow_on_other_thread_does_not_disarm(monkeypatch):
+    """`gpu_sync_allowed()` on one thread must not suppress the check on
+    another. It is scoped by ContextVar rather than torch's process-global
+    sync debug mode, which a previous implementation mutated."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+
+    def main_syncs_while_worker_allows():
+        stop = threading.Event()
+
+        def worker():
+            with gpu_sync_allowed():
+                while not stop.is_set():
+                    torch.ones(4, device="cuda").cpu()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            # Must still be reported despite the worker's open allow region.
+            torch.ones(4, device="cuda").cpu()
+        finally:
+            stop.set()
+            thread.join()
+
+    with pytest.raises(RuntimeError, match=SYNC_ERROR_MESSAGE):
+        with_gpu_sync_check(main_syncs_while_worker_allows)()
+
+
+@create_new_process_for_each_test()
 def test_without_env_set(monkeypatch):
     # Env unset: the decorator is a pass-through, no sync is detected.
-    monkeypatch.delenv("VLLM_GPU_SYNC_CHECK", raising=False)
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", None)
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
     with_gpu_sync_check(_no_sync)()
