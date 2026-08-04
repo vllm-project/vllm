@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Literal, Union
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
@@ -645,20 +644,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SITU:
-        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-        # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-        # which would inflate weights and OOM.
-        intermediate_size = round_up(intermediate_size, 128)
-        hidden_size = round_up(hidden_size, 128)
-    elif (
-        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SILU
-    ):
-        # AITER's A16W4 SiLU kernel handles native dimensions aligned to 128.
-        intermediate_size = round_up(intermediate_size, 128)
-        hidden_size = round_up(hidden_size, 128)
-    elif backend == Mxfp4MoeBackend.EMULATION:
+    if backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).
@@ -1489,9 +1475,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # a8w4 (AITER_SITUV2_A8W4=1) uses gate/up-interleaved flydsl kernels;
+            # a8w4 uses gate/up-interleaved flydsl kernels;
             # default a16w4 keeps the separated layout.
-            guinterleave = envs.AITER_SITUV2_A8W4
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
