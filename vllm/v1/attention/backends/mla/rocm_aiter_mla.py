@@ -77,6 +77,23 @@ def _fp8_mla_prefill_supported() -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=1)
+def _gluon_mla_decode_supported() -> bool:
+    """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
+
+    Its tiling needs ~160 KiB of LDS, which exceeds CDNA3's 64 KiB, so on
+    gfx942 there is no kernel to fall through to and selecting it asserts
+    (``mla_gluon requires gfx950``). Restrict Gluon decode to gfx950; other
+    archs use the asm persistent decode, which ``get_mla_padded_q`` makes
+    correct for any 1..15 heads.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    return on_gfx950()
+
+
 class AiterMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -845,14 +862,15 @@ class AiterMLAHelper:
 
     @staticmethod
     def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
-        # Divisor head counts (<16) keep the Gluon decode. Non-divisor counts
-        # (e.g. 12 heads/rank at TP8) are padded to 16 in get_mla_padded_q and
-        # use the faster asm persistent decode instead of Gluon, which
-        # parallelizes only over heads and scales linearly with KV length.
+        # Divisor head counts (<16) keep the Gluon decode, but only on gfx950
+        # where the kernel exists. Non-divisor counts (e.g. 12 heads/rank at
+        # TP8) -- and every small head count on gfx942, which has no Gluon
+        # build -- are padded to 16 in get_mla_padded_q and use the asm
+        # persistent decode instead.
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1:
             return False
-        return m % num_heads == 0
+        return m % num_heads == 0 and _gluon_mla_decode_supported()
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
