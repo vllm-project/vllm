@@ -301,6 +301,7 @@ def test_enabled_continuation_respects_prompt_reasoning_state(
         chat_template_kwargs={
             "thinking_mode": "enabled",
             "_vllm_continue_final_message": True,
+            "_vllm_continue_final_message_content": prompt_suffix,
         },
     )
     request = ChatCompletionRequest(
@@ -342,6 +343,7 @@ def test_enabled_non_streaming_continuation_respects_prompt_reasoning_state(
         chat_template_kwargs={
             "thinking_mode": "enabled",
             "_vllm_continue_final_message": True,
+            "_vllm_continue_final_message_content": prompt_suffix,
         },
     )
     request = ChatCompletionRequest(
@@ -356,6 +358,42 @@ def test_enabled_non_streaming_continuation_respects_prompt_reasoning_state(
 
     assert (reasoning or "") == expected_reasoning
     assert (content or "") == expected_content
+
+
+@pytest.mark.parametrize("thinking_mode", ["adaptive", "enabled"])
+def test_continuation_ignores_reasoning_markers_before_final_message(thinking_mode):
+    tokenizer = MiniMaxM3Tokenizer()
+    parser = MiniMaxM3DelegatingParser(
+        tokenizer,
+        chat_template_kwargs={
+            "thinking_mode": thinking_mode,
+            "_vllm_continue_final_message": True,
+            "_vllm_continue_final_message_content": "answer",
+        },
+    )
+    prompt_token_ids = tokenizer.encode(
+        "system message with unmatched <mm:think>\nassistant\nanswer"
+    )
+
+    assert parser.is_reasoning_end_from_prompt(prompt_token_ids) is True
+
+    request = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": "answer"}],
+        model="test-model",
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    delta = parser.parse_delta(
+        " more",
+        tokenizer.encode(" more"),
+        request,
+        prompt_token_ids=prompt_token_ids,
+        finished=True,
+    )
+
+    assert delta is not None
+    assert (delta.reasoning or "") == ""
+    assert (delta.content or "") == " more"
 
 
 def test_streaming_boundary_can_emit_reasoning_and_content():

@@ -119,10 +119,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for messages in request.messages
         ]
 
-        chat_template_kwargs = {
-            **self._effective_chat_template_kwargs(single_requests[0]),
-            "_vllm_continue_final_message": single_requests[0].continue_final_message,
-        }
+        parser_chat_template_kwargs = [
+            self._reasoning_parser_chat_template_kwargs(single_request)
+            for single_request in single_requests
+        ]
         parsers: list[Parser | None]
         if self.parser_cls is not None:
             parsers = [
@@ -131,7 +131,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     None,  # tools
                     chat_template_kwargs=chat_template_kwargs,
                 )
-                for _ in single_requests
+                for chat_template_kwargs in parser_chat_template_kwargs
             ]
         else:
             parsers = [None] * len(single_requests)
@@ -168,6 +168,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             )
             single_request = single_requests[i]
             parser = parsers[i]
+            chat_template_kwargs = parser_chat_template_kwargs[i]
             sampling_params = single_request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
