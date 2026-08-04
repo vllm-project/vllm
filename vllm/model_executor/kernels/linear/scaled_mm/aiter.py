@@ -4,11 +4,13 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
 )
@@ -399,6 +401,30 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
+        # aiter only ships per-shape tuned A8W8 blockscale configs (and the
+        # gfx1250 gluon kernels) for the B-preshuffled layout, so shuffle the
+        # weight at load time and dispatch to the preshuffle GEMM.
+        self.use_bpreshuffle = (
+            _on_gfx1250
+            and envs.VLLM_ROCM_USE_AITER_BLOCKSCALE_BPRESHUFFLE
+            and n % 16 == 0
+            and k % 128 == 0
+            and bool(rocm_aiter_ops.is_blockscale_bpreshuffle_gemm_tuned(n, k))
+        )
+        if self.use_bpreshuffle:
+            # The tuned preshuffle configs expect a column-major group scale.
+            act_scale_descriptor = config.activation_quant_key.scale
+            self.quant_fp8 = QuantFP8(
+                static=act_scale_descriptor.static,
+                group_shape=act_scale_descriptor.group_shape,
+                num_token_padding=self.get_output_padding(),
+                use_ue8m0=False,
+                column_major_scales=True,
+            )
+            logger.debug_once(
+                "Using aiter A8W8 blockscale B-preshuffle GEMM for N=%d K=%d", n, k
+            )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
@@ -409,6 +435,22 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             ws, attr = params.weight_scale, params.WEIGHT_SCALE
         if ws is not None and ws.dtype == torch.float8_e8m0fnu:
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        # bmm layers consume the weight as a batch of matrices, not through
+        # apply_block_scaled_mm, so the shuffled layout does not apply.
+        if getattr(layer, "is_bmm", False):
+            self.use_bpreshuffle = False
+
+        if self.use_bpreshuffle:
+            w = FP8BlockParams.from_layer(layer).weight
+            replace_parameter(
+                layer,
+                FP8BlockParams.WEIGHT,
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
+            # Tells model code that also B-preshuffles (deepseek_v4) not to
+            # shuffle this weight a second time.
+            layer.aiter_bpreshuffled = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -464,7 +506,11 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
-        if self.use_triton:
+        if self.use_bpreshuffle:
+            gemm_a8w8_blockscale_op = (
+                rocm_aiter_ops.triton_gemm_a8w8_blockscale_preshuffle
+            )
+        elif self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
