@@ -5,13 +5,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict, cast, final
 
+import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
+from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -336,6 +341,82 @@ class MultiModalConfig:
                     f"Parent directory for FP8 scale save path not found: {save_parent}"
                 )
         return self
+
+    def get_mm_processor_device_type(self) -> str | None:
+        """The torch device type `mm_processor_kwargs["device"]` names.
+
+        `mm_processor_kwargs` is untyped, so `device` may be any form torch
+        accepts -- `"cuda"`, `"cuda:1"`, `torch.device(...)`, or a bare index.
+        Normalising through torch rather than parsing the string keeps the
+        non-string forms from slipping past a caller's comparison.
+
+        Returns:
+            The device type, or None when no device is requested.
+
+        Raises:
+            ValueError: If `device` is not something `torch.device` accepts.
+                `validate_mm_processor_device` is what surfaces this during
+                startup, so the value is only parsed once.
+        """
+        device = (self.mm_processor_kwargs or {}).get("device")
+        if device is None:
+            return None
+        try:
+            return torch.device(device).type  # type: ignore[arg-type]
+        except (RuntimeError, TypeError, ValueError):
+            raise ValueError(
+                f'Invalid "device" in mm_processor_kwargs: {device!r}. Expected a '
+                'torch device such as "cpu", "cuda" or "cuda:0".'
+            ) from None
+
+    def validate_mm_processor_device(self, ec_config: ECTransferConfig | None) -> None:
+        """Check `mm_processor_kwargs["device"]` for this deployment.
+
+        The only place the requested device is validated, so it runs even on a
+        CPU-only platform: the value is parsed before any early return.
+
+        Args:
+            ec_config: The deployment's EC config, or None when it is not an
+                encode/prefill/decode deployment. Passed in because it is not
+                reachable from here, and because a field assigned after
+                construction would not re-trigger this config's validators.
+
+        Raises:
+            ValueError: If the requested device is not a torch device, or if it
+                is the accelerator on an instance that also runs the language
+                model.
+        """
+        from vllm.platforms import current_platform
+
+        device_type = self.get_mm_processor_device_type()
+        accelerator = current_platform.device_type
+        if device_type is None or accelerator in ("", "cpu"):
+            return
+        if device_type != accelerator:
+            return
+
+        if ec_config is None or not ec_config.is_encode_only:
+            raise ValueError(
+                f"Cannot run the multi-modal processor on {device_type!r}: this "
+                "instance also runs the language model. The processor would "
+                "share the device with the model's forward pass, so its "
+                "transform kernels contend with that compute, and because it "
+                "runs in the API-server process its allocations are outside the "
+                "memory the engine profiled for its KV cache -- risking OOM or "
+                "a silently shrunken cache.\n"
+                "Accelerator preprocessing is only supported on an encode-only "
+                "instance of an encode/prefill/decode deployment (an EC "
+                "producer that is not also a consumer), which runs no forward "
+                "pass and allocates no KV cache.\n"
+                'Use --mm-processor-device=cpu, or drop "device" from '
+                "--mm-processor-kwargs."
+            )
+
+        logger.info_once(
+            "Running the multi-modal processor on %s. Override with "
+            "--mm-processor-device=cpu.",
+            device_type,
+        )
 
     def compute_hash(self) -> str:
         """

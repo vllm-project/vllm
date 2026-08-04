@@ -1492,6 +1492,7 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         self._resolve_mm_embeds_out_of_band()
+        self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
@@ -2196,6 +2197,17 @@ class VllmConfig:
                 "EC consumer: pre-computed-embedding inputs may omit the "
                 "embedding tensor; embeddings are loaded from the EC connector."
             )
+
+    def _validate_mm_processor_device(self) -> None:
+        """Hand the EC config to `MultiModalConfig`, which owns the rule."""
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        mm_config.validate_mm_processor_device(self.ec_transfer_config)
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""

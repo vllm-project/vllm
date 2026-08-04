@@ -1698,8 +1698,9 @@ class EngineArgs:
         while translating args into configs. "auto" needs both the EC role and
         the tensor transport, which are only available together here.
 
-        An explicit `device` in `--mm-processor-kwargs` always wins, and is
-        checked by the same validation below, so both entry points are covered.
+        An explicit `device` in `--mm-processor-kwargs` always wins. Validating
+        the result is `MultiModalConfig`'s job, so entry points that never build
+        `EngineArgs` are covered too.
         """
         original = self.mm_processor_kwargs or {}
         kwargs = dict(original)
@@ -1710,14 +1711,7 @@ class EngineArgs:
         has_accelerator = device_type not in ("", "cpu")
 
         ec_config = self.ec_transfer_config
-        # An EC producer that is not also a consumer runs no decoder and
-        # allocates no KV cache -- `GPUModelRunner.get_kv_cache_spec` returns {}
-        # for it -- so frontend accelerator work has the device to itself.
-        is_encoder_instance = (
-            ec_config is not None
-            and ec_config.is_ec_producer
-            and not ec_config.is_ec_consumer
-        )
+        is_encoder_instance = ec_config is not None and ec_config.is_encode_only
 
         if "device" not in kwargs and has_accelerator:
             # Any explicit value other than "cpu" means "the accelerator", so a
@@ -1739,46 +1733,6 @@ class EngineArgs:
                     )
                 else:
                     kwargs["device"] = device_type
-
-        # `mm_processor_kwargs` is untyped, so `device` may be any form torch
-        # accepts -- "cuda", "cuda:1", `torch.device(...)`, or a bare index.
-        # Normalise through torch rather than parsing the string, otherwise the
-        # non-string forms slip past the check below.
-        device = kwargs.get("device")
-        requested_type: str | None = None
-        if device is not None:
-            try:
-                requested_type = torch.device(device).type
-            except (RuntimeError, TypeError, ValueError):
-                raise ValueError(
-                    f'Invalid "device" in --mm-processor-kwargs: {device!r}. '
-                    'Expected a torch device such as "cpu", "cuda" or "cuda:0".'
-                ) from None
-
-        on_accelerator = has_accelerator and requested_type == device_type
-
-        if on_accelerator and not is_encoder_instance:
-            raise ValueError(
-                f"Cannot run the multi-modal processor on {device}: this "
-                "instance also runs the language model. The processor would "
-                "share the device with the model's forward pass, so its "
-                "transform kernels contend with that compute, and because it "
-                "runs in the API-server process its allocations are outside the "
-                "memory the engine profiled for its KV cache -- risking OOM or "
-                "a silently shrunken cache.\n"
-                "Accelerator preprocessing is only supported on an encode-only "
-                "instance of an encode/prefill/decode deployment (an EC "
-                "producer that is not also a consumer), which runs no forward "
-                "pass and allocates no KV cache.\n"
-                'Use --mm-processor-device=cpu, or drop "device" from '
-                "--mm-processor-kwargs."
-            )
-        if on_accelerator:
-            logger.info_once(
-                "Running the multi-modal processor on %s. Override with "
-                "--mm-processor-device=cpu.",
-                device,
-            )
 
         if kwargs != original:
             self.mm_processor_kwargs = kwargs
