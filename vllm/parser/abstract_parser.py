@@ -193,6 +193,10 @@ class Parser:
             True if the reasoning content ends in the input_ids.
         """
 
+    def is_reasoning_end_from_prompt(self, prompt_token_ids: list[int]) -> bool | None:
+        """Check whether reasoning has ended at the generation boundary."""
+        return self.is_reasoning_end(prompt_token_ids)
+
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -723,6 +727,11 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def is_reasoning_end_from_prompt(self, prompt_token_ids: list[int]) -> bool | None:
+        if self._reasoning_parser is None:
+            return False
+        return self._reasoning_parser.is_reasoning_end_from_prompt(prompt_token_ids)
+
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
@@ -812,7 +821,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self._reasoning_parser is None or self.is_reasoning_end(
+            if self._reasoning_parser is None or self.is_reasoning_end_from_prompt(
                 prompt_token_ids
             ):
                 state.reasoning_ended = True

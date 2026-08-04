@@ -1,15 +1,109 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.chat_completion import batch_serving
+from vllm.entrypoints.openai.chat_completion.batch_serving import (
+    OpenAIServingChatBatch,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+)
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+@pytest.mark.parametrize(
+    ("thinking_mode", "expected_reasoning_ended"),
+    [
+        ("adaptive", None),
+        ("enabled", False),
+        ("disabled", True),
+    ],
+)
+def test_batch_forwards_prompt_reasoning_state(
+    monkeypatch,
+    thinking_mode: str,
+    expected_reasoning_ended: bool | None,
+) -> None:
+    """Batch requests initialize reasoning like standard chat requests."""
+
+    class BatchParser:
+        def __init__(self, tokenizer, tools, chat_template_kwargs, **kwargs):
+            self.reasoning_parser = object()
+            self.thinking_mode = chat_template_kwargs["thinking_mode"]
+
+        def is_reasoning_end_from_prompt(self, prompt_token_ids):
+            return {
+                "adaptive": None,
+                "enabled": False,
+                "disabled": True,
+            }[self.thinking_mode]
+
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.renderer = SimpleNamespace(tokenizer=MagicMock())
+    serving.parser_cls = BatchParser
+    serving.model_config = SimpleNamespace(max_model_len=128)
+    serving.default_sampling_params = {}
+    serving.override_max_tokens = None
+    serving.engine_client = MagicMock()
+    serving.engine_client.generate.return_value = MagicMock()
+    serving.models = MagicMock()
+    serving.models.model_name.return_value = "test-model"
+    serving._effective_chat_template_kwargs = MagicMock(
+        return_value={"thinking_mode": thinking_mode}
+    )
+    engine_prompt = {"type": "tokens", "prompt_token_ids": [1, 2, 3]}
+    serving.render_batch_chat_request = AsyncMock(
+        return_value=([[], []], [engine_prompt, engine_prompt])
+    )
+    serving._base_request_id = MagicMock(return_value="batch-test")
+    serving._maybe_get_adapters = MagicMock(return_value=None)
+    serving._get_data_parallel_rank = MagicMock(return_value=None)
+    serving._extract_prompt_components = MagicMock(
+        return_value=SimpleNamespace(token_ids=[1, 2, 3])
+    )
+    serving._extract_prompt_len = MagicMock(return_value=3)
+    serving._log_inputs = MagicMock()
+    serving.chat_completion_full_generator_batch = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(batch_serving, "get_max_tokens", lambda *args, **kwargs: 8)
+
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=[
+            [{"role": "user", "content": "Return JSON."}],
+            [{"role": "user", "content": "Return JSON."}],
+        ],
+        response_format={"type": "json_object"},
+        chat_template_kwargs={"thinking_mode": thinking_mode},
+        max_tokens=8,
+    )
+
+    asyncio.run(serving.create_batch_chat_completion(request))
+
+    assert serving.engine_client.generate.call_count == 2
+    for generate_call in serving.engine_client.generate.call_args_list:
+        generate_kwargs = generate_call.kwargs
+        assert generate_kwargs["reasoning_ended"] is expected_reasoning_ended
+        assert generate_kwargs["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {
+                "thinking_mode": thinking_mode,
+                "_vllm_continue_final_message": False,
+            }
+        }
+
+    parsers = serving.chat_completion_full_generator_batch.call_args.args[-1]
+    assert len(parsers) == 2
+    assert parsers[0] is not parsers[1]
 
 
 @pytest.fixture(scope="module")

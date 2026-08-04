@@ -6,6 +6,7 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.v1.request import Request
@@ -16,7 +17,9 @@ from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 class MockReasoner:
     def __init__(self, tokenizer):
         self.is_reasoning_end = Mock(return_value=False)
+        self.is_reasoning_end_from_prompt = Mock(return_value=False)
         self.is_reasoning_end_streaming = Mock(return_value=False)
+        self.extract_content_ids = Mock(return_value=[])
 
 
 class TestReasoningStructuredOutput:
@@ -62,6 +65,9 @@ class TestReasoningStructuredOutput:
         request = Mock(spec=Request)
         request.structured_output_request = Mock()
         request.structured_output_request.reasoning_ended = None
+        request.structured_output_request.reasoning_end_token_index = None
+        request.structured_output_request.deferred_grammar_start_index = None
+        request.structured_output_request.reasoning_prompt_state_initialized = False
         request.structured_output_request.grammar = Mock()
         request.structured_output_request.reasoning_parser_kwargs = None
         request.structured_output_request.reasoner = None
@@ -70,6 +76,7 @@ class TestReasoningStructuredOutput:
         )
         request.use_structured_output = True
         request.prompt_token_ids = [1, 2, 3, 4, 5]
+        request.num_prompt_tokens = 5
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         request.num_computed_tokens = 5
         request.num_output_placeholders = 0
@@ -117,6 +124,53 @@ class TestReasoningStructuredOutput:
         )
         assert result is False
 
+        reasoner = (
+            mock_request_with_structured_output.structured_output_request.reasoner
+        )
+        reasoner.is_reasoning_end_from_prompt.assert_called_once_with([1, 2, 3, 4, 5])
+        reasoner.is_reasoning_end.assert_not_called()
+
+    def test_should_fill_bitmask_preserves_deferred_prompt_state(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Test adaptive reasoning remains deferred after prompt inspection."""
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end.return_value = True
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoner = reasoner
+
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
+
+        assert result is False
+        assert structured_req.reasoning_ended is None
+        reasoner.is_reasoning_end_from_prompt.assert_called_once_with([1, 2, 3, 4, 5])
+        reasoner.is_reasoning_end.assert_not_called()
+
+    def test_should_fill_bitmask_initializes_forwarded_open_state(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Engine parsers inspect open continuations despite a forwarded state."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        result = manager_with_reasoner.should_fill_bitmask(
+            mock_request_with_structured_output
+        )
+
+        assert result is False
+        assert structured_req.reasoning_ended is False
+        assert structured_req.reasoning_prompt_state_initialized is True
+        structured_req.reasoner.is_reasoning_end_from_prompt.assert_called_once_with(
+            [1, 2, 3, 4, 5]
+        )
+
     def test_should_fill_bitmask_no_reasoner(
         self, mock_vllm_config, mock_request_with_structured_output
     ):
@@ -139,6 +193,9 @@ class TestReasoningStructuredOutput:
 
             def is_reasoning_end(self, input_ids):
                 return not self.chat_template_kwargs.get("enable_thinking", False)
+
+            def is_reasoning_end_from_prompt(self, prompt_token_ids):
+                return self.is_reasoning_end(prompt_token_ids)
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner_cls = KwargReasoner
@@ -189,6 +246,210 @@ class TestReasoningStructuredOutput:
 
         # Should return False since reasoning hasn't ended
         assert result is False
+
+    def test_should_advance_ignores_prompt_reasoning_markers(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Adaptive reasoning detection only inspects generated tokens."""
+        start_marker = 101
+        end_marker = 102
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda input_ids, delta_ids: end_marker in list(input_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.prompt_token_ids = [
+            start_marker,
+            end_marker,
+        ]
+        mock_request_with_structured_output.num_prompt_tokens = 2
+        mock_request_with_structured_output.all_token_ids = [
+            start_marker,
+            end_marker,
+            start_marker,
+        ]
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[start_marker],
+        )
+
+        assert result is False
+        assert structured_req.reasoning_ended is None
+        input_ids, delta_ids = reasoner.is_reasoning_end_streaming.call_args.args
+        assert list(input_ids) == [start_marker]
+        assert list(delta_ids) == [start_marker]
+
+    def test_should_advance_replays_adaptive_direct_content(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """The token that resolves adaptive mode as content reaches the grammar."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        reasoner.is_reasoning_end_streaming.return_value = True
+        reasoner.extract_content_ids.side_effect = lambda token_ids: list(token_ids)
+        structured_req.reasoner = reasoner
+
+        prompt_token_ids = [1, 2, 3]
+        direct_content_token = 400
+        mock_request_with_structured_output.prompt_token_ids = prompt_token_ids
+        mock_request_with_structured_output.num_prompt_tokens = len(prompt_token_ids)
+        mock_request_with_structured_output.all_token_ids = [
+            *prompt_token_ids,
+            direct_content_token,
+        ]
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[direct_content_token],
+        )
+        assert structured_req.reasoning_ended is True
+        assert structured_req.reasoning_end_token_index is None
+        assert structured_req.deferred_grammar_start_index == len(prompt_token_ids)
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            mock_request_with_structured_output, [direct_content_token]
+        ) == [direct_content_token]
+        assert structured_req.deferred_grammar_start_index is None
+
+    def test_should_advance_replays_ambiguous_adaptive_prefix(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Earlier unconstrained prefix tokens are replayed with direct content."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        reasoner.is_reasoning_end_streaming.return_value = True
+        reasoner.extract_content_ids.side_effect = lambda token_ids: list(token_ids)
+        structured_req.reasoner = reasoner
+
+        prompt_token_ids = [1, 2, 3]
+        output_token_ids = [401, 402]
+        mock_request_with_structured_output.prompt_token_ids = prompt_token_ids
+        mock_request_with_structured_output.num_prompt_tokens = len(prompt_token_ids)
+        mock_request_with_structured_output.all_token_ids = [
+            *prompt_token_ids,
+            *output_token_ids,
+        ]
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[output_token_ids[-1]],
+        )
+        assert (
+            manager_with_reasoner.trim_reasoning_for_advance(
+                mock_request_with_structured_output, [output_token_ids[-1]]
+            )
+            == output_token_ids
+        )
+
+    def test_speculative_reasoning_detection_ignores_prompt_markers(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Speculative draft simulation starts after the prompt boundary."""
+        start_marker = 101
+        end_marker = 102
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda input_ids, delta_ids: end_marker in list(input_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.prompt_token_ids = [
+            start_marker,
+            end_marker,
+        ]
+        mock_request_with_structured_output.num_prompt_tokens = 2
+        mock_request_with_structured_output.all_token_ids = [
+            start_marker,
+            end_marker,
+        ]
+
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 1
+        manager_with_reasoner.vllm_config.model_config.is_diffusion = False
+        manager_with_reasoner.backend = Mock()
+        manager_with_reasoner.backend.allocate_token_bitmask.return_value = torch.zeros(
+            (2, 1), dtype=torch.int32
+        )
+
+        request_id = mock_request_with_structured_output.request_id
+        manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={request_id: [start_marker]},
+        )
+
+        input_ids, delta_ids = reasoner.is_reasoning_end_streaming.call_args.args
+        assert list(input_ids) == [start_marker]
+        assert list(delta_ids) == [start_marker]
+        structured_req.grammar.fill_bitmask.assert_not_called()
+
+    def test_speculative_adaptive_direct_content_advances_grammar(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Later speculative rows include direct adaptive content state."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = None
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_from_prompt.return_value = None
+        reasoner.is_reasoning_end_streaming.return_value = True
+        reasoner.extract_content_ids.side_effect = lambda token_ids: list(token_ids)
+        structured_req.reasoner = reasoner
+        structured_req.grammar.validate_tokens.side_effect = lambda token_ids: list(
+            token_ids
+        )
+        structured_req.grammar.accept_tokens.return_value = True
+
+        prompt_token_ids = [1, 2, 3]
+        mock_request_with_structured_output.prompt_token_ids = prompt_token_ids
+        mock_request_with_structured_output.num_prompt_tokens = len(prompt_token_ids)
+        mock_request_with_structured_output.all_token_ids = prompt_token_ids
+
+        manager_with_reasoner.vllm_config.num_speculative_tokens = 2
+        manager_with_reasoner.vllm_config.model_config.is_diffusion = False
+        manager_with_reasoner.backend = Mock()
+        manager_with_reasoner.backend.allocate_token_bitmask.return_value = torch.zeros(
+            (3, 1), dtype=torch.int32
+        )
+
+        request_id = mock_request_with_structured_output.request_id
+        direct_tokens = [501, 502]
+        manager_with_reasoner.grammar_bitmask(
+            requests={request_id: mock_request_with_structured_output},
+            structured_output_request_ids=[request_id],
+            scheduled_spec_decode_tokens={request_id: direct_tokens},
+        )
+
+        accepted_token_batches = [
+            mock_call.args[1]
+            for mock_call in structured_req.grammar.accept_tokens.call_args_list
+        ]
+        assert accepted_token_batches == [[direct_tokens[0]], [direct_tokens[1]]]
+        structured_req.grammar.rollback.assert_called_once_with(len(direct_tokens))
 
     def test_should_advance_reasoning_just_ended(
         self,
@@ -247,12 +508,16 @@ class TestReasoningStructuredOutput:
         structured_req.reasoning_ended = False
 
         end_token_id = 248069
+        seen_delta_ids: list[list[int]] = []
+
+        def detects_reasoning_end(input_ids, delta_ids):
+            delta_ids = list(delta_ids)
+            seen_delta_ids.append(delta_ids)
+            return end_token_id in delta_ids
 
         reasoner = MockReasoner(tokenizer=Mock())
         # Detection mirrors the real Qwen3 parser: end token in the delta.
-        reasoner.is_reasoning_end_streaming = Mock(
-            side_effect=lambda input_ids, delta_ids: end_token_id in list(delta_ids)
-        )
+        reasoner.is_reasoning_end_streaming = Mock(side_effect=detects_reasoning_end)
         structured_req.reasoner = reasoner
 
         # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
@@ -277,9 +542,7 @@ class TestReasoningStructuredOutput:
 
         # First call to is_reasoning_end_streaming was with the full
         # new_token_ids (not the truncated placeholder window).
-        first_call = reasoner.is_reasoning_end_streaming.call_args_list[0]
-        _, called_delta = first_call.args
-        assert list(called_delta) == new_token_ids
+        assert seen_delta_ids[0] == new_token_ids
 
         assert structured_req.reasoning_ended is True
         assert result is True
@@ -298,17 +561,17 @@ class TestReasoningStructuredOutput:
         reasoner.is_reasoning_end_streaming.return_value = False
         structured_req.reasoner = reasoner
 
-        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
-        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5, 6, 7]
+        mock_request_with_structured_output.num_computed_tokens = 7
         mock_request_with_structured_output.num_output_placeholders = 2
 
         result = manager_with_reasoner.should_advance(
             mock_request_with_structured_output
         )
 
-        # placeholder window: start = 5 - 2 = 3, delta = [4, 5]
+        # placeholder window: start = 7 - 2 = 5, delta = [6, 7]
         _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
-        assert list(called_delta) == [4, 5]
+        assert list(called_delta) == [6, 7]
         assert result is False
 
     def test_should_advance_trims_reasoning_prefix_for_json(
@@ -330,12 +593,17 @@ class TestReasoningStructuredOutput:
             def __init__(self, *_, **__):
                 pass
 
+            def is_reasoning_end_from_prompt(self, prompt_token_ids):
+                return False
+
             def is_reasoning_end_streaming(self, input_ids, delta_ids):
                 return marker in list(delta_ids)
 
         structured_req.reasoner = MarkerReasoner()
 
         new_token_ids = [9, 198, marker, 271, 5005]
+        mock_request_with_structured_output.prompt_token_ids = [1, 2, 3]
+        mock_request_with_structured_output.num_prompt_tokens = 3
         mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
 
         result = manager_with_reasoner.should_advance(
