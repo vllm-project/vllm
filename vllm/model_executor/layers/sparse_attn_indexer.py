@@ -17,6 +17,10 @@ from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
+from vllm.models.deepseek_v4.turing.indexer_fallback import (
+    supports_turing_indexer_fallback,
+)
+from vllm.models.deepseek_v4.turing.indexer_logits import fp8_mqa_logits_triton
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -326,10 +330,6 @@ def sparse_attn_indexer(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
-    from vllm.models.deepseek_v4.turing.indexer_fallback import (
-        supports_turing_indexer_fallback,
-    )
-
     use_turing_fallback = supports_turing_indexer_fallback()
 
     # assert isinstance(attn_metadata, dict)
@@ -513,10 +513,6 @@ def sparse_attn_indexer(
                         "Turing indexer fallback does not support FP4 cache"
                     )
                     assert q_scale_slice is None
-                    from vllm.models.deepseek_v4.turing.indexer_logits import (
-                        fp8_mqa_logits_triton,
-                    )
-
                     logits = fp8_mqa_logits_triton(
                         q_slice_cast,
                         k_quant_cast,
@@ -816,16 +812,15 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        if current_platform.is_cuda() and not has_deep_gemm():
-            from vllm.models.deepseek_v4.turing.indexer_fallback import (
-                supports_turing_indexer_fallback,
+        if (
+            current_platform.is_cuda()
+            and not has_deep_gemm()
+            and not supports_turing_indexer_fallback()
+        ):
+            raise RuntimeError(
+                "Sparse Attention Indexer CUDA op requires DeepGEMM or the "
+                "Turing Triton fallback (SM75)."
             )
-
-            if not supports_turing_indexer_fallback():
-                raise RuntimeError(
-                    "Sparse Attention Indexer CUDA op requires DeepGEMM or the "
-                    "Turing Triton fallback (SM75)."
-                )
 
     def forward_native(
         self,

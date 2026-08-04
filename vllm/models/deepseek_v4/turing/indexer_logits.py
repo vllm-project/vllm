@@ -4,16 +4,16 @@
 
 The DeepGEMM ``fp8_fp4_mqa_logits`` kernel is unavailable below SM90 because
 its ``normal_kernel_cuda`` path does not implement fp8 (e4m3) matmul on Turing.
-This module vendors a Triton launcher around the portable
-``_fp8_mqa_logits_kernel`` from ``vllm/v1/attention/ops/triton_fp8_mqa_logits.
-py``.
+This module vendors a copy of the portable ``_fp8_mqa_logits_kernel`` from
+``vllm/v1/attention/ops/triton_fp8_mqa_logits.py`` (same body, renamed to the
+fp16-typed ``_fp16_mqa_logits_kernel``) with a CUDA launcher.
 
 Unlike the AMD ``fp8_mqa_logits_gfx942`` launcher, Triton on SM75 cannot even
 *load* ``float8_e4m3fn`` tensors (``fp8e4nv`` is unsupported on this
 architecture), so the fp8 values are converted losslessly to fp16 before the
 dot (e4m3 has 3 mantissa bits, fp16 has 10, so every fp8 value is exact).
-``tl.dot(..., input_precision="ieee")`` then falls back to a full-precision
-FFMA accumulation on Turing instead of the fp16 tensor-core path.
+``tl.dot(..., input_precision="ieee")`` keeps a full-precision accumulation
+path instead of the fp16 tensor-core path.
 """
 
 from __future__ import annotations
