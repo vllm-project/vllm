@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -34,7 +34,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    ParsableContext,
+    SimpleContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
@@ -123,6 +127,70 @@ def test_reasoning_continuation_context_is_forwarded_to_parser() -> None:
     assert kwargs["_vllm_continue_final_message"] is True
     assert kwargs["_vllm_continue_final_message_content"] == ""
     assert kwargs["_vllm_continue_final_message_reasoning"] == "partial plan"
+
+
+@pytest.mark.asyncio
+async def test_builtin_tool_turn_clears_reasoning_continuation_context() -> None:
+    serving = _make_serving_instance_with_reasoning()
+
+    async def result_generator():
+        yield MagicMock()
+
+    serving.engine_client.generate.side_effect = lambda *args, **kwargs: (
+        result_generator()
+    )
+    serving._render_next_turn = AsyncMock(return_value=[tokens_input([4, 5])])
+    serving._extract_prompt_len = MagicMock(return_value=2)
+
+    request = ResponsesRequest(input="hi", tools=[], max_output_tokens=8)
+    context = ParsableContext(
+        response_messages=[],
+        tokenizer=MagicMock(),
+        parser_cls=None,
+        request=request,
+        available_tools=[],
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    context.append_output = MagicMock()
+    context.need_builtin_tool_call = MagicMock(side_effect=[True, False])
+    context.call_tool = AsyncMock(return_value=[])
+    context.append_tool_output = MagicMock()
+
+    reasoning_parser_kwargs = {
+        "chat_template_kwargs": {
+            "thinking_mode": "adaptive",
+            "_vllm_continue_final_message": True,
+            "_vllm_continue_final_message_content": "",
+            "_vllm_continue_final_message_reasoning": "partial plan",
+            "_vllm_continue_final_message_reasoning_ended": False,
+        }
+    }
+
+    outputs = [
+        output
+        async for output in serving._generate_with_builtin_tools(
+            request_id="resp-test",
+            engine_input=tokens_input([1, 2, 3]),
+            sampling_params=SamplingParams(max_tokens=8),
+            context=context,
+            reasoning_ended=False,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
+        )
+    ]
+
+    assert len(outputs) == 2
+    assert serving.engine_client.generate.call_count == 2
+    first_call, second_call = serving.engine_client.generate.call_args_list
+    assert first_call.kwargs["reasoning_ended"] is False
+    assert first_call.kwargs["reasoning_parser_kwargs"] == reasoning_parser_kwargs
+    assert second_call.kwargs["reasoning_ended"] is None
+    assert second_call.kwargs["reasoning_parser_kwargs"] == {
+        "chat_template_kwargs": {
+            "thinking_mode": "adaptive",
+            "_vllm_continue_final_message": False,
+        }
+    }
 
 
 @pytest.fixture
