@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_moe_marlin_supports_config,
     marlin_act_int8_process_scales,
     marlin_moe_padded_intermediate,
     marlin_moe_permute_scales,
@@ -125,9 +126,11 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
 
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
+    moe_config: FusedMoEConfig,
     quant_config: QuantizationConfig | QuantizationArgs,
     may_have_zp: bool,
     may_have_bias: bool,
+    allow_tile_padding: bool,
 ) -> str | None:
     if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
         return "zero points and bias are not supported"
@@ -149,7 +152,24 @@ def _backend_incompatibility_reason(
         ):
             return "group activation ordering is not supported"
 
-    if isinstance(quant_config, MoeWNA16Config) and backend in (
+    # Marlin only supports certain problem/group sizes.
+    allow_marlin = not isinstance(quant_config, MoeWNA16Config)
+
+    if allow_marlin and backend in (
+        WNA16MoEBackend.MARLIN,
+        WNA16MoEBackend.BATCHED_MARLIN,
+    ):
+        if isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs)):
+            group_size = quant_config.group_size
+        else:
+            return "Marlin not supported for this layer"
+
+        if not check_moe_marlin_supports_config(
+            moe_config, group_size, allow_tile_padding
+        ):
+            return "Marlin not supported for this layer"
+
+    if not allow_marlin and backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.EMULATION,
@@ -182,6 +202,7 @@ def select_wna16_moe_backend(
     quant_config: QuantizationConfig | QuantizationArgs,
     may_have_zp: bool,
     may_have_bias: bool,
+    allow_tile_padding: bool = False,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -239,7 +260,12 @@ def select_wna16_moe_backend(
     if runner_backend != "auto":
         requested_backend = map_wna16_backend(runner_backend)
         reason = _backend_incompatibility_reason(
-            requested_backend, quant_config, may_have_zp, may_have_bias
+            requested_backend,
+            config,
+            quant_config,
+            may_have_zp,
+            may_have_bias,
+            allow_tile_padding,
         )
         if reason is not None:
             raise ValueError(_make_log_unsupported(requested_backend, reason))
@@ -252,7 +278,12 @@ def select_wna16_moe_backend(
 
     for backend in AVAILABLE_BACKENDS:
         reason = _backend_incompatibility_reason(
-            backend, quant_config, may_have_zp, may_have_bias
+            backend,
+            config,
+            quant_config,
+            may_have_zp,
+            may_have_bias,
+            allow_tile_padding,
         )
         if reason is not None:
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
