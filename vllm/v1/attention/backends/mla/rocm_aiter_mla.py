@@ -329,9 +329,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
-        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads.
+        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads, and
+        # only runs when the KV cache is FP8 (otherwise the bf16 path is used and
+        # the PS workspace must not be reserved).
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
-            self.num_heads % 16 == 0 or 0 < self.num_heads < 16
+            kv_cache_dtype_str == "fp8"
+            and (self.num_heads % 16 == 0 or 0 < self.num_heads < 16)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -902,10 +905,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
-        # Auto-enabled on gfx950 when AITER ships the kernels.
-        # FP8 MLA prefill (kn_mla_reduce_v1) only supports 16-aligned heads.
+        # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
+        # KV cache is FP8, and supports non-divisor small head counts via pad-to-16.
+        from vllm.utils.torch_utils import is_quantized_kv_cache
+
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
-            self.num_heads % 16 == 0 or 0 < self.num_heads < 16
+            is_quantized_kv_cache(kv_cache_dtype)
+            and (self.num_heads % 16 == 0 or 0 < self.num_heads < 16)
         )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
