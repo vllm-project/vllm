@@ -6,6 +6,7 @@ DeepEP test utilities
 
 import dataclasses
 import os
+import sys
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -15,6 +16,7 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
@@ -72,6 +74,7 @@ def _worker_parallel_launch(
     barrier = torch.tensor([rank], device=device)
     torch.distributed.all_reduce(barrier)
 
+    exit_code = 0
     try:
         worker(
             ProcessGroupInfo(
@@ -88,9 +91,17 @@ def _worker_parallel_launch(
     except Exception as ex:
         print(ex)
         traceback.print_exc()
+        exit_code = 1
         raise
     finally:
         torch.distributed.destroy_process_group()
+        if current_platform.is_rocm():
+            # Bypass a ROCm teardown use-after-free (SIGSEGV in HIP's atexit
+            # handler; fixed by https://github.com/ROCm/rocm-systems/pull/6942).
+            # Flush first since os._exit skips it, to keep a failing traceback.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(exit_code)
 
 
 def parallel_launch(
