@@ -45,6 +45,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8Static,
@@ -571,8 +573,10 @@ class TritonWNA16Experts(TritonExperts):
     ) -> bool:
         SUPPORTED_W = [
             kInt4Static,
+            kInt4StaticAsym,
             kInt8Static,
             kInt4Static32,
+            kInt4Static32Asym,
             # other group sizes?
         ]
         return weight_key in SUPPORTED_W
