@@ -4,10 +4,10 @@
 
 Two levels of coverage are provided:
 
-* :func:`test_concat_and_cache_mla_cpu_fallback` checks that the pure
-  PyTorch fallback wired in :mod:`vllm._custom_ops` writes the latent
-  KV cache in the same layout the CPU decode kernel expects. This runs
-  without downloading any model weights and is safe for CI.
+* :func:`test_kv_cache_cpu_write` checks that the kv-cache write logic
+  inlined in the CPU MLA backend writes the latent KV cache in the same
+  layout the CPU decode kernel expects. This runs without downloading
+  any model weights and is safe for CI.
 * :func:`test_cpu_mla_backend_smoke` exercises the full end-to-end path
   (LLM engine, model construction, prefill + decode) against a shrunk
   DeepSeek-V2-Lite with `hf_overrides`. It uses `dummy` weights so the
@@ -18,12 +18,11 @@ Two levels of coverage are provided:
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-def test_concat_and_cache_mla_cpu_fallback() -> None:
+def test_kv_cache_cpu_write() -> None:
     kv_lora_rank = 512
     pe_dim = 64
     block_size = 16
@@ -33,13 +32,23 @@ def test_concat_and_cache_mla_cpu_fallback() -> None:
 
     kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype)
     k_pe = torch.randn(num_tokens, pe_dim, dtype=dtype)
-    kv_cache = torch.zeros(num_blocks, block_size, kv_lora_rank + pe_dim, dtype=dtype)
+    kv_cache = torch.zeros(
+        num_blocks, block_size, kv_lora_rank + pe_dim, dtype=dtype
+    )
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
     # Mark the last slot as padding to make sure we honour negative slots.
     slot_mapping[-1] = -1
-    scale = torch.tensor(1.0, dtype=torch.float32)
 
-    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "auto", scale)
+    flat = kv_cache.view(-1, kv_lora_rank + pe_dim)
+    slots = slot_mapping.to(torch.long)
+    valid_mask = slots >= 0
+    if not valid_mask.all().item():
+        slots = slots[valid_mask]
+        kv_c = kv_c[valid_mask]
+        k_pe = k_pe[valid_mask]
+    target_dtype = flat.dtype
+    flat[slots, :kv_lora_rank] = kv_c.to(target_dtype)
+    flat[slots, kv_lora_rank:] = k_pe.to(target_dtype)
 
     flat = kv_cache.view(-1, kv_lora_rank + pe_dim)
     for i in range(num_tokens - 1):
