@@ -281,6 +281,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             swiglu_limit = self.gemm1_clamp_limit
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
+        use_wfp4afp8_humming = False
         # Select quantization metadata based on FP8 format/path
         if (
             self.quant_dtype == torch.float8_e4m3fn
@@ -315,6 +316,83 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+        elif self.quant_config.use_wfp4afp8_humming:
+            # SM90 humming (MXFP4 weight x kernel-internal FP8 act). The
+            # per-expert fp32 residuals arrive via g1/g2_alphas; fold them into
+            # per-token, expert-contiguous routed-token scales (validated by
+            # scripts/humming_offline_check.py).
+            assert self.w1_scale is not None and self.w2_scale is not None
+            assert self.g1_alphas is not None and self.g2_alphas is not None
+            assert hidden_states.dtype == torch.bfloat16
+            # Plain SwiGLU, no clamp: this is the activation path validated by
+            # the offline check + M1 correctness (which pass no swiglu_* args).
+            # Must reset the clamp set at the top of apply, else the kernel
+            # switches to the un-validated SwigluBias path.
+            swiglu_alpha = None
+            swiglu_beta = None
+            swiglu_limit = None
+            # 2^6 exponent-bias compensation from humming's FP4->FP8 conversion
+            # (matches HUMMING_EPILOGUE_COMPENSATION in the flashinfer reference
+            # test test_moe_fp8_mxfp4_humming_prescale_hopper_correctness).
+            HUMMING_EPILOGUE_COMPENSATION = 64.0
+            # topk_ids are GLOBAL expert ids; the kernel filters to this rank's
+            # [start_expert, end_expert) and remaps to local. The per-expert
+            # residuals (g1/g2_alphas) are LOCAL (length num_local_experts), so
+            # index them by local id. Non-local tokens get a sentinel local id
+            # and are sorted to the tail; the kernel only reads the leading
+            # num_valid_local rows in local-expert order.
+            num_local = self.num_experts  # == moe_config.num_local_experts
+            start_expert = self.ep_rank * num_local
+            sel = topk_ids.to(torch.long).reshape(-1)
+            local_id = sel - start_expert
+            is_local = (local_id >= 0) & (local_id < num_local)
+            # Clamp OOB ids to 0 for a safe gather; masked out below.
+            gather_id = torch.where(is_local, local_id, torch.zeros_like(local_id))
+            fc1_route = self.g1_alphas[gather_id] * HUMMING_EPILOGUE_COMPENSATION
+            fc2_route = self.g2_alphas[gather_id] * HUMMING_EPILOGUE_COMPENSATION
+
+            # Sort key = local expert id, with non-local tokens pushed to the
+            # tail (sentinel num_local). Stable argsort keeps output size fixed
+            # (= topk_ids.numel()), so it is cudagraph-safe; the leading
+            # num_valid_local entries then match the kernel's permuted rows,
+            # ordered by local expert id. At ep_size=1 this reduces to the
+            # global expert-contiguous order (validated in
+            # scripts/humming_offline_check.py).
+            sort_key = torch.where(
+                is_local, local_id, torch.full_like(local_id, num_local)
+            )
+            # Both GEMMs' per-token residual scales live in the same expert-
+            # permuted token space (kernel reads fc1 via [permuted_row], fc2 via
+            # [token], both in that space), so fc1 and fc2 share one perm.
+            perm = torch.argsort(sort_key, stable=True)
+            fc1_residual_token = fc1_route.reshape(-1)[perm].contiguous()
+            fc2_residual_token = fc2_route.reshape(-1)[perm].contiguous()
+            fc2_act_global = torch.ones((), device=self.device, dtype=torch.float32)
+            # Positional contract with the humming kernel: it indexes these five
+            # slots by position, so the order below is load-bearing and a
+            # reordering fails silently with wrong values rather than raising.
+            #   0 fc1 weight E8M0 exponent offsets (int32-viewed)
+            #   1 fc1 per-token residual, in expert-permuted token order
+            #   2 fc2 activation global scale (1.0; fc2 input is kernel-produced)
+            #   3 fc2 weight E8M0 exponent offsets (int32-viewed)
+            #   4 fc2 per-token residual, same permuted order as slot 1
+            quant_scales = [
+                self.w1_scale.view(torch.int32),
+                fc1_residual_token,
+                fc2_act_global,
+                self.w2_scale.view(torch.int32),
+                fc2_residual_token,
+            ]
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+            fc1_expert_biases = self.w1_bias
+            fc2_expert_biases = self.w2_bias
+            a1q_scale = None
+            use_w4_group_scaling = True
+            use_wfp4afp8_humming = True
+            # The humming kernel asserts float32 routing weights.
+            topk_weights = topk_weights.to(torch.float32)
+
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
@@ -388,6 +466,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            use_wfp4afp8_humming=use_wfp4afp8_humming,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
