@@ -11,7 +11,7 @@ Two comparisons are reported:
   (vLLM does not dispatch to it for these layouts) called directly for
   comparison, as this benchmark has done since it was first added.
 - 8x4 small-M plot: the TRTLLM 8x4 scale layout, CUDA versus CuTe-DSL. Both are
-  production paths; scaled_fp4_quant selects this layout only when the backend
+  production paths; scaled_fp4_quant selects this layout only when gemm_backend
   contains "trtllm" and M <= 32.
 """
 
@@ -65,11 +65,13 @@ PROVIDER_CFGS = {
 }
 
 # Small-M comparison: the TRTLLM 8x4 scale layout only, CUDA vs CuTe-DSL kernel.
-# scaled_fp4_quant selects the 8x4 layout when the backend contains "trtllm" and
+# scaled_fp4_quant selects the 8x4 layout when gemm_backend contains "trtllm" and
 # M <= 32, so this runs on a separate small-M axis (see benchmark_8x4).
 PROVIDER_CFGS_8X4 = {
-    "flashinfer-cuda-8x4": dict(cutedsl=False, enabled=_flashinfer_ok),
-    "flashinfer-cutedsl-8x4": dict(cutedsl=True, enabled=_flashinfer_cutedsl_ok),
+    "flashinfer-cuda-8x4": dict(quant_backend="auto", enabled=_flashinfer_ok),
+    "flashinfer-cutedsl-8x4": dict(
+        quant_backend="flashinfer_cutedsl", enabled=_flashinfer_cutedsl_ok
+    ),
 }
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
@@ -132,7 +134,7 @@ def benchmark(batch_size, provider, N, K):
             a,
             a_global_scale,
             is_sf_swizzled_layout=cfg["swizzle"],
-            flashinfer_cutedsl=True,
+            quant_backend="flashinfer_cutedsl",
         )
     else:
         raise ValueError(f"unknown provider backend: {cfg['backend']}")
@@ -166,13 +168,13 @@ def benchmark_8x4(batch_size, provider, N, K):
     a_global_scale = compute_global_scale(a)
 
     cfg = PROVIDER_CFGS_8X4[provider]
-    # backend="trtllm" with M <= 32 selects the 8x4 scale layout; flashinfer_cutedsl
+    # gemm_backend="trtllm" with M <= 32 selects the 8x4 scale layout; quant_backend
     # picks the CuTe-DSL kernel over the CUDA one.
     fn = lambda: ops.scaled_fp4_quant(
         a,
         a_global_scale,
-        backend="trtllm",
-        flashinfer_cutedsl=cfg["cutedsl"],
+        gemm_backend="trtllm",
+        quant_backend=cfg["quant_backend"],
     )
     return _bench_quant(fn)
 

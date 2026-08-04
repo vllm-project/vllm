@@ -44,7 +44,7 @@ def test_nvfp4_input_quant_backend_routes_only_flashinfer_kernels() -> None:
 
     with set_current_vllm_config(_config("flashinfer_cutedsl")):
         fi_kernel = FlashInferCutlassNvFp4LinearKernel(layer_config)
-        assert fi_kernel.use_flashinfer_cutedsl_input_quant is True
+        assert fi_kernel.input_quant_backend == "flashinfer_cutedsl"
 
         # A non-FlashInfer NVFP4 linear kernel cannot honor the knob and raises.
         with pytest.raises(ValueError, match="does not route activation quant"):
@@ -52,7 +52,7 @@ def test_nvfp4_input_quant_backend_routes_only_flashinfer_kernels() -> None:
 
     with set_current_vllm_config(_config("auto")):
         fi_kernel = FlashInferCutlassNvFp4LinearKernel(layer_config)
-        assert fi_kernel.use_flashinfer_cutedsl_input_quant is False
+        assert fi_kernel.input_quant_backend == "auto"
 
 
 @pytest.mark.skipif(

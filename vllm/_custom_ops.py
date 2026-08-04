@@ -1524,9 +1524,9 @@ def scaled_fp4_quant(
     input: torch.Tensor,
     input_global_scale: torch.Tensor,
     is_sf_swizzled_layout: bool = True,
-    backend: str = "none",
+    gemm_backend: str = "none",
     padded_n: int | None = None,
-    flashinfer_cutedsl: bool = False,
+    quant_backend: Literal["auto", "flashinfer_cutedsl"] = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1542,17 +1542,19 @@ def scaled_fp4_quant(
         input_global_scale: A scalar scaling factor for the entire tensor.
         is_sf_swizzled_layout: Whether to store the scaling factors in the
             swizzled layout (default `True`).
-        backend: Quantization kernel backend to dispatch to. For `"trtllm"`
-            backends the 8x4 scale-factor layout is selected for small
-            batches (m <= 32) instead of the 128x4 layout.
+        gemm_backend: Backend of the GEMM that consumes the quantized output.
+            Only affects the scale-factor layout: `"trtllm"` backends take the
+            8x4 layout for small batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
             output and scale tensors are allocated for ``padded_n``
-        flashinfer_cutedsl: Internal; normally set by the NVFP4 linear kernels,
-            which validate availability. When ``True`` quantize via FlashInfer's
-            CuTe-DSL ``nvfp4_quantize`` (128x4, linear, or 8x4 layout) instead of
-            the built-in kernel. There is no availability check here (to stay
-            torch.compile-safe), so direct callers must first ensure
-            has_flashinfer_cutedsl_nvfp4_quant(). ``False`` is the default.
+        quant_backend: Which kernel performs the quantization, mirroring
+            ``KernelConfig.nvfp4_input_quant_backend``. ``"auto"`` (the default)
+            uses the built-in kernel; ``"flashinfer_cutedsl"`` uses FlashInfer's
+            CuTe-DSL ``nvfp4_quantize`` (128x4, linear, or 8x4 layout). Normally
+            set by the NVFP4 linear kernels, which validate availability. There
+            is no availability check here (to stay torch.compile-safe), so
+            direct callers must first ensure
+            has_flashinfer_cutedsl_nvfp4_quant().
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1560,6 +1562,8 @@ def scaled_fp4_quant(
             in the sizzled layout.
     """
     assert not current_platform.is_rocm()
+    if quant_backend not in ("auto", "flashinfer_cutedsl"):
+        raise ValueError(f"Unknown quant_backend: {quant_backend}.")
     assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
     other_dims = 1 if input.ndim == 1 else -1
     input = input.reshape(other_dims, input.shape[-1])
@@ -1576,14 +1580,14 @@ def scaled_fp4_quant(
             f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
         )
 
-    use_8x4_sf_layout = "trtllm" in backend and m <= 32
+    use_8x4_sf_layout = "trtllm" in gemm_backend and m <= 32
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
         # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
     if use_8x4_sf_layout:
         # 8x4 layout (TRTLLM small-M). CuTe-DSL supports it, so honor
-        # flashinfer_cutedsl instead of always using the CUDA kernel.
-        if flashinfer_cutedsl:
+        # quant_backend instead of always using the CUDA kernel.
+        if quant_backend == "flashinfer_cutedsl":
             output, output_scale = torch.ops.vllm.flashinfer_cutedsl_nvfp4_quantize(
                 input, input_global_scale, "8x4"
             )
@@ -1591,7 +1595,7 @@ def scaled_fp4_quant(
             output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
                 input, input_global_scale
             )
-    elif flashinfer_cutedsl:
+    elif quant_backend == "flashinfer_cutedsl":
         # CuTe-DSL 128x4 or linear quant; output uses the same packed layout as
         # the vLLM C++ kernel (drop-in replaceable) and is numerically equivalent
         # aside from occasional adjacent-FP4 rounding from CuTe-DSL's approximate

@@ -3,11 +3,15 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.utils.flashinfer import has_flashinfer_cutedsl_nvfp4_quant
+
+if TYPE_CHECKING:
+    from vllm.config.kernel import NvFp4InputQuantBackend
 
 
 @dataclass
@@ -37,26 +41,25 @@ class NvFp4LinearKernel(ABC):
 
     # Resolved per instance in __init__; the class-level default keeps
     # input_quant_key() safe on instances probed without running __init__.
-    use_flashinfer_cutedsl_input_quant: bool = False
+    input_quant_backend: "NvFp4InputQuantBackend" = "auto"
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
         self.config = config
-        self.use_flashinfer_cutedsl_input_quant = (
-            self._resolve_use_flashinfer_cutedsl_input_quant()
-        )
+        self.input_quant_backend = self._resolve_input_quant_backend()
 
-    def _resolve_use_flashinfer_cutedsl_input_quant(self) -> bool:
-        """Resolve once at setup whether this kernel's activation quant uses
-        FlashInfer CuTe-DSL, so apply_weights only reads a plain attribute."""
+    def _resolve_input_quant_backend(self) -> "NvFp4InputQuantBackend":
+        """Resolve once at setup which backend performs this kernel's activation
+        quant, so apply_weights only reads a plain attribute."""
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is None:
-            return False
-        if config.kernel_config.nvfp4_input_quant_backend != "flashinfer_cutedsl":
-            return False
+            return "auto"
+        backend = config.kernel_config.nvfp4_input_quant_backend
+        if backend != "flashinfer_cutedsl":
+            return backend
         # An explicit backend request that cannot be honored is an error, matching
         # how linear_backend rejects unsatisfiable selections.
         if not self.uses_flashinfer_input_quant:
@@ -72,7 +75,7 @@ class NvFp4LinearKernel(ABC):
                 "FlashInfer build with CuTe-DSL available "
                 "(flashinfer.cute_dsl.is_cute_dsl_available())."
             )
-        return True
+        return backend
 
     def input_quant_key(self) -> QuantKey | None:
         """Return the input quantization key supported by this kernel. If the kernel

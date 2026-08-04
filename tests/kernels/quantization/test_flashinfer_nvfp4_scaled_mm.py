@@ -114,7 +114,7 @@ def test_flashinfer_nvfp4_gemm(
     # from checkpoints are in linear scales.
     # cutlass and b12x use swizzled scales directly; trtllm needs them unswizzled.
     a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
-        a_dtype, a_global_scale, is_sf_swizzled_layout=True, backend=backend
+        a_dtype, a_global_scale, is_sf_swizzled_layout=True, gemm_backend=backend
     )
     is_sf_128x4_layout = not (backend == "trtllm" and m <= 32)
 

@@ -77,8 +77,8 @@ class FlashInferCuteDslNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-cutedsl",
-            flashinfer_cutedsl=self.use_flashinfer_cutedsl_input_quant,
+            gemm_backend="flashinfer-cutedsl",
+            quant_backend=self.input_quant_backend,
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
@@ -110,7 +110,7 @@ class FlashInferCutlassNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
         activation quant), except under FlashInfer CuTe-DSL: producers quantize
         with the C++ kernel, so a pre-quantized input would bypass the selected
         backend. Returning None keeps the quant in apply_weights."""
-        if self.use_flashinfer_cutedsl_input_quant:
+        if self.input_quant_backend != "auto":
             return None
         return kNvfp4Dynamic
 
@@ -167,9 +167,9 @@ class FlashInferCutlassNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
                 x,
                 layer.input_global_scale_inv,
                 is_sf_swizzled_layout=True,
-                backend="flashinfer-cutlass",
+                gemm_backend="flashinfer-cutlass",
                 padded_n=x.shape[-1] + weights_padding_bytes * 2,
-                flashinfer_cutedsl=self.use_flashinfer_cutedsl_input_quant,
+                quant_backend=self.input_quant_backend,
             )
 
         out = flashinfer_scaled_fp4_mm(
@@ -236,8 +236,8 @@ class FlashInferTrtllmNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-trtllm",
-            flashinfer_cutedsl=self.use_flashinfer_cutedsl_input_quant,
+            gemm_backend="flashinfer-trtllm",
+            quant_backend=self.input_quant_backend,
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -298,9 +298,9 @@ class FlashInferCudnnNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="flashinfer-cudnn",
+            gemm_backend="flashinfer-cudnn",
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
-            flashinfer_cutedsl=self.use_flashinfer_cutedsl_input_quant,
+            quant_backend=self.input_quant_backend,
         )
 
         out = flashinfer_scaled_fp4_mm(
@@ -363,8 +363,8 @@ class FlashInferB12xNvFp4LinearKernel(_FlashInferNvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="b12x",
-            flashinfer_cutedsl=self.use_flashinfer_cutedsl_input_quant,
+            gemm_backend="b12x",
+            quant_backend=self.input_quant_backend,
         )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(

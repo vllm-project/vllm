@@ -57,7 +57,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="cutlass",
+            gemm_backend="cutlass",
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 

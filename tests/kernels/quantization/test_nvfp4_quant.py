@@ -359,7 +359,7 @@ def test_flashinfer_nvfp4_quant_128x4_matches_vllm(
     )
     # FlashInfer CuTe-DSL 128x4.
     fi_out, fi_scale = ops.scaled_fp4_quant(
-        x, global_scale, is_sf_swizzled_layout=True, flashinfer_cutedsl=True
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
     )
 
     assert fi_out.shape == ref_out.shape
@@ -412,10 +412,10 @@ def test_flashinfer_nvfp4_quant_128x4_padded_output(
         global_scale,
         is_sf_swizzled_layout=True,
         padded_n=padded_n,
-        flashinfer_cutedsl=True,
+        quant_backend="flashinfer_cutedsl",
     )
     unpadded_out, unpadded_scale = ops.scaled_fp4_quant(
-        x, global_scale, is_sf_swizzled_layout=True, flashinfer_cutedsl=True
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
     )
 
     assert padded_out.shape == (m, padded_n // 2)
@@ -458,7 +458,7 @@ def test_flashinfer_nvfp4_quant_128x4_zeros_scale_padding(
     )
 
     _, scale = ops.scaled_fp4_quant(
-        x, global_scale, is_sf_swizzled_layout=True, flashinfer_cutedsl=True
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
     )
 
     # Un-swizzle the full padded buffer; the padded rows [m:padded_m) must be zero.
@@ -495,7 +495,7 @@ def test_flashinfer_nvfp4_quant_linear_matches_vllm(
     )
     # FlashInfer CuTe-DSL linear.
     fi_out, fi_scale = ops.scaled_fp4_quant(
-        x, global_scale, is_sf_swizzled_layout=False, flashinfer_cutedsl=True
+        x, global_scale, is_sf_swizzled_layout=False, quant_backend="flashinfer_cutedsl"
     )
 
     assert fi_out.shape == ref_out.shape
@@ -526,7 +526,8 @@ def test_flashinfer_nvfp4_quant_linear_matches_vllm(
 def test_nvfp4_quant_trtllm_8x4_layout_selection() -> None:
     """For the TRTLLM backend the SF layout is chosen by M: 8x4 at m <= 32 and
     128x4 above (distinguished by the scale row count). This holds with
-    flashinfer_cutedsl, which routes to the cute-dsl 8x4 / 128x4 kernels."""
+    quant_backend="flashinfer_cutedsl", which routes to the cute-dsl 8x4 / 128x4
+    kernels."""
     set_random_seed(42)
     torch.set_default_device("cuda:0")
     n = 64
@@ -536,7 +537,7 @@ def test_nvfp4_quant_trtllm_8x4_layout_selection() -> None:
     x = torch.randn((m_small, n), dtype=torch.bfloat16)
     gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
     _, scale = ops.scaled_fp4_quant(
-        x, gs, backend="flashinfer-trtllm", flashinfer_cutedsl=True
+        x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
     )
     assert scale.shape[0] == round_up(m_small, 8)
 
@@ -546,7 +547,7 @@ def test_nvfp4_quant_trtllm_8x4_layout_selection() -> None:
     x = torch.randn((m_large, n), dtype=torch.bfloat16)
     gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
     _, scale = ops.scaled_fp4_quant(
-        x, gs, backend="flashinfer-trtllm", flashinfer_cutedsl=True
+        x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
     )
     assert scale.shape[0] == round_up(m_large, 128)
 
@@ -570,10 +571,10 @@ def test_flashinfer_cutedsl_nvfp4_quant_8x4_matches_cuda(dtype: torch.dtype) -> 
         x = torch.randn((m, n), dtype=dtype)
         gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
         cuda_out, cuda_scale = ops.scaled_fp4_quant(
-            x, gs, backend="flashinfer-trtllm", flashinfer_cutedsl=False
+            x, gs, gemm_backend="flashinfer-trtllm", quant_backend="auto"
         )
         fi_out, fi_scale = ops.scaled_fp4_quant(
-            x, gs, backend="flashinfer-trtllm", flashinfer_cutedsl=True
+            x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
         )
 
         # Both use the 8x4 layout (scale rows rounded up to 8).
