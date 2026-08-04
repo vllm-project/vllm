@@ -7,7 +7,7 @@ import pytest
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.ec_transfer import ECRole, ECTransferConfig
 from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
@@ -196,7 +196,7 @@ def test_mm_processor_device_type_normalizes(device: object, expected: str | Non
     assert config.get_mm_processor_device_type() == expected
 
 
-def _validate_mm_processor_device(*, device: str, ec_role: str | None) -> None:
+def _validate_mm_processor_device(*, device: str, ec_role: ECRole | None) -> None:
     ec_config = (
         None
         if ec_role is None
@@ -210,7 +210,7 @@ def _validate_mm_processor_device(*, device: str, ec_role: str | None) -> None:
 
 
 @pytest.mark.parametrize("ec_role", [None, "ec_producer"])
-def test_bad_mm_processor_device_rejected(ec_role: str | None):
+def test_bad_mm_processor_device_rejected(ec_role: ECRole | None):
     """A bad device must fail during startup, not mid-request.
 
     Rejected for every role, and on a CPU-only platform too, so a typo can never
@@ -225,7 +225,7 @@ def test_bad_mm_processor_device_rejected(ec_role: str | None):
 
 @pytest.mark.parametrize("ec_role", [None, "ec_consumer", "ec_both"])
 def test_accelerator_mm_processor_rejected_outside_encoder_instance(
-    ec_role: str | None,
+    ec_role: ECRole | None,
 ):
     """Only an encode-only EPD instance has the device to itself.
 
