@@ -10,6 +10,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
@@ -18,10 +19,17 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -44,6 +52,118 @@ def parser(mock_tokenizer):
     )
 
 
+SCAN_TOOL_NAME = "scan_for_sqlInjection"
+INVALID_SCAN_TOOL_NAME = "scan_for_sqlInjectionscan_for_sqlInjection"
+
+
+def _scan_chat_tool() -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": SCAN_TOOL_NAME,
+            "description": "Scan SQL injection risk",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+            },
+        },
+    )
+
+
+def _scan_responses_tool() -> FunctionTool:
+    return FunctionTool(
+        type="function",
+        name=SCAN_TOOL_NAME,
+        description="Scan SQL injection risk",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+        },
+    )
+
+
+def _scan_chat_request() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="qwen3-test-model",
+        messages=[],
+        tools=[_scan_chat_tool()],
+    )
+
+
+def _scan_responses_request() -> ResponsesRequest:
+    return ResponsesRequest(
+        model="qwen3-test-model",
+        input="scan this query",
+        tools=[_scan_responses_tool()],
+    )
+
+
+def _scan_tool_output(tool_name: str) -> str:
+    return (
+        "<tool_call>\n"
+        f"<function={tool_name}>\n"
+        "<parameter=query>\n"
+        "SELECT * FROM users\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+
+def _scan_tool_chunks(tool_name: str) -> list[str]:
+    return [
+        "<tool_call>\n",
+        f"<function={tool_name}>\n",
+        "<parameter=query>\n",
+        "SELECT * FROM users\n",
+        "</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+
+
+def _qwen3_parser_for_request(
+    mock_tokenizer,
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> Qwen3Parser:
+    return Qwen3Parser(
+        mock_tokenizer,
+        tools=request.tools,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+
+def _delta_token_ids_for_chunk(parser: Qwen3Parser, chunk: str) -> list[int]:
+    cfg = parser.parser_engine_config
+    return [
+        token_id
+        for text in (cfg.token_id_terminals or {}).values()
+        if (token_id := parser.vocab.get(text)) is not None and text in chunk
+    ]
+
+
+def _stream_parse_delta(
+    parser: Qwen3Parser,
+    request: ChatCompletionRequest | ResponsesRequest,
+    chunks: list[str],
+) -> list[DeltaMessage]:
+    results: list[DeltaMessage] = []
+    for i, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            chunk,
+            _delta_token_ids_for_chunk(parser, chunk),
+            request,
+            finished=i == len(chunks) - 1,
+        )
+        if delta:
+            results.append(delta)
+    return results
+
+
+def _collect_tool_call_deltas(results: list[DeltaMessage]):
+    return [tc for delta in results for tc in delta.tool_calls or []]
+
+
 class TestNonStreaming:
     def test_no_tool_calls(self, parser, mock_request):
         result = parser.extract_tool_calls(
@@ -53,6 +173,23 @@ class TestNonStreaming:
         assert result.tools_called is False
         assert result.tool_calls == []
         assert result.content == ("This is a regular response without any tool calls.")
+
+    @pytest.mark.parametrize(
+        "request_factory",
+        [_scan_chat_request, _scan_responses_request],
+        ids=["chat_completion", "responses"],
+    )
+    def test_invalid_tool_name_is_filtered(self, mock_tokenizer, request_factory):
+        request = request_factory()
+        parser = _qwen3_parser_for_request(mock_tokenizer, request)
+
+        _, content, tool_calls = parser.parse(
+            _scan_tool_output(INVALID_SCAN_TOOL_NAME),
+            request,
+        )
+
+        assert content is None
+        assert tool_calls is None
 
     def test_single_tool_call(self, parser, mock_request):
         text = (
@@ -295,6 +432,58 @@ class TestStreaming:
         assert args_text
         parsed = json.loads(args_text)
         assert parsed == {"city": "Tokyo"}
+
+    @pytest.mark.parametrize(
+        "request_factory",
+        [_scan_chat_request, _scan_responses_request],
+        ids=["chat_completion", "responses"],
+    )
+    def test_invalid_tool_name_is_filtered(self, mock_tokenizer, request_factory):
+        request = request_factory()
+        parser = _qwen3_parser_for_request(mock_tokenizer, request)
+
+        results = _stream_parse_delta(
+            parser,
+            request,
+            _scan_tool_chunks(INVALID_SCAN_TOOL_NAME),
+        )
+
+        assert _collect_tool_call_deltas(results) == []
+
+    def test_invalid_name_is_filtered_and_valid_call_keeps_raw_index(
+        self,
+        mock_tokenizer,
+    ):
+        request = _scan_chat_request()
+        parser = _qwen3_parser_for_request(mock_tokenizer, request)
+        chunks = (
+            _scan_tool_chunks(INVALID_SCAN_TOOL_NAME)
+            + ["\n"]
+            + _scan_tool_chunks(SCAN_TOOL_NAME)
+        )
+
+        results = _stream_parse_delta(parser, request, chunks)
+        tool_call_deltas = _collect_tool_call_deltas(results)
+
+        assert tool_call_deltas
+        assert {tool_call.index for tool_call in tool_call_deltas} == {1}
+
+        name = next(
+            (
+                tool_call.function.name
+                for tool_call in tool_call_deltas
+                if tool_call.function and tool_call.function.name
+            ),
+            None,
+        )
+        arguments = "".join(
+            tool_call.function.arguments or ""
+            for tool_call in tool_call_deltas
+            if tool_call.function
+        )
+
+        assert name == SCAN_TOOL_NAME
+        assert json.loads(arguments) == {"query": "SELECT * FROM users"}
 
     def test_streaming_multi_param(self, parser, mock_request):
         chunks = [
