@@ -11,6 +11,7 @@ from torch.nn import Module
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import (
+        FusedMoEParallelConfig,
         FusedMoEQuantConfig,
         RoutedExperts,
     )
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -151,6 +153,23 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             config=self.moe, activation_key=self.activation_quant_key
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: "FusedMoEParallelConfig",
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        return mxfp4_round_up_hidden_size_and_intermediate_size(
+            self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+        )
+
     def create_weights(
         self,
         layer: Module,
@@ -266,6 +285,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
+
+        self._zero_padding(layer)
 
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             layer._already_called_process_weights_after_loading = True

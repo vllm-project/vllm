@@ -108,12 +108,8 @@ def test_online_quantization(
 
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
-    if quant_scheme == "mxfp4" and not (
-        on_gfx950() or on_gfx942()
-    ):
-        pytest.skip(
-            "mxfp4 online quantization is only tested on AMD gfx942, gfx950."
-        )
+    if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
+        pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
 
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
