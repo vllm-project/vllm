@@ -18,6 +18,7 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
@@ -28,6 +29,7 @@ elif current_platform.is_xpu():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     # On ROCm we use AITER's Triton flash-attention; the upstream flash-attn
@@ -36,6 +38,7 @@ elif current_platform.is_rocm():
     # regardless of whether AITER is present.
     from vllm.platforms.rocm import on_gfx1250
 
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     try:
         if on_gfx1250():
             from aiter.ops.triton.mha import (  # type: ignore[no-redef]
