@@ -101,7 +101,10 @@ struct l2norm_kernel {
     using bVec = at::vec::Vectorized<scalar_t>;
     using fVec = at::vec::Vectorized<float>;
     constexpr int bVecSize = bVec::size();
-    constexpr float scale = 1.f / std::sqrt(static_cast<float>(D));
+    // NOTE: std::sqrt is not constexpr per the C++ standard; GCC accepts it as a
+    // builtin extension but Clang (e.g. AppleClang) rejects it. Use const --
+    // the compiler still folds this to a compile-time constant.
+    const float scale = 1.f / std::sqrt(static_cast<float>(D));
 
     fVec sum_fvec0(0.f), sum_fvec1(0.f);
     int d = 0;
@@ -2313,7 +2316,7 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
   int64_t v_strideB = v.stride(1);
   int64_t v_strideS = v.stride(0);
   int64_t v_strideH = v.stride(2);
-  // IMPORTANT: To make the kernal compatible with vLLM KV cache layout 
+  // IMPORTANT: To make the kernal compatible with vLLM KV cache layout
   int64_t state_slot_stride = initial_state_source.stride(0);
   at::Tensor core_attn_out = at::empty({batch_size, seq_len, v_num_heads, v_head_dim}, q.options());
   at::Tensor qk_scale_buf = at::empty({2 * batch_size, seq_len, num_heads}, at::kFloat);
