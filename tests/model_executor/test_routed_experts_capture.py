@@ -4,147 +4,45 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import numpy as np
 import pytest
 import torch
 
+from vllm.config import VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
-    KVConnectorSidecarBlockMap,
-    KVConnectorSidecarConfig,
-    KVConnectorSidecarTransferPlan,
-)
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
-    RoutedExpertsManager,
-    RoutedExpertsTensors,
-    RoutedExpertsWriteTask,
-    require_full_attn_group_id,
+    bind_routed_experts_capturer,
+    get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
 
 pytestmark = pytest.mark.cpu_test
 
-_CAPTURER_MODULE = (
-    "vllm.model_executor.layers.fused_moe.routed_experts_capture.capturer"
-)
-
-
-def test_multiple_full_attention_groups_use_hashable_warning_args():
-    kv_cache_spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["layer.0"], kv_cache_spec),
-            KVCacheGroupSpec(["layer.1"], kv_cache_spec),
-        ],
-    )
-
-    assert require_full_attn_group_id(kv_cache_config) == 0
-
-
-def test_routed_experts_write_task_publishes_copied_tensors():
-    routing_data = torch.tensor([[[1, 2]], [[3, 4]]], dtype=torch.int32)
-    slot_mapping = torch.tensor([5, 9], dtype=torch.int64)
-    writer = Mock()
-    output = SimpleNamespace(routed_experts_slots=None)
-    write_task = RoutedExpertsWriteTask(
-        routed_experts_tensors=RoutedExpertsTensors(routing_data, slot_mapping),
-        writer=writer,
-    )
-
-    write_task.start_copy()
-    write_task.finalize(output)
-
-    stored_routing, stored_slots = writer.store_batch.call_args.args
-    assert stored_routing.tolist() == routing_data.tolist()
-    assert stored_slots.tolist() == slot_mapping.tolist()
-    assert output.routed_experts_slots.tolist() == slot_mapping.tolist()
-
-
-def test_routed_experts_manager_applies_public_sidecar_transfers():
-    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
-    manager.routed_experts_by_offload_block = np.zeros(
-        (2, 2, 2, 1, 1),
-        dtype=np.uint8,
-    )
-    manager._blocks_view = np.arange(6, dtype=np.uint8).reshape(3, 2, 1, 1)
-    stores = KVConnectorSidecarBlockMap(
-        gpu_block_ids=np.array([0, 1]),
-        connector_block_ids=np.array([1, 1]),
-        connector_block_offsets=np.array([0, 1]),
-    )
-
-    manager.apply_offload_transfers(KVConnectorSidecarTransferPlan(store=stores))
-
-    np.testing.assert_array_equal(
-        manager.routed_experts_by_offload_block[1, 0],
-        np.array([0, 1], dtype=np.uint8).reshape(2, 1, 1),
-    )
-    np.testing.assert_array_equal(
-        manager.routed_experts_by_offload_block[1, 1],
-        np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),
-    )
-
-    manager._blocks_view[2].fill(0)
-    loads = KVConnectorSidecarBlockMap(
-        gpu_block_ids=np.array([2]),
-        connector_block_ids=np.array([1]),
-        connector_block_offsets=np.array([1]),
-    )
-    manager.apply_offload_transfers(KVConnectorSidecarTransferPlan(load=loads))
-    np.testing.assert_array_equal(
-        manager._blocks_view[2],
-        np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),
-    )
-
-
-@pytest.mark.parametrize(
-    "sidecar_config",
-    [
-        KVConnectorSidecarConfig(0, 1),
-        KVConnectorSidecarConfig(1, 0),
-    ],
-)
-def test_routed_experts_manager_rejects_invalid_sidecar_layout(
-    sidecar_config: KVConnectorSidecarConfig,
-):
-    with pytest.raises(ValueError, match="sidecar block counts must be positive"):
-        RoutedExpertsManager(Mock(), Mock(), sidecar_config)
+_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
 
 
 def _capturer_with_buffer(
     *,
     max_tokens: int = 8,
     num_layers: int = 4,
-    moe_top_k: int = 2,
+    num_experts_per_tok: int = 2,
     dp_rank: int = 0,
     tp_size: int = 1,
 ) -> RoutedExpertsCapturer:
     # Bypass __init__ so the test can use a CPU buffer and skip the
     # VllmConfig dependency. The CUDA device-tensor allocation in the
     # real constructor is not what we are exercising here.
-    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer.dp_rank = dp_rank
-    capturer.tp_size = tp_size
-    capturer.device_buffer = torch.full(
-        (max_tokens, num_layers, moe_top_k),
+    c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    c.dp_rank = dp_rank
+    c.tp_size = tp_size
+    c.device_buffer = torch.full(
+        (max_tokens, num_layers, num_experts_per_tok),
         -1,
         dtype=torch.int32,
     )
-    return capturer
+    return c
 
 
 class DummyRouter(BaseRouter):
@@ -182,8 +80,8 @@ def test_base_router_capture_pre_eplb_mapping():
     router = _make_router()
     captured = []
 
-    def capture_fn(expert_ids: torch.Tensor) -> None:
-        captured.append(expert_ids.clone())
+    def capture_fn(ids):
+        captured.append(ids.clone())
 
     router.set_capture_fn(capture_fn)
     topk_weights, topk_ids = router.select_experts(
@@ -208,8 +106,8 @@ def test_base_router_capture_with_eplb_enabled():
 
     captured = []
 
-    def capture_fn(expert_ids: torch.Tensor) -> None:
-        captured.append(expert_ids.clone())
+    def capture_fn(ids):
+        captured.append(ids.clone())
 
     router.set_capture_fn(capture_fn)
     _, topk_ids = router.select_experts(
@@ -224,95 +122,12 @@ def test_base_router_capture_with_eplb_enabled():
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
 
 
-def test_gpu_model_runner_binds_router_capture(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner
-
-    class _DummyRouter:
-        _routing_replay_out: torch.Tensor | None = None
-
-    class DummyFusedMoE:
-        def __init__(self):
-            self.layer_id = 7
-            self.router = _make_router()
-            self.routed_experts = _make_modular_routed_experts()
-            self._quant_method = self.routed_experts.quant_method
-
-    class DummyCapturer:
-        def __init__(self):
-            self.calls = []
-
-        def capture(self, layer_id, topk_ids):
-            self.calls.append((layer_id, topk_ids))
-
-    dummy_module = DummyFusedMoE()
-
-    # Patch the runtime import inside _bind_routed_experts_capturer.
-    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
-
-    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
-
-    dummy_self = types.SimpleNamespace(
-        model=types.SimpleNamespace(modules=lambda: [dummy_module])
-    )
-
-    capturer = DummyCapturer()
-    gpu_model_runner.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
-
-    assert dummy_module.router.capture_fn is not None
-    dummy_module.router.capture_fn(torch.tensor([[5, 6]]))
-
-    assert len(capturer.calls) == 1
-    layer_id, topk_ids = capturer.calls[0]
-    assert layer_id == 7
-    assert torch.equal(topk_ids, torch.tensor([[5, 6]]))
-
-
-def test_gpu_model_runner_binding_stage(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner
-
-    class DummyFusedMoE:
-        def __init__(self):
-            self.layer_id = 11
-            self.router = _make_router()
-            self.routed_experts = _make_modular_routed_experts()
-            self._quant_method = self.routed_experts.quant_method
-
-    class DummyCapturer:
-        def __init__(self):
-            self.calls = []
-
-        def capture(self, layer_id, topk_ids):
-            self.calls.append((layer_id, topk_ids))
-
-    dummy_module = DummyFusedMoE()
-
-    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
-
-    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
-
-    dummy_self = types.SimpleNamespace(
-        model=types.SimpleNamespace(modules=lambda: [dummy_module])
-    )
-
-    assert dummy_module.router.capture_fn is None
-
-    capturer = DummyCapturer()
-    gpu_model_runner.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
-
-    assert callable(dummy_module.router.capture_fn)
-    dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
-    assert len(capturer.calls) == 1
-
-
-def test_gpu_model_runner_does_not_bind_draft_router_capture(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner as gmr
-
+def test_public_binding_only_visits_target_model(monkeypatch):
     class DummyFusedMoE:
         def __init__(self, layer_id):
             self.layer_id = layer_id
             self.router = _make_router()
-            self.routed_experts = _make_modular_routed_experts()
-            self._quant_method = self.routed_experts.quant_method
+            self._quant_method = _make_modular_routed_experts().quant_method
 
     target_module = DummyFusedMoE(layer_id=7)
     draft_module = DummyFusedMoE(layer_id=0)
@@ -320,27 +135,21 @@ def test_gpu_model_runner_does_not_bind_draft_router_capture(monkeypatch):
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
+    calls = []
+    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
 
-    dummy_self = types.SimpleNamespace(
-        model=types.SimpleNamespace(modules=lambda: [target_module]),
-        compilation_config=types.SimpleNamespace(
-            static_forward_context={
-                "model.layers.7.mlp.experts": target_module,
-                "mtp.layers.0.mlp.experts": draft_module,
-            }
-        ),
+    bind_routed_experts_capturer(
+        types.SimpleNamespace(modules=lambda: [target_module]), capturer
     )
-
-    capturer = types.SimpleNamespace(capture=lambda *_: None)
-    gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, capturer)
 
     assert target_module.router.capture_fn is not None
     assert draft_module.router.capture_fn is None
+    topk_ids = torch.tensor([[5, 6]])
+    target_module.router.capture_fn(topk_ids)
+    assert calls == [(7, topk_ids)]
 
 
-def test_gpu_model_runner_rejects_monolithic_without_replay_support(monkeypatch):
-    from vllm.v1.worker import gpu_model_runner as gmr
-
+def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
     class DummyFusedMoE:
         def __init__(self):
             self.layer_id = 3
@@ -373,78 +182,173 @@ def test_gpu_model_runner_rejects_monolithic_without_replay_support(monkeypatch)
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
 
-    dummy_self = types.SimpleNamespace(
-        model=types.SimpleNamespace(modules=lambda: [dummy_module])
-    )
-
     with pytest.raises(ValueError, match="monolithic MoE kernel"):
-        gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, DummyCapturer())
+        bind_routed_experts_capturer(
+            types.SimpleNamespace(modules=lambda: [dummy_module]), DummyCapturer()
+        )
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
-    topk_ids = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
-    forward_context = SimpleNamespace(dp_metadata=None)
-    with patch(
-        f"{_CAPTURER_MODULE}.get_forward_context",
-        return_value=forward_context,
-    ):
-        capturer.capture(layer_id=0, topk_ids=topk_ids)
-    assert torch.equal(capturer.device_buffer[:3, 0, :], topk_ids)
+    topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    ctx = SimpleNamespace(dp_metadata=None)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
     assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
-    """Slice this rank's rows from routing concatenated across DP ranks."""
+    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    forward_context = SimpleNamespace(
+    ctx = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
     # Concatenated order: rank0 rows then rank1 rows.
-    topk_ids = torch.tensor(
+    topk = torch.tensor(
         [[0, 1], [2, 3], [10, 11], [12, 13], [14, 15]], dtype=torch.int32
     )
-    with patch(
-        f"{_CAPTURER_MODULE}.get_forward_context",
-        return_value=forward_context,
-    ):
-        capturer.capture(layer_id=0, topk_ids=topk_ids)
-    expected = topk_ids[2:5]
-    assert torch.equal(capturer.device_buffer[:3, 0, :], expected)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    want = topk[2:5]
+    assert torch.equal(capturer.device_buffer[:3, 0, :], want)
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
-    """Capture routing that is already local to this DP rank."""
+    """n == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    forward_context = SimpleNamespace(
+    ctx = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
-    topk_ids = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
-    with patch(
-        f"{_CAPTURER_MODULE}.get_forward_context",
-        return_value=forward_context,
-    ):
-        capturer.capture(layer_id=0, topk_ids=topk_ids)
-    assert torch.equal(capturer.device_buffer[:3, 0, :], topk_ids)
+    topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
-    forward_context = SimpleNamespace(
+    ctx = SimpleNamespace(
         dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
     )
-    topk_ids = torch.tensor([[1, 2]], dtype=torch.int32)
+    # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
+    topk = torch.tensor([[1, 2]], dtype=torch.int32)
     with (
-        patch(
-            f"{_CAPTURER_MODULE}.get_forward_context",
-            return_value=forward_context,
-        ),
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
-        capturer.capture(layer_id=0, topk_ids=topk_ids)
+        capturer.capture(layer_id=0, topk_ids=topk)
     assert capturer.device_buffer[0, 0, 0].item() == -1
+
+
+def test_routed_experts_attention_group_is_shared_and_fail_closed(monkeypatch):
+    class FullAttentionSpec:
+        pass
+
+    monkeypatch.setattr(f"{_REC_MODULE}.FullAttentionSpec", FullAttentionSpec)
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=object()),
+            SimpleNamespace(kv_cache_spec=FullAttentionSpec()),
+        ]
+    )
+    assert get_routed_experts_attn_gid(config) == 1
+
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_mrv2_async_output_returns_existing_routed_experts_field():
+    from vllm.v1.outputs import ModelRunnerOutput, RoutedExpertsTensors
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    routed_experts = RoutedExpertsTensors(
+        routing_data=torch.arange(6, dtype=torch.int32, device="cuda").reshape(3, 1, 2),
+        slot_mapping=torch.tensor([11, 12, 13], device="cuda"),
+    )
+    num_sampled = torch.tensor([1], dtype=torch.int32, device="cuda")
+    sampler_output = SamplerOutput(
+        sampled_token_ids=torch.tensor([[1]], device="cuda"),
+        logprobs_tensors=None,
+        num_nans=None,
+        num_sampled=num_sampled,
+        num_rejected=torch.tensor([0], dtype=torch.int32, device="cuda"),
+    )
+    output = AsyncOutput(
+        model_runner_output=ModelRunnerOutput(req_ids=["req"], req_id_to_index={}),
+        sampler_output=sampler_output,
+        num_sampled_tokens=num_sampled,
+        main_stream=torch.cuda.current_stream(),
+        copy_stream=torch.cuda.Stream(),
+        routed_experts=routed_experts,
+    ).get_output()
+
+    assert output.routed_experts is not None
+    assert output.routed_experts.routing_data[:, 0, 0].tolist() == [0, 2, 4]
+    assert output.routed_experts.slot_mapping.tolist() == [11, 12, 13]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
+    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+    import vllm.v1.worker.gpu.model_runner as model_runner
+
+    capturer = Mock()
+    constructor = Mock(return_value=capturer)
+    bind = Mock()
+    monkeypatch.setattr(model_runner, "RoutedExpertsCapturer", constructor)
+    monkeypatch.setattr(model_runner, "bind_routed_experts_capturer", bind)
+
+    runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
+    runner.max_num_tokens = 32
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=rank))
+    runner.kv_cache_config = SimpleNamespace()
+    runner.model = Mock()
+
+    runner.init_routed_experts_capturer()
+
+    constructor.assert_called_once_with(
+        max_num_batched_tokens=32,
+        vllm_config=runner.vllm_config,
+        kv_cache_config=runner.kv_cache_config,
+    )
+    bind.assert_called_once_with(runner.model, capturer)
+    assert runner.routed_experts_capturer is capturer
+
+
+def test_v2_model_runner_accepts_routed_experts(monkeypatch):
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda **_: ())
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            enable_return_routed_experts=True,
+            use_mla=False,
+            logits_processors=None,
+            enable_prompt_embeds=False,
+        ),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            tensor_parallel_size=1,
+            distributed_executor_backend=None,
+            pipeline_parallel_size=1,
+            enable_dbo=False,
+            enable_elastic_ep=False,
+        ),
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.NONE,
+            pass_config=SimpleNamespace(enable_sp=False),
+        ),
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        ec_transfer_config=None,
+    )
+
+    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+
+    assert "routed experts capture" not in unsupported

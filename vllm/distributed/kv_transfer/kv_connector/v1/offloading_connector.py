@@ -33,17 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.sidecar import (
-    build_sidecar_config,
-    normalize_sidecar_transfers,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.sidecar import (
-    KVConnectorSidecarConfig,
-    KVConnectorSidecarTransferPlan,
-    SupportsKVConnectorSidecar,
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
@@ -55,11 +46,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 
-class OffloadingConnector(
-    KVConnectorBase_V1,
-    SupportsHMA,
-    SupportsKVConnectorSidecar,
-):
+class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -80,7 +67,6 @@ class OffloadingConnector(
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         spec = OffloadingSpecFactory.create_spec(offloading_config)
-        self._block_sidecar_config = build_sidecar_config(spec)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -92,31 +78,6 @@ class OffloadingConnector(
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
-
-    def get_block_sidecar_config(self) -> KVConnectorSidecarConfig | None:
-        return self._block_sidecar_config
-
-    def get_block_sidecar_transfers(
-        self,
-        connector_metadata: KVConnectorMetadata,
-        kv_group_id: int,
-    ) -> KVConnectorSidecarTransferPlan:
-        if self._block_sidecar_config is None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support KV block sidecars "
-                "with this offloading spec"
-            )
-        if not isinstance(connector_metadata, OffloadingConnectorMetadata):
-            raise RuntimeError(
-                "OffloadingConnector expected OffloadingConnectorMetadata, got "
-                f"{type(connector_metadata).__name__}"
-            )
-        return normalize_sidecar_transfers(
-            connector_metadata,
-            config=self._block_sidecar_config,
-            kv_group_id=kv_group_id,
-            expected_num_groups=len(self._kv_cache_config.kv_cache_groups),
-        )
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
