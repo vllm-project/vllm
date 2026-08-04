@@ -715,10 +715,24 @@ def test_shm_ring_buffer_creation_checks_free_space():
         ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
 
 
-def test_remote_subscribe_addr_unique_concurrent_writers():
+def test_remote_subscribe_addr_unique_concurrent_writers(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Writers bind the remote socket to port 0 (kernel-assigned), so
     concurrent writers never race for the same probed port and the
-    announced address is connectable."""
+    announced address is connectable.
+
+    Pre-fix, the writer probed a port with get_open_port() and bound it
+    afterwards; pinning the probe to one free port makes every writer
+    bind the same port and fail deterministically on that code path,
+    while the late-binding implementation never consults the probe."""
+    from vllm.distributed.device_communicators import shm_broadcast
+
+    colliding_port = get_open_port()
+    monkeypatch.setattr(
+        shm_broadcast, "get_open_port", lambda: colliding_port, raising=False
+    )
+
     n_writers = 32
     queues: list[MessageQueue] = []
     lock = threading.Lock()
