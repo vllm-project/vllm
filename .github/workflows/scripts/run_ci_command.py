@@ -639,8 +639,12 @@ def notify_authorized(
     github.add_comment(
         pr["number"],
         (
-            f"✅ @{author}, CI is now available for this PR. Comment `/ci run` "
-            "to run CI or `/ci retry` to retry failed jobs.\n\n"
+            f"✅ @{author}, CI is now available for this PR.\n\n"
+            "- `/ci run` starts a CI build.\n"
+            "- `/ci retry` retries failed jobs in the CI build for the current "
+            "PR head. If the current head has no CI build, it starts a new CI "
+            "build for the current head containing only jobs that failed in "
+            "the latest earlier CI build for this PR.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )

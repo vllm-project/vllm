@@ -515,12 +515,15 @@ class RunCiCommandTest(unittest.TestCase):
         notify_authorized(event, github)
 
         self.assertEqual(len(github.comments), 1)
-        self.assertTrue(github.comments[0].startswith("✅ @author"))
-        self.assertIn("`/ci run`", github.comments[0])
-        self.assertIn("`/ci retry`", github.comments[0])
-        self.assertNotIn(COMMAND_RUN_CI_ALL, github.comments[0])
-        self.assertNotIn(COMMAND_RUN_CI_NIGHTLY, github.comments[0])
-        self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, github.comments[0])
+        comment = github.comments[0]
+        self.assertTrue(comment.startswith("✅ @author"))
+        self.assertIn("`/ci run` starts a CI build", comment)
+        self.assertIn("`/ci retry` retries failed jobs", comment)
+        self.assertIn("CI build for the current PR head", comment)
+        self.assertIn("only jobs that failed in the latest earlier CI build", comment)
+        self.assertNotIn(COMMAND_RUN_CI_ALL, comment)
+        self.assertNotIn(COMMAND_RUN_CI_NIGHTLY, comment)
+        self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, comment)
 
     def test_ready_label_does_not_notify_after_trusted_approval(self) -> None:
         pr = make_pr(labels=[{"name": "ready"}])
