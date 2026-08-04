@@ -14,6 +14,8 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
+from .utils import make_dummy_moe_config
+
 
 class TestGetHiddenDim:
     """Unit tests for _get_hidden_dim."""
@@ -374,6 +376,61 @@ class TestWeightLoadingWithPaddedHiddenSize:
                 shard_id="w2",
                 expert_id=0,
             )
+
+
+class TestLoadWeightsExpertBias:
+    """Some quantized exports (e.g. GPTQ, llm-compressor NVFP4) materialize
+    all-zero per-expert `.bias` tensors for models whose experts have no bias
+    params. `RoutedExperts.load_weights` needs to ignore them like
+    `AutoWeightsLoader` does, instead of raising AttributeError for the
+    nonexistent `w13_bias`/`w2_bias` params.
+    """
+
+    NUM_EXPERTS = 2
+
+    def _make_experts(self, has_bias: bool) -> torch.nn.Module:
+        experts = torch.nn.Module()
+        experts.layer_name = "model.layers.0.mlp.experts"
+        experts.moe_config = make_dummy_moe_config(num_experts=self.NUM_EXPERTS)
+        mapping = RoutedExperts.build_expert_params_mapping(
+            "gate_proj",
+            "down_proj",
+            "up_proj",
+            num_experts=self.NUM_EXPERTS,
+            routed_experts_prefix="",
+            include_fused=True,
+        )
+        experts.get_expert_mapping = lambda **_: mapping
+
+        def weight_loader(**_):
+            return True
+
+        names = ["w13_weight", "w2_weight"]
+        if has_bias:
+            names += ["w13_bias", "w2_bias"]
+        for name in names:
+            param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+            param.weight_loader = weight_loader
+            setattr(experts, name, param)
+        return experts
+
+    def _checkpoint_weights(self) -> list[tuple[str, torch.Tensor]]:
+        return [
+            (f"{expert_id}.{proj}.{suffix}", torch.zeros(1, 1))
+            for expert_id in range(self.NUM_EXPERTS)
+            for proj in ("gate_proj", "up_proj", "down_proj")
+            for suffix in ("weight", "bias")
+        ]
+
+    def test_bias_free_experts_ignore_checkpoint_biases(self):
+        experts = self._make_experts(has_bias=False)
+        loaded = list(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
+        assert set(loaded) == {"w13_weight", "w2_weight"}
+
+    def test_experts_with_bias_params_load_checkpoint_biases(self):
+        experts = self._make_experts(has_bias=True)
+        loaded = list(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
+        assert set(loaded) == {"w13_weight", "w2_weight", "w13_bias", "w2_bias"}
 
 
 class TestPerTensorScaleCoercion:

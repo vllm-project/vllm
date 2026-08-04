@@ -936,6 +936,11 @@ class RoutedExperts(PluggableLayer):
                 matched = True
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
+                if param_name.endswith("_bias") and not hasattr(self, param_name):
+                    # skip unexpected expert biases (e.g. all-zero biases
+                    # materialized by GPTQ-style quantized exports), like
+                    # AutoWeightsLoader's ".bias" handling.
+                    continue
                 param = getattr(self, param_name)
                 if is_fused:
                     # w1 and w3 share one fused tensor; use a local copy so the
