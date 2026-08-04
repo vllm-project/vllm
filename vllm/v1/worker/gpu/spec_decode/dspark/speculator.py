@@ -29,9 +29,84 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+
+@triton.jit(do_not_specialize=["step_i"])
+def _draft_penalties_kernel(
+    logits_ptr,
+    logits_stride,
+    rows_ptr,  # [num_reqs] req-state indices
+    draft_tokens_ptr,  # [max_num_reqs, n_spec] tokens sampled so far this block
+    draft_tokens_stride,
+    step_i,  # number of in-block tokens sampled before this step
+    repetition_penalty_ptr,
+    prompt_bin_mask_ptr,
+    prompt_bin_mask_stride,
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
+    d2t_index_ptr,  # [vocab_size] draft column -> target id (HAS_D2T only)
+    vocab_size,  # row width of logits (draft vocab when HAS_D2T)
+    max_num_reqs,  # bound for req-state indices (padded rows may hold junk)
+    BLOCK_SIZE: tl.constexpr,
+    HAS_D2T: tl.constexpr,
+):
+    """Draft-side mirror of the target's _penalties_kernel (rep penalty only).
+
+    Penalized set = prompt bin mask | output bin counts | draft tokens
+    t_0..t_{step_i-1} sampled earlier in this block — identical to what the
+    verify kernel accumulates for the row checking t_{step_i}.
+
+    With HAS_D2T, logits are in the (reduced) draft-vocab space and each
+    column's target id is looked up via d2t_index — the penalty statistics
+    (target-vocab sized) are gathered per element. draft_tokens hold target
+    ids in both modes.
+    """
+    req_idx = tl.program_id(0).to(tl.int64)
+    state_idx = tl.load(rows_ptr + req_idx).to(tl.int64)
+    # CUDA-graph replays run with a padded request count; padded rows can
+    # carry junk state indices. Clamp so their (ignored) rows never gather
+    # out of bounds.
+    state_idx = tl.minimum(tl.maximum(state_idx, 0), max_num_reqs - 1)
+    rep = tl.load(repetition_penalty_ptr + state_idx)
+    if rep == 1.0:
+        return
+
+    block_idx = tl.program_id(1)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    logits = tl.load(logits_ptr + req_idx * logits_stride + block, mask=mask)
+    logits = logits.to(tl.float32)
+
+    if HAS_D2T:
+        tgt = tl.load(d2t_index_ptr + block, mask=mask, other=0).to(tl.int64)
+    else:
+        tgt = block.to(tl.int64)
+
+    counts = tl.load(
+        output_bin_counts_ptr + state_idx * output_bin_counts_stride + tgt,
+        mask=mask,
+        other=0,
+    )
+    pen_mask = counts > 0
+
+    word = tl.load(
+        prompt_bin_mask_ptr + state_idx * prompt_bin_mask_stride + (tgt >> 5),
+        mask=mask,
+        other=0,
+    )
+    pen_mask |= ((word >> (tgt & 31)) & 1).to(tl.int1)
+
+    for j in tl.range(step_i):
+        t = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride + j)
+        pen_mask |= tgt == t
+
+    scale = tl.where(pen_mask, rep, 1.0)
+    logits *= tl.where(logits > 0, 1.0 / scale, scale)
+    tl.store(logits_ptr + req_idx * logits_stride + block, logits, mask=mask)
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -72,6 +147,24 @@ class DSparkSpeculator(DFlashSpeculator):
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
+
+        # Draft-side repetition penalty (speculative_config.
+        # draft_apply_repetition_penalty): the drafter mirrors the target's
+        # repetition-penalty logit transform so the rejection test compares
+        # aligned p/q distributions. Without this, every context-repeated
+        # token has q suppressed but p not, which costs speculation
+        # acceptance heavily on repetition-rich outputs (e.g. TTS speech
+        # tokens). Set via set_penalties_state().
+        self._penalties_state = None
+
+    def set_penalties_state(self, penalties_state) -> None:
+        if self.draft_logits is None:
+            # Greedy drafting: rejection uses exact match, p/q alignment moot
+            # (draft_apply_repetition_penalty + greedy is rejected at
+            # config time).
+            return
+        if self.speculative_config.draft_apply_repetition_penalty:
+            self._penalties_state = penalties_state
 
     def load_draft_model(
         self,
@@ -115,12 +208,53 @@ class DSparkSpeculator(DFlashSpeculator):
         # read via the precomputed persistent index (fixed buffer for capture).
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
 
+        # Per-request state for the draft-side repetition
+        # penalty (_draft_penalties_kernel). pen_rows is block-constant; the
+        # kernel adds the in-block draft tokens t_0..t_{i-1} per step from
+        # self.draft_tokens.
+        pen_rows = None
+        if self._penalties_state is not None and self.draft_logits is not None:
+            pen_rows = idx_map[:, 0].contiguous()
+
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             if self.draft_logits is not None:
+                # Mirror the target's repetition-penalty logit
+                # transform on the draft logits (fused triton kernel, mutates
+                # logits_i in place; per-row early exit when rep == 1.0).
+                # Runs BEFORE the d2t scatter so the kernel only touches
+                # draft-vocab-sized rows; target-vocab penalty statistics are
+                # gathered via the d2t index.
+                if pen_rows is not None:
+                    ps = self._penalties_state
+                    logits_i = logits_i.contiguous()
+                    vocab = logits_i.shape[-1]
+                    blk = 8192
+                    _draft_penalties_kernel[(num_reqs, triton.cdiv(vocab, blk))](
+                        logits_i,
+                        logits_i.stride(0),
+                        pen_rows,
+                        self.draft_tokens,
+                        self.draft_tokens.stride(0),
+                        i,
+                        ps.repetition_penalty.gpu,
+                        ps.prompt_bin_mask,
+                        ps.prompt_bin_mask.stride(0),
+                        ps.output_bin_counts,
+                        ps.output_bin_counts.stride(0),
+                        # Placeholder pointer when there is no d2t map; the
+                        # kernel never dereferences it with HAS_D2T=False.
+                        self._d2t_scatter_index
+                        if self._d2t_scatter_index is not None
+                        else self.draft_tokens,
+                        vocab,
+                        self.max_num_reqs,
+                        BLOCK_SIZE=blk,
+                        HAS_D2T=self._d2t_scatter_index is not None,
+                    )
                 # Probabilistic: sample in target vocab (a reduced draft vocab is
                 # scattered into its target columns; full vocab is already there).
                 if self._d2t_scatter_index is not None:
