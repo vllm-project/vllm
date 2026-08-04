@@ -425,9 +425,7 @@ class RustFrontendProcessManager:
                 return payload["inputs"], payload["outputs"]
             sys.stdout.buffer.write(line)
             sys.stdout.buffer.flush()
-        raise RuntimeError(
-            "Rust frontend exited before reporting its bound addresses"
-        )
+        raise RuntimeError("Rust frontend exited before reporting its bound addresses")
 
     def shutdown(self, timeout: float | None = None) -> None:
         if self._finalizer.detach() is not None:

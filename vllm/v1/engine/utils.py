@@ -1053,19 +1053,14 @@ class CoreEngineActorManager:
 def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
-    *,
-    defer_api_server_ports: bool = True,
 ) -> EngineZmqAddresses:
     """Allocate ZMQ addresses for engine-client communication.
 
-    By default each TCP address is a ``tcp://host:0`` placeholder; the
-    consumer (API-server child or single-process ``MPClient``) binds, then
-    recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
-    and writes it back into ``addresses`` before the engine handshake.
-
-    Set ``defer_api_server_ports=False`` only when the consumer cannot
-    report a bound port back (e.g. the Rust front-end). IPC paths are
-    unaffected."""
+    Each TCP address is a ``tcp://host:0`` placeholder; the consumer
+    (API-server child, Rust front-end, or single-process ``MPClient``)
+    binds, then reports the kernel-assigned port back, and the final
+    addresses are written into ``addresses`` before the engines learn
+    them. IPC paths are unaffected."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -1090,7 +1085,7 @@ def get_engine_zmq_addresses(
     def _addr() -> str:
         if client_local_only:
             return get_open_zmq_ipc_path()
-        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+        return get_tcp_uri(host, 0)
 
     return EngineZmqAddresses(
         inputs=[_addr() for _ in range(num_api_servers)],

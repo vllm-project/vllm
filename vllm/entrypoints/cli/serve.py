@@ -314,20 +314,18 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    # Defer port allocation to the child's bind() to avoid TOCTOU, except
-    # for Rust front-end and Ray DP, which can't see the post-bind rebind
-    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
-    # so pre-allocate driver-side -- reintroducing the original race only
-    # there.
+    # Port allocation is deferred to the front-end's bind() to avoid TOCTOU;
+    # the bound addresses are gathered below and forwarded to the engines
+    # (via the startup handshake, or the address broker for Ray DP actors).
     is_ray_dp = parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers,
-        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
-    )
+    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses
+        vllm_config,
+        executor_class,
+        log_stats,
+        addresses,
+        defer_engine_addresses=is_ray_dp,
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator
@@ -367,15 +365,14 @@ def run_multi_api_server(args: argparse.Namespace):
                 tensor_queue=engine_launch.tensor_queue,
             )
 
-            if not is_ray_dp:
-                # Forward each child's bound endpoints to the engine handshake
-                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
-                # are pre-allocated above and Ray actors already hold them.
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses()
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
+        # Forward the front-end's bound endpoints to the engines: via the
+        # startup handshake (runs on ``with`` exit), or the address broker
+        # for Ray DP actors.
+        addresses.inputs, addresses.outputs = (
+            api_server_manager.gather_actual_addresses()
+        )
+        if is_ray_dp:
+            local_engine_manager.publish_addresses(addresses)
 
         # Set frontend processes to watch during engine startup.
         # If any of these processes exit before the engines are up, the engine startup
