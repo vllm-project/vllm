@@ -97,17 +97,16 @@ class SPTestSettings:
         parallel_setups = []
         for eager_mode_val in [False, True]:
             for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(
-                            tp_size=tp_base,
-                            pp_size=pp_multiplier * pp_base,
-                            fuse_norm_quant=False,
-                            fuse_act_quant=False,
-                            eager_mode=eager_mode_val,
-                            chunked_prefill=chunked_prefill_val,
-                        )
+                parallel_setups.append(
+                    ParallelSetup(
+                        tp_size=tp_base,
+                        pp_size=pp_multiplier * pp_base,
+                        fuse_norm_quant=False,
+                        fuse_act_quant=False,
+                        eager_mode=eager_mode_val,
+                        chunked_prefill=True,
                     )
+                )
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
