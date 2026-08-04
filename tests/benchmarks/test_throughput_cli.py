@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ``vllm bench throughput`` CLI and its shared dataset dispatch.
+"""Tests for ``vllm bench throughput`` CLI.
 
-Throughput routes request sampling through ``datasets.get_samples`` (the same
-path ``bench serve`` uses); the multimodal/gate/LoRA/adapter cases below pin
-that shared dispatch so the two benchmarks cannot drift apart.
+Throughput reuses ``bench serve``'s ``datasets.get_samples`` dispatch; the
+LoRA-assignment and MMVU cases below cover the pieces that are throughput-only
+(serve has no analogue), keeping the two benchmarks aligned without duplicating
+serve-side dataset coverage.
 """
 
 import subprocess
@@ -13,10 +14,9 @@ from types import SimpleNamespace
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import SampleRequest, get_samples
+from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.throughput import (
     _run_vllm_chat_requests,
-    _to_serve_args,
     add_cli_args,
     assign_loras,
     get_requests,
@@ -116,243 +116,14 @@ def test_vllm_chat_requests_include_multimodal_content():
     ]
 
 
-# -----------------------------
-# Shared dataset dispatch (get_samples) fixtures + helpers
-# -----------------------------
-
-
 @pytest.fixture(scope="session")
 def hf_tokenizer() -> PreTrainedTokenizerBase:
     # Small, commonly available tokenizer.
     return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
-def _build_args(*extra: str):
-    parser = FlexibleArgumentParser()
-    add_cli_args(parser)
-    return parser.parse_args(
-        [
-            "--dataset-name",
-            "random",
-            "--num-prompts",
-            "16",
-            "--random-input-len",
-            "64",
-            "--random-output-len",
-            "8",
-            "--random-prefix-len",
-            "4",
-            "--random-range-ratio",
-            "0.0",
-            "--seed",
-            "0",
-            "--backend",
-            "vllm",
-            *extra,
-        ]
-    )
-
-
-def _hf_mm_args(backend: str) -> SimpleNamespace:
-    # Minimal namespace that routes get_samples to an IS_MULTIMODAL=True HF
-    # dataset (MMStar) and reaches the backend gate before any dataset is
-    # constructed or downloaded, so the gate can be exercised without network.
-    return SimpleNamespace(
-        dataset_name="hf",
-        dataset_path="Lin-Chen/MMStar",
-        hf_name="Lin-Chen/MMStar",
-        hf_split=None,
-        hf_subset=None,
-        backend=backend,
-        seed=0,
-        num_prompts=4,
-    )
-
-
 # -----------------------------
-# Determinism + shape
-# -----------------------------
-
-
-@pytest.mark.benchmark
-def test_get_requests_random_deterministic_and_shaped(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
-    """Routing through get_samples stays deterministic and well-shaped.
-
-    Two calls with the same seed must produce identical requests (the
-    regression that matters), without pinning an absolute fingerprint that
-    would be brittle across tokenizer/library versions.
-    """
-    args = _build_args()
-    first = get_requests(args, hf_tokenizer)
-    second = get_requests(args, hf_tokenizer)
-
-    fp = [(r.prompt_len, r.expected_output_len, r.prompt) for r in first]
-    assert fp == [(r.prompt_len, r.expected_output_len, r.prompt) for r in second]
-    assert len(first) == 16
-    assert len({r.prompt_len for r in first}) == 1  # consistent shape
-    assert all(r.expected_output_len == 8 for r in first)
-
-
-# -----------------------------
-# Multimodal backend gate
-# -----------------------------
-
-
-@pytest.mark.benchmark
-def test_get_samples_multimodal_gate_default_backends() -> None:
-    """serve's default gate still rejects MM HF datasets on non-chat backends."""
-    args = _hf_mm_args(backend="vllm")
-    with pytest.raises(ValueError, match="openai-chat"):
-        get_samples(args, tokenizer=None)
-
-
-@pytest.mark.benchmark
-def test_get_samples_multimodal_gate_accepts_custom_backends() -> None:
-    """Callers (throughput) can pass their own multimodal backends.
-
-    ``vllm`` is not in the custom set, so the gate still raises -- but the
-    error now names the caller's configured backend, proving the keyword
-    argument is wired through.
-    """
-    args = _hf_mm_args(backend="vllm")
-    with pytest.raises(ValueError, match="vllm-chat"):
-        get_samples(args, tokenizer=None, multimodal_backends=("vllm-chat",))
-
-
-@pytest.mark.benchmark
-def test_get_samples_random_mm_gate_accepts_custom_backends(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
-    """The random-mm-specific gate also honours caller-supplied backends."""
-    args = SimpleNamespace(
-        dataset_name="random-mm",
-        backend="vllm",
-        random_range_ratio="0.0",
-        random_input_len=64,
-        random_output_len=8,
-        random_prefix_len=0,
-        seed=0,
-        num_prompts=4,
-    )
-    with pytest.raises(ValueError, match="vllm-chat"):
-        get_samples(args, tokenizer=hf_tokenizer, multimodal_backends=("vllm-chat",))
-
-
-@pytest.mark.benchmark
-@pytest.mark.parametrize(
-    "backend, should_raise", [("vllm-chat", False), ("vllm", True)]
-)
-def test_random_mm_gate_accepts_vllm_chat_rejects_vllm(
-    hf_tokenizer: PreTrainedTokenizerBase, backend: str, should_raise: bool
-) -> None:
-    """Throughput's multimodal gate (multimodal_backends=('vllm-chat',)) admits
-    vllm-chat but rejects the plain vllm backend for random-mm.
-    """
-    parser = FlexibleArgumentParser()
-    add_cli_args(parser)
-    args = parser.parse_args(
-        [
-            "--dataset-name",
-            "random-mm",
-            "--backend",
-            backend,
-            "--num-prompts",
-            "2",
-            "--random-input-len",
-            "64",
-            "--random-output-len",
-            "8",
-            "--random-mm-limit-mm-per-prompt",
-            '{"image": 1, "video": 0}',
-            "--seed",
-            "0",
-        ]
-    )
-    if should_raise:
-        with pytest.raises(ValueError, match="not supported on backend"):
-            get_requests(args, hf_tokenizer)
-    else:
-        assert len(get_requests(args, hf_tokenizer)) == 2
-
-
-# -----------------------------
-# random-mm edge cases
-# -----------------------------
-
-
-@pytest.mark.benchmark
-def test_random_mm_limit_requires_video_key(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
-    """random-mm's default bucket_config carries a video bucket (prob 0) that is
-    validated against limit_mm_per_prompt *before* zero-prob entries are dropped,
-    so the limit must include 'video' even for image-only runs.
-    """
-    parser = FlexibleArgumentParser()
-    add_cli_args(parser)
-    args = parser.parse_args(
-        [
-            "--dataset-name",
-            "random-mm",
-            "--backend",
-            "vllm-chat",
-            "--num-prompts",
-            "4",
-            "--random-input-len",
-            "64",
-            "--random-output-len",
-            "8",
-            "--random-mm-limit-mm-per-prompt",
-            '{"image": 1}',
-            "--seed",
-            "0",
-        ]
-    )
-    with pytest.raises(ValueError, match="video is not in limit_mm_per_prompt"):
-        get_requests(args, hf_tokenizer)
-
-
-@pytest.mark.benchmark
-def test_random_mm_vllm_chat_produces_image_chat_prompts(
-    hf_tokenizer: PreTrainedTokenizerBase,
-) -> None:
-    """vllm-chat + random-mm + a complete limit yields chat prompts with image
-    content embedded. enable_multimodal_chat is auto-on for vllm-chat, so
-    multi_modal_data is None by design and images live in the prompt list.
-    """
-    parser = FlexibleArgumentParser()
-    add_cli_args(parser)
-    args = parser.parse_args(
-        [
-            "--dataset-name",
-            "random-mm",
-            "--backend",
-            "vllm-chat",
-            "--num-prompts",
-            "4",
-            "--random-input-len",
-            "64",
-            "--random-output-len",
-            "8",
-            "--random-mm-limit-mm-per-prompt",
-            '{"image": 1, "video": 0}',
-            "--seed",
-            "0",
-        ]
-    )
-    requests = get_requests(args, hf_tokenizer)
-    assert len(requests) == 4
-    for r in requests:
-        assert isinstance(r.prompt, list) and r.prompt
-        assert r.multi_modal_data is None
-        content = r.prompt[0]["content"]
-        assert any(c.get("type") == "image_url" for c in content)
-
-
-# -----------------------------
-# assign_loras post-processing
+# LoRA assignment (throughput-only post-processing)
 # -----------------------------
 
 
@@ -404,66 +175,6 @@ def test_assign_loras_random_in_range() -> None:
     ids = [r.lora_request.lora_int_id for r in out]
     assert all(1 <= i <= 5 for i in ids)
     assert len(set(ids)) == 5
-
-
-# -----------------------------
-# _to_serve_args adapter
-# -----------------------------
-
-
-@pytest.mark.benchmark
-def test_to_serve_args_random_passthrough() -> None:
-    """Throughput-native attrs pass through; serve-only defaults are filled."""
-    args = _build_args()  # backend vllm, random, random-input 64 / output 8 / prefix 4
-    serve = _to_serve_args(args)
-    # pass-through
-    assert serve.dataset_name == "random"
-    assert serve.backend == "vllm"
-    assert serve.seed == 0
-    # random lens preserved
-    assert serve.random_input_len == 64
-    assert serve.random_output_len == 8
-    assert serve.random_prefix_len == 4
-    # serve-only attrs throughput never exposed keep serve's defaults
-    assert serve.disable_shuffle is False
-    assert serve.skip_chat_template is False
-    assert serve.no_stream is False
-    assert serve.request_id_prefix == ""
-    assert serve.chat_template_kwargs is None
-    # --output-len unset -> per-dataset entry points are None (each dataset
-    # applies its own default), matching prior throughput behaviour.
-    assert serve.hf_output_len is None
-    assert serve.sharegpt_output_len is None
-    # sonnet defaults applied when --input-len/--output-len unset
-    assert serve.sonnet_input_len == 550
-    assert serve.sonnet_output_len == 150
-    assert serve.sonnet_prefix_len == 0  # --prefix-len default 0
-    # multimodal chat off for a non-chat backend
-    assert serve.enable_multimodal_chat is False
-
-
-@pytest.mark.benchmark
-def test_to_serve_args_vllm_chat_and_output_len() -> None:
-    """vllm-chat auto-enables multimodal chat; --output-len maps downstream."""
-    args = _build_args(
-        "--backend",
-        "vllm-chat",
-        "--input-len",
-        "100",
-        "--output-len",
-        "20",
-        "--prefix-len",
-        "5",
-    )
-    serve = _to_serve_args(args)
-    assert serve.enable_multimodal_chat is True  # auto for vllm-chat
-    assert serve.sonnet_input_len == 100
-    assert serve.sonnet_output_len == 20
-    assert serve.sonnet_prefix_len == 5
-    assert serve.hf_output_len == 20
-    assert serve.sharegpt_output_len == 20
-    # random_* still resolve from --random-* (64 wins over legacy --input-len)
-    assert serve.random_input_len == 64
 
 
 # -----------------------------
