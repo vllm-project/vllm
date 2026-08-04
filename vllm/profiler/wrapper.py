@@ -26,6 +26,8 @@ _TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 
 class WorkerProfiler(ABC):
+    _propagate_errors = False
+
     def __init__(self, profiler_config: ProfilerConfig) -> None:
         self._delay_iters = profiler_config.delay_iterations
         if self._delay_iters > 0:
@@ -72,6 +74,8 @@ class WorkerProfiler(ABC):
             self._running = True  # Only mark as running if start succeeds
         except Exception as e:
             logger.warning("Failed to start profiler: %s", e)
+            if self._propagate_errors:
+                raise
 
     def _call_stop(self) -> None:
         """Call _stop with error handling but no safeguards."""
@@ -80,7 +84,10 @@ class WorkerProfiler(ABC):
             logger.info_once("Profiler stopped successfully.")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
-        self._running = False  # Always mark as not running, assume stop worked
+            if self._propagate_errors:
+                raise
+        finally:
+            self._running = False
 
     def start(self) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
@@ -92,7 +99,11 @@ class WorkerProfiler(ABC):
             return
         self._active = True
         if self._delay_iters == 0:
-            self._call_start()
+            try:
+                self._call_start()
+            except Exception:
+                self._active = False
+                raise
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
@@ -108,7 +119,11 @@ class WorkerProfiler(ABC):
             and self._active_iteration_count == self._delay_iters
         ):
             logger.info_once("Starting profiler after delay...")
-            self._call_start()
+            try:
+                self._call_start()
+            except Exception:
+                self._active = False
+                raise
 
         # Call profiler step for schedule-based profiling
         # Only count iterations where data is actually recorded (not warmup)
@@ -124,7 +139,12 @@ class WorkerProfiler(ABC):
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            try:
+                self._call_stop()
+            except Exception:
+                logger.exception(
+                    "Failed to stop profiler after reaching max iterations."
+                )
             return
 
     def _profiler_step(self) -> bool:
@@ -155,9 +175,14 @@ class WorkerProfiler(ABC):
         """Ensure profiler is stopped when shutting down."""
         logger.info_once("Shutting down profiler")
         if self._running:
-            self.stop()
+            try:
+                self.stop()
+            except Exception:
+                logger.exception("Failed to stop profiler during worker shutdown.")
 
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
 
@@ -347,12 +372,16 @@ class TorchProfilerWrapper(WorkerProfiler):
         return True
 
     @override
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         return torch.profiler.record_function(name)
 
 
 class ProtonProfilerWrapper(WorkerProfiler):
     """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+
+    _propagate_errors = True
 
     def __init__(
         self,
@@ -462,10 +491,12 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 self._session_id = None
 
     @override
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         if not self._running:
             return nullcontext()
-        return self._proton.scope(name)
+        return self._proton.scope(name, metrics=metrics)
 
 
 class CudaProfilerWrapper(WorkerProfiler):
@@ -485,5 +516,7 @@ class CudaProfilerWrapper(WorkerProfiler):
         self._cuda_profiler.stop()
 
     @override
-    def annotate_context_manager(self, name: str):
+    def annotate_context_manager(
+        self, name: str, metrics: dict[str, float | int] | None = None
+    ):
         return torch.cuda.nvtx.range(name)

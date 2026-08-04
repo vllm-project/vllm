@@ -257,7 +257,7 @@ class TestIsUriPath:
 class TestAnnotateProfile:
     """Tests for Worker.annotate_profile() annotation string formatting."""
 
-    def _annotate(self, detailed: bool) -> str:
+    def _annotate(self, detailed: bool):
         worker = MagicMock()
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
         worker.profiler = MagicMock()
@@ -279,28 +279,37 @@ class TestAnnotateProfile:
         )
 
         Worker.annotate_profile(worker, sched)
-        return worker.profiler.annotate_context_manager.call_args[0][0]
+        return worker.profiler.annotate_context_manager.call_args
 
     def test_simple_format_mixed(self):
-        assert self._annotate(detailed=False) == (
+        assert self._annotate(detailed=False).args[0] == (
             "execute_context_1(4)_generation_1(1)"
         )
 
     def test_detailed_format_mixed(self):
         # ctx1: sq=4, sk=4, sqsq=16, sqsk=16 | gen1: sq=1, sk=11, sqsq=1, sqsk=11 | bs=5
-        assert self._annotate(detailed=True) == (
+        assert self._annotate(detailed=True).args[0] == (
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
 
-    def test_skips_annotation_work_after_profiler_stops(self):
+    def test_numeric_metrics(self):
+        assert self._annotate(detailed=False).kwargs["metrics"] == {
+            "num_context_requests": 1,
+            "num_context_tokens": 4,
+            "num_generation_requests": 1,
+            "num_generation_tokens": 1,
+        }
+
+    def test_skips_annotations_outside_profile_window(self):
         worker = MagicMock()
         worker.profiler.is_running = False
 
-        context = Worker.annotate_profile(worker, scheduler_output=None)
+        context = Worker.annotate_profile(worker, MagicMock())
 
         worker.profiler.step.assert_called_once_with()
         worker.profiler.annotate_context_manager.assert_not_called()
-        assert isinstance(context, nullcontext)
+        with context:
+            pass
 
 
 def test_profiler_entered_during_capture():
@@ -555,6 +564,75 @@ class TestProtonProfilerWrapper:
         with pytest.raises(RuntimeError, match="does not support selecting"):
             make_proton_wrapper(tmp_path, proton, proton_output_format="hatchet")
 
+    @pytest.mark.parametrize("fail_cleanup", [False, True])
+    def test_shutdown_finalizes_active_session(self, tmp_path, fail_cleanup):
+        proton = make_proton()
+        wrapper, proton = make_proton_wrapper(tmp_path, proton)
+        wrapper.start()
+        if fail_cleanup:
+            proton.deactivate.side_effect = RuntimeError("deactivate failed")
+            proton.finalize.side_effect = RuntimeError("finalize failed")
+
+        wrapper.shutdown()
+        wrapper.shutdown()
+
+        proton.deactivate.assert_called_once_with(session=7)
+        proton.finalize.assert_called_once_with(session=7)
+
+    @pytest.mark.parametrize(
+        ("first_result", "message"),
+        [
+            (None, "did not create"),
+            (RuntimeError("CUPTI unavailable"), "CUPTI unavailable"),
+        ],
+    )
+    def test_recovers_from_start_errors(self, tmp_path, first_result, message):
+        proton = make_proton()
+        proton.start.side_effect = [first_result, 8]
+        wrapper, _ = make_proton_wrapper(tmp_path, proton)
+
+        with pytest.raises(RuntimeError, match=message):
+            wrapper.start()
+
+        wrapper.start()
+        assert wrapper.is_running
+        wrapper.stop()
+        proton.finalize.assert_called_once_with(session=8)
+
+    @pytest.mark.parametrize(
+        ("failing_call", "message"),
+        [("finalize", "write failed"), ("deactivate", "deactivate failed")],
+    )
+    def test_recovers_from_stop_errors(self, tmp_path, failing_call, message):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        getattr(proton, failing_call).side_effect = RuntimeError(message)
+        wrapper, _ = make_proton_wrapper(tmp_path, proton)
+        wrapper.start()
+
+        with pytest.raises(RuntimeError, match=message):
+            wrapper.stop()
+
+        getattr(proton, failing_call).side_effect = None
+        wrapper.start()
+        wrapper.stop()
+        assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
+
+    def test_automatic_stop_errors_do_not_fail_inference(self, tmp_path):
+        proton = make_proton()
+        proton.finalize.side_effect = RuntimeError("write failed")
+        wrapper, _ = make_proton_wrapper(tmp_path, proton, max_iterations=1)
+        wrapper.start()
+
+        wrapper.step()
+        wrapper.step()
+        worker = MagicMock(profiler=wrapper)
+        context = Worker.annotate_profile(worker, scheduler_output=None)
+
+        assert isinstance(context, nullcontext)
+        proton.scope.assert_not_called()
+        proton.finalize.assert_called_once_with(session=7)
+
     def test_missing_proton_has_actionable_error(self, tmp_path):
         config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
         with (
@@ -572,7 +650,7 @@ class TestProtonProfilerWrapper:
 
         context = wrapper.annotate_context_manager("decode")
 
-        proton.scope.assert_called_once_with("decode")
+        proton.scope.assert_called_once_with("decode", metrics=None)
         assert context is not None
 
 

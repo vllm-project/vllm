@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
 from vllm.config import ProfilerConfig
@@ -21,7 +21,13 @@ def engine_client(request: Request) -> EngineClient:
 @router.post("/start_profile")
 async def start_profile(raw_request: Request):
     logger.info("Starting profiler...")
-    await engine_client(raw_request).start_profile()
+    try:
+        await engine_client(raw_request).start_profile()
+    except Exception as exc:
+        logger.exception("Failed to start profiler")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start profiler: {exc}"
+        ) from exc
     logger.info("Profiler started.")
     return Response(status_code=200)
 
@@ -29,7 +35,13 @@ async def start_profile(raw_request: Request):
 @router.post("/stop_profile")
 async def stop_profile(raw_request: Request):
     logger.info("Stopping profiler...")
-    await engine_client(raw_request).stop_profile()
+    try:
+        await engine_client(raw_request).stop_profile()
+    except Exception as exc:
+        logger.exception("Failed to stop profiler")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to stop profiler: {exc}"
+        ) from exc
     logger.info("Profiler stopped.")
     return Response(status_code=200)
 
