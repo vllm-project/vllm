@@ -47,7 +47,7 @@ apache-tvm-ffi==0.1.10
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-arctic-inference==0.1.1
+arctic-inference==0.2.0
     # via -r requirements/test/rocm.in
 argcomplete==3.6.3
     # via datamodel-code-generator
@@ -72,7 +72,7 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
-bitsandbytes==0.49.2
+bitsandbytes @ git+https://github.com/rasmith/bitsandbytes.git@07fc91bb5ac2a32a50b097c676cff332f90af873
     # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
@@ -104,7 +104,7 @@ certifi==2026.2.25
     #   httpx
     #   requests
     #   sentry-sdk
-cffi==1.17.1
+cffi==2.0.0
     # via
     #   cryptography
     #   soundfile
@@ -168,7 +168,7 @@ dataproperty==1.1.0
     # via
     #   pytablewriter
     #   tabledata
-datasets==3.6.0
+datasets==5.0.0
     # via
     #   -r requirements/test/rocm.in
     #   evaluate
@@ -178,11 +178,11 @@ decorator==5.2.1
     # via librosa
 decord==0.6.0
     # via -r requirements/test/rocm.in
-depyf==0.20.0
+depyf @ git+https://github.com/rasmith/depyf.git@c67f28ddbdb5c4922fb14530743d77cc6468da32
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-dill==0.3.8
+dill==0.4.1
     # via
     #   datasets
     #   depyf
@@ -537,7 +537,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-multiprocess==0.70.16
+multiprocess==0.70.19
     # via
     #   -r requirements/test/rocm.in
     #   datasets
@@ -561,7 +561,7 @@ numba==0.65.0
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-numpy==2.2.6
+numpy==2.4.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
@@ -628,7 +628,7 @@ opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
     # via opencensus
-opencv-python-headless==4.13.0.92
+opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -717,7 +717,7 @@ packaging==26.0
     #   statsmodels
     #   transformers
     #   typepy
-pandas==3.0.1
+pandas==3.0.5
     # via
     #   datasets
     #   evaluate
@@ -878,7 +878,7 @@ pyparsing==3.3.2
     # via matplotlib
 pyrate-limiter==4.4.0
     # via schemathesis
-pystemmer==3.0.0
+pystemmer==3.1.0
     # via mteb
 pytablewriter==1.2.1
     # via lm-eval
@@ -960,11 +960,11 @@ pyzmq==27.1.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-rapidfuzz==3.12.1
+rapidfuzz==3.14.5
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.55.1
+ray==2.56.0
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
@@ -1123,7 +1123,7 @@ soundfile==0.13.1
     #   genai-perf
     #   librosa
     #   mistral-common
-soxr==0.5.0.post1
+soxr==1.1.0
     # via
     #   librosa
     #   mistral-common
@@ -1170,7 +1170,7 @@ tenacity==9.1.4
     #   gpt-oss
     #   lm-eval
     #   schemathesis
-tensorizer==2.10.1
+tensorizer==2.12.1
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in

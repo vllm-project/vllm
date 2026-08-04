@@ -185,7 +185,7 @@ decorator==5.1.1
     # via librosa
 decord==0.6.0
     # via -r requirements/test/cuda.in
-depyf==0.20.0
+depyf @ git+https://github.com/rasmith/depyf.git@c67f28ddbdb5c4922fb14530743d77cc6468da32
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

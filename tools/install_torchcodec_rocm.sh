@@ -74,8 +74,35 @@ pip install pybind11 setuptools wheel
 
 # Set pybind11 cmake path so CMake can find it
 export pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
-export CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}"
+export PYTHON3_EXECUTABLE=$(python3 -c "import sys; print(sys.executable)")
+export PYTHON3_INCLUDE_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['include'])")
+export PYTHON3_LIBRARY=$(python3 - <<'PY'
+import os
+import sysconfig
+
+libdir = sysconfig.get_config_var("LIBDIR")
+ldlibrary = sysconfig.get_config_var("LDLIBRARY")
+if not libdir or not ldlibrary:
+    raise SystemExit("Could not determine Python library path")
+print(os.path.join(libdir, ldlibrary))
+PY
+)
+export PYTHON3_ROOT_DIR=$(python3 -c "import pathlib, sysconfig; print(pathlib.Path(sysconfig.get_paths()['include']).parents[1])")
+export CMAKE_PREFIX_PATH="${pybind11_DIR}:${PYTHON3_ROOT_DIR}:${CMAKE_PREFIX_PATH}"
 echo "pybind11_DIR set to: $pybind11_DIR"
+echo "Python3 executable set to: $PYTHON3_EXECUTABLE"
+echo "Python3 include dir set to: $PYTHON3_INCLUDE_DIR"
+echo "Python3 library set to: $PYTHON3_LIBRARY"
+
+if [ ! -f "${PYTHON3_INCLUDE_DIR}/Python.h" ]; then
+    echo "Error: Python.h not found in $PYTHON3_INCLUDE_DIR"
+    exit 1
+fi
+
+if [ ! -f "$PYTHON3_LIBRARY" ]; then
+    echo "Error: Python shared library not found at $PYTHON3_LIBRARY"
+    exit 1
+fi
 
 # Limit GPU architectures to only what this image targets.
 # The default builds for all supported archs which is very slow.
@@ -99,6 +126,31 @@ echo "Cloning TorchCodec from $TORCHCODEC_REPO (branch: $TORCHCODEC_BRANCH)..."
 git clone --depth 1 --branch "$TORCHCODEC_BRANCH" "$TORCHCODEC_REPO" torchcodec
 
 cd torchcodec
+
+# TorchCodec v0.10.0 builds its CMake argument list inside setup.py, so
+# exported CMake variables are not enough for uv-managed Python installs.
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+setup_py = Path("setup.py")
+text = setup_py.read_text()
+needle = '            f"-DPYTHON_VERSION={python_version.major}.{python_version.minor}",\n'
+if "-DPython3_EXECUTABLE=" not in text:
+    if needle not in text:
+        raise SystemExit("Could not find TorchCodec CMake Python version argument")
+    hints = "".join(
+        f"            {json.dumps(f'-D{cmake_name}={os.environ[env_name]}')},\n"
+        for cmake_name, env_name in (
+            ("Python3_EXECUTABLE", "PYTHON3_EXECUTABLE"),
+            ("Python3_INCLUDE_DIR", "PYTHON3_INCLUDE_DIR"),
+            ("Python3_LIBRARY", "PYTHON3_LIBRARY"),
+            ("Python3_ROOT_DIR", "PYTHON3_ROOT_DIR"),
+        )
+    )
+    setup_py.write_text(text.replace(needle, needle + hints, 1))
+PY
 
 # Set build environment for ROCm compatibility
 export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build"
