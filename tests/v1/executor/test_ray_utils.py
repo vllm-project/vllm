@@ -56,21 +56,3 @@ def test_detach_zero_copy_from_model_runner_output_copies_only_numpy_views():
     assert detached_logprobs.sampled_token_ranks.flags.writeable
     assert detached_logprobs.cu_num_generated_tokens is cu_num_generated_tokens
     assert output.prompt_logprobs_dict["req-0"] is prompt_logprobs
-
-
-def test_detach_zero_copy_routed_experts_without_logprobs():
-    output = ModelRunnerOutput(
-        req_ids=["req-0"],
-        req_id_to_index={"req-0": 0},
-        routed_experts=_make_readonly(np.arange(12, dtype=np.int32).reshape(2, 3, 2)),
-    )
-    original = output.routed_experts
-    assert output.logprobs is None
-
-    detach_zero_copy_from_model_runner_output(output)
-
-    detached = output.routed_experts
-    assert detached is not None
-    assert detached is not original
-    assert detached.flags.writeable
-    np.testing.assert_array_equal(detached, original)

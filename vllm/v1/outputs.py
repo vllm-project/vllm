@@ -14,12 +14,14 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.artifact_connector.connector import ArtifactConnectorOutput
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
+    ArtifactConnectorOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
@@ -229,9 +231,7 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Per-step routed experts. Shape: (num_scheduled_tokens, num_layers,
-    # num_experts_per_tok); expert IDs as int32 from worker capture.
-    routed_experts: np.ndarray | None = None
+    artifact_connector_output: ArtifactConnectorOutput | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

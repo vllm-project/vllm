@@ -670,7 +670,9 @@ class Worker(WorkerBase):
                 GPUModelRunner as GPUModelRunnerV2,
             )
 
-            cast(GPUModelRunnerV2, self.model_runner).init_artifact_connector()
+            cast(GPUModelRunnerV2, self.model_runner).init_artifact_connector(
+                kv_cache_config
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

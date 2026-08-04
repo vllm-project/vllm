@@ -24,12 +24,12 @@ class RoutedExpertsCapturer:
     Layer-level hooks call :meth:`capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
 
-    The device and CPU transit buffers use the narrowest unsigned dtype that
-    can represent every logical expert ID. The SP all-gather still operates on
-    the router's native dtype before the result is written into this buffer.
+    The capture buffer uses the narrowest unsigned dtype that can represent
+    every logical expert ID. SP all-gather operates on the router's native
+    dtype before writing into this buffer.
 
     Invariants:
-        - One instance on the output worker; shape is fixed at init and covers the
+        - One instance per worker; shape is fixed at init and covers the
           worst-case step (``max_num_batched_tokens`` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
@@ -124,8 +124,7 @@ class RoutedExpertsCapturer:
                 #
                 # ``topk_ids`` is already whatever the router produced
                 # (typically int32/int64, both supported by NCCL); the
-                # downstream ``device_buffer[...] = topk_ids[...]``
-                # setitem narrows into int32 automatically.
+                # downstream buffer assignment narrows to the capture dtype.
                 local_topk_ids = get_tp_group().all_gather(topk_ids, dim=0)[
                     :num_local_tokens
                 ]

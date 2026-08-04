@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Immutable execution-artifact objects in a shared-memory filesystem."""
+"""Immutable execution-artifact objects in shared memory."""
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import hashlib
+import mmap
 import os
 import stat
 import threading
 import time
-import uuid
 from collections import OrderedDict
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 import regex as re
 
 from vllm.distributed.artifact_connector.store import (
     ArtifactCapacityError,
-    ArtifactCorruptionError,
     ArtifactNotFoundError,
     ArtifactObject,
 )
@@ -28,6 +28,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _SAFE_STORE_ID = re.compile(r"^[a-f0-9]{32,64}$")
+_ARTIFACT_KEY_PREFIX = "vllm-artifact/"
 
 
 def make_shm_store_id(instance_id: str, dp_rank: int) -> str:
@@ -35,51 +36,29 @@ def make_shm_store_id(instance_id: str, dp_rank: int) -> str:
     return hashlib.sha256(f"{instance_id}:{dp_rank}".encode()).hexdigest()[:32]
 
 
+@dataclass
+class _Entry:
+    offset: int
+    size: int
+
+
 class LocalSharedMemoryArtifactStore:
-    """Single-writer immutable artifact store in `/dev/shm`."""
+    """Single-owner immutable object store backed by one SHM mmap arena."""
 
     @staticmethod
     def _object_id(key: str) -> str:
         if not key or "\x00" in key:
             raise ValueError("artifact object key must be a non-empty string")
+        if key.startswith(_ARTIFACT_KEY_PREFIX):
+            digest = key[len(_ARTIFACT_KEY_PREFIX) :]
+            if len(digest) == 64 and digest == digest.lower():
+                try:
+                    int(digest, 16)
+                except ValueError:
+                    pass
+                else:
+                    return digest
         return hashlib.sha256(key.encode()).hexdigest()
-
-    def _path(self, key: str) -> Path:
-        return self._path_from_object_id(self._object_id(key))
-
-    def _path_from_object_id(self, object_id: str) -> Path:
-        return self.objects_dir / f"{object_id}.bin"
-
-    @staticmethod
-    def _open_regular_file(path: Path) -> int:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != os.getuid():
-            os.close(fd)
-            raise ArtifactCorruptionError(f"unsafe artifact file: {path}")
-        if stat.S_IMODE(file_stat.st_mode) != 0o600:
-            os.close(fd)
-            raise ArtifactCorruptionError(f"invalid artifact mode: {path}")
-        return fd
-
-    def _read(self, keys: list[str]) -> list[bytes]:
-        payloads: list[bytes] = []
-        for key in keys:
-            path = self._path(key)
-            try:
-                fd = self._open_regular_file(path)
-            except FileNotFoundError as error:
-                raise ArtifactNotFoundError(
-                    f"artifact object does not exist: {key}"
-                ) from error
-            file_size = os.fstat(fd).st_size
-            with os.fdopen(fd, "rb") as file:
-                payload = file.read()
-            if len(payload) != file_size:
-                raise ArtifactCorruptionError(f"artifact object is truncated: {key}")
-            payloads.append(payload)
-        return payloads
 
     def __init__(
         self,
@@ -90,23 +69,27 @@ class LocalSharedMemoryArtifactStore:
         max_bytes: int,
         ttl_seconds: int,
     ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("artifact SHM capacity must be positive")
         self.store_id = make_shm_store_id(instance_id, dp_rank)
         self.root = Path(root) / self.store_id
-        self.objects_dir = self.root / "objects"
+        self.arena_path = self.root / "arena.bin"
         self.max_bytes = max_bytes
         self.ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
         self._used_bytes = 0
-        self._lru: OrderedDict[str, int] = OrderedDict()
+        self._lru: OrderedDict[str, _Entry] = OrderedDict()
+        self._free: list[tuple[int, int]] = []
+        self._next_offset = 0
+        self._arena_fd: int | None = None
+        self._arena: mmap.mmap | None = None
 
         root_path = Path(root)
         self._prepare_directory(root_path)
         self._gc_stale_store_dirs(root_path)
         self._writer_lock_fd: int | None = self._acquire_writer_lock()
         try:
-            self._prepare_directory(self.objects_dir)
-            self._cleanup_orphan_partials()
-            self._load_lru()
+            self._create_arena()
         except Exception:
             self.close()
             raise
@@ -156,9 +139,9 @@ class LocalSharedMemoryArtifactStore:
             return fd
 
     @staticmethod
-    def _stale_store_entries(
+    def _stale_store_files(
         store_root: Path,
-    ) -> tuple[list[Path], list[Path], float] | None:
+    ) -> tuple[list[Path], float] | None:
         try:
             root_stat = store_root.stat(follow_symlinks=False)
         except FileNotFoundError:
@@ -175,24 +158,23 @@ class LocalSharedMemoryArtifactStore:
         for entry in entries:
             entry_stat = entry.stat(follow_symlinks=False)
             newest_mtime = max(newest_mtime, entry_stat.st_mtime)
-            if entry.name == ".writer.lock":
-                if not stat.S_ISREG(entry_stat.st_mode):
-                    return None
-                continue
-            if entry.name != "objects" or not stat.S_ISDIR(entry_stat.st_mode):
+            if entry.name not in (".writer.lock", "arena.bin"):
                 return None
-            if entry_stat.st_uid != os.getuid():
+            if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_uid != os.getuid():
                 return None
-            for child in os.scandir(entry.path):
-                child_stat = child.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(child_stat.st_mode)
-                    or child_stat.st_uid != os.getuid()
-                ):
-                    return None
-                newest_mtime = max(newest_mtime, child_stat.st_mtime)
-                files.append(Path(child.path))
-        return files, [store_root / "objects"], newest_mtime
+            if entry.name == "arena.bin":
+                files.append(Path(entry.path))
+        return files, newest_mtime
+
+    @staticmethod
+    def _open_lock_file(path: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != os.getuid():
+            os.close(fd)
+            raise ValueError(f"unsafe artifact writer lock: {path}")
+        return fd
 
     def _gc_stale_store_dirs(self, root: Path) -> None:
         now = time.time()
@@ -203,122 +185,121 @@ class LocalSharedMemoryArtifactStore:
                 if not entry.is_dir(follow_symlinks=False):
                     continue
                 store_root = Path(entry.path)
-                scanned = self._stale_store_entries(store_root)
+                scanned = self._stale_store_files(store_root)
                 cutoff = now - self.ttl_seconds
-                if scanned is None or scanned[2] >= cutoff:
+                if scanned is None or scanned[1] >= cutoff:
                     continue
                 lock_path = store_root / ".writer.lock"
-                lock_fd = self._open_regular_file(lock_path)
+                lock_fd = self._open_lock_file(lock_path)
                 try:
                     try:
                         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
                         continue
-                    scanned = self._stale_store_entries(store_root)
-                    if scanned is None or scanned[2] >= cutoff:
+                    scanned = self._stale_store_files(store_root)
+                    if scanned is None or scanned[1] >= cutoff:
                         continue
-                    files, directories, _ = scanned
+                    files, _ = scanned
                     for path in files:
                         path.unlink(missing_ok=True)
-                    for path in directories:
-                        path.rmdir()
                     lock_path.unlink(missing_ok=True)
                     store_root.rmdir()
                     logger.info("Removed expired artifact SHM store %s", store_root)
                 finally:
                     os.close(lock_fd)
-            except (ArtifactCorruptionError, FileNotFoundError, OSError, ValueError):
+            except (FileNotFoundError, OSError, ValueError):
                 logger.debug(
                     "Could not collect stale artifact SHM store %s",
                     entry.path,
                     exc_info=True,
                 )
 
-    def _load_lru(self) -> None:
-        entries: list[tuple[int, str, int]] = []
-        for path in self.objects_dir.glob("*.bin"):
-            path_stat = path.stat(follow_symlinks=False)
-            if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.getuid():
-                raise ArtifactCorruptionError(f"unsafe artifact file: {path}")
-            entries.append((path_stat.st_mtime_ns, path.stem, path_stat.st_size))
-        entries.sort()
-        self._lru = OrderedDict((object_id, size) for _, object_id, size in entries)
-        self._used_bytes = sum(self._lru.values())
+    def _create_arena(self) -> None:
+        for entry in os.scandir(self.root):
+            if entry.name == ".writer.lock":
+                continue
+            entry_stat = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_uid != os.getuid():
+                raise ValueError(f"unsafe artifact file: {entry.path}")
+            Path(entry.path).unlink()
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.arena_path, flags, 0o600)
+        try:
+            os.ftruncate(fd, self.max_bytes)
+            self._arena = mmap.mmap(fd, self.max_bytes, access=mmap.ACCESS_WRITE)
+        except Exception:
+            os.close(fd)
+            self.arena_path.unlink(missing_ok=True)
+            raise
+        self._arena_fd = fd
 
-    def _touch(self, object_id: str) -> None:
-        if object_id in self._lru:
-            self._lru.move_to_end(object_id)
+    def _release(self, entry: _Entry) -> None:
+        self._free.append((entry.offset, entry.size))
+        self._free.sort()
+        merged: list[tuple[int, int]] = []
+        for offset, size in self._free:
+            if merged and merged[-1][0] + merged[-1][1] == offset:
+                previous_offset, previous_size = merged[-1]
+                merged[-1] = (previous_offset, previous_size + size)
+            else:
+                merged.append((offset, size))
+        self._free = merged
 
-    def _evict_to_fit(
-        self,
-        additional_bytes: int,
-        protected: set[str],
-    ) -> None:
-        protected_bytes = sum(self._lru.get(object_id, 0) for object_id in protected)
+    def _evict_to_fit(self, additional_bytes: int, protected: set[str]) -> None:
+        if self._used_bytes + additional_bytes <= self.max_bytes:
+            return
+        protected_bytes = sum(
+            self._lru[object_id].size
+            for object_id in protected
+            if object_id in self._lru
+        )
         if protected_bytes + additional_bytes > self.max_bytes:
             raise ArtifactCapacityError(
                 "artifact SHM cannot retain the requested batch: "
                 f"retained={protected_bytes}, requested={additional_bytes}, "
                 f"limit={self.max_bytes}"
             )
-
         while self._used_bytes + additional_bytes > self.max_bytes:
             victim = next(
                 object_id for object_id in self._lru if object_id not in protected
             )
-            size = self._lru.pop(victim)
-            (self.objects_dir / f"{victim}.bin").unlink(missing_ok=True)
-            self._used_bytes -= size
+            entry = self._lru.pop(victim)
+            self._used_bytes -= entry.size
+            self._release(entry)
 
-    @staticmethod
-    def _write_immutable(path: Path, payload: bytes) -> bool:
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
-        fd: int | None = None
-        try:
-            fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                os.posix_fallocate(fd, 0, len(payload))
-            except OSError as error:
-                if error.errno == errno.ENOSPC:
-                    raise ArtifactCapacityError(
-                        f"artifact SHM could not reserve {len(payload)} bytes"
-                    ) from error
-                if error.errno not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
-                    raise
-                os.ftruncate(fd, len(payload))
-            view = memoryview(payload)
-            offset = 0
-            while offset < len(view):
-                written = os.write(fd, view[offset:])
-                if written <= 0:
-                    raise OSError("short write while publishing artifact object")
-                offset += written
-            view.release()
-            os.close(fd)
-            fd = None
-            try:
-                os.link(temporary, path, follow_symlinks=False)
-                return True
-            except FileExistsError:
-                return False
-        finally:
-            if fd is not None:
-                os.close(fd)
-            temporary.unlink(missing_ok=True)
+    def _compact(self) -> None:
+        assert self._arena is not None
+        cursor = 0
+        for entry in self._lru.values():
+            if entry.offset != cursor:
+                payload = self._arena[entry.offset : entry.offset + entry.size]
+                self._arena[cursor : cursor + entry.size] = payload
+                entry.offset = cursor
+            cursor += entry.size
+        self._free.clear()
+        self._next_offset = cursor
 
-    def _put_one(self, object_id: str, obj: ArtifactObject) -> None:
-        if object_id in self._lru:
-            self._touch(object_id)
-            return
-        path = self._path_from_object_id(object_id)
-        created = self._write_immutable(path, obj.payload)
-        if created:
-            self._used_bytes += len(obj.payload)
-            self._lru[object_id] = len(obj.payload)
+    def _allocate(self, size: int) -> int:
+        for index, (offset, available) in enumerate(self._free):
+            if available < size:
+                continue
+            if available == size:
+                self._free.pop(index)
+            else:
+                self._free[index] = (offset + size, available - size)
+            return offset
+        if self._next_offset + size > self.max_bytes:
+            self._compact()
+        if self._next_offset + size > self.max_bytes:
+            raise ArtifactCapacityError("artifact SHM arena is fragmented")
+        offset = self._next_offset
+        self._next_offset += size
+        return offset
 
     def put(self, objects: list[ArtifactObject]) -> None:
         if not objects:
             return
+        assert self._arena is not None
         with self._lock:
             unique: dict[str, ArtifactObject] = {}
             for obj in objects:
@@ -331,30 +312,47 @@ class LocalSharedMemoryArtifactStore:
             )
             self._evict_to_fit(additional_bytes, protected)
             for object_id, obj in unique.items():
-                self._put_one(object_id, obj)
+                if object_id in self._lru:
+                    self._lru.move_to_end(object_id)
+                    continue
+                offset = self._allocate(len(obj.payload))
+                self._arena[offset : offset + len(obj.payload)] = obj.payload
+                self._lru[object_id] = _Entry(offset, len(obj.payload))
+                self._used_bytes += len(obj.payload)
 
     def get(self, keys: list[str]) -> list[bytes]:
+        assert self._arena is not None
         with self._lock:
+            object_ids = [self._object_id(key) for key in keys]
             try:
-                payloads = self._read(keys)
-            except ArtifactNotFoundError as error:
+                entries = [self._lru[object_id] for object_id in object_ids]
+            except KeyError as error:
                 raise ArtifactNotFoundError(
-                    f"{error}; the object may have been evicted from SHM "
-                    f"(used={self._used_bytes}, limit={self.max_bytes}). "
-                    "Increase artifact_config.max_shm_bytes when a KV cache hit "
-                    "requires it."
+                    "artifact object does not exist; the object may have been "
+                    f"evicted from SHM (used={self._used_bytes}, "
+                    f"limit={self.max_bytes}). Increase "
+                    "artifact_config.max_shm_bytes when a KV cache hit requires it."
                 ) from error
-            for key in keys:
-                self._touch(self._object_id(key))
+            payloads = [
+                self._arena[entry.offset : entry.offset + entry.size]
+                for entry in entries
+            ]
+            for object_id in object_ids:
+                self._lru.move_to_end(object_id)
             return payloads
 
-    def _cleanup_orphan_partials(self) -> None:
-        # The exclusive writer lock proves no partial file is still active.
-        for path in self.objects_dir.glob(".*.partial"):
-            path.unlink(missing_ok=True)
-
     def close(self) -> None:
-        fd = getattr(self, "_writer_lock_fd", None)
-        if fd is not None:
+        arena = self._arena
+        if arena is not None:
+            self._arena = None
+            arena.close()
+        arena_fd = self._arena_fd
+        if arena_fd is not None:
+            self._arena_fd = None
+            os.close(arena_fd)
+            with suppress(FileNotFoundError):
+                os.utime(self.arena_path)
+        lock_fd = self._writer_lock_fd
+        if lock_fd is not None:
             self._writer_lock_fd = None
-            os.close(fd)
+            os.close(lock_fd)

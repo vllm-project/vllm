@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for execution artifacts."""
 
-from typing import Literal
-
 from pydantic import Field
 
 from vllm.config.utils import config
@@ -15,9 +13,6 @@ class ArtifactConfig:
 
     enable_return_routed_experts: bool = False
     """Capture and return routed-experts artifacts."""
-
-    backend: Literal["shm"] = "shm"
-    """Artifact delivery backend."""
 
     shm_dir: str = "/dev/shm/vllm-artifacts"
     """Trusted root for immutable artifact objects."""

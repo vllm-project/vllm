@@ -12,12 +12,16 @@ import numpy as np
 import pytest
 
 from vllm.distributed.artifact_connector.buffer import RoutedExpertsArtifactBuffer
-from vllm.distributed.artifact_connector.connector import ArtifactSchedulerConnector
-from vllm.distributed.artifact_connector.request_core import (
-    RoutedExpertsRequestCore,
-    decode_routed_experts_array,
-    encode_routed_experts_array,
+from vllm.distributed.artifact_connector.connector import (
+    ArtifactConnectorMetadata,
+    ArtifactConnectorOutput,
+    ArtifactRequestMetadata,
+    ArtifactRequestOutput,
+    ArtifactSchedulerConnector,
+)
+from vllm.distributed.artifact_connector.routed_experts import (
     materialize_routed_experts,
+    publish_routed_experts,
     routed_experts_key,
 )
 from vllm.distributed.artifact_connector.shm import (
@@ -31,6 +35,7 @@ from vllm.distributed.artifact_connector.store import (
     ArtifactStoreError,
     BackgroundArtifactStore,
 )
+from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 
@@ -120,76 +125,64 @@ def _make_connector(tmp_path, *, enable_prefix_caching: bool = True):
             tmp_path,
             enable_prefix_caching=enable_prefix_caching,
         ),
-        SimpleNamespace(num_blocks=8),
-        kv_connector=None,
         block_size=_BLOCK_SIZE,
     )
 
 
-@pytest.mark.parametrize(
-    ("num_cpu_blocks", "expected_blocks"),
-    [(None, 3), (2, 3), (10, 10)],
-)
-def test_connector_capacity_covers_largest_kv_tier(
-    tmp_path,
-    num_cpu_blocks,
-    expected_blocks,
-):
-    config = _make_vllm_config(tmp_path, max_shm_bytes=None)
-    kv_connector = None
-    if num_cpu_blocks is not None:
-        kv_connector = Mock()
-        kv_connector.scheduler_manager = SimpleNamespace(num_cpu_blocks=num_cpu_blocks)
-
-    connector = ArtifactSchedulerConnector(
-        config,
-        SimpleNamespace(num_blocks=3),
-        kv_connector=kv_connector,
-        block_size=8,
+def _make_worker(tmp_path, max_num_seqs: int) -> ArtifactWorkerConnector:
+    store = BackgroundArtifactStore(_make_store(tmp_path), max_pending_batches=2)
+    worker = object.__new__(ArtifactWorkerConnector)
+    worker._store = store
+    worker._buffer = RoutedExpertsArtifactBuffer(
+        _DTYPE, _SHAPE, _BLOCK_SIZE, max_num_seqs, max_num_seqs * _BLOCK_SIZE
     )
-
-    assert connector._store._store.max_bytes == expected_blocks * 8 * 3 * 2
-    connector.shutdown()
-
-
-def test_connector_rejects_capacity_below_kv_minimum(tmp_path):
-    with pytest.raises(ValueError, match="gpu_blocks=3"):
-        ArtifactSchedulerConnector(
-            _make_vllm_config(tmp_path, max_shm_bytes=1),
-            SimpleNamespace(num_blocks=3),
-            kv_connector=None,
-            block_size=8,
-        )
+    worker._pending_blocks = {}
+    worker._emit_cursors = {}
+    worker._generation = -1
+    worker._shape_per_token = _SHAPE
+    worker._dtype = _DTYPE
+    worker._pending_requests = {}
+    worker._finished_requests = {}
+    worker._pending_lock = threading.Lock()
+    return worker
 
 
-def test_raw_object_round_trip_and_size_validation():
+def _process_output(worker, metadata, rows, request_ids, num_rejected):
+    worker.begin_step(metadata)
+    return worker.process_output(metadata, rows, request_ids, num_rejected)
+
+
+def test_materialize_rejects_invalid_object_size():
     array = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
-    payload = encode_routed_experts_array(array)
-    decoded = decode_routed_experts_array(
-        payload,
-        shape_per_token=_SHAPE,
-        dtype=_DTYPE,
-    )
-    np.testing.assert_array_equal(decoded, array)
+    payload = array.tobytes()
 
+    store = Mock()
+    store.get.return_value = [payload[:-1]]
     with pytest.raises(ArtifactCorruptionError, match="size"):
-        decode_routed_experts_array(
-            payload[:-1],
+        materialize_routed_experts(
+            store,
+            ["key"],
             shape_per_token=_SHAPE,
             dtype=_DTYPE,
+            rows_per_object=_BLOCK_SIZE,
         )
 
 
 def test_logical_buffer_handles_overlap_and_release():
-    buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,))
-    buffer.capture("request", 4, np.arange(4, 8, dtype=np.int32).reshape(-1, 1))
-    buffer.capture("request", 6, np.array([[60], [70], [80]], dtype=np.uint8))
+    buffer = RoutedExpertsArtifactBuffer(np.dtype("uint8"), (1,), 4, 2, 8)
+    assert (
+        buffer.capture("request", 4, np.arange(4, 7, dtype=np.int32).reshape(-1, 1))
+        == []
+    )
+    completed = buffer.capture(
+        "request", 6, np.array([[60], [70], [80]], dtype=np.uint8)
+    )
 
     np.testing.assert_array_equal(
-        buffer.read("request", 4, 9).ravel(),
-        [4, 5, 60, 70, 80],
+        completed[0][1].ravel(),
+        [4, 5, 60, 70],
     )
-    buffer.release_through("request", 8)
+    buffer.release_block(completed[0][1])
     np.testing.assert_array_equal(buffer.read("request", 8, 9).ravel(), [80])
 
 
@@ -203,19 +196,16 @@ def _make_store(tmp_path, *, max_bytes: int = 1 << 20, instance="instance"):
     )
 
 
-def test_request_core_publishes_full_blocks(tmp_path):
+def test_publish_routed_experts_publishes_full_blocks(tmp_path):
     store = _make_store(tmp_path)
-    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE)
-    core = RoutedExpertsRequestCore(store, buffer)
+    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
-    buffer.capture("request", 0, logical)
-
-    core.commit(
-        request_id="request",
+    blocks = buffer.capture("request", 0, logical)
+    publish_routed_experts(
+        store,
         artifact_namespace="0",
-        block_hashes=hashes,
-        block_start=0,
+        batches=[(hashes, blocks)],
         block_size=_BLOCK_SIZE,
     )
 
@@ -230,9 +220,280 @@ def test_request_core_publishes_full_blocks(tmp_path):
         ),
         logical,
     )
-    with pytest.raises(RuntimeError, match="buffer is missing"):
-        buffer.read("request", 0, 1)
     store.close()
+
+
+def test_worker_data_plane_publishes_blocks_and_reuses_prefix(tmp_path):
+    worker = _make_worker(tmp_path, 2)
+
+    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
+    logical = np.arange(10 * 3 * 2, dtype=np.uint8).reshape(10, 3, 2)
+    first = ArtifactConnectorMetadata(
+        generation=0,
+        block_size=_BLOCK_SIZE,
+        requests=[ArtifactRequestMetadata("first", 0, 8, 0, True, hashes)],
+        finished_requests={},
+    )
+    output = _process_output(worker, first, logical[:8], ["first"], np.array([0]))
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["first"].rows, logical[:8])
+
+    second = ArtifactConnectorMetadata(
+        generation=0,
+        block_size=_BLOCK_SIZE,
+        requests=[ArtifactRequestMetadata("second", 8, 2, 0, True, hashes)],
+        finished_requests={"first": hashes},
+    )
+    output = _process_output(worker, second, logical[8:], ["second"], np.array([0]))
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["second"].rows, logical)
+    worker.close()
+
+
+def test_worker_publishes_entire_batch_before_materializing_prefix(tmp_path):
+    worker = _make_worker(tmp_path, 2)
+    hashes = [b"a" * 32, b"b" * 32]
+    logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
+    metadata = ArtifactConnectorMetadata(
+        generation=0,
+        block_size=_BLOCK_SIZE,
+        requests=[
+            ArtifactRequestMetadata("consumer", 4, 4, 0, True, hashes),
+            ArtifactRequestMetadata("producer", 0, 4, 0, True, hashes),
+        ],
+        finished_requests={},
+    )
+
+    output = _process_output(
+        worker,
+        metadata,
+        np.concatenate((logical[4:], logical[:4])),
+        ["consumer", "producer"],
+        np.array([0, 0]),
+    )
+
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["consumer"].rows, logical)
+    np.testing.assert_array_equal(output.requests["producer"].rows, logical[:4])
+    worker.close()
+
+
+def test_worker_defers_full_block_until_kv_hash_arrives(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 4, 0, True, [])],
+        {},
+    )
+
+    output = _process_output(worker, first, logical[:4], ["request"], np.array([0]))
+
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["request"].rows, logical[:4])
+    assert worker._pending_blocks["request"][0][0] == 0
+
+    block_hash = b"a" * 32
+    second = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 4, 1, 4, True, [block_hash])],
+        {},
+    )
+    output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
+
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["request"].rows, logical[4:])
+    assert "request" not in worker._pending_blocks
+    assert worker._store is not None
+    np.testing.assert_array_equal(
+        materialize_routed_experts(
+            worker._store,
+            [routed_experts_key(block_hash, "0")],
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+            rows_per_object=_BLOCK_SIZE,
+        ),
+        logical[:4],
+    )
+    worker.close()
+
+
+def test_worker_does_not_rematerialize_emitted_rows(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    hashes = [b"a" * 32, b"b" * 32]
+    logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
+
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 4, 0, True, hashes)],
+        {},
+    )
+    output = _process_output(worker, first, logical[:4], ["request"], np.array([0]))
+    assert output is not None
+
+    worker._materialize = Mock(wraps=worker._materialize)
+    second = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        # Async scheduling may build this before the scheduler consumes first.
+        [ArtifactRequestMetadata("request", 4, 4, 0, True, hashes)],
+        {},
+    )
+    output = _process_output(worker, second, logical[4:], ["request"], np.array([0]))
+
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["request"].rows, logical[4:])
+    worker._materialize.assert_not_called()
+    worker.close()
+
+
+def test_worker_keeps_only_chunked_prefill_tail(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    hashes = [b"a" * 32, b"b" * 32]
+    logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
+
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 6, 0, False, hashes)],
+        {},
+    )
+    output = _process_output(worker, first, logical[:6], ["request"], np.array([0]))
+    assert output is not None and not output.requests
+    assert worker._buffer._rows.shape[1] == _BLOCK_SIZE
+
+    second = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 6, 2, 0, True, hashes)],
+        {},
+    )
+    output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
+    assert output is not None
+    np.testing.assert_array_equal(output.requests["request"].rows, logical)
+    worker.close()
+
+
+def test_worker_retains_tail_until_inflight_output_finishes(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker._generation = 0
+    assert worker._buffer is not None
+    rows = np.zeros((2, *_SHAPE), dtype=_DTYPE)
+    worker._buffer.capture("request", 0, rows)
+    worker._pending_requests["request"] = 1
+
+    cleanup = ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {"request": []})
+    worker.begin_step(cleanup)
+    np.testing.assert_array_equal(worker._buffer.read("request", 0, 2), rows)
+
+    inflight = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 2, 1, 0, True, [b"a" * 32])],
+        {},
+    )
+    worker.output_finished(inflight)
+    with pytest.raises(RuntimeError, match="missing request"):
+        worker._buffer.read("request", 0, 2)
+    worker.close()
+
+
+def test_worker_fails_if_request_finishes_before_block_gets_kv_hash(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker._generation = 0
+    worker._pending_blocks["request"] = [
+        (0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))
+    ]
+
+    with pytest.raises(RuntimeError, match="uncommitted artifact blocks"):
+        worker.begin_step(
+            ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {"request": []})
+        )
+    worker._pending_blocks.clear()
+    worker.close()
+
+
+def test_worker_discards_uncommitted_blocks_for_aborted_request(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker._generation = 0
+    worker._pending_blocks["request"] = [
+        (0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))
+    ]
+    assert worker._buffer is not None
+    worker._buffer.capture("request", _BLOCK_SIZE, np.zeros((1, *_SHAPE)))
+
+    worker.begin_step(ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {"request": None}))
+
+    assert "request" not in worker._pending_blocks
+    with pytest.raises(RuntimeError, match="missing request"):
+        worker._buffer.read("request", _BLOCK_SIZE, _BLOCK_SIZE + 1)
+    worker.close()
+
+
+def test_worker_commits_pending_block_with_finished_request_hash(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker._generation = 0
+    logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
+    worker._pending_requests["request"] = 1
+
+    block_hash = b"a" * 32
+    worker.begin_step(
+        ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {"request": [block_hash]})
+    )
+    inflight = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, _BLOCK_SIZE, 0, True, [])],
+        {},
+    )
+    _process_output(worker, inflight, logical, ["request"], np.array([0]))
+    worker.output_finished(inflight)
+
+    assert worker._store is not None
+    np.testing.assert_array_equal(
+        materialize_routed_experts(
+            worker._store,
+            [routed_experts_key(block_hash, "0")],
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+            rows_per_object=_BLOCK_SIZE,
+        ),
+        logical,
+    )
+    worker.close()
+
+
+def test_worker_fails_when_cached_artifact_is_missing(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker._generation = 0
+    metadata = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [
+            ArtifactRequestMetadata(
+                "request",
+                8,
+                1,
+                0,
+                True,
+                [b"a" * 32, b"b" * 32],
+            )
+        ],
+        {},
+    )
+
+    with pytest.raises(ArtifactNotFoundError):
+        _process_output(
+            worker,
+            metadata,
+            np.zeros((1, *_SHAPE), dtype=_DTYPE),
+            ["request"],
+            np.array([0]),
+        )
+    worker.close()
 
 
 def test_store_rejects_oversized_batch_without_partial_write(tmp_path):
@@ -270,8 +531,7 @@ def test_ttl_collects_only_inactive_store(tmp_path):
     stale.close()
     old_time = time.time() - 5
     for path in [
-        *stale.objects_dir.iterdir(),
-        stale.objects_dir,
+        stale.arena_path,
         stale_root / ".writer.lock",
         stale_root,
     ]:
@@ -319,6 +579,8 @@ def _scheduler_request(
     request.request_id = request_id
     request.block_hashes = block_hashes
     request.num_tokens = num_tokens
+    request.num_computed_tokens = num_tokens
+    request.num_in_flight_tokens = 0
     request.num_prompt_tokens = num_tokens
     request.sampling_params = SimpleNamespace(routed_experts_prompt_start=prompt_start)
     return request
@@ -342,145 +604,79 @@ def _step_output(
     return output
 
 
-def _capture(
-    connector: ArtifactSchedulerConnector,
-    request,
-    rows: np.ndarray,
-    *,
-    token_start: int = 0,
-) -> None:
-    connector.capture_step(
-        _step_output([request.request_id], [token_start], [len(rows)]),
-        rows,
-        [request.request_id],
-    )
-
-
-def test_connector_splits_snapshot_by_request(tmp_path):
-    connector = _make_connector(tmp_path)
-    requests = [
-        _scheduler_request("request-a", [b"a" * 32], num_tokens=5),
-        _scheduler_request("request-b", [b"b" * 32], num_tokens=5),
-    ]
-    for request in requests:
-        connector.request_started(
-            request=request, cached_token_end=0, hash_block_size=_BLOCK_SIZE
-        )
-    routing = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
-    connector.capture_step(
-        _step_output([request.request_id for request in requests], [0, 0], [4, 4]),
-        routing,
-        [request.request_id for request in requests],
-    )
-
-    for request in requests:
-        connector.request_progress(
-            request=request, accepted_token_end=4, hash_block_size=_BLOCK_SIZE
-        )
-    np.testing.assert_array_equal(
-        connector.take_output(
-            request=requests[0], token_end=4, hash_block_size=_BLOCK_SIZE
-        ),
-        routing[:4],
-    )
-    np.testing.assert_array_equal(
-        connector.take_output(
-            request=requests[1], token_end=4, hash_block_size=_BLOCK_SIZE
-        ),
-        routing[4:],
-    )
-    for request in requests:
-        connector.request_finished(request.request_id)
-    connector.shutdown()
-
-
-def test_connector_reuses_cached_prefix_and_returns_suffix(tmp_path):
-    connector = _make_connector(tmp_path)
-    hashes = [b"a" * 32, b"b" * 32, b"c" * 32]
-    logical = np.arange(10 * 3 * 2, dtype=np.uint8).reshape(10, 3, 2)
-    first = _scheduler_request("first", hashes, num_tokens=9)
-    connector.request_started(
-        request=first, cached_token_end=0, hash_block_size=_BLOCK_SIZE
-    )
-    _capture(connector, first, logical[:8])
-    connector.request_progress(
-        request=first, accepted_token_end=8, hash_block_size=_BLOCK_SIZE
-    )
-    connector.take_output(request=first, token_end=8, hash_block_size=_BLOCK_SIZE)
-    connector.request_finished(first.request_id)
-
-    second = _scheduler_request("second", hashes, num_tokens=11)
-    connector.request_started(
-        request=second, cached_token_end=8, hash_block_size=_BLOCK_SIZE
-    )
-    _capture(connector, second, logical[8:10], token_start=8)
-    np.testing.assert_array_equal(
-        connector.take_output(
-            request=second, token_end=10, hash_block_size=_BLOCK_SIZE
-        ),
-        logical,
-    )
-    connector.request_finished(second.request_id)
-    connector.shutdown()
-
-
-def test_connector_private_keys_without_prefix_cache(tmp_path):
-    connector = _make_connector(tmp_path, enable_prefix_caching=False)
-    logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-
-    for request_id in ("first", "second"):
-        request = _scheduler_request(request_id, [], num_tokens=5)
-        connector.request_started(
-            request=request, cached_token_end=0, hash_block_size=_BLOCK_SIZE
-        )
-        _capture(connector, request, logical)
-        connector.request_progress(
-            request=request, accepted_token_end=4, hash_block_size=_BLOCK_SIZE
-        )
-        np.testing.assert_array_equal(
-            connector.take_output(
-                request=request, token_end=4, hash_block_size=_BLOCK_SIZE
-            ),
-            logical,
-        )
-        connector.request_finished(request_id)
-
-    connector.shutdown()
-    assert len(connector._store._store._lru) == 2
-
-
-def test_cached_kv_with_missing_artifact_fails_at_get(tmp_path):
+def test_scheduler_connector_builds_worker_metadata_and_forwards_output(tmp_path):
     connector = _make_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
-    connector.request_started(
-        request=request, cached_token_end=4, hash_block_size=_BLOCK_SIZE
+    connector.request_started(request)
+    scheduler_output = _step_output([request.request_id], [0], [4])
+
+    metadata = connector.build_connector_meta(
+        scheduler_output, {request.request_id: request}
     )
 
-    with pytest.raises(ArtifactNotFoundError):
-        connector.take_output(request=request, token_end=4, hash_block_size=_BLOCK_SIZE)
-    connector.shutdown()
+    assert metadata.generation == 0
+    assert metadata.block_size == _BLOCK_SIZE
+    assert metadata.requests[0].token_start == 0
+    assert list(metadata.requests[0].block_hashes) == [b"a" * 32]
+
+    routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
+    output = ArtifactConnectorOutput({"request": ArtifactRequestOutput(0, routing)})
+    np.testing.assert_array_equal(connector.take_output(request, True, output), routing)
 
 
-def test_reset_changes_namespace_and_preserves_emit_cursor(tmp_path):
+def test_scheduler_connector_sends_final_block_hashes(tmp_path):
+    connector = _make_connector(tmp_path)
+    block_hashes = [b"a" * 32]
+    request = _scheduler_request("request", block_hashes)
+    connector.request_started(request)
+    connector.request_finished(request)
+    scheduler_output = _step_output([], [], [])
+    scheduler_output.finished_req_ids = {request.request_id}
+
+    metadata = connector.build_connector_meta(scheduler_output, {})
+
+    assert list(metadata.finished_requests[request.request_id]) == block_hashes
+
+
+def test_scheduler_connector_hash_snapshots_are_self_contained(tmp_path):
+    connector = _make_connector(tmp_path)
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=8)
+    connector.request_started(request)
+    scheduler_output = _step_output([request.request_id], [0], [4])
+
+    first = connector.build_connector_meta(
+        scheduler_output, {request.request_id: request}
+    )
+    request.block_hashes.append(b"b" * 32)
+    second = connector.build_connector_meta(
+        scheduler_output, {request.request_id: request}
+    )
+
+    assert list(first.requests[0].block_hashes) == [b"a" * 32]
+    assert list(second.requests[0].block_hashes) == [b"a" * 32, b"b" * 32]
+
+
+def test_scheduler_connector_reset_preserves_emit_cursor(tmp_path):
     connector = _make_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
-    connector.request_started(
-        request=request, cached_token_end=0, hash_block_size=_BLOCK_SIZE
+    connector.request_started(request)
+    routing = np.zeros((3, *_SHAPE), dtype=_DTYPE)
+    request.num_computed_tokens = 3
+    connector.take_output(
+        request,
+        True,
+        ArtifactConnectorOutput({"request": ArtifactRequestOutput(0, routing)}),
     )
-    connector._state(request.request_id).emit_cursor = 3
-    old_namespace = connector._artifact_namespace
 
     connector.reset()
-    connector.request_started(
-        request=request, cached_token_end=0, hash_block_size=_BLOCK_SIZE
+    connector.request_started(request)
+    scheduler_output = _step_output([request.request_id], [3], [1])
+    metadata = connector.build_connector_meta(
+        scheduler_output, {request.request_id: request}
     )
 
-    assert connector._state(request.request_id).emit_cursor == 3
-    assert connector._artifact_namespace != old_namespace
-    assert routed_experts_key(b"a" * 32, connector._artifact_namespace) != (
-        routed_experts_key(b"a" * 32, old_namespace)
-    )
-    connector.shutdown()
+    assert metadata.generation == 1
+    assert metadata.requests[0].emit_start == 3
 
 
 @pytest.mark.parametrize("reset_successful", [False, True])

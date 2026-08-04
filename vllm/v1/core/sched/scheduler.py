@@ -340,9 +340,7 @@ class Scheduler(SchedulerInterface):
         self.artifact_connector = (
             ArtifactSchedulerConnector(
                 vllm_config,
-                kv_cache_config,
-                kv_connector=self.connector,
-                block_size=self.block_size,
+                block_size=self.hash_block_size,
             )
             if vllm_config.artifact_config.enabled
             else None
@@ -1048,11 +1046,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 if self.artifact_connector is not None:
-                    self.artifact_connector.request_started(
-                        request=request,
-                        cached_token_end=num_computed_tokens,
-                        hash_block_size=self.hash_block_size,
-                    )
+                    self.artifact_connector.request_started(request)
 
                 self.running.append(request)
                 if self.log_stats:
@@ -1237,6 +1231,13 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+        if self.artifact_connector is not None:
+            scheduler_output.artifact_connector_metadata = (
+                self.artifact_connector.build_connector_meta(
+                    scheduler_output, self.requests
+                )
+            )
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
@@ -1690,22 +1691,6 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # Persist #50721's stable per-step snapshot before handling stops.
-        if self.artifact_connector is not None:
-            stale_request_ids = {
-                request_id
-                for request_id in model_runner_output.req_ids
-                if (request := self.requests.get(request_id)) is not None
-                and request.drop_stale_output
-                and request.num_stale_output_tokens > 0
-            }
-            self.artifact_connector.capture_step(
-                scheduler_output,
-                model_runner_output.routed_experts,
-                model_runner_output.req_ids,
-                stale_request_ids,
-            )
-
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1827,22 +1812,11 @@ class Scheduler(SchedulerInterface):
                 new_token_ids or pooler_output is not None or stopped
             )
             if self.artifact_connector is not None:
-                accepted_token_end = min(
-                    request.num_tokens - 1,
-                    request.num_computed_tokens - request.num_in_flight_tokens,
+                routed_experts = self.artifact_connector.take_output(
+                    request,
+                    should_emit_output,
+                    model_runner_output.artifact_connector_output,
                 )
-                if accepted_token_end > 0:
-                    if should_emit_output:
-                        routed_experts = self.artifact_connector.take_output(
-                            request=request,
-                            token_end=accepted_token_end,
-                            hash_block_size=self.hash_block_size,
-                        )
-                    self.artifact_connector.request_progress(
-                        request=request,
-                        accepted_token_end=accepted_token_end,
-                        hash_block_size=self.hash_block_size,
-                    )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
                 if prefill_stats is not None:
@@ -1861,7 +1835,7 @@ class Scheduler(SchedulerInterface):
                         if finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
                             self.artifact_connector.request_aborted(request.request_id)
                         else:
-                            self.artifact_connector.request_finished(request.request_id)
+                            self.artifact_connector.request_finished(request)
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
@@ -2526,9 +2500,6 @@ class Scheduler(SchedulerInterface):
 
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
-
-        if self.artifact_connector is not None:
-            self.artifact_connector.shutdown()
 
         logger.debug_once("[shutdown] Scheduler: complete")
 

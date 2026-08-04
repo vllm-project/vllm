@@ -31,6 +31,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.artifact_connector.connector import ArtifactConnectorMetadata
 from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -289,9 +290,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
 
-    def init_artifact_connector(self) -> None:
+    def init_artifact_connector(self, kv_cache_config: KVCacheConfig) -> None:
         self.artifact_connector = ArtifactWorkerConnector(
             model=self.model,
+            kv_cache_config=kv_cache_config,
             max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
         )
@@ -1234,6 +1236,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self.artifact_connector is not None:
+                self.artifact_connector.begin_step(
+                    scheduler_output.artifact_connector_metadata
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1462,6 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
             routed_experts=routed_experts,
+            artifact_metadata=scheduler_output.artifact_connector_metadata,
         )
 
         if not self.is_last_pp_rank:
@@ -1485,6 +1492,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         routed_experts = self.execute_model_state.routed_experts
+        artifact_metadata = self.execute_model_state.artifact_metadata
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1542,6 +1550,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
+        pending_artifact_output = (
+            self.artifact_connector.prepare_output(
+                artifact_metadata,
+                routed_experts,
+                model_runner_output.req_ids,
+                num_rejected,
+            )
+            if self.artifact_connector is not None
+            else None
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -1550,7 +1568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
-            routed_experts=routed_experts,
+            pending_artifact_output=pending_artifact_output,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1673,6 +1691,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.artifact_connector is not None:
+            self.artifact_connector.close()
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
@@ -1732,6 +1752,7 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
     routed_experts: torch.Tensor | None
+    artifact_metadata: ArtifactConnectorMetadata | None
 
 
 def sort_batch_req_ids(

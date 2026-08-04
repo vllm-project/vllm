@@ -259,12 +259,12 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_mrv2_async_output_returns_existing_routed_experts_field():
+def test_mrv2_async_output_finishes_pending_artifact_output():
+    from vllm.distributed.artifact_connector.connector import ArtifactConnectorOutput
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.worker.gpu.async_utils import AsyncOutput
     from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
-    routed_experts = torch.arange(6, dtype=torch.int32, device="cuda").reshape(3, 1, 2)
     num_sampled = torch.tensor([1], dtype=torch.int32, device="cuda")
     sampler_output = SamplerOutput(
         sampled_token_ids=torch.tensor([[1]], device="cuda"),
@@ -273,17 +273,21 @@ def test_mrv2_async_output_returns_existing_routed_experts_field():
         num_sampled=num_sampled,
         num_rejected=torch.tensor([0], dtype=torch.int32, device="cuda"),
     )
+    pending = Mock()
+    artifact_output = ArtifactConnectorOutput({})
+    pending.finish.return_value = artifact_output
     output = AsyncOutput(
         model_runner_output=ModelRunnerOutput(req_ids=["req"], req_id_to_index={}),
         sampler_output=sampler_output,
         num_sampled_tokens=num_sampled,
         main_stream=torch.cuda.current_stream(),
         copy_stream=torch.cuda.Stream(),
-        routed_experts=routed_experts,
+        pending_artifact_output=pending,
     ).get_output()
 
-    assert output.routed_experts is not None
-    assert output.routed_experts[:, 0, 0].tolist() == [0, 2, 4]
+    pending.copy_to_cpu.assert_called_once_with()
+    pending.finish.assert_called_once_with()
+    assert output.artifact_connector_output is artifact_output
 
 
 def test_model_runner_initializes_capture(monkeypatch):
@@ -298,11 +302,13 @@ def test_model_runner_initializes_capture(monkeypatch):
     runner.max_num_tokens = 32
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=0))
     runner.model = Mock()
+    kv_cache_config = Mock()
 
-    runner.init_artifact_connector()
+    runner.init_artifact_connector(kv_cache_config)
 
     constructor.assert_called_once_with(
         model=runner.model,
+        kv_cache_config=kv_cache_config,
         max_num_batched_tokens=32,
         vllm_config=runner.vllm_config,
     )
@@ -319,6 +325,11 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
     bind = Mock()
     monkeypatch.setattr(artifact_worker, "RoutedExpertsCapturer", constructor)
     monkeypatch.setattr(artifact_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(
+        artifact_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=False),
+    )
 
     config = SimpleNamespace(
         artifact_config=SimpleNamespace(enable_return_routed_experts=True)
@@ -327,6 +338,7 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
     connector = artifact_worker.ArtifactWorkerConnector(
         vllm_config=config,
         model=model,
+        kv_cache_config=SimpleNamespace(),
         max_num_batched_tokens=32,
     )
 

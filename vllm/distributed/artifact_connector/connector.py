@@ -1,120 +1,109 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scheduler-side connector for routed-experts execution artifacts."""
+"""Scheduler-side control plane for execution artifacts."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, overload
 
 import numpy as np
 
-from vllm.distributed.artifact_connector.buffer import RoutedExpertsArtifactBuffer
-from vllm.distributed.artifact_connector.request_core import (
-    RoutedExpertsRequestCore,
-    get_routing_shape_and_dtype,
-    materialize_routed_experts,
-    routed_experts_key,
-)
-from vllm.distributed.artifact_connector.shm import (
-    LocalSharedMemoryArtifactStore,
-)
-from vllm.distributed.artifact_connector.store import BackgroundArtifactStore
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
 @dataclass
+class PackedBlockHashes(Sequence[bytes]):
+    """Contiguous, self-contained block hashes for scheduler-worker IPC."""
+
+    data: bytes
+    item_size: int
+
+    def __len__(self) -> int:
+        return len(self.data) // self.item_size
+
+    @overload
+    def __getitem__(self, index: int) -> bytes: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[bytes]: ...
+
+    def __getitem__(self, index: int | slice) -> bytes | Sequence[bytes]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            if step == 1:
+                return PackedBlockHashes(
+                    self.data[start * self.item_size : stop * self.item_size],
+                    self.item_size,
+                )
+            return [self[i] for i in range(start, stop, step)]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        start = index * self.item_size
+        return self.data[start : start + self.item_size]
+
+    def __iter__(self) -> Iterator[bytes]:
+        for start in range(0, len(self.data), self.item_size):
+            yield self.data[start : start + self.item_size]
+
+
+@dataclass
+class ArtifactRequestMetadata:
+    request_id: str
+    token_start: int
+    num_tokens: int
+    emit_start: int
+    emit_output: bool
+    block_hashes: Sequence[bytes]
+
+
+@dataclass
+class ArtifactConnectorMetadata:
+    generation: int
+    block_size: int
+    requests: list[ArtifactRequestMetadata]
+    finished_requests: dict[str, Sequence[bytes] | None]
+
+
+@dataclass
+class ArtifactRequestOutput:
+    token_start: int
+    rows: np.ndarray
+
+
+@dataclass
+class ArtifactConnectorOutput:
+    requests: dict[str, ArtifactRequestOutput]
+
+
+@dataclass
 class _RequestState:
-    next_full_end: int
     emit_cursor: int
+    packed_hashes: bytes = b""
+    num_hashes: int = 0
+    hash_size: int = 0
 
 
 class ArtifactSchedulerConnector:
-    """Persist worker-captured R3 under logical KV-cache block hashes."""
+    """Build worker metadata without owning artifact payloads or stores."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        *,
-        kv_connector: KVConnectorBase_V1 | None,
-        block_size: int,
-    ) -> None:
-        config = vllm_config.artifact_config
-        parallel_config = vllm_config.parallel_config
-        shape_per_token, dtype = get_routing_shape_and_dtype(vllm_config)
-        self._shape_per_token = shape_per_token
-        self._dtype: np.dtype[Any] = np.dtype(dtype)
-
-        num_cpu_blocks = getattr(
-            getattr(kv_connector, "scheduler_manager", None),
-            "num_cpu_blocks",
-            0,
-        )
-        num_kv_blocks = max(kv_cache_config.num_blocks, num_cpu_blocks)
-        block_nbytes = block_size * int(np.prod(shape_per_token)) * self._dtype.itemsize
-        minimum_shm_bytes = num_kv_blocks * block_nbytes
-        max_shm_bytes = config.max_shm_bytes
-        if max_shm_bytes is None:
-            max_shm_bytes = minimum_shm_bytes
-        elif max_shm_bytes < minimum_shm_bytes:
-            raise ValueError(
-                "artifact_config.max_shm_bytes is smaller than required by the "
-                "KV cache capacity: "
-                f"configured={max_shm_bytes}, minimum={minimum_shm_bytes}, "
-                f"gpu_blocks={kv_cache_config.num_blocks}, "
-                f"cpu_blocks={num_cpu_blocks}, "
-                f"r3_bytes_per_block={block_nbytes}"
-            )
-        self._store = BackgroundArtifactStore(
-            LocalSharedMemoryArtifactStore(
-                config.shm_dir,
-                vllm_config.instance_id,
-                parallel_config.data_parallel_rank,
-                max_bytes=max_shm_bytes,
-                ttl_seconds=config.shm_ttl_seconds,
-            ),
-            max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
-        )
-        self._buffer = RoutedExpertsArtifactBuffer(
-            self._dtype, shape_per_token, block_size
-        )
-        self._request_core = RoutedExpertsRequestCore(self._store, self._buffer)
+    def __init__(self, vllm_config: VllmConfig, *, block_size: int) -> None:
+        self._block_size = block_size
+        self._reuse_kv_hashes = vllm_config.cache_config.enable_prefix_caching
         self._states: dict[str, _RequestState] = {}
         self._resume_emit_cursors: dict[str, int] = {}
-        self._step_rows: dict[str, tuple[int, np.ndarray]] = {}
-        self._kv_cache_generation = 0
-        self._reuse_kv_hashes = vllm_config.cache_config.enable_prefix_caching
+        self._finished_requests: dict[str, Sequence[bytes] | None] = {}
+        self._generation = 0
 
-    def _state(self, request_id: str) -> _RequestState:
-        try:
-            return self._states[request_id]
-        except KeyError as error:
-            raise RuntimeError(
-                f"artifact request has not started: {request_id}"
-            ) from error
-
-    def request_started(
-        self,
-        *,
-        request: Request,
-        cached_token_end: int,
-        hash_block_size: int,
-    ) -> None:
+    def request_started(self, request: Request) -> None:
         if request.request_id in self._states:
             return
-        if cached_token_end % hash_block_size:
-            raise RuntimeError(
-                "cached KV boundary is not aligned with the artifact hash block: "
-                f"request={request.request_id}, cached={cached_token_end}, "
-                f"block_size={hash_block_size}"
-            )
         sampling_params = request.sampling_params
         prompt_start = (
             sampling_params.routed_experts_prompt_start
@@ -122,57 +111,16 @@ class ArtifactSchedulerConnector:
             else 0
         )
         if prompt_start < 0 or prompt_start >= request.num_prompt_tokens:
-            raise ValueError(
-                "routed_experts_prompt_start "
-                f"({prompt_start}) must be >= 0 and < num_prompt_tokens "
-                f"({request.num_prompt_tokens})"
-            )
-        emit_cursor = self._resume_emit_cursors.pop(
-            request.request_id,
-            prompt_start,
-        )
-        if not prompt_start <= emit_cursor <= request.num_tokens - 1:
-            raise RuntimeError(
-                "invalid artifact resume cursor: "
-                f"request={request.request_id}, cursor={emit_cursor}, "
-                f"range=[{prompt_start}, {request.num_tokens - 1}]"
-            )
+            raise ValueError("routed_experts_prompt_start is outside the prompt")
         self._states[request.request_id] = _RequestState(
-            next_full_end=cached_token_end,
-            emit_cursor=emit_cursor,
+            self._resume_emit_cursors.pop(request.request_id, prompt_start),
         )
 
-    def _block_hashes(
-        self,
-        request: Request,
-        block_end: int,
-    ) -> list[bytes]:
-        if self._reuse_kv_hashes:
-            block_hashes = request.block_hashes[:block_end]
-            if len(block_hashes) != block_end:
-                raise RuntimeError(
-                    "missing KV-compatible hashes for completed artifact blocks"
-                )
-            return list(block_hashes)
-
-        return [
-            f"{request.request_id}:{block_index}".encode()
-            for block_index in range(block_end)
-        ]
-
-    def capture_step(
+    def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
-        routed_experts: np.ndarray | None,
-        request_ids: list[str],
-        stale_request_ids: set[str] | None = None,
-    ) -> None:
-        """Split #50721's stable per-step R3 snapshot by logical request."""
-        if routed_experts is None:
-            if scheduler_output.total_num_scheduled_tokens:
-                raise RuntimeError("artifact capture output is missing")
-            return
-
+        requests: dict[str, Request],
+    ) -> ArtifactConnectorMetadata:
         token_starts = {
             request.req_id: request.num_computed_tokens
             for request in scheduler_output.scheduled_new_reqs
@@ -181,128 +129,104 @@ class ArtifactSchedulerConnector:
         token_starts.update(
             zip(cached.req_ids, cached.num_computed_tokens, strict=True)
         )
-
-        stale_request_ids = stale_request_ids or set()
-        self._step_rows.clear()
-        offset = 0
-        for request_id in request_ids:
-            num_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            end = offset + num_tokens
-            try:
-                token_start = token_starts[request_id]
-            except KeyError as error:
-                raise RuntimeError(
-                    f"artifact token start is missing for request {request_id}"
-                ) from error
-            if request_id in self._states and request_id not in stale_request_ids:
-                request_rows = routed_experts[offset:end]
-                self._buffer.capture(
-                    request_id,
-                    token_start,
-                    request_rows,
+        metadata = []
+        for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            state = self._states.get(request_id)
+            request = requests.get(request_id)
+            if state is None or request is None:
+                continue
+            block_hashes = (
+                self._pack_block_hashes(state, request.block_hashes)
+                if self._reuse_kv_hashes
+                else [
+                    f"{request_id}:{i}".encode()
+                    for i in range(
+                        (token_starts[request_id] + num_tokens) // self._block_size
+                    )
+                ]
+            )
+            metadata.append(
+                ArtifactRequestMetadata(
+                    request_id=request_id,
+                    token_start=token_starts[request_id],
+                    num_tokens=num_tokens,
+                    emit_start=state.emit_cursor,
+                    emit_output=(
+                        token_starts[request_id] + num_tokens
+                        >= request.num_prompt_tokens
+                    ),
+                    block_hashes=block_hashes,
                 )
-                self._step_rows[request_id] = (token_start, request_rows)
-            offset = end
-        if offset != len(routed_experts):
-            raise RuntimeError("artifact capture output has an invalid row count")
-
-    def request_progress(
-        self,
-        *,
-        request: Request,
-        accepted_token_end: int,
-        hash_block_size: int,
-    ) -> None:
-        state = self._state(request.request_id)
-        full_end = accepted_token_end // hash_block_size * hash_block_size
-        if full_end <= state.next_full_end:
-            return
-        first_block = state.next_full_end // hash_block_size
-        last_block = full_end // hash_block_size
-        block_hashes = self._block_hashes(request, last_block)[first_block:]
-        self._request_core.commit(
-            request_id=request.request_id,
-            artifact_namespace=self._artifact_namespace,
-            block_hashes=block_hashes,
-            block_start=state.next_full_end,
-            block_size=hash_block_size,
+            )
+        finished_requests = {
+            request_id: self._finished_requests.pop(request_id, None)
+            for request_id in scheduler_output.finished_req_ids
+        }
+        return ArtifactConnectorMetadata(
+            self._generation,
+            self._block_size,
+            metadata,
+            finished_requests,
         )
-        state.next_full_end = full_end
 
     def take_output(
         self,
-        *,
         request: Request,
-        token_end: int,
-        hash_block_size: int,
+        emit_output: bool,
+        output: ArtifactConnectorOutput | None,
     ) -> np.ndarray | None:
-        """Return the next inline R3 delta for the SHM backend."""
-        state = self._state(request.request_id)
-        token_start = state.emit_cursor
-        if token_end <= token_start:
+        if not emit_output:
             return None
-
-        step = self._step_rows.get(request.request_id)
-        if step is not None:
-            step_start, step_rows = step
-            if step_start <= token_start and token_end <= step_start + len(step_rows):
-                state.emit_cursor = token_end
-                return step_rows[token_start - step_start : token_end - step_start]
-
-        chunks: list[np.ndarray] = []
-        stored_end = min(state.next_full_end, token_end)
-        if token_start < stored_end:
-            first_block = token_start // hash_block_size
-            last_block = stored_end // hash_block_size
-            block_hashes = self._block_hashes(request, last_block)[first_block:]
-            object_start = first_block * hash_block_size
-            stored = materialize_routed_experts(
-                self._store,
-                [
-                    routed_experts_key(block_hash, self._artifact_namespace)
-                    for block_hash in block_hashes
-                ],
-                shape_per_token=self._shape_per_token,
-                dtype=self._dtype,
-                rows_per_object=hash_block_size,
-            )
-            chunks.append(stored[token_start - object_start :])
-
-        buffer_start = max(token_start, stored_end)
-        if buffer_start < token_end:
-            chunks.append(
-                self._buffer.read(request.request_id, buffer_start, token_end)
-            )
-
-        output = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
-        if len(output) != token_end - token_start:
-            raise RuntimeError("inline artifact output has an invalid row count")
+        token_end = min(
+            request.num_tokens - 1,
+            request.num_computed_tokens - request.num_in_flight_tokens,
+        )
+        if token_end <= 0:
+            return None
+        request_id = request.request_id
+        state = self._states[request_id]
+        if token_end <= state.emit_cursor:
+            return None
+        if output is None or request_id not in output.requests:
+            raise RuntimeError(f"artifact worker output is missing {request_id}")
+        request_output = output.requests[request_id]
+        local_start = state.emit_cursor - request_output.token_start
+        local_end = token_end - request_output.token_start
+        if local_start < 0 or local_end > len(request_output.rows):
+            raise RuntimeError("artifact worker output has an invalid token range")
         state.emit_cursor = token_end
-        return output
+        return request_output.rows[local_start:local_end]
 
-    def request_finished(
-        self,
-        request_id: str,
-    ) -> None:
-        self._states.pop(request_id)
-        self._buffer.discard(request_id)
-
-    def request_aborted(self, request_id: str) -> None:
+    def request_finished(self, request: Request) -> None:
+        request_id = request.request_id
+        state = self._states[request_id]
+        self._finished_requests[request_id] = self._pack_block_hashes(
+            state, request.block_hashes
+        )
         self._states.pop(request_id, None)
         self._resume_emit_cursors.pop(request_id, None)
-        self._buffer.discard(request_id)
 
-    @property
-    def _artifact_namespace(self) -> str:
-        return str(self._kv_cache_generation)
+    @staticmethod
+    def _pack_block_hashes(
+        state: _RequestState, block_hashes: Sequence[bytes]
+    ) -> PackedBlockHashes:
+        if state.num_hashes < len(block_hashes):
+            new_hashes = block_hashes[state.num_hashes :]
+            if state.hash_size == 0:
+                state.hash_size = len(new_hashes[0])
+            if any(len(block_hash) != state.hash_size for block_hash in new_hashes):
+                raise RuntimeError("KV block hashes have inconsistent sizes")
+            state.packed_hashes += b"".join(new_hashes)
+            state.num_hashes = len(block_hashes)
+        return PackedBlockHashes(state.packed_hashes, state.hash_size or 1)
+
+    def request_aborted(self, request_id: str) -> None:
+        self._finished_requests[request_id] = None
+        self._states.pop(request_id, None)
+        self._resume_emit_cursors.pop(request_id, None)
 
     def reset(self) -> None:
-        """Reset artifact state after a successful KV cache reset."""
         for request_id, state in self._states.items():
             self._resume_emit_cursors[request_id] = state.emit_cursor
-            self._buffer.discard(request_id)
         self._states.clear()
-        self._kv_cache_generation += 1
-
-    def shutdown(self) -> None:
-        self._store.close()
+        self._generation += 1

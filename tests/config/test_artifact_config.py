@@ -49,12 +49,11 @@ def _config(
     )
 
 
-def test_artifact_config_defaults_to_shm():
+def test_artifact_config_defaults():
     config = ArtifactConfig()
 
     assert not config.enabled
     assert not config.enable_return_routed_experts
-    assert config.backend == "shm"
     assert config.shm_dir == "/dev/shm/vllm-artifacts"
     assert config.max_shm_bytes is None
 

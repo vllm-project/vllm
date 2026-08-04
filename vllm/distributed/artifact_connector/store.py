@@ -72,7 +72,7 @@ class BackgroundArtifactStore:
             try:
                 if objects is None:
                     return
-                pending = list(objects)
+                pending = objects
                 while True:
                     try:
                         next_objects = self._queue.get_nowait()
@@ -114,7 +114,6 @@ class BackgroundArtifactStore:
         self._closed = True
         self._queue.join()
         self._queue.put(None)
-        self._queue.join()
         self._thread.join()
         try:
             self._raise_if_failed()
