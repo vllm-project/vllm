@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 import unittest
+import urllib.error
 from typing import Any
+from unittest.mock import patch
 
 from run_ci_command import (
+    CI_AUTHORIZED_COMMENT_MARKER,
     COMMAND_RETRY_FAILED,
     COMMAND_RUN_CI,
     RETRY_STATES,
     BuildkiteClient,
+    HttpTransport,
     authorize,
     create_build_payload,
     has_trusted_approval,
     is_active_build,
     is_build_for_pr,
+    notify_authorized,
     parse_command,
     parse_trusted_users,
     run,
@@ -63,8 +69,9 @@ class FakeGitHub:
         pr: dict[str, Any] | None = None,
         review_decision: str = "REVIEW_REQUIRED",
         reviews: list[dict[str, Any]] | None = None,
+        comments: list[str] | None = None,
     ) -> None:
-        self.comments: list[str] = []
+        self.comments = comments or []
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -83,6 +90,15 @@ class FakeGitHub:
 
     def list_reviews(self, number: int) -> list[dict[str, Any]]:
         return self.reviews
+
+    def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "body": body,
+                "user": {"login": "github-actions[bot]"},
+            }
+            for body in self.comments
+        ]
 
     def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
         return []
@@ -148,7 +164,109 @@ class FakeTransport:
         return self.response
 
 
+class FakeHttpResponse:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.response).encode()
+
+
 class RunCiCommandTest(unittest.TestCase):
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_retries_buildkite_rate_limit(self, urlopen: Any) -> None:
+        body = {
+            "message": "Please wait 9 seconds before making more requests.",
+            "reset": 9,
+            "scope": "rest",
+        }
+        rate_limit_error = urllib.error.HTTPError(
+            "https://api.buildkite.com/v2/builds",
+            429,
+            "Too Many Requests",
+            {
+                "RateLimit-Limit": "400",
+                "RateLimit-Remaining": "0",
+                "RateLimit-Reset": "9",
+            },
+            io.BytesIO(json.dumps(body).encode()),
+        )
+        urlopen.side_effect = [rate_limit_error, FakeHttpResponse({"ok": True})]
+        delays: list[float] = []
+
+        response = HttpTransport(
+            jitter=lambda: 2.5,
+            sleep=delays.append,
+        ).request("https://api.buildkite.com/v2/builds")
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(delays, [11.5])
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_retries_rate_limit_three_times(self, urlopen: Any) -> None:
+        def rate_limit_error() -> urllib.error.HTTPError:
+            body = {
+                "message": "Please wait 9 seconds before making more requests.",
+                "reset": 9,
+                "scope": "rest",
+            }
+            return urllib.error.HTTPError(
+                "https://api.buildkite.com/v2/builds",
+                429,
+                "Too Many Requests",
+                {
+                    "RateLimit-Limit": "400",
+                    "RateLimit-Remaining": "0",
+                    "RateLimit-Reset": "9",
+                },
+                io.BytesIO(json.dumps(body).encode()),
+            )
+
+        urlopen.side_effect = [rate_limit_error() for _ in range(4)]
+        delays: list[float] = []
+
+        with self.assertRaisesRegex(RuntimeError, "API returned 429"):
+            HttpTransport(
+                jitter=lambda: 2,
+                sleep=delays.append,
+            ).request("https://api.buildkite.com/v2/builds")
+
+        self.assertEqual(delays, [11, 11, 11])
+        self.assertEqual(urlopen.call_count, 4)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_does_not_retry_permission_error(self, urlopen: Any) -> None:
+        permission_error = urllib.error.HTTPError(
+            "https://api.github.com/repos/vllm-project/vllm/issues/1/comments",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"message":"Resource not accessible by integration"}'),
+        )
+        urlopen.side_effect = permission_error
+        delays: list[float] = []
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Resource not accessible by integration",
+        ):
+            HttpTransport(
+                jitter=lambda: 2,
+                sleep=delays.append,
+            ).request(
+                "https://api.github.com/repos/vllm-project/vllm/issues/1/comments"
+            )
+
+        self.assertEqual(delays, [])
+        self.assertEqual(urlopen.call_count, 1)
+
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         self.assertEqual(parse_command(COMMAND_RUN_CI), COMMAND_RUN_CI)
         self.assertEqual(
@@ -303,7 +421,7 @@ class RunCiCommandTest(unittest.TestCase):
             },
         )
 
-    def test_ci_run_dispatches_build_with_current_pr_metadata(self) -> None:
+    def test_write_reviewer_runs_ci_without_delegation(self) -> None:
         github = FakeGitHub()
         buildkite = FakeBuildkite([[], []])
         run(make_event(COMMAND_RUN_CI), github, buildkite)
@@ -314,6 +432,7 @@ class RunCiCommandTest(unittest.TestCase):
             "PR #42 /ci run by @reviewer",
         )
         self.assertEqual(github.reactions, ["eyes", "rocket"])
+        self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
     def test_unapproved_authors_are_denied_without_buildkite(self) -> None:
@@ -326,10 +445,171 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
 
         self.assertEqual(buildkite.list_calls, [])
-        self.assertEqual(github.reactions, ["eyes", "-1"])
+        self.assertEqual(github.reactions, ["eyes"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
         self.assertIn("approve the PR", github.comments[0])
 
-    def test_ci_retry_uses_latest_current_sha_build(self) -> None:
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+        self.assertEqual(len(github.comments), 1)
+
+    def test_untrusted_approval_cannot_launch_ci(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(),
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "untrusted-reviewer"},
+                }
+            ],
+        )
+        buildkite = FakeBuildkite()
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.list_calls, [])
+        self.assertEqual(github.reactions, ["eyes"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+
+    def test_ready_label_notifies_author_once(self) -> None:
+        pr = make_pr(labels=[{"name": "ready"}])
+        event = {
+            "action": "labeled",
+            "label": {"name": "ready"},
+            "pull_request": pr,
+        }
+        github = FakeGitHub(permission="read", pr=pr)
+
+        notify_authorized(event, github)
+        notify_authorized(event, github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertTrue(github.comments[0].startswith("✅ @author"))
+        self.assertIn("`/ci run`", github.comments[0])
+        self.assertIn("`/ci retry`", github.comments[0])
+        self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, github.comments[0])
+
+    def test_ready_label_does_not_notify_after_trusted_approval(self) -> None:
+        pr = make_pr(labels=[{"name": "ready"}])
+        event = {
+            "action": "labeled",
+            "label": {"name": "ready"},
+            "pull_request": pr,
+        }
+        github = FakeGitHub(
+            permission="read",
+            permissions={"reviewer": "write"},
+            pr=pr,
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "reviewer"},
+                }
+            ],
+        )
+
+        notify_authorized(event, github)
+
+        self.assertEqual(github.comments, [])
+
+    def test_trusted_approval_notifies_author_once(self) -> None:
+        event = {
+            "action": "submitted",
+            "pull_request": make_pr(),
+            "review": {"state": "approved"},
+        }
+        github = FakeGitHub(
+            permission="read",
+            permissions={"reviewer": "write"},
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "reviewer"},
+                }
+            ],
+        )
+
+        notify_authorized(event, github)
+        notify_authorized(event, github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("@author", github.comments[0])
+
+    def test_approval_does_not_notify_when_ready_label_exists(self) -> None:
+        pr = make_pr(labels=[{"name": "ready"}])
+        event = {
+            "action": "submitted",
+            "pull_request": pr,
+            "review": {"state": "approved"},
+        }
+        github = FakeGitHub(
+            permission="read",
+            permissions={"reviewer": "write"},
+            pr=pr,
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "reviewer"},
+                }
+            ],
+        )
+
+        notify_authorized(event, github)
+
+        self.assertEqual(github.comments, [])
+
+    def test_untrusted_approval_does_not_notify_author(self) -> None:
+        event = {
+            "action": "submitted",
+            "pull_request": make_pr(),
+            "review": {"state": "approved"},
+        }
+        github = FakeGitHub(
+            permission="read",
+            review_decision="APPROVED",
+            reviews=[
+                {
+                    "state": "APPROVED",
+                    "user": {"login": "reviewer"},
+                }
+            ],
+        )
+
+        notify_authorized(event, github)
+
+        self.assertEqual(github.comments, [])
+
+    def test_notification_skips_authors_who_already_have_write(self) -> None:
+        pr = make_pr(labels=[{"name": "ready"}])
+        event = {
+            "action": "labeled",
+            "label": {"name": "ready"},
+            "pull_request": pr,
+        }
+        github = FakeGitHub(permission="write", pr=pr)
+
+        notify_authorized(event, github)
+
+        self.assertEqual(github.comments, [])
+
+    def test_notification_skips_draft_prs(self) -> None:
+        pr = make_pr(draft=True, labels=[{"name": "ready"}])
+        event = {
+            "action": "labeled",
+            "label": {"name": "ready"},
+            "pull_request": pr,
+        }
+        github = FakeGitHub(permission="read", pr=pr)
+
+        notify_authorized(event, github)
+
+        self.assertEqual(github.comments, [])
+
+    def test_ci_retry_retries_failed_jobs_while_build_is_running(self) -> None:
         github = FakeGitHub(
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
@@ -339,10 +619,9 @@ class RunCiCommandTest(unittest.TestCase):
                 [
                     {
                         "created_at": "2026-07-28T01:00:00Z",
-                        "finished_at": "2026-07-28T02:00:00Z",
                         "number": 123,
                         "pull_request": {"id": 42},
-                        "state": "failed",
+                        "state": "failing",
                         "web_url": "https://buildkite.example/builds/123",
                     }
                 ]

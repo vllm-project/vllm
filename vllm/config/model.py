@@ -17,6 +17,7 @@ from vllm.config.model_arch import (
 from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
+    MMHasherAlgorithm,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -92,6 +93,7 @@ TokenizerMode = Literal[
     "deepseek_v4",
     "inkling",
     "kimi_k3",
+    "cohere",
 ]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
@@ -150,6 +152,9 @@ class ModelConfig:
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "cohere" uses the standard HF tokenizer but renders the chat template
+      via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
+      Jinja, and surfaces grounded-citation metadata on responses.
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
@@ -374,6 +379,7 @@ class ModelConfig:
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
+    mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
@@ -503,6 +509,7 @@ class ModelConfig:
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
+        mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
@@ -737,6 +744,7 @@ class ModelConfig:
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
+                mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
@@ -1781,7 +1789,13 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
+        if envs.VLLM_MLA_DISABLE:
+            return False
+        if self.using_transformers_backend():
+            # kv_lora_rank indicates that a Transformers model implementation uses MLA
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+        # Manually maintained list of model types for vLLM model implementations
+        return self.is_deepseek_mla
 
     @property
     def is_matryoshka(self) -> bool:
