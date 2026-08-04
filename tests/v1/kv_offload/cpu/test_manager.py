@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -685,6 +686,35 @@ class TestARCPolicy:
         assert to_keys([1])[0] in arc_policy.b1
         # block 5 should be in T1
         assert to_keys([5])[0] in arc_policy.t1
+
+    def test_batch_eviction_scans_each_entry_at_most_once(self):
+        """A large ARC eviction must not restart its scan per selected block."""
+
+        class CountingOrderedDict(OrderedDict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.items_yielded = 0
+
+            def items(self):
+                for item in super().items():
+                    self.items_yielded += 1
+                    yield item
+
+        cpu_manager, arc_policy = self._make_manager(
+            num_blocks=256, enable_events=False
+        )
+        keys = to_keys(list(range(256)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        counting_t1 = CountingOrderedDict(arc_policy.t1)
+        arc_policy.t1 = counting_t1
+
+        evicted = arc_policy.evict(128, protected=set())
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == keys[:128]
+        assert counting_t1.items_yielded == 128
 
     def test_ghost_list_bounds(self):
         """
