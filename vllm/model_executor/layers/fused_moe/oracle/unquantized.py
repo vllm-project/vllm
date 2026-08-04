@@ -143,6 +143,20 @@ def backend_to_kernel_cls(
 
         return [XPUExperts]
 
+    elif backend == UnquantizedMoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            ArmCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
+            X86CPUUnquantizedExperts,
+        )
+
+        # Prefer architecture-specific kernels before the portable vector path.
+        return [
+            X86CPUUnquantizedExperts,
+            ArmCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
+        ]
+
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
@@ -198,10 +212,6 @@ def select_unquantized_moe_backend(
     Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    if current_platform.is_cpu():
-        # TODO: migrate to MK structure.
-        return UnquantizedMoeBackend.CPU, None
 
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
@@ -288,7 +298,12 @@ def select_unquantized_moe_backend(
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+        skip_aiter_moe = (
+            not envs.VLLM_ROCM_USE_AITER
+            or not envs.VLLM_ROCM_USE_AITER_MOE
+            or rocm_aiter_ops.is_rdna_aiter_enabled()
+        )
+        if skip_aiter_moe:
             if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
