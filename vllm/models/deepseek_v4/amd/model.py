@@ -149,11 +149,13 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        replace_parameter(
-            self.gate_up_proj,
-            "weight",
-            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-        )
+        # Skip when the linear kernel already B-preshuffled this weight.
+        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+            replace_parameter(
+                self.gate_up_proj,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
         self._gateup_scale = ws
 
     def forward(self, x):

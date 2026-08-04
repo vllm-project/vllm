@@ -916,12 +916,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Shuffle the weight in place (single weight, no unshuffled copy).
-            replace_parameter(
-                linear,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
+            # Shuffle the weight in place (single weight, no unshuffled copy),
+            # unless the linear kernel already B-preshuffled it at load time.
+            if not getattr(linear, "aiter_bpreshuffled", False):
+                replace_parameter(
+                    linear,
+                    "weight",
+                    rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+                )
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
