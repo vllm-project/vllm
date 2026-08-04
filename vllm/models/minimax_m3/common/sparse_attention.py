@@ -461,9 +461,9 @@ def minimax_m3_use_flashinfer_msa(
 ) -> bool:
     """Whether to use the flashinfer.msa_ops impls on SM120/SM121.
 
-    One predicate feeds both selectors: the FlashInfer indexer and attend
-    share the top-k buffer token-major while the Triton impls read it
-    head-major, so they must be selected together or not at all.
+    One predicate feeds both selectors so the FlashInfer indexer and attend
+    engage together or not at all. Mixed FlashInfer/Triton pairs are
+    unsupported.
     """
     return (
         current_platform.is_cuda()

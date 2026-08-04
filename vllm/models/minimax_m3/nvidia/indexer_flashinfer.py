@@ -3,9 +3,10 @@
 """FlashInfer indexer impl for MiniMax M3 on SM120/SM121.
 
 One whole-batch ``msa_proxy_score`` call plus one ``msa_topk_select`` call, no
-decode/prefill split. flashinfer's top-k takes only batch-wide scalars, so the
-per-token local window and causal-range clamp are recovered in Python (see
-``forward``). Imported only when ``minimax_m3_use_flashinfer_msa`` passes.
+decode/prefill split. Each token's causal extent and trailing local window go
+to the top-k kernel through the per-token ``num_valid_pages`` tensor and
+``force_end_blocks``. Imported only when ``minimax_m3_use_flashinfer_msa``
+passes.
 """
 
 from dataclasses import dataclass
