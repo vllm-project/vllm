@@ -191,7 +191,7 @@ class QkNormRopeKvCachePattern:
         q_rope = q_rope.view(-1, self.num_heads, self.head_size)
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v)
         return dummy, q_rope, k_rope, v
 
     def replacement_non_fp8_quant_query(
@@ -269,7 +269,7 @@ class QkNormRopeKvCachePattern:
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v)
         return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
     def replacement_fp8_quant_query(
