@@ -167,13 +167,15 @@ class MiniMaxM3IndexerFlashInferImpl(MiniMaxM3IndexerImpl):
         # afterwards: no selected index can exceed its own token's extent, and
         # the ascending, -1-tail-padded contract holds by construction.
         assert md.num_valid_pages is not None
+        # Both clamped so msa_topk_select's force-region checks cannot raise.
         force_begin = min(self.init_blocks, md.max_k_tiles, self.topk_blocks)
+        force_end = min(md.local_blocks, self.topk_blocks - force_begin)
         msa_topk_select(
             scores,
             self.topk_blocks,
             num_valid_pages=md.num_valid_pages,
             force_begin_blocks=force_begin,
-            force_end_blocks=md.local_blocks,
+            force_end_blocks=force_end,
             output=buf[:num_tokens],
         )
 
