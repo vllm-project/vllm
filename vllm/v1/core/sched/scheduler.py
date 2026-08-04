@@ -1714,7 +1714,7 @@ class Scheduler(SchedulerInterface):
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         nan_abort_req_ids: set[str] = set()
-        nan_block_ids: set[int] = set()
+        nan_block_ids_to_evict: set[int] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -1788,6 +1788,25 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
+
+            # NaN abort must happen before check_stop/_free_request so
+            # get_block_ids still returns the request's blocks.
+            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+                request.num_nans_in_logits = num_nans_in_logits[req_id]
+                if (
+                    self.parallel_config.fault_tolerance_config
+                        .enable_nan_fault_tolerance
+                    and request.num_nans_in_logits > 0
+                ):
+                    logger.warning(
+                        "Request %s aborted: %d NaN values in logits",
+                        req_id,
+                        request.num_nans_in_logits,
+                    )
+                    nan_abort_req_ids.add(req_id)
+                    for group in self.kv_cache_manager.get_block_ids(req_id):
+                        nan_block_ids_to_evict.update(group)
+                    continue
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -1899,28 +1918,6 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
-                request.num_nans_in_logits = num_nans_in_logits[req_id]
-                if (
-                    self.observability_config.enable_nan_fault_tolerance
-                    and request.num_nans_in_logits > 0
-                    and request.status == RequestStatus.RUNNING
-                ):
-                    logger.warning(
-                        "Request %s aborted: %d NaN values in logits",
-                        req_id,
-                        request.num_nans_in_logits,
-                    )
-                    nan_abort_req_ids.add(req_id)
-                    # Collect this request's blocks so they can be evicted from
-                    # the prefix cache below. Prefill commits full blocks to the
-                    # prefix cache at schedule time (before the forward writes
-                    # KV), so a block holding NaN KV may already be matchable;
-                    # the plain free() path leaves it in the cache map.
-                    for group in self.kv_cache_manager.get_block_ids(req_id):
-                        nan_block_ids.update(group)
-                    continue
-
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if should_emit_output:
@@ -1961,15 +1958,10 @@ class Scheduler(SchedulerInterface):
             error_req_ids.update(failed_kv_load_req_ids)
         error_req_ids.update(nan_abort_req_ids)
 
-        # Evict NaN-corrupted blocks from the prefix cache before freeing the
-        # aborted requests, so a later request with the same prefix cannot match
-        # (and read) the NaN KV as a cache hit. Eviction resets the block hash,
-        # which also makes free() prioritize these blocks for reallocation, where
-        # the existing zero-on-allocation path wipes their contents. This mirrors
-        # the KV-load-failure recovery path, which evicts corrupt blocks for the
-        # same reason.
-        if nan_block_ids:
-            self.kv_cache_manager.evict_blocks(nan_block_ids)
+        # Evict NaN-corrupted blocks from the prefix cache before freeing,
+        # mirroring the KV-load-failure recovery path.
+        if nan_block_ids_to_evict:
+            self.kv_cache_manager.evict_blocks(nan_block_ids_to_evict)
 
         if error_req_ids:
             error_reqs = self.finish_requests(

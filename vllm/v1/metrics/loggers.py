@@ -99,6 +99,9 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
         self.vllm_config = vllm_config
+        self.detect_nans_in_logits = (
+            vllm_config.observability_config.enable_detect_nans_in_logits
+        )
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
@@ -296,7 +299,7 @@ class LoggingStatLogger(StatLoggerBase):
             ]
         )
 
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             log_parts.append("Corrupted: %d reqs")
             log_args.append(self.num_corrupted_reqs)
         if not self.connector_prefix_caching_metrics.empty:
@@ -463,6 +466,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
+        self.detect_nans_in_logits = (
+            vllm_config.observability_config.enable_detect_nans_in_logits
+        )
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
@@ -567,7 +573,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
                 documentation=(
@@ -1183,7 +1189,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         if iteration_stats is None:
             return
-        if self.vllm_config.observability_config.enable_detect_nans_in_logits:
+        if self.detect_nans_in_logits:
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )

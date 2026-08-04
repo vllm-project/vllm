@@ -88,12 +88,6 @@ class ObservabilityConfig:
     debugging hardware or numerical issues. Adds a small compute overhead
     per step."""
 
-    enable_nan_fault_tolerance: bool = False
-    """When enabled, requests producing NaN logits are immediately aborted and
-    KV cache blocks are zeroed on reuse to prevent corruption from propagating
-    into prefix cache, CPU/disk offloading tiers, or disaggregated decode
-    instances. Implies --enable-detect-nans-in-logits."""
-
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -170,10 +164,7 @@ class ObservabilityConfig:
         return self
 
     @model_validator(mode="after")
-    def _validate_nan_fault_tolerance(self):
-        if self.enable_nan_fault_tolerance:
-            self.enable_detect_nans_in_logits = True
-
+    def _validate_nan_detection(self):
         import vllm.envs as envs
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
