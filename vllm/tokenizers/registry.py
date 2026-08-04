@@ -11,20 +11,14 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
-from vllm.transformers_utils.gguf_utils import (
-    check_gguf_file,
-    get_gguf_file_path_from_hf,
-    is_gguf,
-    is_remote_gguf,
-    split_remote_gguf,
-)
+from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
+from .hf import CachedHfTokenizer
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -38,16 +32,27 @@ logger = init_logger(__name__)
 # temporary workaround and better long term solutions are:
 # - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
-_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
+    "internlm2",
+    "step3_vl",
+    "step3p7",
+    "unlimited-ocr",
+}
 
 _VLLM_TOKENIZERS = {
+    # ``cohere`` mode uses the standard cached HF tokenizer; only the
+    # renderer (template stage) is replaced with a melody-based one.
+    "cohere": ("hf", "CachedHfTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
-    "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
+    "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
-    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
+    # Inkling uses the plain HF tokenizer for token operations; the "inkling"
+    # mode exists to select the InklingRenderer, which renders chat to
+    # token ids natively (Inkling has no Jinja chat template).
+    "inkling": ("hf", "CachedHfTokenizer"),
 }
 
 
@@ -125,21 +130,6 @@ def resolve_tokenizer_args(
                 )
                 tokenizer_name = tokenizer_path
 
-    # Separate model folder from file path for GGUF models
-    if is_gguf(tokenizer_name):
-        if check_gguf_file(tokenizer_name):
-            kwargs["gguf_file"] = Path(tokenizer_name).name
-            tokenizer_name = Path(tokenizer_name).parent
-        elif is_remote_gguf(tokenizer_name):
-            tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
-            # Get the HuggingFace Hub path for the GGUF file
-            gguf_file = get_gguf_file_path_from_hf(
-                tokenizer_name,
-                quant_type,
-                revision=revision,
-            )
-            kwargs["gguf_file"] = gguf_file
-
     if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":
             kwargs["truncation_side"] = "left"
@@ -203,6 +193,13 @@ def get_tokenizer(
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
+    if envs.VLLM_USE_FASTOKENS:
+        # Process-global, idempotent patch that swaps the Rust BPE backend
+        # of any HF fast tokenizer loaded afterwards. No-op for non-HF modes.
+        from .fastokens import apply_fastokens_patch
+
+        apply_fastokens_patch()
+
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -212,17 +209,27 @@ def get_tokenizer(
         **kwargs,
     )
 
+    if tokenizer_cls == TokenizerLike:
+        tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
+    else:
+        tokenizer_cls_ = tokenizer_cls
+
     # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
     # registered with AutoConfig before the tokenizer is loaded. This is necessary since
     # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
     # This may fail for paths that don't have a model config (e.g. LoRA adapters),
     # which is fine — those don't need custom config registration.
+    # HF-backed tokenizers must receive the HF config. In a dual-format Mistral
+    # repository, auto detection intentionally prefers params.json, but passing
+    # that generic config to AutoTokenizer can select the wrong tokenizer class.
+    config_format = "hf" if tokenizer_cls_ is CachedHfTokenizer else "auto"
     config = None
     with contextlib.suppress(ValueError, OSError):
         config = get_config(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            config_format=config_format,
         )
 
     # Some models have an incorrect tokenizer_class on the hub.
@@ -236,12 +243,18 @@ def get_tokenizer(
             model_type,
         )
         tokenizer_cls_ = TokenizersBackend
-    elif tokenizer_cls == TokenizerLike:
-        tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
-    else:
-        tokenizer_cls_ = tokenizer_cls
+
+    if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        # AutoTokenizer otherwise reloads config.json internally. Reuse the
+        # config that get_config just loaded successfully so a concurrent Hub
+        # cache refresh cannot invalidate the file between the two reads.
+        kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from vllm.tokenizers.hf import get_cached_tokenizer
+
+        tokenizer = get_cached_tokenizer(tokenizer)
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
@@ -257,6 +270,8 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
+
+    _maybe_register_hf_config(getattr(model_config, "hf_config", None))
 
     return cached_get_tokenizer(
         model_config.tokenizer,

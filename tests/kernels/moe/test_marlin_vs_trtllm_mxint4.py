@@ -5,8 +5,12 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     fused_marlin_moe,
+)
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
+    TrtLlmMxint4ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     grouped_topk,
@@ -75,6 +79,14 @@ __all__ = [
     "mxint4_quantize_moe_weights",
     "marlin_quantize_moe_weights",
 ]
+
+
+def test_trtllm_mxint4_activation_supports_vllm_gated_silu():
+    assert TrtLlmMxint4ExpertsMonolithic._supports_activation(MoEActivation.SILU)
+    assert TrtLlmMxint4ExpertsMonolithic._supports_activation(MoEActivation.SWIGLUOAI)
+    assert not TrtLlmMxint4ExpertsMonolithic._supports_activation(
+        MoEActivation.RELU2_NO_MUL
+    )
 
 
 def marlin_quantize_moe_weights(

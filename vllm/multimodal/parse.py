@@ -24,6 +24,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
+from .image import convert_image_mode, normalize_image
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -334,7 +335,13 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image)).
+                # PIL images are always channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)
@@ -359,6 +366,20 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
 
         self.metadata = metadata
 
+    def _unwrap(self, item: Any) -> Any:
+        if isinstance(item, tuple):
+            frames, metadata = item
+            return super()._unwrap(frames), metadata
+        return super()._unwrap(item)
+
+    def get_item_for_hash(self, index: int) -> Any:
+        item = self.data[index]
+        if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
+            metadata = self.metadata[index]
+            if metadata is not None:
+                return item, metadata
+        return item
+
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)
         if video is None:
@@ -378,7 +399,14 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image) via
+                # _get_video_with_metadata).  PIL images are always
+                # channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)
@@ -495,7 +523,7 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
     ) -> None:
@@ -538,7 +566,10 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[np.ndarray, dict[str, Any] | None]:
+    ) -> tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any] | None]:
+        if isinstance(video, MediaWithBytes):
+            new_video, metadata = self._get_video_with_metadata(video.media)
+            return MediaWithBytes(new_video, video.original_bytes), metadata
         if isinstance(video, tuple):
             return video
         if isinstance(video, list):
@@ -608,6 +639,13 @@ class MultiModalDataParser:
         else:
             data_items = data
 
+        data_items = [
+            convert_image_mode(normalize_image(item), "RGB")
+            if isinstance(item, PILImage.Image)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
@@ -632,7 +670,11 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_videos = list[tuple[np.ndarray, dict[str, Any] | None]]()
+        new_videos = list[
+            np.ndarray
+            | MediaWithBytes[np.ndarray]
+            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+        ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
             video, metadata = self._get_video_with_metadata(data_item)
@@ -643,12 +685,9 @@ class MultiModalDataParser:
                         "Please check your video input in `multi_modal_data`"
                     )
                 new_videos.append((video, metadata))
-                metadata_lst.append(metadata)
             else:
                 new_videos.append(video)
-
-        if not self.video_needs_metadata:
-            metadata = None
+            metadata_lst.append(metadata)
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 

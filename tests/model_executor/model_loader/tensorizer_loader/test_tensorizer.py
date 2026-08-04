@@ -9,13 +9,14 @@ import pathlib
 import subprocess
 import sys
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.model_executor.model_loader.tensorizer
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
@@ -325,7 +326,7 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
         pass
 
 
-def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
+def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path, vllm_runner):
     serialization_params = {
         "limit_cpu_concurrency": 2,
     }
@@ -333,9 +334,6 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
     model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(
         tensorizer_uri=str(model_path), serialization_kwargs=serialization_params
-    )
-    llm = LLM(
-        model=model_ref,
     )
 
     def serialization_test(self, *args, **kwargs):
@@ -365,7 +363,66 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
     kwargs = {"tensorizer_config": config.to_serializable()}
 
-    assert assert_from_collective_rpc(llm, serialization_test, kwargs)
+    with vllm_runner(model_ref) as runner:
+        assert assert_from_collective_rpc(runner.get_llm(), serialization_test, kwargs)
+
+
+@pytest.mark.parametrize(
+    (
+        "serialization_error",
+        "renderer_shutdown_error",
+        "engine_shutdown_error",
+        "expected_error",
+    ),
+    [
+        (None, None, None, None),
+        (RuntimeError("serialization failed"), None, None, "serialization failed"),
+        (
+            RuntimeError("serialization failed"),
+            ValueError("renderer shutdown failed"),
+            ValueError("engine shutdown failed"),
+            "serialization failed",
+        ),
+        (
+            None,
+            ValueError("renderer shutdown failed"),
+            None,
+            "renderer shutdown failed",
+        ),
+        (None, None, ValueError("engine shutdown failed"), "engine shutdown failed"),
+    ],
+)
+def test_tensorize_vllm_model_shuts_down_engine(
+    monkeypatch,
+    serialization_error,
+    renderer_shutdown_error,
+    engine_shutdown_error,
+    expected_error,
+):
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine_args = Mock()
+    config = Mock(encryption_keyfile=None)
+    engine = Mock()
+    engine.collective_rpc.side_effect = serialization_error
+    engine.renderer.shutdown.side_effect = renderer_shutdown_error
+    engine.engine_core.shutdown.side_effect = engine_shutdown_error
+    monkeypatch.setattr(LLMEngine, "from_vllm_config", Mock(return_value=engine))
+    monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "7")
+
+    if expected_error is None:
+        tensorize_vllm_model(engine_args, config)
+    else:
+        with pytest.raises(Exception, match=expected_error) as exc_info:
+            tensorize_vllm_model(engine_args, config)
+        notes = getattr(exc_info.value, "__notes__", ())
+        if serialization_error is not None and renderer_shutdown_error is not None:
+            assert any("renderer shutdown failed" in note for note in notes)
+        if serialization_error is not None and engine_shutdown_error is not None:
+            assert any("engine shutdown failed" in note for note in notes)
+
+    engine.engine_core.shutdown.assert_called_once_with(timeout=17.0)
+    engine.renderer.shutdown.assert_called_once_with()
 
 
 def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
@@ -460,7 +517,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
         result = subprocess.run(
             [
                 sys.executable,
-                f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py",
+                f"{VLLM_PATH}/examples/features/tensorize_vllm_model.py",
                 "--model",
                 model_ref,
                 "serialize",

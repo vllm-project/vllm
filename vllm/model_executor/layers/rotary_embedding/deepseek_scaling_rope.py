@@ -45,6 +45,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -65,7 +66,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             and head_size in [64, 128, 256, 512]
         )
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size,
+            rotary_dim,
+            max_position_embeddings,
+            base,
+            is_neox_style,
+            dtype,
+            init_cache=init_cache,
         )
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
@@ -120,29 +127,52 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
+        return self.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            self.cos_sin_cache,
+            self.is_neox_style,
+            offsets,
+        )
+
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """A static implementation of forward()."""
+        assert key is not None
+        query_rot = query[..., :rotary_dim]
+        key_rot = key[..., :rotary_dim]
+        if rotary_dim < head_size:
+            query_pass = query[..., rotary_dim:]
+            key_pass = key[..., rotary_dim:]
 
         cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
+        if is_neox_style:
             cos = torch.cat((cos, cos), dim=-1).unsqueeze(-2)
             sin = torch.cat((sin, sin), dim=-1).unsqueeze(-2)
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
+        rotate_fn = rotate_neox if is_neox_style else rotate_gptj
         query_rot = query_rot * cos + rotate_fn(query_rot) * sin
         key_rot = key_rot * cos + rotate_fn(key_rot) * sin
 
-        if self.rotary_dim < self.head_size:
+        if rotary_dim < head_size:
             query = torch.cat((query_rot, query_pass), dim=-1)
             key = torch.cat((key_rot, key_pass), dim=-1)
         else:
@@ -211,7 +241,9 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Avoid compute cache repeatedly
+        kwargs.pop("init_cache", None)
+        super().__init__(*args, **kwargs, init_cache=False)
         cache_fp32 = self._compute_cos_sin_cache()
         self.register_buffer("cos_sin_cache", cache_fp32, persistent=False)
 
@@ -219,7 +251,7 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
-            device=current_platform.device_type,
+            device=inv_freq.device,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)

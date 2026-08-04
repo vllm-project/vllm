@@ -602,7 +602,8 @@ class AttentionImplNEONBFMMLA {
       [[maybe_unused]] const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
       const int64_t block_size,
-      [[maybe_unused]] const int64_t block_size_stride) {
+      [[maybe_unused]] const int64_t block_size_stride,
+      const float /*k_inv*/ = 0.0f, const float /*v_inv*/ = 0.0f) {
     const int64_t k_block_stride = (head_dim / TILE_K) * K_INNER_STRIDE;
     const int64_t v_pair_stride =
         (block_size / V_TOKENS_PER_ROW_BLOCK) * V_INNER_STRIDE;

@@ -33,15 +33,23 @@ def sync_openai(
     *,
     repetition_penalty: float = 1.3,
     hotwords: str = None,
+    prompt: str | None = None,
 ):
     """
     Perform synchronous transcription using OpenAI-compatible API.
+
+    The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
+    vocabulary hint). It is wired through model-by-model: Whisper uses it
+    as a ``<|prev|>`` continuation hint, Qwen3-ASR maps it into the
+    chat-template ``system`` turn. Models that do not consume it accept
+    it without effect.
     """
     with open(audio_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=f,
             model=model,
             language="en",
+            prompt=prompt or "",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
@@ -55,7 +63,11 @@ def sync_openai(
 
 
 async def stream_openai_response(
-    audio_path: str, client: AsyncOpenAI, model: str, hotwords: str = None
+    audio_path: str,
+    client: AsyncOpenAI,
+    model: str,
+    hotwords: str = None,
+    prompt: str | None = None,
 ):
     """
     Perform asynchronous transcription using OpenAI-compatible API.
@@ -66,6 +78,7 @@ async def stream_openai_response(
             file=f,
             model=model,
             language="en",
+            prompt=prompt or "",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
@@ -146,6 +159,7 @@ def main(args):
         model=model,
         repetition_penalty=args.repetition_penalty,
         hotwords=args.hotwords,
+        prompt=args.prompt,
     )
 
     # Run the asynchronous function
@@ -160,6 +174,7 @@ def main(args):
                 client,
                 model,
                 hotwords=args.hotwords,
+                prompt=args.prompt,
             )
         )
     else:
@@ -192,6 +207,17 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="hotwords",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help=(
+            "Optional `prompt` (OpenAI transcription API: style/vocabulary "
+            "hint). Wired model-by-model: Whisper uses it as a `<|prev|>` "
+            "continuation hint, Qwen3-ASR maps it into the chat-template "
+            "system turn."
+        ),
     )
     args = parser.parse_args()
     main(args)

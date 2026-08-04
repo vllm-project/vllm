@@ -43,7 +43,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -238,10 +238,10 @@ class HunYuanAttention(nn.Module):
         ori_k = k
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)
@@ -346,10 +346,10 @@ class HunYuanCrossAttention(nn.Module):
         q, _ = self.rotary_emb(positions, q, k_tmp)
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)
@@ -441,7 +441,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_mlp,
             num_experts=self.n_routed_experts,
             top_k=top_k,
@@ -771,15 +771,6 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             # processed with quantization, LoRA, fine-tuning, etc.
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                continue
 
             is_found = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -930,7 +921,10 @@ class HunyuanV1ModelBase(
         self.config = config
         self.quant_config = quant_config
 
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
+        self.model = HunYuanModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -997,7 +991,6 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers = []
         example_layer = None

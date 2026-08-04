@@ -45,7 +45,10 @@ def set_weight_attrs(
 
 
 def replace_parameter(
-    layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None
+    layer: torch.nn.Module,
+    param_name: str,
+    new_data: torch.Tensor | None,
+    prefer_copy: bool = False,
 ):
     """
     Replace a parameter of a layer while maintaining the ability to reload the weight.
@@ -57,6 +60,12 @@ def replace_parameter(
         layer: Layer containing parameter to replace
         param_name: Name of parameter to replace
         new_data: New data of the new parameter, or None to set the parameter to None
+        prefer_copy: If True and the existing parameter is compatible with
+            ``new_data`` (same shape, dtype, and device), copy ``new_data``
+            into the existing parameter in place rather than re-registering
+            a new parameter. This preserves the parameter's storage address
+            (``data_ptr``), which is required for captured CUDA graphs to
+            remain valid across weight updates (e.g. in RL training loops).
     """
     # should not be used on a tied/shared param
 
@@ -67,9 +76,21 @@ def replace_parameter(
 
     if isinstance(new_data, torch.nn.Parameter):
         new_data = new_data.data
-    new_param = torch.nn.Parameter(new_data, requires_grad=False)
 
     old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
+
+    if (
+        prefer_copy
+        and old_param is not None
+        and old_param.shape == new_data.shape
+        and old_param.dtype == new_data.dtype
+        and old_param.device == new_data.device
+    ):
+        old_param.copy_(new_data)
+        return
+
+    new_param = torch.nn.Parameter(new_data, requires_grad=False)
+
     if old_param is not None and hasattr(old_param, "weight_loader"):
         weight_loader = old_param.weight_loader
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
@@ -103,15 +124,16 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
 def get_moe_expert_mapping(
     model: torch.nn.Module,
 ) -> list[tuple[str, str, int, str]]:
-    if parent_map := getattr(model, "get_expert_mapping", None):
-        return parent_map()
-    else:
-        # We only check main components instead of whole model submodules
-        for child in model.children():
-            child_map = getattr(child, "get_expert_mapping", None)
-            if child_map is not None:
-                return child_map()
-        return []
+    """Get the expert mapping from a model.
+
+    It will be retrieved from the first module that has a `get_expert_mapping` method.
+    If the model manually implements `get_expert_mapping`, it will be used.
+    Otherwise, it will use the first RoutedExperts layer."""
+    for _, module in model.named_modules():
+        get_mapping = getattr(module, "get_expert_mapping", None)
+        if get_mapping is not None:
+            return get_mapping()
+    raise ValueError("No module in the model has a `get_expert_mapping` method.")
 
 
 def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:

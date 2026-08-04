@@ -26,6 +26,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
@@ -41,8 +42,10 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
-def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
-    x = torch.randn(5, 64, dtype=torch.float16)
+def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch):
+    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
+    # fall back to torch.nn.functional.linear.
+    x = torch.randn(6, 64, dtype=torch.float16)
     weight = torch.randn(128, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
@@ -50,6 +53,7 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
@@ -74,6 +78,7 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitkrc_mock = MagicMock(side_effect=lambda x_view, w, _, __: x_view @ w.t())

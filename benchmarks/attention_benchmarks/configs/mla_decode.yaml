@@ -53,10 +53,9 @@ backends:
   - FLASHINFER_MLA
   - FLASH_ATTN_MLA  # Hopper only
   - FLASHMLA        # Hopper only
+  - TOKENSPEED_MLA  # Blackwell + R1 dims + FP8 KV (use --kv-cache-dtype fp8)
 
 device: "cuda:0"
-repeats: 100
-warmup_iters: 10
 profile_memory: true
 
 # Backend-specific tuning

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
 import torch
 
 from vllm import SamplingParams
@@ -29,6 +30,9 @@ from vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
     SchedulerOutput,
+)
+from vllm.v1.core.single_type_kv_cache_manager import (
+    register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -68,6 +72,9 @@ def _make_kv_cache_config(
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
+    register_all_kvcache_specs(
+        vllm_config=None
+    )  # Ensure specs are registered for tests
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         groups.append(
@@ -153,6 +160,8 @@ def make_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=cpu_capacity_bytes,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
     )
 
@@ -179,6 +188,7 @@ _req_counter = 0
 def make_request(
     num_blocks: int = 2,
     request_id: str | None = None,
+    extra_tokens: int = 1,
 ) -> Request:
     """Create a Request with deterministic block hashes."""
     global _req_counter
@@ -186,7 +196,7 @@ def make_request(
     if request_id is None:
         request_id = f"req-{_req_counter}"
 
-    num_tokens = num_blocks * BLOCK_SIZE
+    num_tokens = num_blocks * BLOCK_SIZE + extra_tokens
     start = _req_counter * 10000
     prompt_token_ids = list(range(start, start + num_tokens))
     sampling_params = SamplingParams(max_tokens=1)
@@ -380,6 +390,8 @@ def test_eager_store_and_load_roundtrip() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    # make_request pads num_tokens by +1 beyond the last full block, so the
+    # manager's max_hit_len = num_tokens - 1 cap leaves all full blocks intact.
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
 
@@ -399,7 +411,44 @@ def test_eager_store_and_load_roundtrip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1b: Lazy store-and-load roundtrip
+# Test 1b: Boundary — max_hit_len cap drops the last full block when the
+# prompt is an exact multiple of BLOCK_SIZE.
+# ---------------------------------------------------------------------------
+def test_max_hit_len_cap_drops_last_full_block() -> None:
+    """When num_tokens is an exact multiple of BLOCK_SIZE, the manager's
+    ``max_hit_len = num_tokens - 1`` cap forces ``find_longest_cache_hit`` to
+    drop the final block (since ``max_length // block_size`` rounds down).
+    """
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks, extra_tokens=0)
+    assert req.num_tokens == num_blocks * BLOCK_SIZE
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-cap-boundary",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == (num_blocks - 1) * BLOCK_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Test 1c: Lazy store-and-load roundtrip
 # ---------------------------------------------------------------------------
 def _flush_old_blocks_to_lru_head(
     gpu_pool: BlockPool,
@@ -463,8 +512,11 @@ def test_lazy_store_and_load_roundtrip() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(
         req_old2, num_computed_tokens=0
     )
-    assert hit_tokens == num_blocks * BLOCK_SIZE, (
-        f"Expected {num_blocks * BLOCK_SIZE} hit tokens, got {hit_tokens}"
+    # make_request pads num_tokens by +1 beyond the last full block, so the
+    # manager's max_hit_len = num_tokens - 1 cap leaves all full blocks intact.
+    expected_hit = num_blocks * BLOCK_SIZE
+    assert hit_tokens == expected_hit, (
+        f"Expected {expected_hit} hit tokens, got {hit_tokens}"
     )
     assert is_async is True
 
@@ -531,7 +583,72 @@ def test_eager_duplicate_store_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2b: Lazy duplicate store is skipped
+# Test 2b: Eager dedup of in-flight stores across consecutive steps
+# ---------------------------------------------------------------------------
+def test_eager_in_flight_store_dedup_across_steps() -> None:
+    """Eager: a second request sharing a prefix with an in-flight store
+    must not re-offload the same GPU blocks before completion lands.
+
+    Simulates a GPU prefix-cache hit by reusing the first request's
+    GPU block IDs in the second scheduler step, which is the path the
+    real scheduler takes when two requests share a prefix.
+    """
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+
+    meta1 = sched.build_connector_meta(sched_out)
+    assert meta1.store_event >= 0
+    assert len(meta1.store_cpu_blocks) == num_blocks
+    # In-flight set tracks the scheduled GPU blocks until completion.
+    assert sched._in_flight_store_gpu_blocks == set(meta1.store_gpu_blocks)
+    cpu_free_after_first = get_cpu_free_blocks(sched)
+
+    # Second request shares the prefix and reuses the same GPU block IDs
+    # (the real scheduler path: GPU prefix cache returns the same blocks).
+    # Do NOT simulate completion — the first store is still in-flight.
+    req2 = Request(
+        request_id="req-dup-eager-inflight",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    req2.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req2, kv_blocks, num_external_tokens=0)
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req2.request_id: block_ids},
+    )
+
+    meta2 = sched.build_connector_meta(sched_out2)
+    if meta2.store_event >= 0:
+        assert len(meta2.store_cpu_blocks) == 0, (
+            "Expected no new CPU blocks for in-flight duplicate hashes"
+        )
+    assert get_cpu_free_blocks(sched) == cpu_free_after_first, (
+        "Second request should not consume CPU blocks while the first "
+        "store is still in-flight"
+    )
+
+    # After completion, the in-flight set is cleared.
+    simulate_store_completion(sched, meta1.store_event)
+    assert sched._in_flight_store_gpu_blocks == set()
+
+
+# ---------------------------------------------------------------------------
+# Test 2c: Lazy duplicate store is skipped
 # ---------------------------------------------------------------------------
 def test_lazy_duplicate_store_skipped() -> None:
     """Lazy: blocks already offloaded to CPU should not be offloaded again.
@@ -1086,11 +1203,9 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(
         req2, num_computed_tokens=gpu_local_computed
     )
-    # CPU should hit blocks 2,3 (not 4,5 — those are beyond the CPU range).
-    num_cpu_hit_blocks = 2
-    # Actually CPU has all 6 stored; it returns hits starting from position 2.
-    # The number of CPU hit blocks = min(remaining request blocks, CPU cached).
-    # Here remaining = 6 - 2 = 4 blocks are in CPU, so hit = 4 * BLOCK_SIZE.
+    # CPU has all 6 blocks stored. make_request pads num_tokens by +1, so
+    # the manager's num_tokens - 1 cap leaves all full blocks intact:
+    # remaining hashable range = 6 - 2 = 4 blocks, all hit.
     num_cpu_hit_blocks = 4
     assert hit_tokens == num_cpu_hit_blocks * BLOCK_SIZE, (
         f"Expected {num_cpu_hit_blocks * BLOCK_SIZE} CPU hit tokens, got {hit_tokens}"
@@ -1134,4 +1249,585 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
     for bid in meta2.load_gpu_blocks:
         assert bid in ext_block_ids, (
             f"Load GPU block {bid} should be an ext_comp block, not a comp or new block"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: TOCTOU between Phase A and Phase B (regression for #39702)
+# ---------------------------------------------------------------------------
+def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
+    """Regression for vllm-project/vllm#39702.
+
+    When ``get_num_new_matched_tokens`` (Phase A) reports a CPU cache hit
+    of ``N`` tokens but ``update_state_after_alloc`` (Phase B) runs after
+    other requests have caused LRU eviction of those exact blocks, the
+    second ``find_longest_cache_hit`` call returns 0 while
+    ``num_external_tokens`` is still ``N``, triggering
+    ``AssertionError: Expected N hit tokens, got 0``.
+
+    Setup: ``num_cpu_blocks=5`` (4 usable; null_block takes 1).
+        1. Store req_a's 2 blocks to CPU. CPU: [a0, a1, _, _].
+        2. Phase A on req_b (same prompt as req_a) reports a 2-block hit.
+           Without the fix this does NOT pin a0/a1 — they remain at LRU front.
+        3. Store req_c (2) + req_d (2) — 4 more blocks into 4 slots. With
+           a0/a1 unpinned and at LRU front, they get evicted. CPU: [c0, c1,
+           d0, d1].
+        4. Phase B on req_b: re-searches the CPU coordinator, finds 0
+           cached hashes, asserts.
+
+    After the fix, Phase A pins the hit blocks so step 3 evicts req_c's
+    blocks instead, and Phase B reads the cached ``(cpu_hit_blocks,
+    hit_length)`` tuple without re-searching.
+    """
+    # 5 total = 4 usable (null_block takes 1)
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # --- Step 1: Store req_a's 2 blocks to CPU cache ---
+    req_a = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched_out_a = make_scheduler_output(
+        {req_a.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: kv_a.get_block_ids()},
+    )
+    meta_a = sched.build_connector_meta(sched_out_a)
+    assert meta_a.store_event >= 0
+    simulate_store_completion(sched, meta_a.store_event)
+
+    # --- Step 2: Phase A — req_b (same prompt as req_a) reports a CPU hit ---
+    req_b = Request(
+        request_id="req-b-toctou",
+        prompt_token_ids=req_a.prompt_token_ids,
+        sampling_params=req_a.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req_a._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(
+        req_b, num_computed_tokens=0
+    )
+    assert hit_tokens == 2 * BLOCK_SIZE, (
+        f"Phase A should report 2 blocks of CPU hit, got {hit_tokens}"
+    )
+    assert is_async is True
+
+    # --- Step 3: TOCTOU window — fill CPU cache so LRU evicts req_a's blocks
+    # (in production this corresponds to other concurrent requests landing
+    # between Phase A and Phase B for req_b). 4 usable slots, req_a occupies 2;
+    # req_c (2) + req_d (2) require evicting 2 LRU blocks. ---
+    req_c = make_request(num_blocks=2)
+    req_d = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    kv_d = _alloc_and_register(fix, req_d, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    sched.update_state_after_alloc(req_d, kv_d, num_external_tokens=0)
+    sched_out_pressure = make_scheduler_output(
+        {
+            req_c.request_id: 2 * BLOCK_SIZE,
+            req_d.request_id: 2 * BLOCK_SIZE,
+        },
+        new_reqs={
+            req_c.request_id: kv_c.get_block_ids(),
+            req_d.request_id: kv_d.get_block_ids(),
+        },
+    )
+    meta_pressure = sched.build_connector_meta(sched_out_pressure)
+    assert meta_pressure.store_event >= 0
+    simulate_store_completion(sched, meta_pressure.store_event)
+
+    # --- Step 4: Phase B — must not crash ---
+    # Before fix: AssertionError: Expected 32 hit tokens, got 0
+    # After fix: Phase A pinned the hits → Step 3 evicted req_c instead,
+    # Phase B consumes the cached (cpu_hit_blocks, hit_length) tuple.
+    gpu_blocks_b = fix.gpu_block_pool.get_new_blocks(2)
+    kv_blocks_b = KVCacheBlocks(blocks=(gpu_blocks_b,))
+    sched.update_state_after_alloc(req_b, kv_blocks_b, num_external_tokens=hit_tokens)
+
+    # --- Step 5: with the fix, the load is queued correctly ---
+    sched_out_b = make_scheduler_output(
+        {req_b.request_id: 1},
+        new_reqs={req_b.request_id: kv_blocks_b.get_block_ids()},
+    )
+    meta_b = sched.build_connector_meta(sched_out_b)
+    assert meta_b.load_event >= 0, (
+        "Phase B should queue a load event using the pinned CPU hit blocks"
+    )
+    assert len(meta_b.load_gpu_blocks) == 2
+    assert len(meta_b.load_cpu_blocks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Reset with pending eager stores waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_eager_stores() -> None:
+    """Eager mode: reset() abandons in-flight stores until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    assert len(sched._store_event_to_blocks) > 0
+
+    # GPU blocks should have elevated ref_cnt from touch()
+    for bid in meta.store_gpu_blocks:
+        assert gpu_pool.blocks[bid].ref_cnt > 0
+
+    # Free the request's own block refs (simulates preemption)
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
+
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
+    assert len(sched._reqs_to_store) == 0
+    assert len(sched._store_event_to_reqs) == 0
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
+
+    # All GPU blocks should now be free (ref_cnt == 0) except null block
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used == 1, f"Expected only null block in use, got {num_used}"
+
+    # GPU prefix cache reset should now succeed
+    assert gpu_pool.reset_prefix_cache() is True
+    assert sched.reset() is True
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Reset with pending lazy stores waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_lazy_stores() -> None:
+    """Lazy mode: reset() abandons in-flight stores until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+
+    # Allocate, hash, and free — blocks move to free queue with hashes
+    gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    gpu_pool.free_blocks(gpu_blocks)
+
+    # Push hashed blocks to LRU head
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+
+    # Lazy scanner offloads old hashed blocks
+    sched_out = make_scheduler_output({})
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    assert len(sched._store_event_to_blocks) > 0
+
+    gpu_pool.free_blocks(fillers)
+
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
+    assert sched._cursor is None
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
+    assert sched.reset() is True
+
+    # No CPU cache hits after reset
+    req2 = Request(
+        request_id="req-after-lazy-reset",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == 0, "CPU cache should be empty after reset"
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Reset with pending loads waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_loads() -> None:
+    """reset() abandons in-flight loads until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+
+    # First store blocks to CPU
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    # Start a load — CPU cache hit
+    req2 = Request(
+        request_id="req-load-reset",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens > 0
+
+    gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    block_ids2 = kv_blocks2.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: 1},
+        new_reqs={req2.request_id: block_ids2},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.load_event >= 0
+    assert req2.request_id in sched._reqs_to_load
+
+    # Free request block refs (simulates preemption)
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids2[0])
+
+    # Reset should keep load touch refs until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._reqs_to_load) == 0
+    assert len(sched._abandoned_reqs_to_load) == 1
+    assert len(sched._load_event_to_reqs) == 1
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_load_completion(sched, {req2.request_id})
+    assert len(sched._abandoned_reqs_to_load) == 0
+    assert len(sched._load_event_to_reqs) == 0
+    assert sched.reset() is True
+
+    # All GPU blocks free
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used == 1, f"Expected only null block in use, got {num_used}"
+
+
+def _make_cp_vllm_config(
+    dcp_world_size: int = 1,
+    pcp_world_size: int = 1,
+) -> VllmConfig:
+    """VllmConfig with context-parallel sizes set for scheduler-only tests."""
+    cfg = _make_vllm_config()
+
+    cfg.parallel_config.decode_context_parallel_size = dcp_world_size
+    cfg.parallel_config.prefill_context_parallel_size = pcp_world_size
+    return cfg
+
+
+def _make_cp_scheduler(
+    *,
+    dcp_world_size: int = 1,
+    pcp_world_size: int = 1,
+    num_cpu_blocks: int = 8,
+    num_gpu_blocks: int = 16,
+    lazy: bool = False,
+) -> SchedulerFixture:
+    """Build a SimpleCPUOffloadScheduler with DCP-scaled block size."""
+    virtual_block_size = BLOCK_SIZE * dcp_world_size
+
+    kv_cache_config = _make_kv_cache_config(num_gpu_blocks)
+    vllm_config = _make_cp_vllm_config(dcp_world_size, pcp_world_size)
+    cpu_capacity_bytes = _BYTES_PER_BLOCK * num_cpu_blocks
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=cpu_capacity_bytes,
+        scheduler_block_size=virtual_block_size,
+        hash_block_size=virtual_block_size,
+        lazy_offload=lazy,
+    )
+
+    gpu_block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=virtual_block_size,
+    )
+    sched.bind_gpu_block_pool(gpu_block_pool)
+
+    return SchedulerFixture(
+        scheduler=sched,
+        gpu_block_pool=gpu_block_pool,
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+    )
+
+
+def _make_cp_request(
+    num_blocks: int,
+    virtual_block_size: int,
+    request_id: str | None = None,
+) -> Request:
+    """Create a request whose block hashes are computed at the virtual
+    (CP-scaled) block size, matching what the real scheduler does.
+    """
+    global _req_counter
+    _req_counter += 1
+    if request_id is None:
+        request_id = f"req-cp-{_req_counter}"
+
+    num_tokens = num_blocks * virtual_block_size + 1
+    start = _req_counter * 10000
+    prompt_token_ids = list(range(start, start + num_tokens))
+    sampling_params = SamplingParams(max_tokens=1)
+
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=get_request_block_hasher(virtual_block_size, sha256),
+    )
+
+
+def _allocate_cp_gpu_blocks(
+    gpu_block_pool: BlockPool,
+    request: Request,
+    num_blocks: int,
+    virtual_block_size: int,
+    group_id: int = 0,
+) -> list:
+    """Allocate GPU blocks and cache them using the CP-scaled block size."""
+    blocks = gpu_block_pool.get_new_blocks(num_blocks)
+    num_full = min(num_blocks, len(request.block_hashes))
+    if num_full > 0:
+        gpu_block_pool.cache_full_blocks(
+            request=request,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=num_full,
+            block_size=virtual_block_size,
+            kv_cache_group_id=group_id,
+        )
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Test 15: CP block size scaling is correct
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dcp_world_size, pcp_world_size",
+    [
+        (2, 1),  # DCP only
+        (1, 2),  # PCP only
+        (2, 2),  # DCP + PCP
+    ],
+)
+def test_cp_block_size_scaling(dcp_world_size: int, pcp_world_size: int) -> None:
+    """Verify block size scaling follows DCP ownership."""
+    fix = _make_cp_scheduler(
+        dcp_world_size=dcp_world_size, pcp_world_size=pcp_world_size
+    )
+    sched = fix.scheduler
+
+    assert sched.cp_world_size == dcp_world_size
+    assert sched.block_size == BLOCK_SIZE * dcp_world_size
+
+
+# ---------------------------------------------------------------------------
+# Test 16: CP eager store-and-load roundtrip
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dcp_world_size, pcp_world_size",
+    [
+        (2, 1),
+        (1, 2),
+    ],
+)
+def test_cp_eager_store_and_load_roundtrip(
+    dcp_world_size: int, pcp_world_size: int
+) -> None:
+    """With CP enabled, store blocks to CPU and reload them for a new request
+    with matching tokens.  Verifies that hash matching and transfer-pair
+    construction work with the virtual block size."""
+    fix = _make_cp_scheduler(
+        dcp_world_size=dcp_world_size,
+        pcp_world_size=pcp_world_size,
+        num_cpu_blocks=8,
+        num_gpu_blocks=16,
+        lazy=False,
+    )
+    sched = fix.scheduler
+    vbs = BLOCK_SIZE * dcp_world_size
+
+    num_blocks = 2
+    req = _make_cp_request(num_blocks, vbs)
+
+    # Allocate GPU blocks and register hashes
+    gpu_blocks = _allocate_cp_gpu_blocks(fix.gpu_block_pool, req, num_blocks, vbs)
+    kv_blocks = KVCacheBlocks(blocks=(gpu_blocks,))
+    req.num_computed_tokens = num_blocks * vbs
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * vbs},
+        new_reqs={req.request_id: block_ids},
+    )
+
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0, "Expected a store event"
+    assert len(meta.store_gpu_blocks) == num_blocks
+    assert len(meta.store_cpu_blocks) == num_blocks
+    simulate_store_completion(sched, meta.store_event)
+
+    # New request with same tokens — should get a full CPU cache hit.
+    req2 = Request(
+        request_id="req-cp-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * vbs
+    assert is_async is True
+
+    # Allocate fresh GPU blocks for the load.
+    gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
+    kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: 1},
+        new_reqs={req2.request_id: kv_blocks2.get_block_ids()},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.load_event >= 0, "Expected a load event"
+    assert len(meta2.load_gpu_blocks) == num_blocks
+    assert len(meta2.load_cpu_blocks) == num_blocks
+
+
+# ---------------------------------------------------------------------------
+# Test 18: CP store and load use effective block size
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dcp_world_size, pcp_world_size",
+    [
+        (2, 1),
+        (1, 2),
+        (2, 2),
+    ],
+)
+def test_cp_effective_block_size_store_and_load(
+    dcp_world_size: int, pcp_world_size: int
+) -> None:
+    """Verify store/load physical block counts scale with DCP, not PCP."""
+    fix = _make_cp_scheduler(
+        dcp_world_size=dcp_world_size, pcp_world_size=pcp_world_size
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    vbs = BLOCK_SIZE * dcp_world_size
+    expected_blocks = 1
+
+    # Store one DCP-scaled logical block worth of tokens.
+    req = _make_cp_request(num_blocks=2, virtual_block_size=vbs)
+    gpu_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs)
+    kv = KVCacheBlocks(blocks=(gpu_blocks,))
+    req.num_computed_tokens = vbs
+    sched.update_state_after_alloc(req, kv, num_external_tokens=0)
+    m1 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: vbs},
+            new_reqs={req.request_id: kv.get_block_ids()},
+        )
+    )
+    assert len(m1.store_gpu_blocks) == expected_blocks
+    assert len(m1.store_cpu_blocks) == expected_blocks
+    simulate_store_completion(sched, m1.store_event)
+
+    # Load one DCP-scaled logical block from a two-block CPU hit.
+    req2 = _make_cp_request(num_blocks=2, virtual_block_size=vbs)
+    kv2 = KVCacheBlocks(blocks=(_allocate_cp_gpu_blocks(gpu_pool, req2, 2, vbs),))
+    req2.num_computed_tokens = 2 * vbs
+    sched.update_state_after_alloc(req2, kv2, num_external_tokens=0)
+    m2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req2.request_id: 2 * vbs},
+            new_reqs={req2.request_id: kv2.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, m2.store_event)
+
+    req3 = Request(
+        request_id="req-cp-partial-load",
+        prompt_token_ids=req2.prompt_token_ids,
+        sampling_params=req2.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req2._block_hasher,
+    )
+    hit, _ = sched.get_num_new_matched_tokens(req3, num_computed_tokens=0)
+    assert hit == 2 * vbs
+
+    kv3 = KVCacheBlocks(blocks=(gpu_pool.get_new_blocks(expected_blocks),))
+    sched.update_state_after_alloc(req3, kv3, num_external_tokens=vbs)
+    m3 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req3.request_id: vbs},
+            new_reqs={req3.request_id: kv3.get_block_ids()},
+        )
+    )
+    assert m3.load_event >= 0
+    assert len(m3.load_gpu_blocks) == expected_blocks
+    assert len(m3.load_cpu_blocks) == expected_blocks
+    assert m3.load_gpu_blocks == [kv3.get_block_ids()[0][0]]
+
+
+# ---------------------------------------------------------------------------
+# Test 17: CP lazy target blocks are scaled correctly
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cp_world_size", [1, 2, 4])
+def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
+    """_estimate_lazy_target_blocks returns fewer blocks when cp_world_size > 1
+    because each virtual block covers more tokens."""
+    kv_cache_config = _make_kv_cache_config(num_blocks=16)
+    max_batched = 64
+
+    target_base = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        kv_cache_config, max_batched, cp_world_size=1
+    )
+    target_cp = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        kv_cache_config, max_batched, cp_world_size=cp_world_size
+    )
+
+    if cp_world_size == 1:
+        assert target_cp == target_base
+    else:
+        assert target_cp < target_base, (
+            f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
+            f"less than target_base={target_base}"
         )

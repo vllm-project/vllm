@@ -90,6 +90,7 @@ class ScaleDesc:
             GroupShape.PER_CHANNEL: "per_channel",
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
+
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
@@ -106,15 +107,24 @@ class QuantKey:
     symmetric: symmetric if True, asymmetric if False
     """
 
-    dtype: torch.dtype
+    # TODO: QuantKey.dtype is assumed to be `torch.dtype` in matcher_utils.py,
+    # but #37990 introduced e.g. `kInt4Static` that uses a `ScalarType` dtype,
+    # same for kMxfp6 that does not have a native torch representation.
+    # Logical dtype and storage (torch) dtype should be separated (see #48949).
+    dtype: torch.dtype | ScalarType
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
     symmetric: bool = True
 
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        dtype_description = (
+            fx.graph.dtype_abbrs[self.dtype]
+            if isinstance(self.dtype, torch.dtype)
+            else self.dtype
+        )
         return (
-            f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+            f"QuantKey({dtype_description},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
@@ -172,14 +182,77 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
+kMxfp6E3M2StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E3M2Static = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2StaticGroupScale, symmetric=True
+)
+
+kMxfp6E3M2DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E3M2Dynamic = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2DynamicGroupScale, symmetric=True
+)
+
+kMxfp6E2M3StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E2M3Static = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3StaticGroupScale, symmetric=True
+)
+
+kMxfp6E2M3DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E2M3Dynamic = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3DynamicGroupScale, symmetric=True
+)
+
 # TODO: convert this to use SCALAR_TYPE. This is not right.
 kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 
+kInt4Static32GroupScale = ScaleDesc(torch.float16, True, GroupShape(1, 32))
+kInt4Static32 = QuantKey(INT4_DTYPE, scale=kInt4Static32GroupScale, symmetric=True)
+
+kInt4StaticAsym = QuantKey(
+    scalar_types.uint4, scale=kInt4StaticGroupScale, symmetric=False
+)
+kInt4Static32Asym = QuantKey(
+    scalar_types.uint4, scale=kInt4Static32GroupScale, symmetric=False
+)
+
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
+kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
+
+# INT4 W4A8 quantization keys
+
+# For group-wise quantization (e.g., group_size=128)
+# Note: group_size will be specified at runtime, this is a generic group scale
+kInt4W4A8StaticGroupScale128 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 128))
+kInt4W4A8StaticGroup128Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale128, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale64 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 64))
+kInt4W4A8StaticGroup64Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale64, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale32 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 32))
+kInt4W4A8StaticGroup32Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale32, symmetric=True
+)
+
+# Generic group-wise with flexible group size (per-token groups)
+kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
+kInt4W4A8StaticGroupSym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
+
+kInt4W4A8StaticChannelSym = QuantKey(
+    torch.int8,
+    ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL),
+    symmetric=True,
+)
 
 
 def create_fp8_quant_key(
@@ -366,6 +439,9 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerTensorOnlineLinearMethod,
+    )
 
     # LoRA linear wrappers store quantization metadata on `base_layer`.
     # Unwrap here so callers can pass either a raw linear layer or its LoRA
@@ -383,7 +459,9 @@ def get_and_maybe_dequant_weights(
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (
-        isinstance(layer.quant_method, Fp8LinearMethod)
+        isinstance(
+            layer.quant_method, (Fp8LinearMethod, Fp8PerTensorOnlineLinearMethod)
+        )
         and not layer.quant_method.use_marlin
         # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
         # a layout that is not compatible with `scaled_dequantize`.
@@ -485,7 +563,15 @@ def is_layer_skipped(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in fused_mapping:
+    #
+    # Some checkpoints (e.g. block-FP8 Step-3.5-Flash) already list the
+    # fused name (e.g. ``self_attn.qkv_proj``) directly in
+    # ``modules_to_not_convert``. Honor that fused-name match first so
+    # those layers are still correctly skipped even when a
+    # ``packed_modules_mapping`` is registered on the model.
+    if proj_name in fused_mapping and match_func(prefix, ignored_layers):
+        is_skipped = True
+    elif proj_name in fused_mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
             for shard_proj_name in fused_mapping[proj_name]

@@ -149,9 +149,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             actual_lm_head = lm_head.base_layer
         else:
             actual_lm_head = lm_head
-        logits = actual_lm_head.quant_method.apply(actual_lm_head, hidden_states)
-        if embedding_bias is not None:
-            logits += embedding_bias
+        # Run the base projection through the LogitsProcessor so head_dtype
+        # (e.g. an fp32 lm_head) is honored on the LoRA path too. The LoRA
+        # delta is accumulated into these logits by add_lora_logits below,
+        # whose internal buffer is already fp32.
+        logits = self.base_layer._apply_head(
+            actual_lm_head, hidden_states, embedding_bias
+        )
 
         # Gather logits for TP
         logits = self.base_layer._gather_logits(logits)

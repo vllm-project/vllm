@@ -198,7 +198,9 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             vllm_config.parallel_config
         )
         self.model = DeepseekV2Model(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         self.lm_head = ParallelLMHead(

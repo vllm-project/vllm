@@ -195,7 +195,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
 The API server takes care of basic audio I/O and optional chunking before building prompts:
 
 - Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `AudioResampler`.
-- Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into overlapping chunks and generates a prompt per chunk. Overlap is controlled by `overlap_chunk_second`.
+- Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into chunks and generates a prompt per chunk. There is no overlap between chunks, overlap_chunk_second controls the size of the search window used to find the split point.
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
 Relevant server logic:
@@ -278,7 +278,7 @@ Once your model implements `SupportsTranscription`, you can test the endpoints (
       http://localhost:8000/v1/audio/translations
     ```
 
-Or check out more examples in [examples/online_serving](../../../examples/online_serving).
+Or check out more examples in [examples/speech_to_text](../../../examples/speech_to_text).
 
 !!! note
     - If your model handles chunking internally (e.g., via its processor or encoder), set `min_energy_split_window_size=None` in the returned `SpeechToTextConfig` to disable server-side chunking.

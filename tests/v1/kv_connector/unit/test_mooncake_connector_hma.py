@@ -221,9 +221,14 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    )
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
         worker = connector.connector_worker
 
         block_len = 4096
@@ -252,16 +257,25 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
             },
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
         )
 
         local_regions = [
             TransferRegion(
-                base_addr=0x1000, block_len=block_len, kv_block_len=block_len
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
             ),
         ]
         remote_regions = [
             TransferRegion(
-                base_addr=0x2000, block_len=block_len, kv_block_len=block_len
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
             ),
         ]
 
@@ -304,9 +318,14 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    )
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
         worker = connector.connector_worker
 
         block_len = 4096
@@ -330,16 +349,25 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             },
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
         )
 
         local_regions = [
             TransferRegion(
-                base_addr=0x1000, block_len=block_len, kv_block_len=block_len
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
             ),
         ]
         remote_regions = [
             TransferRegion(
-                base_addr=0x2000, block_len=block_len, kv_block_len=block_len
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
             ),
         ]
 

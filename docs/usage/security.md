@@ -85,6 +85,21 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+### 5. **Restrict Media Decode Sizes:**
+
+Compressed media files can expand into gigabytes of memory during decoding. vLLM
+enforces decode-size limits to prevent out-of-memory denial of service:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
+| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
+| `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+
+Setting any of these to `0` disables the corresponding limit. This is **not
+recommended** for deployments exposed to untrusted users, as it removes the
+protection against resource-exhaustion attacks.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
@@ -128,7 +143,7 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**, and other similar `/v2`, `/inference` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
@@ -140,8 +155,10 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/chat/completions` - Chat completions
 - `/v1/chat/completions/batch` - Batch chat completions
 - `/v1/chat/completions/render` - Render chat completion requests
+- `/v1/chat/completions/derender` - Derender chat completion requests
 - `/v1/completions` - Text completions
 - `/v1/completions/render` - Render completion requests
+- `/v1/completions/derender` - Derender completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
@@ -154,6 +171,9 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/inference/v1/generate` - Generate completions
+- `/v2/embed` - Cohere Embed API
+- `/v2/rerank` - Cohere Rerank API
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -162,7 +182,6 @@ The following endpoints **do not require authentication** even when `--api-key` 
 **Inference endpoints:**
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
-- `/inference/v1/generate` - Generate completions
 - `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
@@ -174,6 +193,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
@@ -308,6 +328,206 @@ To disable the Python code interpreter specifically, omit `code_interpreter` fro
 vLLM supports dynamically loading and unloading LoRA adapters at runtime via the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
 
 **Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
+
+## Endpoint Plugins
+
+vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` entry point group (see [Endpoint Plugins](../design/endpoint_plugins.md) for how to write one). An endpoint plugin can register arbitrary FastAPI routes, including routes that reach the engine via `EngineClient.collective_rpc`, so it must be treated as part of the server's trusted code base and not as sandboxed or reviewed input.
+
+**Endpoint plugins are not loaded by default.** Unlike other vLLM plugin groups (`vllm.general_plugins`, `vllm.platform_plugins`, etc.), which load every discovered plugin unless `VLLM_PLUGINS` narrows the set, endpoint plugins load **none** unless `VLLM_PLUGINS` is set and explicitly names them. This mirrors the "off by default in production" posture used for development endpoints gated behind `VLLM_SERVER_DEV_MODE`. Both surfaces are only present when an operator has explicitly opted in.
+
+### Recommended Security Practices
+
+1. **Only allowlist plugins you trust.** Set `VLLM_PLUGINS` to the exact plugin names you intend to run and never wildcard or copy an allowlist between deployments without reviewing what each named plugin does.
+2. **Audit routes before deploying.** A plugin's `attach_router` can add routes under any path, including ones that duplicate existing `/v1/*` paths. There is currently no route conflict enforcement (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)), so a malicious or buggy plugin can **shadow a core route** and silently replace its behavior. Prefer plugins that namespace their routes under a distinct prefix (e.g. `/plugins/<plugin-name>/...`) instead of reusing `/v1/...` and review `app.routes` after startup if you need certainty about what is actually being served.
+3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, and `/inference` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
+4. **Remember the `vllm.general_plugins` pairing.** A plugin that also needs new engine side behavior ships that half separately via `vllm.general_plugins` which loads in every worker process under the default (load all unless restricted) posture. Allowlisting the endpoint plugin does not by itself restrict its paired engine side plugin. Need to review both.
+
+## gRPC Interface
+
+vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+
+**Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
+
+### Security Implications
+
+An attacker who can reach the gRPC port can:
+
+1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
+2. **Consume GPU and compute resources** by submitting unbounded generation requests
+3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+
+### Recommendations
+
+- Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Ensure the gRPC port is only accessible from trusted hosts or services
+- Use firewall rules to block external access to the gRPC port
+- Consider deploying the gRPC interface on a dedicated internal network interface
+
+## Cache Directory Security
+
+vLLM assumes that its cache directories are **private and trusted**. Cache contents are loaded without cryptographic integrity verification, including formats that support arbitrary code execution. If an untrusted user or process can write to vLLM's cache directories, they may be able to crash vLLM or cause it to execute arbitrary code.
+
+**Do not share vLLM cache directories with untrusted users or mount them from untrusted storage.** Treat the cache directory with the same care as the vLLM installation itself.
+
+### Cache Directory Configuration
+
+Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. When `torch.compile` caching is enabled (the default), vLLM also redirects `TRITON_CACHE_DIR` into this tree. If compile caching is disabled, Triton falls back to its own default location (`~/.triton/cache`).
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
+| *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | FlashInfer autotune config cache. |
+| `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
+| `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
+| `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
+
+### Recommendations
+
+- **Restrict file permissions** on `VLLM_CACHE_ROOT` (and any other cache directories used by dependencies, such as `~/.triton` if compile caching is disabled) so that only the vLLM process owner can read and write to them.
+- **Do not copy cache contents from untrusted sources.** If you distribute cache artifacts between environments, ensure they originate from a trusted build pipeline.
+- **Container deployments:** If mounting cache directories into containers, ensure the volume source is trusted.
+
+## FIPS Compatibility
+
+FIPS compliance depends on many factors, so a vLLM deployment is not automatically FIPS compliant. Recent changes have improved vLLM's *tolerance* of FIPS-enabled hosts — that is, avoiding crashes when non-approved algorithms are blocked — but tolerance is not the same as compliance. Whether a deployment satisfies FIPS requirements depends on the host operating system, the OpenSSL provider backing Python's `hashlib` and `ssl` modules, and which optional dependencies are installed.
+
+### FIPS-relevant configuration
+
+Operators running vLLM on FIPS-enabled hosts should select FIPS-approved algorithms via the following knobs:
+
+- **Multimodal input hashing** — `--mm-hasher-algorithm` (config field `mm_hasher_algorithm`) defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
+- **Prefix-cache hashing** — set `--prefix-caching-hash-algo` (config field `prefix_caching_hash_algo`) to `sha256` or `sha256_cbor`. The `xxhash` and `xxhash_cbor` options are not FIPS-approved.
+- **TLS ciphers** — use `--ssl-ciphers` to restrict the API server's TLS handshake to FIPS-approved cipher suites that match your environment's policy.
+
+### Automatic fallback for non-security MD5 use
+
+vLLM uses MD5 in a few places to derive non-security cache keys (for example, configuration hashes). These call sites pass `usedforsecurity=False` and additionally fall back to SHA-256 when the underlying OpenSSL provider refuses MD5 outright (see `safe_hash()` in `vllm/utils/hashing.py`). No user action is required; this behavior is documented so that auditors and security reviewers can identify the MD5 references and understand their purpose.
+
+### Dependencies that provide non-FIPS hash implementations
+
+Some dependencies expose hash implementations that are not FIPS-approved. vLLM only invokes them when the corresponding algorithm is selected, but operators with strict cryptographic controls may want to ensure the code paths are not exercised — and, where policy requires, that the packages themselves are absent:
+
+- `blake3` — currently listed in `requirements/common.txt`, so a standard
+  install pulls it in. It is imported lazily and only used when
+  `mm_hasher_algorithm=blake3` (the default). Setting
+  `--mm-hasher-algorithm sha256` or `--mm-hasher-algorithm sha512` is sufficient
+  to keep the non-FIPS code path dormant. If your policy additionally forbids
+  the package being present, uninstall it after installation; vLLM will
+  continue to function as long as a non-blake3 algorithm is selected.
+- `xxhash` — a true optional dependency (not in `requirements/common.txt`). It is only imported when an `xxhash`-based prefix-cache algorithm is selected. Leave it uninstalled and select a `sha256`-based prefix-cache algorithm.
+
+### Beyond hashing: other FIPS considerations
+
+Hashing is the area where vLLM has explicit FIPS-aware code, but a FIPS-compliant deployment depends on several factors that sit outside vLLM itself. Operators should evaluate the following with their platform and security teams:
+
+- **Host crypto provider.** Python's `hashlib` and `ssl` modules are FIPS-aware only when Python is linked against a FIPS-validated OpenSSL (or equivalent) provider supplied by the host OS. vLLM inherits whatever provider the host configures — it does not bundle one.
+- **API server TLS.** TLS termination for the OpenAI-compatible API server uses the host's OpenSSL via Python's `ssl` module. Restrict the cipher suite with `--ssl-ciphers` to match your environment's FIPS policy, and ensure server certificates are issued with FIPS-approved algorithms and key sizes.
+- **Outbound HTTPS.** Model and asset downloads (for example, via `huggingface_hub`) use the same host TLS stack. The same provider/cipher considerations apply.
+- **Inter-node communication is unencrypted by default.** As described in [Inter-Node Communication](#inter-node-communication), PyTorch Distributed, KV-cache transfer, and data-parallel channels do not encrypt traffic. FIPS environments that require FIPS-approved cryptography for data in transit must provide that protection externally — for example, via an mTLS sidecar or IPsec terminated by a FIPS-validated module — since vLLM's internal channels cannot satisfy the requirement on their own. Network isolation alone is not cryptography and does not meet a "FIPS-approved cryptography for data in transit" requirement, though it remains a useful defense-in-depth measure.
+- **Dependencies that bundle their own OpenSSL.** Some Python wheels statically link OpenSSL builds that fail the kernel FIPS self-test on FIPS-enabled hosts (`FATAL FIPS SELFTEST FAILURE`). `opencv-python-headless` is a known example; other manylinux wheels may behave similarly. Audit your installed wheels for bundled crypto libraries when troubleshooting FIPS startup failures.
+- **Accelerator and ML libraries.** PyTorch, CUDA, cuDNN, NCCL, and similar components have their own crypto and FIPS posture independent of vLLM. NVIDIA publishes FIPS-validated builds for some libraries; vLLM does not pin to those builds, so selecting and validating them is the operator's responsibility.
+- **What is *not* a FIPS concern in vLLM.** Random number generation used for token sampling (Python/NumPy/PyTorch RNGs) is not a cryptographic use and is out of scope for FIPS. Pickled cache artifacts are a separate security concern covered under [Cache Directory Security](#cache-directory-security).
+
+In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
+
+## Ray Cluster Trust Model and Environment Variable Propagation
+
+### Trust Assumption
+
+vLLM treats the entire Ray cluster as a single trust domain. Any principal
+with the ability to execute code within the Ray cluster (e.g. submit actors
+or tasks) is considered to have the same level of trust as the driver/API
+server process. This means that vLLM does **not** attempt to isolate
+driver-side credentials from worker-side processes within the same Ray
+cluster.
+
+This assumption is consistent with
+[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+which states that any user who can connect to a Ray cluster can run arbitrary
+code on any node in that cluster. In other words, Ray cluster access already
+implies full code execution on worker nodes, so restricting environment
+variable propagation alone would not constitute a meaningful security
+boundary.
+
+### Driver-to-Worker Environment Variable Propagation
+
+When using `RayExecutorV2` in multi-node deployments, vLLM propagates
+environment variables from the driver process to remote Ray workers so that
+workers have the configuration they need to function correctly (e.g. vLLM
+settings, NCCL tuning, Hugging Face tokens for gated model downloads).
+
+The propagation uses a **copy-all-except-denylist** policy via
+`get_driver_env_vars()` in `vllm/v1/executor/ray_env_utils.py`: every
+environment variable present in the driver's `os.environ` is sent to
+workers, except for a small set of worker-specific variables and any
+names the operator has explicitly excluded.
+
+On the worker side, propagated variables are applied with `setdefault`
+semantics — they fill in missing variables but never overwrite values
+already present in the worker's environment.
+
+### When This Matters
+
+In deployments where operators intentionally scope credentials (such as
+`HF_TOKEN`, cloud storage keys, registry tokens, or internal service
+tokens) to the driver/API server alone — for example, when GPU workers
+run in a different node, pod, or trust domain — the default propagation
+behavior will copy those credentials into worker environments. A process
+running on a worker node under the same OS user may then be able to read
+those credentials (e.g. via `/proc/<pid>/environ` on Linux).
+
+If your deployment treats Ray workers as less trusted than the driver, be
+aware that environment-variable isolation is **not** enforced by default.
+
+### Hardening Recommendations
+
+Operators who want to limit which environment variables are propagated to
+Ray workers can use the following mechanisms:
+
+#### 1. Denylist via Configuration File
+
+Create a JSON file at `$VLLM_CONFIG_ROOT/ray_non_carry_over_env_vars.json`
+(default: `~/.config/vllm/ray_non_carry_over_env_vars.json`) containing an
+array of environment variable names to exclude from propagation:
+
+```json
+[
+  "HF_TOKEN",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_CLIENT_SECRET",
+  "REGISTRY_TOKEN",
+  "MY_INTERNAL_SERVICE_KEY"
+]
+```
+
+Any variable listed here will **not** be copied from the driver to workers.
+
+#### 2. Minimize Driver Environment
+
+Rather than setting credentials in the driver's shell environment, inject
+them through a secrets manager, a mounted file, or a short-lived
+subprocess so that they are not present in `os.environ` when vLLM starts.
+
+#### 3. Network and Process Isolation
+
+- Restrict `procfs` visibility on worker nodes (e.g. mount `/proc` with
+  `hidepid=2` or use a container runtime that isolates `/proc` between
+  pods) so that same-UID processes cannot read each other's
+  `/proc/<pid>/environ`.
+- Run the driver and workers under different OS users or in separate
+  containers with non-overlapping UIDs.
+
+#### 4. Limit Ray Cluster Access
+
+Because Ray cluster access is equivalent to arbitrary code execution,
+ensure that only trusted principals can submit work to the cluster:
+
+- Use Ray's TLS authentication to restrict cluster membership.
+- Place the Ray cluster on an isolated network segment.
+- Do not expose the Ray client port or dashboard to untrusted networks.
 
 ## Reporting Security Vulnerabilities
 

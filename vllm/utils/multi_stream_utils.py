@@ -8,10 +8,6 @@ from typing import Any
 import torch
 
 
-class AuxStreamType(Enum):
-    Attention = 1
-
-
 class EventType(Enum):
     Main = 0
     Attention = 1
@@ -27,8 +23,9 @@ def maybe_execute_in_parallel(
     """Run two functions potentially in parallel on separate CUDA streams.
 
     When aux_stream is provided, fn0 runs on the current (default) stream and
-    fn1 runs on aux_stream, synchronized via CUDA events.  When aux_stream is
-    None, both functions execute sequentially on the current stream.
+    fn1 runs on aux_stream, synchronized via CUDA events. When aux_stream is
+    None or a breakable CUDA graph capture is active, both functions execute
+    sequentially on the current stream.
 
     This design follows TensorRT-LLM's maybe_execute_in_parallel pattern
     (tensorrt_llm/_torch/modules/multi_stream_utils.py).
@@ -39,11 +36,18 @@ def maybe_execute_in_parallel(
         event0: CUDA event recorded before fn0 so aux_stream can wait.
         event1: CUDA event recorded after fn1 so default stream can wait.
         aux_stream: The second CUDA stream for fn1.
-            Multi-stream is disabled when aux_stream is None.
+            Multi-stream is disabled when aux_stream is None or a breakable
+            CUDA graph capture is active.
 
     Returns:
         Tuple of (fn0_result, fn1_result).
     """
+    if aux_stream is not None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        if BreakableCUDAGraphCapture.is_active():
+            aux_stream = None
+
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
@@ -64,6 +68,7 @@ def execute_in_parallel(
     start_event: torch.cuda.Event,
     done_events: list[torch.cuda.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
+    enable: bool = False,
 ) -> tuple[Any, list[Any]]:
     """Run default_fn on the current stream and aux_fns concurrently on
     aux_streams.
@@ -74,8 +79,9 @@ def execute_in_parallel(
 
     start_event fans out from the current stream to every launched aux stream;
     done_events[i] is recorded after aux_fns[i] so the current stream joins
-    before returning. When aux_streams is None, all aux_fns run sequentially
-    on the current stream.
+    before returning. Falls back to sequential execution on the current stream
+    when aux_streams is None or enable is False; in that case default_fn runs
+    first, then aux_fns in order.
 
     Args:
         default_fn: Callable for the default (current) stream.
@@ -86,13 +92,17 @@ def execute_in_parallel(
             corresponding aux_fn. Length must match aux_fns.
         aux_streams: Per-aux CUDA streams. Length must match aux_fns.
             Multi-stream is disabled when None.
+        enable: Opt-in switch for the multi-stream path. Defaults to False,
+            so callers that pass aux_streams must also pass enable=True
+            (typically gated by an env var) to actually overlap. When False,
+            execution falls back to sequential on the current stream.
 
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
         result of aux_fns[i] (or None when skipped).
     """
     aux_results: list[Any]
-    if aux_streams is None:
+    if aux_streams is None or not enable:
         default_result = default_fn()
         aux_results = [fn() if fn is not None else None for fn in aux_fns]
         return default_result, aux_results

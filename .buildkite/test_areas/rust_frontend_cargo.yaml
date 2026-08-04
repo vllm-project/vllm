@@ -1,0 +1,30 @@
+group: Rust Frontend Cargo
+depends_on: []
+steps:
+- label: Rust Frontend Cargo Style + Clippy
+  key: rust-frontend-cargo-style-clippy
+  depends_on: []
+  timeout_in_minutes: 20
+  device: cpu-medium
+  no_plugin: true
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: Rust Frontend Cargo Tests
+  key: rust-frontend-cargo-tests
+  depends_on: []
+  timeout_in_minutes: 20
+  device: cpu-medium
+  no_plugin: true
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test

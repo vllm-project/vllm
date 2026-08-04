@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 import tempfile
 from contextlib import contextmanager
 
@@ -9,7 +8,7 @@ import pytest
 import torch
 
 from tests.models.utils import check_logprobs_close
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import (
@@ -24,7 +23,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 def get_test_models():
     """Get list of models to test based on PyTorch version"""
     models = [
-        "gpt2",
+        "openai-community/gpt2",
         "Qwen/Qwen2-7B-Instruct",
         "meta-llama/Llama-3.1-8B",
     ]
@@ -48,6 +47,7 @@ def get_test_models():
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_dynamic_shapes_compilation(
     monkeypatch,
+    vllm_runner,
     model_name,
     shapes_type,
     use_aot_compile,
@@ -55,12 +55,19 @@ def test_dynamic_shapes_compilation(
     evaluate_guards,
 ):
     """Test that all dynamic shapes types compile successfully"""
-    if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
-        pytest.skip("UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0")
+    if shapes_type == DynamicShapesType.UNBACKED and not is_torch_equal_or_newer(
+        "2.11.0"
+    ):
+        # NOTE[ROCm]: shape_id (used by Qwen2/Llama to relate input dims) only
+        # landed in torch 2.11, but the ROCm CI still runs torch 2.10.x. On
+        # older torch there's no way to express it, so unbacked shapes go
+        # data-dependent and compilation blows up -- nothing to test.
+        pytest.skip("unbacked dynamic shapes with shape_id require torch>=2.11")
 
     if evaluate_guards and shapes_type == DynamicShapesType.UNBACKED:
         pytest.skip("unbacked dynamic shapes do not add guards")
 
+    # TODO is this still a requirement?
     if evaluate_guards and use_aot_compile:
         pytest.skip("evaluate_guards requires use_aot_compile=0")
 
@@ -71,9 +78,13 @@ def test_dynamic_shapes_compilation(
 
     print(f"Testing {shapes_type.name} dynamic shapes...")
 
-    # Initialize the model with specific dynamic shapes configuration
-    model = LLM(
-        model=model_name,
+    sampling_params = SamplingParams(max_tokens=5, temperature=0, logprobs=10)
+    test_prompts = [prompt, "The capital of France is"]
+
+    # VllmRunner shuts down the engine core on exit, so the eager model
+    # below never races a lingering compiled engine for GPU memory.
+    with vllm_runner(
+        model_name,
         compilation_config={
             "mode": CompilationMode.VLLM_COMPILE,
             "dynamic_shapes_config": {
@@ -82,32 +93,25 @@ def test_dynamic_shapes_compilation(
             },
         },
         max_model_len=1024,
-    )
+        enable_chunked_prefill=None,
+    ) as vllm_model:
+        compiled_outputs = []
+        for p in test_prompts:
+            output = vllm_model.llm.generate(p, sampling_params)[0].outputs[0]
+            assert len(output.text.strip()) > 0, "Compiled model produced empty output"
+            compiled_outputs.append((output.token_ids, output.text, output.logprobs))
 
-    sampling_params = SamplingParams(max_tokens=5, temperature=0, logprobs=10)
-    test_prompts = [prompt, "The capital of France is"]
-
-    compiled_outputs = []
-    for p in test_prompts:
-        output = model.generate(p, sampling_params)[0].outputs[0]
-        assert len(output.text.strip()) > 0, "Compiled model produced empty output"
-        compiled_outputs.append((output.token_ids, output.text, output.logprobs))
-
-    del model
-    gc.collect()
-    torch.accelerator.empty_cache()
-    torch.accelerator.synchronize()
-
-    eager_model = LLM(model=model_name, enforce_eager=True, max_model_len=1024)
-    eager_outputs = []
-    for p in test_prompts:
-        output = eager_model.generate(p, sampling_params)[0].outputs[0]
-        assert len(output.text.strip()) > 0, "Eager model produced empty output"
-        eager_outputs.append((output.token_ids, output.text, output.logprobs))
-    del eager_model
-    gc.collect()
-    torch.accelerator.empty_cache()
-    torch.accelerator.synchronize()
+    with vllm_runner(
+        model_name,
+        enforce_eager=True,
+        max_model_len=1024,
+        enable_chunked_prefill=None,
+    ) as vllm_model:
+        eager_outputs = []
+        for p in test_prompts:
+            output = vllm_model.llm.generate(p, sampling_params)[0].outputs[0]
+            assert len(output.text.strip()) > 0, "Eager model produced empty output"
+            eager_outputs.append((output.token_ids, output.text, output.logprobs))
 
     check_logprobs_close(
         outputs_0_lst=eager_outputs,
@@ -232,44 +236,39 @@ def test_model_specialization_with_evaluate_guards(
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
-def test_piecewise_backend_empty_sym_shape_indices():
+def test_piecewise_backend_empty_sym_shape_indices(vllm_runner):
     """Test that PiecewiseBackend handles empty sym_shape_indices correctly.
 
     When all inputs have static shapes (no torch.SymInt), sym_shape_indices
     will be empty. The fix in PiecewiseBackend.__call__ handles this case
     by using the first compiled range_entry.
     """
-    gc.collect()
-    torch.accelerator.empty_cache()
-    torch.accelerator.synchronize()
-
     # Use small max_model_len and max_num_batched_tokens to encourage
     # static shape compilation with empty sym_shape_indices
-    llm = LLM(
-        model="Qwen/Qwen3-0.6B",
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
         max_model_len=512,
         max_num_batched_tokens=1,
+        enable_chunked_prefill=None,
         compilation_config={
             "mode": CompilationMode.VLLM_COMPILE,
             "dynamic_shapes_config": {
                 "type": DynamicShapesType.BACKED.value,
             },
         },
-    )
+    ) as vllm_model:
+        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+        # Generate with static shape inputs
+        output = vllm_model.llm.generate(
+            "Hello, my name is", sampling_params=sampling_params
+        )
+        result = output[0].outputs[0].text
+        assert len(result) > 0, "Should generate non-empty output"
 
-    # Generate with static shape inputs
-    output = llm.generate("Hello, my name is", sampling_params=sampling_params)
-    result = output[0].outputs[0].text
-    assert len(result) > 0, "Should generate non-empty output"
-
-    # Generate again to verify compilation works with empty sym_shape_indices
-    output = llm.generate("The capital of France is", sampling_params=sampling_params)
-    result = output[0].outputs[0].text
-    assert len(result) > 0, "Should generate non-empty output on second run"
-
-    del llm
-    gc.collect()
-    torch.accelerator.empty_cache()
-    torch.accelerator.synchronize()
+        # Generate again to verify compilation works with empty sym_shape_indices
+        output = vllm_model.llm.generate(
+            "The capital of France is", sampling_params=sampling_params
+        )
+        result = output[0].outputs[0].text
+        assert len(result) > 0, "Should generate non-empty output on second run"

@@ -25,10 +25,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deepgemm_moe_permute,
+)
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -39,6 +42,35 @@ from vllm.utils.deep_gemm import (
 )
 
 BLOCK_SIZE = [128, 128]
+
+
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
+    hidden_states = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
+    activations, scales = per_token_group_quant_fp8(
+        hidden_states,
+        group_size=128,
+        use_ue8m0=True,
+    )
+    topk_ids = torch.tensor([[0], [1]], device="cuda", dtype=torch.int64)
+
+    _, permuted_scales, expert_ids, _, _ = deepgemm_moe_permute(
+        aq=activations,
+        aq_scale=scales,
+        topk_ids=topk_ids,
+        local_num_experts=2,
+        expert_map=None,
+        expert_tokens_meta=None,
+    )
+
+    padding = expert_ids < 0
+    assert padding.any()
+    torch.testing.assert_close(
+        permuted_scales[padding],
+        torch.zeros_like(permuted_scales[padding]),
+        rtol=0,
+        atol=0,
+    )
 
 
 def make_block_quant_fp8_weights(
@@ -126,7 +158,6 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     # triton reference
@@ -136,7 +167,6 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         quant_config=quant_config,
     )
 
@@ -323,7 +353,6 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     # DeepGEMM FP4 path
@@ -352,6 +381,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
 FP4_MNKs = [
     (128, 4096, 4096),  # DeepSeek V4 shape
     (256, 2048, 2048),  # Half-size variant
+    (128, 384, 3584),  # Kimi-K3 TP8 latent-MoE shape
 ]
 
 FP4_TOPKS = [2]

@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -29,24 +30,24 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 
 logger = init_logger(__name__)
 
-if current_platform.is_cuda_alike():
-    if has_deep_ep():
-        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
-        from .prepare_finalize.deepep_ll import (
-            DEEPEP_QUANT_BLOCK_SHAPE,
-            DeepEPLLPrepareAndFinalize,
-        )
-    if has_mori():
-        from .prepare_finalize.mori import MoriPrepareAndFinalize
-    if has_nixl_ep():
-        from .prepare_finalize.nixl_ep import (
-            NIXL_EP_QUANT_BLOCK_SHAPE,
-            NixlEPPrepareAndFinalize,
-        )
+
+def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+    if eep_stage:
+        from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
+
+        ep_group = get_standby_ep_group()
+        assert ep_group is not None
+        device_communicator = ep_group.device_communicator
+    else:
+        device_communicator = get_ep_group().device_communicator
+
+    assert device_communicator is not None
+    all2all_manager = device_communicator.all2all_manager
+    assert all2all_manager is not None
+    return all2all_manager
 
 
 def maybe_roundup_layer_hidden_size(
@@ -69,16 +70,29 @@ def maybe_roundup_layer_hidden_size(
         Original hidden size otherwise.
     """
     if moe_parallel_config.use_deepep_ht_kernels:
+        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
+
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
 
     if moe_parallel_config.use_deepep_ll_kernels:
+        from .prepare_finalize.deepep_ll import DeepEPLLPrepareAndFinalize
+
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
 
+    if moe_parallel_config.use_deepep_v2_kernels:
+        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
+
+        hidden_size = DeepEPV2PrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype
+        )
+
     if moe_parallel_config.use_nixl_ep_kernels:
+        from .prepare_finalize.nixl_ep import NixlEPPrepareAndFinalize
+
         hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
@@ -92,6 +106,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
+    eep_stage: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
@@ -111,31 +126,38 @@ def maybe_make_prepare_finalize(
         if not allow_new_interface:
             return None
 
+        # Opt-in XPU batched path: reorganize tokens into E x T x K locally
+        # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
+        if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
+            return BatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=1,
+                rank=moe.moe_parallel_config.ep_rank,
+            )
+
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:
             logger.info_once(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            device_communicator = get_ep_group().device_communicator
-            assert device_communicator is not None
-            assert device_communicator.all2all_manager is not None
+            all2all_manager = get_ep_all2all_manager(eep_stage)
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-                num_dispatchers=(device_communicator.all2all_manager.world_size),
+                num_dispatchers=all2all_manager.world_size,
                 use_monolithic=use_monolithic,
             )
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    device_communicator = get_ep_group().device_communicator
-    assert device_communicator is not None
-    all2all_manager = device_communicator.all2all_manager
-    assert all2all_manager is not None
+    all2all_manager = get_ep_all2all_manager(eep_stage)
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
     if moe.use_deepep_ht_kernels:
+        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
+
         assert moe.dp_size == all2all_manager.dp_world_size
 
         all_to_all_args: dict[str, Any] = dict()
@@ -148,6 +170,11 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_deepep_ll_kernels:
+        from .prepare_finalize.deepep_ll import (
+            DEEPEP_QUANT_BLOCK_SHAPE,
+            DeepEPLLPrepareAndFinalize,
+        )
+
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
@@ -181,7 +208,41 @@ def maybe_make_prepare_finalize(
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
         )
+    elif moe.use_deepep_v2_kernels:
+        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
+
+        assert moe.dp_size == all2all_manager.dp_world_size
+
+        use_fp8_dispatch = (
+            quant_config is not None
+            and quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.is_block_quantized
+        )
+        all_to_all_args = dict(
+            num_max_tokens_per_rank=moe.max_num_tokens,
+            hidden=moe.hidden_dim,
+            num_topk=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            use_fp8_dispatch=use_fp8_dispatch,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+        vllm_config = get_current_vllm_config()
+        use_cudagraph = not vllm_config.model_config.enforce_eager
+
+        prepare_finalize = DeepEPV2PrepareAndFinalize(
+            buffer=handle,
+            num_dispatchers=all2all_manager.world_size,
+            dp_size=all2all_manager.dp_world_size,
+            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            num_experts=moe.num_experts,
+            num_topk=moe.experts_per_token,
+            use_fp8_dispatch=use_fp8_dispatch,
+            use_cudagraph=use_cudagraph,
+        )
+
     elif moe.use_mori_kernels:
+        from .prepare_finalize.mori import MoriPrepareAndFinalize
+
         assert quant_config is not None
 
         # Note: We may want to use FP8 dispatch just to reduce
@@ -228,23 +289,37 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_nvl_one_sided_kernels:
         assert quant_config is not None
-        if quant_config.quant_dtype != "nvfp4":
-            raise ValueError(
-                "The 'flashinfer_nvlink_one_sided' all2all backend only "
-                "supports nvfp4 activation quantization, but got "
-                f"quant_dtype={quant_config.quant_dtype!r}. Use a different "
-                "all2all backend (e.g. 'flashinfer_nvlink_two_sided' or "
-                "'allgather_reducescatter') for non-nvfp4 models."
-            )
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
+        if quant_config.quant_dtype is None:
+            dispatch_dtype_bytes_per_elem = 2
+            dispatch_scale_bytes_per_token = 0
+        elif quant_config.quant_dtype == "nvfp4":
+            dispatch_dtype_bytes_per_elem = 0
+            dispatch_scale_bytes_per_token = moe.hidden_dim // 16
+        elif quant_config.quant_dtype == "mxfp8":
+            dispatch_dtype_bytes_per_elem = 1
+            align = quant_config.mx_alignment
+            if align > 0:
+                padded_k = ((moe.hidden_dim + align - 1) // align) * align
+            else:
+                padded_k = moe.hidden_dim
+            dispatch_scale_bytes_per_token = padded_k // 32
+        else:
+            raise NotImplementedError(
+                "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
+                "and bf16 (quant_dtype=None) today; got "
+                f"quant_dtype={quant_config.quant_dtype!r}"
+            )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
+            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
+            dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
@@ -255,6 +330,11 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_nixl_ep_kernels:
+        from .prepare_finalize.nixl_ep import (
+            NIXL_EP_QUANT_BLOCK_SHAPE,
+            NixlEPPrepareAndFinalize,
+        )
+
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
@@ -269,6 +349,7 @@ def maybe_make_prepare_finalize(
             num_ep_ranks=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
+            stage=eep_stage,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 

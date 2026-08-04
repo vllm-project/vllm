@@ -187,6 +187,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         aot_autograd_config: dict[str, Any] | None = None,
         execution_code: str | None = None,
         submod_names: list[str] | None = None,
+        consts: list[Any] | None = None,
     ) -> None:
         self.graph_module = graph_module
         self.example_inputs = example_inputs
@@ -198,6 +199,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.sym_tensor_indices = sym_tensor_indices
         self.execution_code = execution_code
         self.submod_names = submod_names
+        self.consts = consts
         self._fake_mode: Any | None = None
 
         import torch._functorch.config as functorch_config
@@ -526,8 +528,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
     execution_code = state.get("execution_code")
     submod_names = state.get("submod_names")
     if execution_code is not None and submod_names is not None:
+        consts = state.get("consts")
         runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
+            execution_code, submod_callables, submod_names, consts
         )
     else:
         logger.warning(

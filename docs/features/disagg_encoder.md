@@ -36,10 +36,10 @@ The current reference pathway is **ExampleConnector**.
 Below ready-to-run scripts shows the workflow:
 
 1 Encoder instance + 1 PD instance:
-`examples/online_serving/disaggregated_encoder/disagg_1e1pd_example.sh`
+`examples/disaggregated/disaggregated_encoder/disagg_1e1pd_example.sh`
 
 1 Encoder instance + 1 Prefill instance + 1 Decode instance:
-`examples/online_serving/disaggregated_encoder/disagg_1e1p1d_example.sh`
+`examples/disaggregated/disaggregated_encoder/disagg_1e1p1d_example.sh`
 
 ---
 
