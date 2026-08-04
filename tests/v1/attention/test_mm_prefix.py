@@ -9,9 +9,10 @@ cannot be reasoned about from the Python side:
 * ``q_ranges[token_idx, 0]`` indexing an aux tensor with a runtime ``Int32``.
 * ``cu_seqlens_q[b] + q_local`` matching FA4's own packing of a varlen batch.
 
-Passing ``mask_mod`` makes FA4 resolve causal and local to False, so the
-mask_mod is the *entire* mask and the reference reproduces the causal and
-sliding-window terms too.
+The mask_mod is the *entire* mask (``(causal ∧ window) ∨ mm_prefix``), so
+callers must pass ``causal=False`` and no FA-layer window. FA #155 stopped
+auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
+short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
 import numpy as np
@@ -290,7 +291,7 @@ def _run_kernel(
         max_seqlen_q=max(query_lens),
         max_seqlen_k=max(seq_lens),
         softmax_scale=scale,
-        causal=True,
+        causal=False,
         fa_version=4,
         mask_mod=_make_mm_prefix_mask_mod(
             sliding_window=mm_clamp_sw, sliding_window_left=sliding_window_left
@@ -438,11 +439,14 @@ def _enable_mm_prefix(vllm_config):
     """Flip stock Gemma4's null use_bidirectional_attention to "vision".
 
     ``ModelConfig.__init__`` derives ``model_arch_config`` once from
-    ``hf_text_config``, so we re-derive after the flip.
+    ``hf_text_config``, and ``is_mm_prefix_lm`` is a ``cached_property`` that
+    may already hold False from that first derivation, so re-derive and drop
+    the cache.
     """
     model_config = vllm_config.model_config
     model_config.hf_text_config.use_bidirectional_attention = "vision"
     model_config.model_arch_config = model_config.get_model_arch_config()
+    model_config.__dict__.pop("is_mm_prefix_lm", None)
     return vllm_config
 
 

@@ -1038,6 +1038,12 @@ class FlashAttentionImpl(AttentionImpl):
                         sliding_window_left=sw_val,
                     )
                     mm_aux = [mm_prefix_query_ranges, attn_metadata.query_start_loc]
+                    # mm_prefix is (causal ∧ window) ∨ bidirectional-range —
+                    # not ⊆ causal. FA #155 stopped auto-clearing causal/local
+                    # when mask_mod is set, so the caller must disable them or
+                    # the built-in causal path shorts out / clips the mask_mod.
+                    causal = False
+                    sliding_window_size = None
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
                 # mask without block-size approximation.  The mask_mod encodes
