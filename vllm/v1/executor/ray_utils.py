@@ -237,15 +237,6 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
 
-    if output.routed_experts is not None:
-        routing_data, slot_mapping = output.routed_experts
-        routing_data_c = _copy_if_readonly(routing_data)
-        slot_mapping_c = _copy_if_readonly(slot_mapping)
-        if routing_data_c is not routing_data or slot_mapping_c is not slot_mapping:
-            output.routed_experts = type(output.routed_experts)(
-                routing_data_c, slot_mapping_c
-            )
-
 
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface

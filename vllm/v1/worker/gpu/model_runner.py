@@ -31,6 +31,8 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.artifact_connector.connector import ArtifactConnectorMetadata
+from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -39,10 +41,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-    bind_routed_experts_capturer,
-)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -62,7 +60,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
-    RoutedExpertsTensors,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -291,20 +288,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        self.routed_experts_capturer: RoutedExpertsCapturer | None = None
+        self.artifact_connector: ArtifactWorkerConnector | None = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
 
-    def init_routed_experts_capturer(self) -> None:
-        """Initialize target-model capture on every participating worker."""
-        self.routed_experts_capturer = RoutedExpertsCapturer(
+    def init_artifact_connector(self, kv_cache_config: KVCacheConfig) -> None:
+        self.artifact_connector = ArtifactWorkerConnector(
+            model=self.model,
+            kv_cache_config=kv_cache_config,
             max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
-            kv_cache_config=self.kv_cache_config,
         )
-        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1258,6 +1254,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self.artifact_connector is not None:
+                self.artifact_connector.begin_step(
+                    scheduler_output.artifact_connector_metadata
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1483,9 +1483,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         routed_experts = None
-        if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
-            assert slot_mappings is not None
-            routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
+        if not dummy_run and self.artifact_connector is not None:
+            routed_experts = self.artifact_connector.capture_routed_experts(num_toks)
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
@@ -1496,6 +1495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
             routed_experts=routed_experts,
+            artifact_metadata=scheduler_output.artifact_connector_metadata,
         )
 
         if not self.is_last_pp_rank:
@@ -1519,6 +1519,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
         routed_experts = self.execute_model_state.routed_experts
+        artifact_metadata = self.execute_model_state.artifact_metadata
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1576,6 +1577,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
+        pending_artifact_output = (
+            self.artifact_connector.prepare_output(
+                artifact_metadata,
+                routed_experts,
+                model_runner_output.req_ids,
+                num_rejected,
+            )
+            if self.artifact_connector is not None
+            else None
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -1584,7 +1595,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
-            routed_experts=routed_experts,
+            pending_artifact_output=pending_artifact_output,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1707,6 +1718,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.artifact_connector is not None:
+            self.artifact_connector.close()
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
@@ -1765,7 +1778,8 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
-    routed_experts: RoutedExpertsTensors | None
+    routed_experts: torch.Tensor | None
+    artifact_metadata: ArtifactConnectorMetadata | None
 
 
 def sort_batch_req_ids(
