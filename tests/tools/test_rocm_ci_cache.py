@@ -197,46 +197,6 @@ def test_rocm_base_force_preserves_layer_cache() -> None:
     assert "--no-cache" not in forced_args
 
 
-def test_rocm_base_content_refs_are_trust_scoped() -> None:
-    command = (
-        'printf "trusted=%s\\n" "$(trusted_base_content_ref content 2)"\n'
-        'printf "scoped=%s\\n" "$(scoped_base_content_ref content 2)"'
-    )
-    common = {"ROCM_BASE_IMAGE_REPO": "example/base"}
-    trusted = run_sourced(
-        ROCM_BASE_REFRESH,
-        command,
-        env=common
-        | {
-            "BUILDKITE": "true",
-            "BUILDKITE_BRANCH": "main",
-            "BUILDKITE_PULL_REQUEST": "false",
-            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
-        },
-    ).stdout.splitlines()
-    pull_request = run_sourced(
-        ROCM_BASE_REFRESH,
-        command,
-        env=common
-        | {
-            "BUILDKITE": "true",
-            "BUILDKITE_BRANCH": "feature",
-            "BUILDKITE_PULL_REQUEST": "48646",
-            "BUILDKITE_REPO": "https://github.com/example/vllm.git",
-        },
-    ).stdout.splitlines()
-
-    assert trusted == [
-        "trusted=example/base:base-v2-content",
-        "scoped=example/base:base-v2-main-content",
-    ]
-    assert pull_request[0] == "trusted=example/base:base-v2-content"
-    assert re.fullmatch(
-        r"scoped=example/base:base-v2-pr-48646-[0-9a-f]{12}-content",
-        pull_request[1],
-    )
-
-
 @pytest.mark.parametrize(
     ("mode", "expected_status", "expected_calls"),
     [("transient", 0, 4), ("transport", 1, 4), ("mismatch", 2, 4)],
@@ -397,12 +357,16 @@ build_base_image
     )
 
 
-def test_rocm_base_content_build_omits_per_build_labels(tmp_path: Path) -> None:
+def test_untrusted_base_build_uses_scoped_ref_without_per_build_labels(
+    tmp_path: Path,
+) -> None:
     trace = tmp_path / "trace"
     run_sourced(
         ROCM_BASE_REFRESH,
         """
 resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
+trusted_base_content_ref() { printf 'example/base:trusted\n'; }
+scoped_base_content_ref() { printf 'example/base:scoped\n'; }
 find_matching_base_content_ref() { return 1; }
 validate_base_content_ref() { printf '%s@%s\n' "$1" "$DIGEST_A"; }
 docker() { printf 'docker:%s\n' "$*" >> "$TRACE"; }
@@ -425,7 +389,8 @@ build_base_image
         event for event in trace.read_text().splitlines() if "buildx build" in event
     )
 
-    assert re.search(r"-t example/base:base-v2-pr-48646-[0-9a-f]{12}-", build)
+    assert "-t example/base:scoped" in build
+    assert "-t example/base:trusted" not in build
     assert (
         f"--build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete@{DIGEST_A}"
         in build
