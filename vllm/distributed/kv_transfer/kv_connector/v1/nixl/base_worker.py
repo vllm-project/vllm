@@ -499,6 +499,7 @@ class NixlBaseConnectorWorker:
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
         # Set when the local KV destination is host memory; see host_staging.
         self._host_stager: HostReadStager | None = None
+        self._host_stager_init_attempted = False
         # A posted READ cannot be aborted, so failure remains pending until
         # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
@@ -1301,7 +1302,6 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
-        self._maybe_init_host_stager()
 
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
@@ -2310,21 +2310,26 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _maybe_init_host_stager(self) -> None:
-        """Enable device staging when every local KV region is host memory.
+    def _maybe_init_host_stager(self, remote_host: str) -> HostReadStager | None:
+        """Enable device staging for same-host, all-host KV reads.
 
         UCX falls back to TCP loopback for a remote-device to local-host read,
         which measures ~0.20 GB/s against ~22 GB/s for the device-to-device read
         the same stack performs. Staging through device memory composes the fast
         remote read with a fast local device-to-host copy.
         """
+        if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
+            return None
+        if self._host_stager is not None or self._host_stager_init_attempted:
+            return self._host_stager
         stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
         if stage_bytes <= 0 or not self.region_mem_types:
-            return
+            return None
         if any(mem_type != "DRAM" for mem_type in self.region_mem_types):
             # Mixed layouts already split VRAM/DRAM reads; only the all-host
             # case is handled here.
-            return
+            return None
+        self._host_stager_init_attempted = True
         # A KV group may mix descriptor lengths (GLM-5.2's host source holds
         # MLA latent pages alongside smaller DSA indexer pages); the stager
         # keeps one staging pool per length.
@@ -2351,6 +2356,7 @@ class NixlBaseConnectorWorker:
                 "host reads (set VLLM_NIXL_HOST_STAGE_BYTES=0 to silence)"
             )
             self._host_stager = None
+        return self._host_stager
 
     def _advance_host_staging(self) -> set[str]:
         """Drive the staging pipeline; return req_ids whose KV is fully landed."""

@@ -606,6 +606,7 @@ def test_pull_uses_only_transferable_groups(default_vllm_config, dist_init):
         dst_engine_id=remote_engine,
         request_id="request",
         remote_request_id="remote-request",
+        remote_host="localhost",
         local_xfer_side_handle=1,
         remote_xfer_side_handle=2,
     )
