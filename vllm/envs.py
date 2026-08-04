@@ -292,6 +292,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB: float = 8.0
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -2009,6 +2010,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
+    ),
+    # Host-memory headroom (in GiB) to keep free on integrated / unified-memory
+    # GPUs (e.g. GB10 / DGX Spark, GH200, Jetson) during startup profiling.
+    # On these devices CPU and GPU share one physical pool, so
+    # gpu_memory_utilization alone does not reserve memory for the OS. vLLM caps
+    # the profiling/KV budget so at least this many GiB stay available; if the
+    # requested budget would drop below it, startup fails cleanly instead of
+    # wedging the host. Ignored on discrete GPUs.
+    "VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB": lambda: float(
+        os.getenv("VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB", "8.0")
     ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(

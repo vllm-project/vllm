@@ -11,6 +11,7 @@ import psutil
 import torch
 import torch.types
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -79,6 +80,137 @@ def release_device_memory_under_pressure(device: torch.device) -> bool:
     logger.debug(
         "Released %sGiB of cached device memory under memory pressure",
         format_gib(releasable),
+    )
+    return True
+
+
+def unified_memory_host_reserve_bytes(total_memory: int) -> int:
+    """Host-memory headroom to keep free on integrated (unified-memory) GPUs.
+
+    On integrated GPUs the CPU/OS and the GPU share one physical pool, so
+    ``gpu_memory_utilization`` does not by itself reserve memory for the host.
+    This returns how many bytes to keep free for the OS: the larger of an
+    absolute floor (``VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB``) and a small
+    fraction of the pool, so the reserve scales with pool size.
+
+    Args:
+        total_memory: Total size of the unified memory pool, in bytes.
+
+    Returns:
+        The number of bytes to leave available for the OS.
+    """
+    absolute_floor = int(envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB * GiB_bytes)
+    proportional_floor = total_memory // 20  # 5% of the shared pool
+    return max(absolute_floor, proportional_floor)
+
+
+def unified_memory_allocator_ceiling_bytes(
+    total_memory: int, gpu_memory_utilization: float
+) -> int:
+    """Hard host-safety ceiling for torch allocations on integrated GPUs.
+
+    Leaves the OS the larger of the host reserve and the ``(1 - util)`` slice of
+    the pool, so a runaway profiling transient is stopped before it can wedge
+    the host. This sits at or above the KV-cache budget from
+    ``cap_unified_memory_budget`` (which is bounded by *available* memory), so
+    normal allocations are not clipped -- only catastrophic over-allocation.
+
+    Args:
+        total_memory: Total size of the unified memory pool, in bytes.
+        gpu_memory_utilization: The configured utilization fraction.
+
+    Returns:
+        The maximum bytes the process may allocate on the device.
+    """
+    reserve = max(
+        unified_memory_host_reserve_bytes(total_memory),
+        int((1.0 - gpu_memory_utilization) * total_memory),
+    )
+    return max(total_memory - reserve, 0)
+
+
+def cap_unified_memory_budget(
+    device: torch.types.Device,
+    requested_memory: int,
+    available_memory: int,
+    total_memory: int,
+) -> int:
+    """Cap a memory budget so an integrated GPU leaves headroom for the OS.
+
+    ``gpu_memory_utilization`` is expressed against total device memory. On an
+    integrated (unified-memory) GPU that total is the same pool the OS uses, so
+    the raw ``util * total`` budget can starve the host. This caps the budget by
+    ``available_memory - reserve`` so the host keeps a floor of free memory.
+    A no-op on discrete GPUs (the two pools are independent there).
+
+    Args:
+        device: The device the budget is for.
+        requested_memory: The uncapped budget (``util * total``), in bytes.
+        available_memory: Currently available host/device memory, in bytes.
+        total_memory: Total unified pool size, in bytes.
+
+    Returns:
+        The capped budget in bytes (unchanged on discrete GPUs).
+    """
+    if device is None:
+        return requested_memory
+    device_ = torch.device(device)
+    device_index = device_.index if device_.index is not None else 0
+    if device_.type != "cuda" or not current_platform.is_integrated_gpu(device_index):
+        return requested_memory
+
+    reserve = unified_memory_host_reserve_bytes(total_memory)
+    honest_cap = available_memory - reserve
+    if requested_memory <= honest_cap:
+        return requested_memory
+
+    logger.warning(
+        "Integrated (unified-memory) GPU detected: capping the memory budget "
+        "from %sGiB to %sGiB to keep %sGiB free for the OS. On these devices "
+        "gpu_memory_utilization does not reserve host memory; tune it (or "
+        "VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB) if you need a different split.",
+        format_gib(requested_memory),
+        format_gib(max(honest_cap, 0)),
+        format_gib(reserve),
+    )
+    return max(honest_cap, 0)
+
+
+def limit_torch_allocator_to_budget(
+    device: torch.types.Device,
+    budget_memory: int,
+    total_memory: int,
+) -> bool:
+    """Hard-cap the torch caching allocator on integrated GPUs.
+
+    Bounds torch allocations to ``budget_memory / total_memory`` of the pool so
+    a startup profiling transient that would exceed the budget raises a clean
+    ``torch.OutOfMemoryError`` instead of physically exhausting the shared pool
+    and wedging the host. A no-op on discrete GPUs, where an over-allocation
+    already fails cleanly against a separate VRAM pool.
+
+    Args:
+        device: The device to cap.
+        budget_memory: The allocation ceiling, in bytes.
+        total_memory: Total device memory, in bytes.
+
+    Returns:
+        True if a cap was applied.
+    """
+    if device is None or total_memory <= 0:
+        return False
+    device_ = torch.device(device)
+    device_index = device_.index if device_.index is not None else 0
+    if device_.type != "cuda" or not current_platform.is_integrated_gpu(device_index):
+        return False
+
+    fraction = max(0.0, min(1.0, budget_memory / total_memory))
+    torch.cuda.set_per_process_memory_fraction(fraction, device_index)
+    logger.info(
+        "Integrated GPU: limiting torch allocations to %sGiB (%.1f%% of the "
+        "unified pool) so profiling cannot wedge the host.",
+        format_gib(budget_memory),
+        fraction * 100,
     )
     return True
 

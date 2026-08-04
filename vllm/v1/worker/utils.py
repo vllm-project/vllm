@@ -18,7 +18,11 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
-from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    cap_unified_memory_budget,
+    format_gib,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -413,6 +417,16 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
+    )
+
+    # On integrated (unified-memory) GPUs the CPU/OS and GPU share one pool, so
+    # `util * total` can claim memory the OS needs. Cap the budget so a host
+    # reserve stays free (no-op on discrete GPUs). See issue #46307.
+    requested_memory = cap_unified_memory_budget(
+        init_snapshot.device_,
+        requested_memory,
+        init_snapshot.free_memory,
+        init_snapshot.total_memory,
     )
 
     if init_snapshot.free_memory < requested_memory:
