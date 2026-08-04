@@ -165,17 +165,14 @@ class ModelArchConfigConvertorBase:
         return num_experts
 
     def get_num_experts_per_token(self) -> int:
-        for name in (
+        names = [
             "num_experts_per_tok",
             "num_experts_per_token",
             "top_k_experts",
             "moe_topk",
             "moe_top_k",
-        ):
-            value = getattr(self.hf_text_config, name, None)
-            if value is not None:
-                return int(value)
-        return 0
+        ]
+        return getattr_iter(self.hf_text_config, names, 0)
 
     @final
     @classmethod
