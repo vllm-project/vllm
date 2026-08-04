@@ -70,7 +70,7 @@ def _fused_mtp_input_rmsnorm_kernel(
         keep = pos != 0
         x = tl.load(
             inputs_embeds_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0
-        )
+        ).to(tl.float32)
         x = tl.where(keep, x, 0.0)
         _rmsnorm_row(
             x,
@@ -85,7 +85,9 @@ def _fused_mtp_input_rmsnorm_kernel(
         # hnorm path: load prev_hidden[token, slot, :].
         slot = pid_task - 1
         row_offset = (token_idx * HC_MULT + slot) * HIDDEN
-        x = tl.load(prev_hidden_ptr + row_offset + block, mask=mask, other=0.0)
+        x = tl.load(
+            prev_hidden_ptr + row_offset + block, mask=mask, other=0.0
+        ).to(tl.float32)
         _rmsnorm_row(
             x,
             hnorm_weight_ptr,
