@@ -536,23 +536,6 @@ class TestPostprocessMambaFusedKernel:
     def test_config(self):
         return _TestConfig()
 
-    def test_rejects_unsupported_state_element_size(self, device, test_config):
-        cfg = test_config
-        cfg.dtype = torch.float64
-        layer_names = ["layer_0"]
-        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
-        _, _, _, _, _, forward_context = _make_dual_states(cfg, layer_names, device)
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
-        block_table = torch.zeros(1, 8, dtype=torch.int32, device=device)
-
-        with pytest.raises(ValueError, match="only 2-byte and 4-byte"):
-            gpu_ctx.initialize_from_forward_context(
-                kv_cache_config,
-                forward_context,
-                (get_conv_copy_spec, get_temporal_copy_spec),
-                [block_table],
-            )
-
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """
         Golden test: GPU kernel produces identical results to Python impl.
@@ -1218,11 +1201,15 @@ class TestPostprocessMambaFusedKernel:
         torch.testing.assert_close(
             conv_state_py,
             expected_conv_state,
+            rtol=0,
+            atol=0,
             msg="Python: overlapping conv copy should have memmove semantics",
         )
         torch.testing.assert_close(
             conv_state_gpu,
             expected_conv_state,
+            rtol=0,
+            atol=0,
             msg="GPU: overlapping conv copy should have memmove semantics",
         )
 
@@ -2241,20 +2228,22 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
 
-        # --- Ground truth: both overlapping conv paths must shift by two ---
+        # --- Ground truth from untouched snapshots ---
         actual_src_block_id = block_ids_per_req[0][3]  # == 3
         dest_block_id = block_ids_per_req[0][1]  # == 1
         expected_conv_state = conv_state_orig.clone()
         expected_conv_state[dest_block_id, :-2].copy_(
             conv_state_orig[dest_block_id, 2:]
         )
-        torch.testing.assert_close(conv_state_py, expected_conv_state)
-        torch.testing.assert_close(conv_state_gpu, expected_conv_state)
+        torch.testing.assert_close(conv_state_py, expected_conv_state, rtol=0, atol=0)
+        torch.testing.assert_close(conv_state_gpu, expected_conv_state, rtol=0, atol=0)
 
         # Python must have sourced temporal from block 3.
         torch.testing.assert_close(
             temporal_state_py[dest_block_id],
             temporal_state_orig[actual_src_block_id],
+            rtol=0,
+            atol=0,
             msg=(
                 "Python reference did not copy from block_ids[src+bias]=3; "
                 "test preconditions are wrong"
@@ -2293,9 +2282,11 @@ class TestPostprocessMambaFusedKernel:
     )
     @pytest.mark.parametrize("accept_token_bias", [1, 2, 3])
     @pytest.mark.parametrize(
-        "dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"]
+        "dtype",
+        [torch.float16, torch.float32, torch.float64],
+        ids=["fp16", "fp32", "fp64"],
     )
-    def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
+    def test_ds_conv_layout_matches_snapshot_and_sd(
         self,
         device,
         test_config,
@@ -2304,7 +2295,7 @@ class TestPostprocessMambaFusedKernel:
         same_physical_block,
         dtype,
     ):
-        """DS conv postprocess should match SD for same/distinct block copies."""
+        """SD and DS copies should independently match memmove semantics."""
         from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
 
         cfg = test_config
@@ -2346,7 +2337,8 @@ class TestPostprocessMambaFusedKernel:
             cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
         )
 
-        # SD GPU path. Default layout is SD.
+        # SD GPU path.
+        monkeypatch.delenv("VLLM_SSM_CONV_STATE_LAYOUT", raising=False)
         model_mamba_utils.get_conv_state_layout.cache_clear()
         sd_conv = sd_source_conv.clone()
         sd_temporal = sd_source_temporal.clone()
@@ -2370,9 +2362,32 @@ class TestPostprocessMambaFusedKernel:
         )
         torch.accelerator.synchronize()
 
-        # Sanity: SD path actually modified the state (copy was performed).
-        assert not torch.equal(sd_conv, sd_source_conv), (
-            "SD baseline did not modify conv state; test setup is wrong"
+        src_block_id = block_ids_per_req[0][src_block_idx]
+        dest_block_id = block_ids_per_req[0][dest_block_idx]
+        expected_conv = sd_source_conv.clone()
+        expected_conv[dest_block_id, :-accept_token_bias].copy_(
+            sd_source_conv[src_block_id, accept_token_bias:]
+        )
+        torch.testing.assert_close(
+            sd_conv,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="SD conv copy did not match the untouched source snapshot",
+        )
+
+        actual_temporal_src_idx = src_block_idx + accept_token_bias
+        actual_temporal_src_id = block_ids_per_req[0][actual_temporal_src_idx]
+        expected_temporal = sd_source_temporal.clone()
+        expected_temporal[dest_block_id].copy_(
+            sd_source_temporal[actual_temporal_src_id]
+        )
+        torch.testing.assert_close(
+            sd_temporal,
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="SD temporal copy did not match the untouched source snapshot",
         )
 
         # DS GPU path on the DS twin.
@@ -2404,22 +2419,39 @@ class TestPostprocessMambaFusedKernel:
             # Reset the lru cache so other tests see the default layout again.
             model_mamba_utils.get_conv_state_layout.cache_clear()
 
-        # DS bytes, un-permuted, should match the SD result.
+        # Validate DS independently against the snapshot before comparing
+        # layouts; otherwise a shared SD/DS bug would remain invisible.
+        ds_conv_sd_layout = ds_conv.permute(0, 2, 1).contiguous()
         torch.testing.assert_close(
-            ds_conv.permute(0, 2, 1).contiguous(),
-            sd_conv,
-            msg=(
-                "DS conv post-kernel does not match SD baseline; the DS "
-                "row-loop in postprocess_mamba_fused_kernel is wrong."
-            ),
+            ds_conv_sd_layout,
+            expected_conv,
+            rtol=0,
+            atol=0,
+            msg="DS conv copy did not match the untouched source snapshot",
         )
         torch.testing.assert_close(
             ds_temporal,
-            sd_temporal,
-            msg="DS temporal state diverged from SD",
+            expected_temporal,
+            rtol=0,
+            atol=0,
+            msg="DS temporal copy did not match the untouched source snapshot",
+        )
+
+        expected_accepted = 1 if same_physical_block else accept_token_bias + 1
+        expected_accepted_tensor = torch.tensor(
+            [expected_accepted], dtype=torch.int32, device=device
+        )
+        torch.testing.assert_close(
+            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="SD num_accepted_tokens result is wrong",
         )
         torch.testing.assert_close(
             gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
-            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
-            msg="DS num_accepted_tokens diverged from SD",
+            expected_accepted_tensor,
+            rtol=0,
+            atol=0,
+            msg="DS num_accepted_tokens result is wrong",
         )

@@ -191,11 +191,8 @@ def _copy_mamba_state_block(
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
 
-        # Copy one logical conv position at a time from low to high while
-        # parallelizing over dimension rows. A row stays on the same lane at
-        # every position, so same-block shifts have memmove ordering without a
-        # barrier. The same layout also avoids serializing rows for copies
-        # between distinct blocks.
+        # Stable row-to-lane ownership makes left shifts memmove-safe while
+        # exposing the dimension rows in parallel.
         num_dst_tokens = conv_width - token_bias
         for token_idx in range(0, num_dst_tokens):
             for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
@@ -214,11 +211,21 @@ def _copy_mamba_state_block(
                     dst_u16 = dst_byte_addr.to(tl.pointer_type(tl.uint16))
                     data_u16 = tl.load(src_u16, mask=mask)
                     tl.store(dst_u16, data_u16, mask=mask)
-                else:
+                elif state_elem_size == 4:
                     src_u32 = src_byte_addr.to(tl.pointer_type(tl.uint32))
                     dst_u32 = dst_byte_addr.to(tl.pointer_type(tl.uint32))
                     data_u32 = tl.load(src_u32, mask=mask)
                     tl.store(dst_u32, data_u32, mask=mask)
+                else:
+                    for byte_idx in range(0, state_elem_size):
+                        src_u8 = (src_byte_addr + byte_idx).to(
+                            tl.pointer_type(tl.uint8)
+                        )
+                        dst_u8 = (dst_byte_addr + byte_idx).to(
+                            tl.pointer_type(tl.uint8)
+                        )
+                        data_u8 = tl.load(src_u8, mask=mask)
+                        tl.store(dst_u8, data_u8, mask=mask)
         return
 
     if is_conv_state:
@@ -227,25 +234,39 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
-        # Small per-block bytes (~60-80 KiB) make tiling degenerate, so
-        # conv runs as a single-CTA memcpy (NUM_TILES=1).
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
-        src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
-        src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
-        copy_size = num_elems_to_copy * state_elem_size
+        src_block_addr = state_base_addr + src_block_id * state_block_stride
+        token_bytes = state_inner_size * state_elem_size
+        num_dst_tokens = conv_width - token_bias
+
+        # Distinct blocks and exact self-copies cannot have a destructive
+        # overlap, so retain the u64-vectorized single-CTA copy.
+        if src_block_id != dest_block_id or token_bias == 0:
+            src_addr = src_block_addr + token_bias.to(tl.int64) * token_bytes
+            copy_size = num_dst_tokens.to(tl.int64) * token_bytes
+            _memcpy_u64_tiled(
+                src_addr,
+                dst_addr,
+                copy_size,
+                tile_idx,
+                COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+                NUM_TILES=1,
+            )
+            return
+
+        # Preserve each byte's lane ownership while copying tokens from low
+        # to high. No lane can overwrite data another lane will read, so
+        # same-block left shifts are memmove-safe without a barrier.
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for i in range(0, copy_size, COPY_BLOCK_SIZE):
-            mask = (i + offsets) < copy_size
-            curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            data = tl.load(curr_src, mask=mask)
-            # Same-block conv shifts are overlapping left copies. Without a
-            # workgroup barrier, one wave can overwrite bytes before another
-            # wave has loaded them.
-            if src_block_id == dest_block_id and token_bias > 0:
-                tl.debug_barrier()
-            tl.store(curr_dst, data, mask=mask)
+        for token_idx in range(0, num_dst_tokens):
+            src_token = src_block_addr + (token_idx + token_bias) * token_bytes
+            dst_token = dst_addr + token_idx * token_bytes
+            for i in range(0, token_bytes, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < token_bytes
+                curr_src = (src_token + i + offsets).to(tl.pointer_type(tl.uint8))
+                curr_dst = (dst_token + i + offsets).to(tl.pointer_type(tl.uint8))
+                data = tl.load(curr_src, mask=mask)
+                tl.store(curr_dst, data, mask=mask)
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
@@ -542,6 +563,9 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     src_ptr = tl.load(src_ptrs + pid)
     dst_ptr = tl.load(dst_ptrs + pid)
     size = tl.load(sizes + pid)
+    # The generic fallback can receive an in-place left shift. Synchronize
+    # only that case so all waves load a chunk before any wave overwrites it.
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
 
     offsets = tl.arange(0, BLOCK_SIZE)
     for i in range(0, size, BLOCK_SIZE):
@@ -551,11 +575,6 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
-        # Mamba conv-state postprocessing can shift a window left within the
-        # same allocation. Synchronize the load before the overlapping store
-        # so this fallback/reference path has memmove rather than memcpy
-        # semantics. The branch is uniform within each Triton program.
-        is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
         if is_left_overlap:
             tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
@@ -804,16 +823,8 @@ class MambaSpecDecodeGPUContext:
                         block_stride_elems * state.element_size()
                     )
 
-                    # The public Mamba/model dtype contracts permit fp16,
-                    # bf16, and fp32. Validate that invariant here so the DS
-                    # device copy only needs an efficient two-way typed branch.
-                    state_elem_size = state.element_size()
-                    if state_elem_size not in (2, 4):
-                        raise ValueError(
-                            "Mamba state copies support only 2-byte and 4-byte "
-                            f"elements, got dtype={state.dtype}"
-                        )
-                    self.state_elem_sizes[idx] = state_elem_size
+                    # Element size
+                    self.state_elem_sizes[idx] = state.element_size()
 
                     copy_func = mamba_state_copy_funcs[state_type_idx]
                     assert (
