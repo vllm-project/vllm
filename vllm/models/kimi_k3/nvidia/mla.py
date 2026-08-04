@@ -302,10 +302,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             indexer=None,
         )
         if getattr(self.impl, "dcp_world_size", -1) < 1:
-            # The K3 wrapper invokes the backend directly, bypassing the
-            # regular MLA wrapper that resolves disabled context parallelism.
-            # FlashAttention requires the neutral values (1, 0), not the
-            # internal disabled sentinel (-1).
+            # FlashAttention requires the cp_world_size is positive and the cp_rank
+            # is non negative; manually set here if not set by caller (-1 is unset)
             self.impl.dcp_world_size = 1
             self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
