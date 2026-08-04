@@ -32,7 +32,7 @@ th {
 
 | Backend | Output act. format | Quant. types | Quant. format | Async | Apply Weight On Input | Subclass |
 | ------- | ------------------ | ------------ | ------------- | ----- | --------------------- | --------- |
-| naive | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [layer.py][vllm.model_executor.layers.fused_moe.runner.MoERunner] |
+| naive | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`MoERunner`][vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner] |
 | deepep_high_throughput | standard | fp8 | G(128),A,T<sup>2</sup> | Y | Y | [`DeepEPHTPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht.DeepEPHTPrepareAndFinalize] |
 | deepep_low_latency | batched | fp8 | G(128),A,T<sup>3</sup> | Y | Y | [`DeepEPLLPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll.DeepEPLLPrepareAndFinalize] |
 | flashinfer_nvlink_two_sided | standard | nvfp4,fp8 | G,A,T | N | N | [`FlashInferNVLinkTwoSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided.FlashInferNVLinkTwoSidedPrepareAndFinalize] |
